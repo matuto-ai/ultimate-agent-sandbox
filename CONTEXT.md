@@ -33,19 +33,43 @@ A configurable permission or workflow eligibility declared by a Profile, such as
 _Avoid_: Hard-coded role
 
 **Hub**:
-The deployment-owned service that routes peer messages, tracks presence, records workflow state, and enforces only configured invariants.
+The deployment-owned service that routes peer traffic, tracks presence, records workflow state, and enforces only configured invariants.
 _Avoid_: Dispatcher, manager, orchestrator
 
+**Map**:
+A Forge work item that groups related decision and delivery work toward one destination. A Run may belong to at most one Map.
+_Avoid_: Epic, parent issue, project
+
 **Run**:
-The durable Hub record for one issue-to-approval lifecycle and its related messages, findings, transitions, and Forge references.
+One bounded Hub coordination attempt against an explicitly activated Forge work item. A paused Run may resume; a closed Run is terminal.
 _Avoid_: Task, session, Workstream
 
+**Run Policy**:
+Versioned completion rules that a Run snapshots when it opens.
+_Avoid_: Profile, workflow, hard-coded phase
+
+**Coordinator**:
+A Participant temporarily authorized by a human to coordinate a Run while remaining a peer.
+_Avoid_: Manager, orchestrator, permanent lead
+
+**Message**:
+Informational Room traffic with no response obligation.
+_Avoid_: Request, Command, event
+
+**Request**:
+Room traffic whose delivery and response lifecycle the Hub supervises without forcing acceptance.
+_Avoid_: Task, Message, Command
+
+**Command**:
+A typed deterministic operation that the Hub validates and records.
+_Avoid_: Shell command, Message, Request
+
 **Finding**:
-A structured review concern that a developer fixes or disputes and a reviewer resolves or upholds.
-_Avoid_: Chat message, review conversation
+An explicitly registered Forge review concern that an implementer fixes or disputes and an eligible reviewer resolves or upholds.
+_Avoid_: Chat message, ordinary review comment
 
 **Forge**:
-A Git collaboration service such as Gitea, GitHub, or GitLab that remains authoritative for issues, pull requests, formal findings, approvals, and merge state.
+A Git collaboration service such as Gitea, GitHub, or GitLab that remains authoritative for issues, pull requests, registered Findings, formal pull-request approvals, and merge state.
 _Avoid_: Git server, Gitea when referring to the general concept
 
 **Forge Broker**:
