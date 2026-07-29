@@ -15,9 +15,10 @@ Prove a reusable path from a Forge issue to an approved pull request:
 4. The implementer fixes or disputes each finding.
 5. The reviewer resolves or upholds it.
 6. Upheld disagreements notify the human and resume after a decision.
-7. A configurable policy either waits for human approval or merges after every gate passes.
+7. A human, the active coordinator, or a Profile with `can-approve-run=true` approves the Run after its policy gates pass.
+8. A human merges the accepted pull request separately through the Forge.
 
-The agents remain peers. A deterministic Hub records the workflow and rejects invalid transitions; it does not assign marching orders or prevent agents from disagreeing.
+The agents remain peers. A deterministic Hub records the workflow and rejects invalid transitions; it does not assign marching orders, prevent disagreement, or merge pull requests during the spike.
 
 ## Architecture direction
 
@@ -104,6 +105,8 @@ Prototype code may be merged here when it is useful for the eventual production 
 ## Project references
 
 - [Domain language](CONTEXT.md)
+- [Room protocol and workflow invariants](docs/architecture/room-protocol.md)
+- [Non-disruptive delivery signals](docs/research/non-disruptive-delivery-signals.md)
 - [Agent issue workflow](docs/agents/issue-management.md)
 - [Original Agent Sandbox](https://git.puglab.im/puglab/ai-agents-sandbox)
 - [Herdr Sandbox](https://git.puglab.im/puglab/herdr-sandbox)
