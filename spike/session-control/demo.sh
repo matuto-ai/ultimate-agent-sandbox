@@ -16,6 +16,8 @@ cleanup() {
   "$BIN" close orph >/dev/null 2>&1 || true
   "$BIN" close multi >/dev/null 2>&1 || true
   "$BIN" close sock >/dev/null 2>&1 || true
+  "$BIN" close clrs >/dev/null 2>&1 || true
+  "$BIN" close clro >/dev/null 2>&1 || true
   "$BIN" close stub >/dev/null 2>&1 || true
   "$BIN" close pisess >/dev/null 2>&1 || true
   rm -rf "$ROOMCTL_HOME"
@@ -169,6 +171,29 @@ printf '%s\n' '{"name":"stub","runtime":"fixture","actor":"x","command":["/bin/b
 stubrp=$("$BIN" status stub | sed 's/.*runtimePid=\([0-9]*\).*/\1/')
 "$BIN" close stub >/dev/null   # must block through the holder's TERM grace
 dead "$stubrp" || { echo "FAIL: close returned while runtime $stubrp was RUNNING"; exit 1; }
+
+say "clear reaps a socket-unreachable holder before relaunch"
+"$BIN" open clrs --profile fixture --workdir "$PWD" >/dev/null
+chp=$(cat "$ROOMCTL_HOME/run/clrs.pid")
+crp=$("$BIN" status clrs | sed 's/.*runtimePid=\([0-9]*\).*/\1/')
+rm -f "$ROOMCTL_HOME/sock/clrs.sock"
+"$BIN" clear clrs >/dev/null
+expect_output "process=RUNNING" "$BIN" status clrs
+[ "$(count_holders clrs)" = "1" ] || { echo "FAIL: clear duplicated the clrs holder"; exit 1; }
+dead "$chp" || { echo "FAIL: socket-less holder $chp survived clear"; exit 1; }
+dead "$crp" || { echo "FAIL: previous runtime $crp survived clear"; exit 1; }
+"$BIN" close clrs >/dev/null
+
+say "clear reaps an orphaned runtime before relaunch"
+"$BIN" open clro --profile fixture --workdir "$PWD" >/dev/null
+ohp=$(cat "$ROOMCTL_HOME/run/clro.pid")
+orp2=$("$BIN" status clro | sed 's/.*runtimePid=\([0-9]*\).*/\1/')
+kill -9 "$ohp"   # holder dies hard; runtime (own session leader) is orphaned
+"$BIN" clear clro >/dev/null
+expect_output "process=RUNNING" "$BIN" status clro
+dead "$orp2" || { echo "FAIL: orphaned runtime $orp2 survived clear"; exit 1; }
+[ "$(count_holders clro)" = "1" ] || { echo "FAIL: clear duplicated the clro holder"; exit 1; }
+"$BIN" close clro >/dev/null
 
 say "close kills an orphaned runtime when the holder is gone"
 printf '%s\n' '{"name":"orph","runtime":"fixture","actor":"x","command":["/bin/bash","-c","trap \"\" HUP; exec sleep 300"],"sessionTemplate":"{root}/native/{name}-{ts}"}' \

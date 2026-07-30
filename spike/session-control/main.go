@@ -311,11 +311,8 @@ func cmdClear(name string) error {
 	if err != nil {
 		return err
 	}
-	if processState(name) == "RUNNING" {
-		if err := cmdClose(name); err != nil {
-			return err
-		}
-		time.Sleep(300 * time.Millisecond)
+	if err := reapHolder(e); err != nil { // never relaunch over a live pair
+		return err
 	}
 	ctx := sessCtx{name: name, workdir: e.Workdir}
 	fresh := ctx.render(p.SessionTemplate)
