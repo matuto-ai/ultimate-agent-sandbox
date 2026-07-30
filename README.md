@@ -15,7 +15,7 @@ Prove a reusable path from a Forge issue to an approved pull request:
 4. The implementer fixes or disputes each finding.
 5. The reviewer resolves or upholds it.
 6. Upheld disagreements notify the human and resume after a decision.
-7. A human, the active coordinator, or a Profile with `can-approve-run=true` approves the Run after its policy gates pass.
+7. A human, the active coordinator, or a Participant whose Deployment Profile grants `can-approve-run=true` approves the Run after its policy gates pass.
 8. A human merges the accepted pull request separately through the Forge.
 
 The agents remain peers. A deterministic Hub records the workflow and rejects invalid transitions; it does not assign marching orders, prevent disagreement, or merge pull requests during the spike.
@@ -43,7 +43,7 @@ The agents remain peers. A deterministic Hub records the workflow and rejects in
                                             Gitea · GitHub · GitLab
 ```
 
-A Deployment contains one Room and one persistent Trusted Workstation container. Participants share three deliberate mounts:
+A Deployment contains one Room permanently bound to one Project and one persistent Trusted Workstation container. Participants share three deliberate Project-data paths:
 
 ```text
 /project/repo       read-write source
@@ -53,29 +53,26 @@ A Deployment contains one Room and one persistent Trusted Workstation container.
 
 The Hub, its durable ledger, and Forge credentials stay outside the Trusted Workstation.
 
-## Profiles and communication
+## Identities, profiles, and communication
 
-Agent boundaries are deployment-local Profiles rather than fixed built-in roles. A Profile may define:
+A Runtime is a CLI implementation and shared state/authentication domain, such as Pi or Claude. A Runtime Launch Profile selects its startup parameters and durable Actor Identity. A Deployment Profile separately defines Room-local responsibilities, instructions, tools, and capabilities.
 
-- CLI runtime, model, and reasoning effort;
-- responsibilities and base instructions;
-- tools, skills, and workflow capabilities;
-- Agent Identity and mapped Forge account.
+A live Participant joins the Room under an Actor Identity and Deployment Profile. Distinct Actor Identities retain separate Git, Forge, Hub, branch, and audit attribution even when Runtime state is shared. Independent-review eligibility follows Actor Identity and contribution history, not Runtime or session separation.
 
-A live Participant joins the Room under one Profile. Minimal Pi and Claude adapters connect it to the neutral Hub for presence, peer discovery, correlated messages, replies, and attention state. Current research favors a Pi extension and a Claude Code MCP adapter while preserving subscription-authenticated CLI use instead of API-priced managed agents.
+Minimal Pi and Claude adapters connect Participants to the neutral Hub for presence, peer discovery, correlated messages, replies, and attention state. Current research favors a Pi extension and a Claude Code MCP adapter while preserving subscription-authenticated CLI use instead of API-priced managed agents.
 
 ## Security boundary
 
-Participants inside the Trusted Workstation are mutually trusted peers. The spike does not claim isolation between them.
+Assume a poisoned Participant can run arbitrary code and search for escape paths. The hard boundary protects the host and every other Room; the spike does not claim isolation between Participants sharing one Trusted Workstation.
 
-The intended hard boundaries are:
+- Project mounts are fixed, path-validated, and limited to the writable repository/workspace plus read-only references.
+- No host container-runtime socket, namespace, network, privileged mode, or device enters the Workstation.
+- Forge tokens and Git private keys remain behind external revocable brokers.
+- Participant authority comes from a process-bound badge, not identity claims in messages.
+- Public internet remains open, while host, private-LAN, metadata, and other-Room access is blocked.
+- The Manager connects outbound and receives typed actions only, never shell, filesystem, mount, or runtime control.
 
-- only the three approved project mounts enter the workstation;
-- no host container-runtime socket enters it;
-- Forge PATs remain in the external Forge Broker;
-- the Manager receives no shell, filesystem, or container control;
-- Manager connections originate outbound from each Deployment;
-- Git commits retain per-agent authorship, while Forge mutations retain mapped identities and broker audit records.
+Mounted Project data and Runtime provider credentials are readable and potentially exfiltratable by poisoned code. Shared Runtime state is also an accepted influence risk between its Actor Identities. See the [enforceable security boundary](docs/architecture/security-boundary.md) for lifecycle, identity, Forge, network, nested-container, and evidence requirements.
 
 Worktrees are optional. The Hub warns when multiple writers target the same checkout; it does not prohibit manually isolated worktrees or enforce a repository-wide writer lock.
 
@@ -96,7 +93,7 @@ Prototype code may be merged here when it is useful for the eventual production 
 - replacing or migrating the existing sandboxes during the spike;
 - automatic loops that continuously consume the issue backlog;
 - hostile multi-tenancy or per-participant containers;
-- multiple active repositories in one Deployment;
+- multiple writable repositories in one Room;
 - production GitHub or GitLab adapters;
 - a polished production frontend;
 - a mandatory orchestrator, lead, and worker hierarchy;
@@ -106,6 +103,7 @@ Prototype code may be merged here when it is useful for the eventual production 
 
 - [Domain language](CONTEXT.md)
 - [Room protocol and workflow invariants](docs/architecture/room-protocol.md)
+- [Enforceable security boundary](docs/architecture/security-boundary.md)
 - [Non-disruptive delivery signals](docs/research/non-disruptive-delivery-signals.md)
 - [Agent issue workflow](docs/agents/issue-management.md)
 - [Original Agent Sandbox](https://git.puglab.im/puglab/ai-agents-sandbox)
