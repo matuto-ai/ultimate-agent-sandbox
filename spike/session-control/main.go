@@ -98,8 +98,15 @@ func spawnHolder(name, mode string) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, _, err := ping(name); err == nil {
-			return nil
+		_, _, up, err := ping(name)
+		if err == nil {
+			if up {
+				return nil
+			}
+			// The holder answers only after spawning the runtime, so a
+			// negative liveness answer means it died during boot.
+			tail, _ := os.ReadFile(hlogPath)
+			return fmt.Errorf("runtime for %q exited during boot: %s", name, strings.TrimSpace(string(tail)))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -303,6 +310,10 @@ func cmdClear(name string) error {
 		return err
 	}
 	if err := spawnHolder(name, "fresh"); err != nil {
+		withRegistry(func(reg map[string]*Entry) error { // keep the resumable handle
+			reg[name].NativeSession = e.NativeSession
+			return nil
+		})
 		return err
 	}
 	fmt.Printf("cleared %s (new native session %s)\n", name, fresh)

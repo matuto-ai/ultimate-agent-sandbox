@@ -16,17 +16,26 @@ trap cleanup EXIT
 
 say() { printf '\n== %s\n' "$*"; }
 
+# want <pattern> <command...> — run, echo output to stderr, grep for pattern.
+# No tee: some harnesses cannot address their own fds as files.
+want() {
+  local pat="$1"; shift
+  local out
+  out=$("$@")
+  printf '%s\n' "$out" >&2
+  grep -q "$pat" <<<"$out"
+}
+
 say "build"
 go build -o "$BIN" .
 go vet ./...
 
 say "open"
 "$BIN" open demo --profile fixture --workdir "$PWD"
-sleep 1
-"$BIN" status demo | tee /proc/self/fd/2 | grep -q "process=RUNNING"
+want "process=RUNNING" "$BIN" status demo
 
 say "identify"
-"$BIN" list | tee /proc/self/fd/2 | grep -q "demo.*fixture.*fixture-agent"
+want "demo.*fixture.*fixture-agent" "$BIN" list
 
 say "send (operator input)"
 "$BIN" send demo "mark via-send"
@@ -41,28 +50,26 @@ grep -q "fakecli up mode=fresh" "$ROOMCTL_HOME/attach.out"
 say "crash the holder (workstation-restart stand-in)"
 kill -9 "$(cat "$ROOMCTL_HOME/run/demo.pid")"
 sleep 0.5
-"$BIN" status demo | tee /proc/self/fd/2 | grep -q "process=EXITED"
+want "process=EXITED" "$BIN" status demo
 
 say "restore (runtime-native resume, bulk path)"
-"$BIN" restore | tee /proc/self/fd/2 | grep -q "restored demo (resume)"
-sleep 1
-"$BIN" status demo | grep -q "process=RUNNING"
+want "restored demo (resume)" "$BIN" restore
+want "process=RUNNING" "$BIN" status demo
 printf '' | "$BIN" attach demo > "$ROOMCTL_HOME/attach2.out" || true
 grep -q "fakecli up mode=resume" "$ROOMCTL_HOME/attach2.out"
 
 say "clear (new native session, same identity)"
 before="$("$BIN" status demo | sed 's/.*session=\([^ ]*\).*/\1/')"
 "$BIN" clear demo
-sleep 1
 after="$("$BIN" status demo | sed 's/.*session=\([^ ]*\).*/\1/')"
 [ "$before" != "$after" ]
-"$BIN" status demo | grep -q "process=RUNNING"
+want "process=RUNNING" "$BIN" status demo
 
 say "close"
 "$BIN" close demo
 sleep 0.5
-"$BIN" status demo | tee /proc/self/fd/2 | grep -q "process=EXITED"
-"$BIN" list | grep -q "demo.*closed"
+want "process=EXITED" "$BIN" status demo
+want "demo.*closed" "$BIN" list
 
 say "restore never revives a closed session"
 if "$BIN" restore demo 2>/dev/null; then
@@ -70,11 +77,21 @@ if "$BIN" restore demo 2>/dev/null; then
   exit 1
 fi
 
+say "open fails fast on a dead-on-boot runtime"
+printf '{"name":"truex","runtime":"fixture","actor":"x","command":["/bin/true"],"sessionTemplate":"{root}/native/{name}-{ts}"}' \
+  > "$ROOMCTL_PROFILES/truex.json"
+if "$BIN" open truex --profile truex --workdir "$PWD" 2>/dev/null; then
+  echo "FAIL: open reported success for a runtime that exited at boot" >&2
+  exit 1
+fi
+if "$BIN" list | grep -q truex; then
+  echo "FAIL: dead-on-boot session left a registry entry" >&2
+  exit 1
+fi
+rm "$ROOMCTL_PROFILES/truex.json"
+
 say "pi smoke (real runtime; soft-fail)"
 mkdir -p "$ROOMCTL_HOME/piwork"
-# Pi shows a ~30s startup splash that swallows early input; wait it out,
-# then submit a local slash command (no model call) to materialize the
-# native session file.
 # Pi shows a ~30s startup splash that swallows early input; wait it out,
 # then send one tiny real message. The native session file materializes on
 # the first exchange; grep it for the reply as end-to-end evidence.
@@ -87,7 +104,7 @@ if "$BIN" open pisess --profile pi-default --workdir "$ROOMCTL_HOME/piwork"; the
     sleep 5
     if [ -s "$sess" ] && grep -q "roomctl-ok" "$sess"; then ok=1; break; fi
   done
-  "$BIN" status pisess | tee /proc/self/fd/2
+  "$BIN" status pisess >&2
   if [ -n "$ok" ]; then
     echo "pi smoke: PASS (open+send+native session $sess)"
   else

@@ -127,11 +127,11 @@ func runHolder(name, mode string) error {
 				upMu.Lock()
 				up := runtimeUp
 				upMu.Unlock()
-				alive := 0
-				if up && syscall.Kill(runtimePid, 0) == nil {
-					alive = 1
+				upNow := 0
+				if up && alive(runtimePid) {
+					upNow = 1
 				}
-				fmt.Fprintf(c, "OK %d %d %d\n", os.Getpid(), runtimePid, alive)
+				fmt.Fprintf(c, "OK %d %d %d\n", os.Getpid(), runtimePid, upNow)
 			case "WRITE":
 				if len(f) != 2 {
 					fmt.Fprintln(c, "ERR usage")
