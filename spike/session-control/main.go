@@ -310,10 +310,13 @@ func cmdClear(name string) error {
 		return err
 	}
 	if err := spawnHolder(name, "fresh"); err != nil {
-		withRegistry(func(reg map[string]*Entry) error { // keep the resumable handle
+		rerr := withRegistry(func(reg map[string]*Entry) error { // keep the resumable handle
 			reg[name].NativeSession = e.NativeSession
 			return nil
 		})
+		if rerr != nil {
+			return fmt.Errorf("%w — and rolling back the session handle failed: %v; registry may point at a nonexistent native session, recreate with open", err, rerr)
+		}
 		return err
 	}
 	fmt.Printf("cleared %s (new native session %s)\n", name, fresh)

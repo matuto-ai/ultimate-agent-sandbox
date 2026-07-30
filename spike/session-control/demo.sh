@@ -5,10 +5,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export ROOMCTL_HOME="$(mktemp -d /tmp/roomctl-demo.XXXXXX)"
-export ROOMCTL_PROFILES="$PWD/profiles"
+export ROOMCTL_PROFILES="$ROOMCTL_HOME/profiles"
+mkdir -p "$ROOMCTL_PROFILES"
+cp profiles/*.json "$ROOMCTL_PROFILES"/
 BIN="$ROOMCTL_HOME/roomctl"
 cleanup() {
   "$BIN" close demo >/dev/null 2>&1 || true
+  "$BIN" close swapx >/dev/null 2>&1 || true
   "$BIN" close pisess >/dev/null 2>&1 || true
   rm -rf "$ROOMCTL_HOME"
 }
@@ -16,9 +19,9 @@ trap cleanup EXIT
 
 say() { printf '\n== %s\n' "$*"; }
 
-# want <pattern> <command...> — run, echo output to stderr, grep for pattern.
+# expect_output <pattern> <command...> — run, echo output to stderr, grep for pattern.
 # No tee: some harnesses cannot address their own fds as files.
-want() {
+expect_output() {
   local pat="$1"; shift
   local out
   out=$("$@")
@@ -32,10 +35,10 @@ go vet ./...
 
 say "open"
 "$BIN" open demo --profile fixture --workdir "$PWD"
-want "process=RUNNING" "$BIN" status demo
+expect_output "process=RUNNING" "$BIN" status demo
 
 say "identify"
-want "demo.*fixture.*fixture-agent" "$BIN" list
+expect_output "demo.*fixture.*fixture-agent" "$BIN" list
 
 say "send (operator input)"
 "$BIN" send demo "mark via-send"
@@ -50,11 +53,11 @@ grep -q "fakecli up mode=fresh" "$ROOMCTL_HOME/attach.out"
 say "crash the holder (workstation-restart stand-in)"
 kill -9 "$(cat "$ROOMCTL_HOME/run/demo.pid")"
 sleep 0.5
-want "process=EXITED" "$BIN" status demo
+expect_output "process=EXITED" "$BIN" status demo
 
 say "restore (runtime-native resume, bulk path)"
-want "restored demo (resume)" "$BIN" restore
-want "process=RUNNING" "$BIN" status demo
+expect_output "restored demo (resume)" "$BIN" restore
+expect_output "process=RUNNING" "$BIN" status demo
 printf '' | "$BIN" attach demo > "$ROOMCTL_HOME/attach2.out" || true
 grep -q "fakecli up mode=resume" "$ROOMCTL_HOME/attach2.out"
 
@@ -63,13 +66,25 @@ before="$("$BIN" status demo | sed 's/.*session=\([^ ]*\).*/\1/')"
 "$BIN" clear demo
 after="$("$BIN" status demo | sed 's/.*session=\([^ ]*\).*/\1/')"
 [ "$before" != "$after" ]
-want "process=RUNNING" "$BIN" status demo
+expect_output "process=RUNNING" "$BIN" status demo
+
+say "clear rolls back when the relaunch dies at boot"
+cp "$ROOMCTL_PROFILES/fixture.json" "$ROOMCTL_PROFILES/swap.json"
+"$BIN" open swapx --profile swap --workdir "$PWD" >/dev/null
+shandle="$("$BIN" status swapx | sed 's/.*session=\([^ ]*\).*/\1/')"
+printf '{"name":"swap","runtime":"fixture","actor":"x","command":["/bin/false"],"sessionTemplate":"{root}/native/{name}-{ts}"}' \
+  > "$ROOMCTL_PROFILES/swap.json"
+if "$BIN" clear swapx 2>/dev/null; then
+  echo "FAIL: clear succeeded with a dead-on-boot relaunch" >&2
+  exit 1
+fi
+[ "$("$BIN" status swapx | sed 's/.*session=\([^ ]*\).*/\1/')" = "$shandle" ]
 
 say "close"
 "$BIN" close demo
 sleep 0.5
-want "process=EXITED" "$BIN" status demo
-want "demo.*closed" "$BIN" list
+expect_output "process=EXITED" "$BIN" status demo
+expect_output "demo.*closed" "$BIN" list
 
 say "restore never revives a closed session"
 if "$BIN" restore demo 2>/dev/null; then
