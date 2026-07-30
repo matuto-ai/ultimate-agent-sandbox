@@ -23,8 +23,9 @@ def encode(value: Any) -> bytes:
 
 
 class Store:
-    def __init__(self, path: str):
+    def __init__(self, path: str, lease_seconds: float):
         self.lock = threading.Lock()
+        self.lease_seconds = lease_seconds
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -37,6 +38,7 @@ class Store:
                     runtime TEXT NOT NULL,
                     profile TEXT NOT NULL,
                     connected INTEGER NOT NULL,
+                    lease_expires_at REAL NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS events(
@@ -54,8 +56,25 @@ class Store:
                 CREATE INDEX IF NOT EXISTS events_target ON events(target);
                 """
             )
+            columns = {row["name"] for row in self.db.execute("PRAGMA table_info(participants)")}
+            if "lease_expires_at" not in columns:
+                self.db.execute(
+                    "ALTER TABLE participants ADD COLUMN lease_expires_at REAL NOT NULL DEFAULT 0"
+                )
             # Badges authorize one Hub process only; every restart requires rejoin.
-            self.db.execute("UPDATE participants SET connected=0")
+            self.db.execute("UPDATE participants SET connected=0,lease_expires_at=0")
+
+    def _expire(self) -> None:
+        rows = self.db.execute(
+            "SELECT actor FROM participants WHERE connected=1 AND lease_expires_at<=?",
+            (time.time(),),
+        ).fetchall()
+        for row in rows:
+            self.db.execute(
+                "UPDATE participants SET connected=0,lease_expires_at=0,updated_at=? WHERE actor=?",
+                (timestamp(), row["actor"]),
+            )
+            self._append("disconnect", str(row["actor"]), payload={"reason": "lease-expired"})
 
     def _append(
         self,
@@ -90,29 +109,37 @@ class Store:
         badge = "b-" + secrets.token_hex(16)
         with self.lock, self.db:
             self.db.execute(
-                "INSERT INTO participants(actor,badge,runtime,profile,connected,updated_at) VALUES (?,?,?,?,1,?) "
-                "ON CONFLICT(actor) DO UPDATE SET badge=excluded.badge,runtime=excluded.runtime,"
-                "profile=excluded.profile,connected=1,updated_at=excluded.updated_at",
-                (actor, badge, runtime, profile, timestamp()),
+                "INSERT INTO participants(actor,badge,runtime,profile,connected,lease_expires_at,updated_at) "
+                "VALUES (?,?,?,?,1,?,?) ON CONFLICT(actor) DO UPDATE SET badge=excluded.badge,"
+                "runtime=excluded.runtime,profile=excluded.profile,connected=1,"
+                "lease_expires_at=excluded.lease_expires_at,updated_at=excluded.updated_at",
+                (actor, badge, runtime, profile, time.time() + self.lease_seconds, timestamp()),
             )
             self._append("join", actor, payload={"runtime": runtime, "profile": profile})
         return {"badge": badge, "after_seq": after_seq}
 
     def actor_for(self, badge: str) -> str:
-        with self.lock:
+        with self.lock, self.db:
+            self._expire()
             row = self.db.execute(
                 "SELECT actor FROM participants WHERE badge=? AND connected=1", (badge,)
             ).fetchone()
-        if not row:
-            raise PermissionError("unauthorized")
-        return str(row["actor"])
+            if not row:
+                raise PermissionError("unauthorized")
+            self.db.execute(
+                "UPDATE participants SET lease_expires_at=?,updated_at=? WHERE badge=?",
+                (time.time() + self.lease_seconds, timestamp(), badge),
+            )
+            return str(row["actor"])
 
     def disconnect(self, badge: str) -> None:
         with self.lock, self.db:
-            row = self.db.execute("SELECT actor FROM participants WHERE badge=?", (badge,)).fetchone()
+            row = self.db.execute(
+                "SELECT actor FROM participants WHERE badge=? AND connected=1", (badge,)
+            ).fetchone()
             if row:
                 self.db.execute(
-                    "UPDATE participants SET connected=0,updated_at=? WHERE badge=?",
+                    "UPDATE participants SET connected=0,lease_expires_at=0,updated_at=? WHERE badge=?",
                     (timestamp(), badge),
                 )
                 self._append("disconnect", str(row["actor"]))
@@ -165,7 +192,8 @@ class Store:
             return self._append(kind, actor, target, client_id, correlation, parent_seq, payload)
 
     def participants(self) -> list[dict[str, Any]]:
-        with self.lock:
+        with self.lock, self.db:
+            self._expire()
             rows = self.db.execute(
                 "SELECT actor,runtime,profile,connected,updated_at FROM participants ORDER BY actor"
             ).fetchall()
@@ -181,7 +209,8 @@ class Store:
             return [self._event(row) for row in rows]
 
     def dump(self) -> dict[str, Any]:
-        with self.lock:
+        with self.lock, self.db:
+            self._expire()
             participants = [dict(row) for row in self.db.execute(
                 "SELECT actor,runtime,profile,connected,updated_at FROM participants ORDER BY actor"
             )]
@@ -213,6 +242,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ))
             elif self.path == "/disconnect":
                 self.server.store.disconnect(badge)
+                self.reply(200, {"ok": True})
+            elif self.path == "/heartbeat":
+                self.server.store.actor_for(badge)
                 self.reply(200, {"ok": True})
             elif self.path == "/traffic":
                 self.reply(200, self.server.store.submit(badge, data))
@@ -268,9 +300,10 @@ def main() -> None:
     parser.add_argument("--db", required=True)
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--debug-token", required=True)
+    parser.add_argument("--lease-seconds", type=float, default=5)
     args = parser.parse_args()
     server = HubServer(("127.0.0.1", args.port), Handler)
-    server.store = Store(args.db)
+    server.store = Store(args.db, args.lease_seconds)
     server.debug_token = args.debug_token
     print(f"http://127.0.0.1:{server.server_port}", flush=True)
     server.serve_forever()

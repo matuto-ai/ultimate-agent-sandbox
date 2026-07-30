@@ -8,6 +8,7 @@ const config = {
   profile: process.env.HUB_PROFILE || "pi-default",
   stateFile: process.env.HUB_STATE || ".demo/pi-state.json",
   evidenceFile: process.env.HUB_EVIDENCE || "",
+  heartbeatMs: Number(process.env.HUB_HEARTBEAT_MS || 1000),
 };
 
 const state = { badge: "", lastSeq: 0, busy: false };
@@ -74,7 +75,8 @@ function parseTarget(args: string) {
 
 export default function (pi: ExtensionAPI) {
   let context: ExtensionContext | undefined;
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let pullTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 
   async function pull() {
     if (state.busy || !context?.isIdle()) return;
@@ -107,7 +109,14 @@ export default function (pi: ExtensionAPI) {
     loadState();
     await join();
     await pull();
-    timer = setInterval(() => void pull().catch(error => evidence({ action: "poll-error", error: String(error) })), 150);
+    pullTimer = setInterval(
+      () => void pull().catch(error => evidence({ action: "poll-error", error: String(error) })),
+      150,
+    );
+    heartbeatTimer = setInterval(
+      () => void request("/heartbeat", "POST", {}).catch(error => evidence({ action: "heartbeat-error", error: String(error) })),
+      config.heartbeatMs,
+    );
   });
   pi.on("agent_start", () => { state.busy = true; });
   pi.on("agent_settled", async (_event, ctx) => {
@@ -124,7 +133,8 @@ export default function (pi: ExtensionAPI) {
     if (ctx.isIdle()) state.busy = false;
   });
   pi.on("session_shutdown", async () => {
-    if (timer) clearInterval(timer);
+    if (pullTimer) clearInterval(pullTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     try { await request("/disconnect", "POST", {}); } catch {}
   });
 
