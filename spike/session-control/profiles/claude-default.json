@@ -1,0 +1,8 @@
+{
+  "name": "claude-default",
+  "runtime": "claude",
+  "actor": "claude-agent",
+  "command": ["claude", "--session-id", "{session}"],
+  "resumeCommand": ["claude", "--resume", "{session}"],
+  "sessionTemplate": "{uuid}"
+}

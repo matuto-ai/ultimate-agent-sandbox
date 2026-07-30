@@ -1,0 +1,12 @@
+{
+  "name": "fixture",
+  "runtime": "fixture",
+  "actor": "fixture-agent",
+  "command": ["bash", "{workdir}/fixture/fakecli.sh", "fresh"],
+  "resumeCommand": ["bash", "{workdir}/fixture/fakecli.sh", "resume"],
+  "sessionTemplate": "{root}/native/{name}-{ts}",
+  "env": {
+    "FAKECLI_SESSION": "{session}",
+    "FAKECLI_MARKER": "{root}/marker-{name}.txt"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "pi-default",
+  "runtime": "pi",
+  "actor": "pi-agent",
+  "command": ["pi", "--session", "{session}", "--name", "{name}"],
+  "resumeCommand": ["pi", "--session", "{session}", "--name", "{name}"],
+  "sessionTemplate": "{root}/native/{name}-{ts}.jsonl"
+}
