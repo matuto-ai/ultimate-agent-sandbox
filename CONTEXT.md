@@ -5,31 +5,43 @@ This context defines the stable language for a sandbox where long-lived coding a
 ## Language
 
 **Deployment**:
-One isolated installation containing a trusted workstation, its Hub, its Forge Broker, and deployment-local configuration.
+One isolated installation containing one Room, its Trusted Workstation, Hub, Forge Broker, and deployment-local configuration.
 _Avoid_: Project, tenant, cluster
 
+**Project**:
+The user-owned work context permanently bound to one Room, with one writable Git repository, a writable workspace, and read-only references.
+_Avoid_: Deployment, Room, repository
+
 **Room**:
-The collaboration boundary belonging to one Deployment. Participants in a Room are trusted peers and normally work on one repository at a time.
+The collaboration boundary belonging to one Deployment and permanently bound to one Project. Its Participants are trusted peers.
 _Avoid_: Project, channel, workspace
 
 **Trusted Workstation**:
 The single persistent container in which all Participants run and share the approved repository, workspace, and read-only reference mounts.
 _Avoid_: Participant container, secure multi-tenant sandbox
 
-**Agent Identity**:
-A durable CLI-family identity such as Pi or Claude that owns Git authorship, CLI authentication, and a mapped Forge account.
-_Avoid_: Profile, Participant, role
+**Runtime**:
+A CLI implementation and its shared state and provider-authentication domain, such as Pi, Claude, or native Kimi.
+_Avoid_: Actor Identity, Runtime Launch Profile, Participant
 
-**Profile**:
-Deployment-local configuration describing an agent's responsibilities, instructions, runtime, model, effort, tools, skills, and capabilities.
-_Avoid_: Fixed role, Agent Identity
+**Runtime Launch Profile**:
+A Runtime-owned startup preset that selects invocation parameters and an Actor Identity, such as Pi · GPT or Pi · Kimi.
+_Avoid_: Deployment Profile, Runtime, role
+
+**Actor Identity**:
+The durable accountability identity used for Git, Forge, Hub, branch, and audit attribution.
+_Avoid_: Runtime, Runtime Launch Profile, Participant
+
+**Deployment Profile**:
+Deployment-local configuration describing a Participant's responsibilities, instructions, tools, skills, and capabilities.
+_Avoid_: Runtime Launch Profile, fixed role, Actor Identity
 
 **Participant**:
-One live agent session joined to a Room under an Agent Identity and Profile.
-_Avoid_: Agent Identity, Profile, subagent
+One live Runtime session joined to a Room under an Actor Identity and Deployment Profile.
+_Avoid_: Actor Identity, Deployment Profile, subagent
 
 **Capability**:
-A configurable permission or workflow eligibility declared by a Profile, such as implementing, testing, advising, or independently reviewing.
+A configurable permission or workflow eligibility declared by a Deployment Profile, such as implementing, testing, advising, or independently reviewing.
 _Avoid_: Hard-coded role
 
 **Hub**:
@@ -46,7 +58,7 @@ _Avoid_: Task, session, Workstream
 
 **Run Policy**:
 Versioned completion rules that a Run snapshots when it opens.
-_Avoid_: Profile, workflow, hard-coded phase
+_Avoid_: Deployment Profile, workflow, hard-coded phase
 
 **Coordinator**:
 A Participant temporarily authorized by a human to coordinate a Run while remaining a peer.
@@ -73,7 +85,7 @@ A Git collaboration service such as Gitea, GitHub, or GitLab that remains author
 _Avoid_: Git server, Gitea when referring to the general concept
 
 **Forge Broker**:
-The deployment-side security boundary that keeps Forge credentials outside the Trusted Workstation, maps requests to Agent Identities, enforces policy, and records an audit trail.
+The deployment-side security boundary that keeps Forge credentials outside the Trusted Workstation, maps requests to Actor Identities, enforces policy, and records an audit trail.
 _Avoid_: Hub, Forge adapter
 
 **Manager**:

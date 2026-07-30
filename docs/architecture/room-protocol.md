@@ -5,12 +5,12 @@ This document fixes the smallest protocol required for the collaborative-agent s
 ## Ownership boundaries
 
 - The Forge owns durable work items, pull requests, registered Findings, and merge outcomes.
-- The Hub owns explicit Runs, Participant identity and desired state, presence, protocol traffic, policy gates, and an append-only audit ledger.
+- The Hub owns explicit Runs, authenticated Actor Identity bindings, Participant desired state, presence, protocol traffic, policy gates, and an append-only audit ledger.
 - Runtime adapters own CLI process launch, resume, stop, attachment, and safe-point detection.
 - The Manager is a client and read model. It exposes typed workflow actions only; it cannot submit shell commands, filesystem operations, arbitrary process arguments, or container-runtime actions.
 - Participants remain peers. The Hub validates state changes but does not poll the Forge backlog or assign work automatically.
 
-One Deployment contains one Room and normally one repository. A Room may contain Maps and standalone Forge work items. Multiple active repositories in one Room are outside the spike.
+One Deployment contains one Room permanently bound to one Project and one writable repository. A Room may contain Maps and standalone Forge work items. Multiple writable repositories in one Room are outside the spike.
 
 ## Work and Run model
 
@@ -49,7 +49,7 @@ Every Run-scoped Request and Command carries `run_id` and `generation`.
 
 ## Participants and coordination
 
-Profiles describe Participant behavior and capabilities. Runtime state belongs to Participants; Git and Forge attribution belongs to durable Agent Identities.
+Deployment Profiles describe Participant behavior and capabilities. Runtime state may be shared; Git, Forge, Hub, branch, and audit attribution belongs to durable Actor Identities.
 
 Peer mode is the default. A human may temporarily assign one Participant as a Run coordinator. During the spike:
 
@@ -94,7 +94,7 @@ Every Request has two clocks:
 
 Expiry escalates through reminder, coordinator when present, and human attention. It never silently cancels work.
 
-A Participant has one active work Request slot by default. A Profile or runtime may explicitly allow more. Work Requests follow:
+A Participant has one active work Request slot by default. A Deployment Profile or Runtime may explicitly allow more. Work Requests follow:
 
 ```text
 QUEUED → DELIVERED → ACCEPTED → COMPLETED
@@ -139,13 +139,13 @@ RESOLVED → OPEN
 - A human may appoint an eligible replacement reviewer when the opener is unavailable.
 - Reopening requires new evidence and reviewer or human authority.
 
-Independent-review eligibility belongs to the durable Agent Identity, not a session, Participant, or Profile. An identity is ineligible when it edited the reviewed artifact, authored or amended a reviewed commit or conflict resolution, or supplied an exact patch that was adopted. Coordination, research, test execution, and problem reporting do not make an identity ineligible. A new session cannot clear the history; a human override is recorded as an override, not independent review.
+Independent-review eligibility belongs to the durable Actor Identity, not a session, Participant, Runtime Launch Profile, or Deployment Profile. An identity is ineligible when it edited the reviewed artifact, authored or amended a reviewed commit or conflict resolution, or supplied an exact patch that was adopted. Coordination, research, test execution, and problem reporting do not make an identity ineligible. A new session cannot clear the history; a human override is recorded as an override, not independent review.
 
 ## Validation, approval, and merge
 
 Validation records evidence without imposing one global strictness level. Each record includes the check, target revision or scope, source, time, result, and evidence link. The Run Policy decides acceptable provenance and freshness. Only a `current-commit` gate automatically becomes stale after a new commit; looser policies may accept attestations or non-commit-scoped evidence.
 
-Humans, the active coordinator, and Profiles with `can-approve-run=true` may approve a Run. Approval satisfies only gates for which that identity is eligible and never bypasses required review or validation.
+Humans, the active coordinator, and Participants whose Deployment Profiles grant `can-approve-run=true` may approve a Run. Approval satisfies only gates for which the approver is eligible and never bypasses required review or validation.
 
 For an implementation Run, `completed` means its pull request is accepted and ready to merge. The Run records the pull-request URL and accepted head SHA. Acceptance and delivery remain visibly distinct:
 
