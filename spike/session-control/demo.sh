@@ -12,6 +12,9 @@ BIN="$ROOMCTL_HOME/roomctl"
 cleanup() {
   "$BIN" close demo >/dev/null 2>&1 || true
   "$BIN" close swapx >/dev/null 2>&1 || true
+  "$BIN" close disc >/dev/null 2>&1 || true
+  "$BIN" close orph >/dev/null 2>&1 || true
+  "$BIN" close multi >/dev/null 2>&1 || true
   "$BIN" close pisess >/dev/null 2>&1 || true
   rm -rf "$ROOMCTL_HOME"
 }
@@ -104,6 +107,68 @@ if "$BIN" list | grep -q truex; then
   exit 1
 fi
 rm "$ROOMCTL_PROFILES/truex.json"
+
+say "malformed arguments fail with usage, not a panic"
+if "$BIN" open demo --profile > "$ROOMCTL_HOME/malformed.out" 2>&1; then
+  echo "FAIL: trailing --profile flag accepted" >&2
+  exit 1
+fi
+if grep -qi panic "$ROOMCTL_HOME/malformed.out"; then
+  echo "FAIL: malformed open panicked" >&2
+  exit 1
+fi
+if "$BIN" open 2>/dev/null; then
+  echo "FAIL: nameless open accepted" >&2
+  exit 1
+fi
+
+# count_holders <name> — live holder processes for a session, via /proc
+# (ps is not available in every harness).
+count_holders() {
+  local n=0 c
+  for c in /proc/[0-9]*/cmdline; do
+    if tr '\0' ' ' < "$c" 2>/dev/null | grep -q "[__]holder $1 "; then n=$((n+1)); fi
+  done
+  echo "$n"
+}
+
+say "restore after holder/runtime loss keeps exactly one holder"
+"$BIN" open disc --profile fixture --workdir "$PWD" >/dev/null
+kill -9 "$("$BIN" status disc | sed 's/.*runtimePid=\([0-9]*\).*/\1/')"
+sleep 1
+"$BIN" restore disc >/dev/null
+expect_output "process=RUNNING" "$BIN" status disc
+[ "$(count_holders disc)" = "1" ]
+"$BIN" close disc >/dev/null
+for _ in 1 2 3 4 5 6 7 8; do
+  [ "$(count_holders disc)" = "0" ] && break
+  sleep 0.5
+done
+[ "$(count_holders disc)" = "0" ]
+
+say "close kills an orphaned runtime when the holder is gone"
+printf '%s\n' '{"name":"orph","runtime":"fixture","actor":"x","command":["/bin/bash","-c","trap \"\" HUP; exec sleep 300"],"sessionTemplate":"{root}/native/{name}-{ts}"}' \
+  > "$ROOMCTL_PROFILES/orph.json"
+"$BIN" open orph --profile orph --workdir "$PWD" >/dev/null
+opid="$("$BIN" status orph | sed 's/.*runtimePid=\([0-9]*\).*/\1/')"
+kill -9 "$(cat "$ROOMCTL_HOME/run/orph.pid")"
+"$BIN" close orph
+if [ -e "/proc/$opid/stat" ] && ! grep -q ") Z" "/proc/$opid/stat"; then
+  echo "FAIL: orphaned runtime $opid survived close" >&2
+  exit 1
+fi
+
+say "clear never reuses a native handle"
+printf '{"name":"multi","runtime":"fixture","actor":"x","command":["%s/fixture/fakecli.sh","multi"],"sessionTemplate":"{root}/native/{name}-{ts}"}' "$PWD" \
+  > "$ROOMCTL_PROFILES/multi.json"
+"$BIN" open multi --profile multi --workdir "$PWD" >/dev/null
+h1="$("$BIN" status multi | sed 's/.*session=\([^ ]*\).*/\1/')"
+"$BIN" clear multi >/dev/null
+h2="$("$BIN" status multi | sed 's/.*session=\([^ ]*\).*/\1/')"
+"$BIN" clear multi >/dev/null
+h3="$("$BIN" status multi | sed 's/.*session=\([^ ]*\).*/\1/')"
+[ "$h1" != "$h2" ] && [ "$h2" != "$h3" ]
+"$BIN" close multi >/dev/null
 
 say "pi smoke (real runtime; soft-fail)"
 mkdir -p "$ROOMCTL_HOME/piwork"

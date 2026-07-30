@@ -98,9 +98,13 @@ func spawnHolder(name, mode string) error {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		_, _, up, err := ping(name)
+		_, rpid, up, err := ping(name)
 		if err == nil {
 			if up {
+				withRegistry(func(reg map[string]*Entry) error { // for orphan cleanup
+					reg[name].RuntimePid = rpid
+					return nil
+				})
 				return nil
 			}
 			// The holder answers only after spawning the runtime, so a
@@ -151,12 +155,16 @@ func cmdOpen(args []string) error {
 	var name, profile, workdir string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--profile":
+		case "--profile", "--workdir":
 			i++
-			profile = args[i]
-		case "--workdir":
-			i++
-			workdir = args[i]
+			if i >= len(args) {
+				return errors.New("usage: roomctl open <name> --profile <p> [--workdir dir]")
+			}
+			if args[i-1] == "--profile" {
+				profile = args[i]
+			} else {
+				workdir = args[i]
+			}
 		default:
 			name = args[i]
 		}
@@ -170,6 +178,11 @@ func cmdOpen(args []string) error {
 	}
 	if workdir == "" {
 		workdir, _ = os.Getwd()
+	}
+	// Reusing a closed name must not leave a previous orphaned runtime alive.
+	if old, err := getEntry(name); err == nil && old.State == "closed" {
+		killHolderGroup(name)
+		killOrphanRuntime(old)
 	}
 	ctx := sessCtx{name: name, workdir: workdir}
 	session := ctx.render(p.SessionTemplate)
@@ -270,9 +283,8 @@ func cmdClose(name string) error {
 		return err
 	}
 	if _, err := holderCall(name, "CLOSE"); err != nil {
-		if pid := holderPid(name); pid > 0 {
-			syscall.Kill(-pid, syscall.SIGKILL) // ponytail: force path, holder group only
-		}
+		killHolderGroup(name) // dead holder may have orphaned the runtime
+		killOrphanRuntime(e)
 	}
 	return withRegistry(func(reg map[string]*Entry) error {
 		reg[e.Name].State = "closed"
@@ -327,6 +339,46 @@ func cmdClear(name string) error {
 // topology (phase 1, already durable); each dead session is resumed through the
 // runtime-native resume command (phase 2). Closed sessions are terminal and are
 // never revived by restore.
+// killOrphanRuntime force-kills the runtime recorded in the registry entry.
+// The runtime is its own session leader (Setsid for the controlling PTY), so
+// a negative pid kills its whole group. Used when the holder cannot shut it
+// down itself.
+// ponytail: a recycled pid could hit an innocent group; bounded prototype
+// risk, proper supervision belongs in the real supervisor.
+func killOrphanRuntime(e *Entry) {
+	if e.RuntimePid > 0 {
+		syscall.Kill(-e.RuntimePid, syscall.SIGKILL)
+	}
+}
+
+// killHolderGroup force-kills the holder's recorded process group, which also
+// contains its runtime child. Used when the holder cannot shut itself down.
+// ponytail: a stale pidfile plus a recycled pgid could hit an innocent group;
+// bounded prototype risk, proper supervision belongs in the real supervisor.
+func killHolderGroup(name string) {
+	b, err := os.ReadFile(filepath.Join(rootDir(), "run", name+".pid"))
+	if err != nil {
+		return
+	}
+	if pid, _ := strconv.Atoi(strings.TrimSpace(string(b))); pid > 0 {
+		syscall.Kill(-pid, syscall.SIGKILL)
+	}
+}
+
+// stopHolder asks a live holder to shut down and waits briefly for it to die.
+func stopHolder(name string) {
+	if _, _, _, err := ping(name); err != nil {
+		return
+	}
+	holderCall(name, "CLOSE")
+	for i := 0; i < 20; i++ {
+		if _, _, _, err := ping(name); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func cmdRestore(name string) error {
 	var targets []*Entry
 	if name != "" {
@@ -363,6 +415,7 @@ func restoreOne(e *Entry) error {
 		fmt.Printf("%s: already RUNNING, skipped\n", e.Name)
 		return nil
 	}
+	stopHolder(e.Name) // a lingering DISCONNECTED holder must not outlive respawn
 	p, err := loadProfile(e.Profile)
 	if err != nil {
 		return err

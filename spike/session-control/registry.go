@@ -21,8 +21,9 @@ type Entry struct {
 	Runtime       string `json:"runtime"`
 	Actor         string `json:"actor"` // Actor Identity for git/forge/hub attribution
 	Workdir       string `json:"workdir"`
-	NativeSession string `json:"nativeSession"` // runtime-native resume handle
-	State         string `json:"state"`         // open | closed
+	NativeSession string `json:"nativeSession"`        // runtime-native resume handle
+	RuntimePid    int    `json:"runtimePid,omitempty"` // last known runtime pid (orphan cleanup)
+	State         string `json:"state"`                // open | closed
 	CreatedAt     string `json:"createdAt"`
 }
 
@@ -121,7 +122,7 @@ func (c sessCtx) render(s string) string {
 		"{name}", c.name,
 		"{session}", c.session,
 		"{workdir}", c.workdir,
-		"{ts}", strconv.FormatInt(time.Now().Unix(), 10),
+		"{ts}", strconv.FormatInt(time.Now().UnixNano(), 10),
 		"{uuid}", uuid(),
 	)
 	return r.Replace(s)
