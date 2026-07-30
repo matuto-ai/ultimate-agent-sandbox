@@ -26,13 +26,14 @@ func runHolder(name, mode string) error {
 	if err != nil {
 		return err
 	}
-	argv := renderArgv(p.Command, e.Name, e.NativeSession, e.Workdir)
+	ctx := sessCtx{name: e.Name, session: e.NativeSession, workdir: e.Workdir}
+	argv := ctx.argv(p.Command)
 	if mode == "resume" && len(p.ResumeCommand) > 0 {
-		argv = renderArgv(p.ResumeCommand, e.Name, e.NativeSession, e.Workdir)
+		argv = ctx.argv(p.ResumeCommand)
 	}
 	env := os.Environ()
 	for k, v := range p.Env {
-		env = append(env, k+"="+render(v, e.Name, e.NativeSession, e.Workdir))
+		env = append(env, k+"="+ctx.render(v))
 	}
 
 	master, slave, err := openPTY()

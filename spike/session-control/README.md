@@ -33,13 +33,18 @@ One small static Go binary, stdlib only, no daemon:
 - **Two-phase restore.** Phase 1 is free: the registry *is* the topology and
   survives any crash. Phase 2: `roomctl restore` relaunches dead sessions
   through the runtime-native resume command (`pi --session <file>`,
-  `claude --resume <id>`), never a replay or scrape.
+  `claude --resume <id>`), never a replay or scrape. `close` is terminal:
+  restore never revives a closed session.
 - **Clear vs close vs restore.** `clear` mints a new native session handle and
   relaunches under the same identity (context wiped, Participant preserved);
-  `close` terminates; `restore` resumes the same native session.
-- **Two state axes, honestly separated.** `status` reports only the *process*
-  axis (`RUNNING / EXITED / DISCONNECTED`) from holder socket + pid liveness.
-  Turn *readiness* is a separate, adapter-owned axis (see
+  `close` terminates for good; `restore` resumes dead *open* sessions only.
+- **Fail-fast open.** `open` only reports success after the holder answers a
+  handshake proving the runtime actually started; a bad profile command fails
+  the command and leaves no registry entry.
+- **Two state axes, honestly separated.** `status` reports only *process
+  liveness* (`RUNNING / EXITED / DISCONNECTED`) from supervisor-owned holder
+  socket + pid signals — not runtime-native turn state. Turn *readiness* is a
+  separate, adapter-owned axis (see
   [Non-disruptive delivery signals](../../docs/research/non-disruptive-delivery-signals.md));
   roomctl never infers it from terminal output or silence.
 - **Hub separation.** roomctl is the terminal control plane only. Room
@@ -55,12 +60,12 @@ sessions, a central supervisor daemon, replay-based restore.
 ```text
 roomctl open <name> --profile <p> [--workdir dir]
 roomctl list                  # identify: name, profile, runtime, actor, state, native session
-roomctl status [name]         # process axis only: RUNNING | EXITED | DISCONNECTED
+roomctl status [name]         # process liveness (holder/pid signals)
 roomctl attach <name>         # operator terminal; Ctrl-] detaches
 roomctl send <name> <text>    # operator input, delivered like typing
 roomctl clear <name>          # wipe context, keep identity/profile
-roomctl close <name>
-roomctl restore [name]        # runtime-native resume; no name = all dead sessions
+roomctl close <name>          # terminate for good
+roomctl restore [name]        # runtime-native resume of dead open sessions
 ```
 
 State root: `$ROOMCTL_HOME` (default `.roomctl/`). Profiles:
@@ -92,7 +97,8 @@ Not proven here:
 
 - **Claude.** The binary is absent in this environment; `claude-default.json`
   encodes only the documented flags (`--session-id`, `--resume`). Its
-  interactive behavior must be proven on a workstation that has Claude.
+  interactive behavior must be proven on a workstation that has Claude —
+  tracked as [issue #20](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/20).
 - Pi's ~30s startup splash swallows early operator input; `send` before the
   TUI is up is lost (the demo waits it out). A production profile may want
   Pi's extension seam for input instead of raw PTY writes.
@@ -102,7 +108,8 @@ Not proven here:
 
 ## Files
 
-- `main.go` — CLI, registry, profiles, lifecycle commands
+- `main.go` — CLI, holder lifecycle, commands
+- `registry.go` — durable registry, profiles, template rendering
 - `holder.go` — per-session PTY/socket holder
 - `pty_linux.go` — Linux PTY + raw-terminal attach (stdlib only)
 - `profiles/` — fixture, Pi, Claude Runtime Launch Profiles

@@ -6,9 +6,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -20,123 +18,6 @@ import (
 	"syscall"
 	"time"
 )
-
-// ---------- durable identity: registry + declarative Runtime Launch Profiles ----------
-
-type Entry struct {
-	Name          string `json:"name"`
-	Profile       string `json:"profile"`
-	Runtime       string `json:"runtime"`
-	Actor         string `json:"actor"` // Actor Identity for git/forge/hub attribution
-	Workdir       string `json:"workdir"`
-	NativeSession string `json:"nativeSession"` // runtime-native resume handle
-	State         string `json:"state"`         // open | closed
-	CreatedAt     string `json:"createdAt"`
-}
-
-type Profile struct {
-	Name            string            `json:"name"`
-	Runtime         string            `json:"runtime"`
-	Actor           string            `json:"actor"`
-	Command         []string          `json:"command"`
-	ResumeCommand   []string          `json:"resumeCommand"` // empty: restore relaunches Command
-	SessionTemplate string            `json:"sessionTemplate"`
-	Env             map[string]string `json:"env"`
-}
-
-func rootDir() string {
-	if v := os.Getenv("ROOMCTL_HOME"); v != "" {
-		return v
-	}
-	return ".roomctl"
-}
-
-func profilesDir() string {
-	if v := os.Getenv("ROOMCTL_PROFILES"); v != "" {
-		return v
-	}
-	return "profiles"
-}
-
-func loadProfile(name string) (Profile, error) {
-	var p Profile
-	b, err := os.ReadFile(filepath.Join(profilesDir(), name+".json"))
-	if err != nil {
-		return p, fmt.Errorf("profile %q: %w", name, err)
-	}
-	return p, json.Unmarshal(b, &p)
-}
-
-// withRegistry runs fn under an exclusive flock on the registry.
-func withRegistry(fn func(map[string]*Entry) error) error {
-	if err := os.MkdirAll(rootDir(), 0o755); err != nil {
-		return err
-	}
-	lk, err := os.OpenFile(filepath.Join(rootDir(), "lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return err
-	}
-	defer lk.Close()
-	if err := syscall.Flock(int(lk.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lk.Fd()), syscall.LOCK_UN)
-	reg := map[string]*Entry{}
-	path := filepath.Join(rootDir(), "registry.json")
-	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &reg); err != nil {
-			return fmt.Errorf("registry corrupt: %w", err)
-		}
-	}
-	if err := fn(reg); err != nil {
-		return err
-	}
-	b, _ := json.MarshalIndent(reg, "", "  ")
-	return os.WriteFile(path, append(b, '\n'), 0o644)
-}
-
-func getEntry(name string) (*Entry, error) {
-	var e *Entry
-	err := withRegistry(func(reg map[string]*Entry) error {
-		if x, ok := reg[name]; ok {
-			c := *x
-			e = &c
-		}
-		return nil
-	})
-	if e == nil && err == nil {
-		err = fmt.Errorf("no session %q", name)
-	}
-	return e, err
-}
-
-// ---------- placeholder rendering ----------
-
-func uuid() string {
-	var b [16]byte
-	rand.Read(b[:])
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
-func render(s, name, session, workdir string) string {
-	r := strings.NewReplacer(
-		"{root}", rootDir(),
-		"{name}", name,
-		"{session}", session,
-		"{workdir}", workdir,
-		"{ts}", strconv.FormatInt(time.Now().Unix(), 10),
-		"{uuid}", uuid(),
-	)
-	return r.Replace(s)
-}
-
-func renderArgv(argv []string, name, session, workdir string) []string {
-	out := make([]string, len(argv))
-	for i, a := range argv {
-		out[i] = render(a, name, session, workdir)
-	}
-	return out
-}
 
 // ---------- holder lifecycle ----------
 
@@ -169,7 +50,28 @@ func holderPid(name string) int {
 	return pid
 }
 
-// spawnHolder detaches a per-session holder process owning the PTY + socket.
+// holderCall sends one verb line to the session holder and returns its
+// one-line response. Attach is the exception: it keeps the connection.
+func holderCall(name, verb string) (string, error) {
+	c, err := net.Dial("unix", sockPath(name))
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := fmt.Fprintln(c, verb); err != nil {
+		return "", err
+	}
+	buf := make([]byte, 256)
+	n, err := c.Read(buf)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(buf[:n])), nil
+}
+
+// spawnHolder detaches a per-session holder process owning the PTY + socket,
+// then waits for it to prove the runtime started before reporting success.
 func spawnHolder(name, mode string) error {
 	for _, d := range []string{"sock", "run", "logs", "native"} {
 		if err := os.MkdirAll(filepath.Join(rootDir(), d), 0o755); err != nil {
@@ -180,8 +82,8 @@ func spawnHolder(name, mode string) error {
 	if err != nil {
 		return err
 	}
-	hlog, err := os.OpenFile(filepath.Join(rootDir(), "logs", name+".holder.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	hlogPath := filepath.Join(rootDir(), "logs", name+".holder.log")
+	hlog, err := os.OpenFile(hlogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -191,26 +93,27 @@ func spawnHolder(name, mode string) error {
 	cmd := exec.Command(self, "__holder", name, mode)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, hlog, hlog
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	return cmd.Start() // reparented to init; holder self-cleans
+	if err := cmd.Start(); err != nil { // reparented to init; holder self-cleans
+		return err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, err := ping(name); err == nil {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	tail, _ := os.ReadFile(hlogPath)
+	return fmt.Errorf("holder for %q did not come up: %s", name, strings.TrimSpace(string(tail)))
 }
 
 // ping asks the holder for live state: "OK <holderPid> <runtimePid> <alive 0|1>".
 func ping(name string) (holder, runtime int, up bool, err error) {
-	c, err := net.Dial("unix", sockPath(name))
+	resp, err := holderCall(name, "PING")
 	if err != nil {
 		return 0, 0, false, err
 	}
-	defer c.Close()
-	c.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := fmt.Fprintln(c, "PING"); err != nil {
-		return 0, 0, false, err
-	}
-	buf := make([]byte, 128)
-	n, err := c.Read(buf)
-	if err != nil {
-		return 0, 0, false, err
-	}
-	f := strings.Fields(string(buf[:n]))
+	f := strings.Fields(resp)
 	if len(f) == 4 && f[0] == "OK" {
 		holder, _ = strconv.Atoi(f[1])
 		runtime, _ = strconv.Atoi(f[2])
@@ -261,7 +164,8 @@ func cmdOpen(args []string) error {
 	if workdir == "" {
 		workdir, _ = os.Getwd()
 	}
-	session := render(p.SessionTemplate, name, "", workdir)
+	ctx := sessCtx{name: name, workdir: workdir}
+	session := ctx.render(p.SessionTemplate)
 	if err := withRegistry(func(reg map[string]*Entry) error {
 		if e, ok := reg[name]; ok && e.State == "open" {
 			return fmt.Errorf("session %q already open", name)
@@ -276,26 +180,38 @@ func cmdOpen(args []string) error {
 		return err
 	}
 	if err := spawnHolder(name, "fresh"); err != nil {
+		withRegistry(func(reg map[string]*Entry) error { // never happened
+			delete(reg, name)
+			return nil
+		})
 		return err
 	}
 	fmt.Printf("opened %s (%s · %s · actor %s)\n", name, p.Runtime, profile, p.Actor)
 	return nil
 }
 
-func eachEntry(fn func(*Entry)) error {
-	return withRegistry(func(reg map[string]*Entry) error {
+func snapshotEntries() ([]*Entry, error) {
+	var out []*Entry
+	err := withRegistry(func(reg map[string]*Entry) error {
 		for _, e := range reg {
-			fn(e)
+			c := *e
+			out = append(out, &c)
 		}
 		return nil
 	})
+	return out, err
 }
 
 func cmdList() error {
-	return eachEntry(func(e *Entry) {
+	entries, err := snapshotEntries()
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
 		fmt.Printf("%-14s %-12s %-8s %-16s %-8s %s\n",
 			e.Name, e.Profile, e.Runtime, e.Actor, e.State, e.NativeSession)
-	})
+	}
+	return nil
 }
 
 func cmdStatus(name string) error {
@@ -316,7 +232,14 @@ func cmdStatus(name string) error {
 		show(e)
 		return nil
 	}
-	return eachEntry(show)
+	entries, err := snapshotEntries()
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		show(e)
+	}
+	return nil
 }
 
 // cmdSend writes operator input to the session PTY (like typing), never Hub traffic.
@@ -324,19 +247,12 @@ func cmdSend(name, text string) error {
 	if _, err := getEntry(name); err != nil {
 		return err
 	}
-	c, err := net.Dial("unix", sockPath(name))
+	resp, err := holderCall(name, "WRITE "+base64.StdEncoding.EncodeToString([]byte(text+"\r")))
 	if err != nil {
 		return fmt.Errorf("session not running: %w", err)
 	}
-	defer c.Close()
-	c.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := fmt.Fprintf(c, "WRITE %s\n", base64.StdEncoding.EncodeToString([]byte(text+"\r"))); err != nil {
-		return err
-	}
-	buf := make([]byte, 16)
-	n, err := c.Read(buf)
-	if err != nil || !strings.HasPrefix(string(buf[:n]), "OK") {
-		return fmt.Errorf("write failed: %s", strings.TrimSpace(string(buf[:n])))
+	if resp != "OK" {
+		return fmt.Errorf("write failed: %s", resp)
 	}
 	return nil
 }
@@ -346,14 +262,10 @@ func cmdClose(name string) error {
 	if err != nil {
 		return err
 	}
-	if c, err := net.Dial("unix", sockPath(name)); err == nil {
-		c.SetDeadline(time.Now().Add(5 * time.Second))
-		fmt.Fprintln(c, "CLOSE")
-		buf := make([]byte, 16)
-		c.Read(buf)
-		c.Close()
-	} else if pid := holderPid(name); pid > 0 {
-		syscall.Kill(-pid, syscall.SIGKILL) // ponytail: force path, holder group only
+	if _, err := holderCall(name, "CLOSE"); err != nil {
+		if pid := holderPid(name); pid > 0 {
+			syscall.Kill(-pid, syscall.SIGKILL) // ponytail: force path, holder group only
+		}
 	}
 	return withRegistry(func(reg map[string]*Entry) error {
 		reg[e.Name].State = "closed"
@@ -369,7 +281,7 @@ func cmdClear(name string) error {
 		return err
 	}
 	if e.State != "open" {
-		return fmt.Errorf("session %q is closed; use restore", name)
+		return fmt.Errorf("session %q is closed; open a new session instead", name)
 	}
 	p, err := loadProfile(e.Profile)
 	if err != nil {
@@ -381,7 +293,8 @@ func cmdClear(name string) error {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	fresh := render(p.SessionTemplate, name, "", e.Workdir)
+	ctx := sessCtx{name: name, workdir: e.Workdir}
+	fresh := ctx.render(p.SessionTemplate)
 	if err := withRegistry(func(reg map[string]*Entry) error {
 		reg[name].State = "open"
 		reg[name].NativeSession = fresh
@@ -389,53 +302,72 @@ func cmdClear(name string) error {
 	}); err != nil {
 		return err
 	}
+	if err := spawnHolder(name, "fresh"); err != nil {
+		return err
+	}
 	fmt.Printf("cleared %s (new native session %s)\n", name, fresh)
-	return spawnHolder(name, "fresh")
+	return nil
 }
 
 // cmdRestore is two-phase per the settled restore decision: the registry is the
 // topology (phase 1, already durable); each dead session is resumed through the
-// runtime-native resume command (phase 2).
+// runtime-native resume command (phase 2). Closed sessions are terminal and are
+// never revived by restore.
 func cmdRestore(name string) error {
-	restoreOne := func(e *Entry) error {
-		if st := processState(e.Name); st == "RUNNING" {
-			fmt.Printf("%s: already RUNNING, skipped\n", e.Name)
-			return nil
-		}
-		p, err := loadProfile(e.Profile)
-		if err != nil {
-			return err
-		}
-		mode := "fresh"
-		if len(p.ResumeCommand) > 0 && e.NativeSession != "" {
-			mode = "resume"
-		}
-		if err := spawnHolder(e.Name, mode); err != nil {
-			return err
-		}
-		if err := withRegistry(func(reg map[string]*Entry) error {
-			reg[e.Name].State = "open"
-			return nil
-		}); err != nil {
-			return err
-		}
-		fmt.Printf("restored %s (%s)\n", e.Name, mode)
-		return nil
-	}
+	var targets []*Entry
 	if name != "" {
 		e, err := getEntry(name)
 		if err != nil {
 			return err
 		}
-		return restoreOne(e)
+		if e.State == "closed" {
+			return fmt.Errorf("session %q is closed; open a new session instead", name)
+		}
+		targets = []*Entry{e}
+	} else {
+		entries, err := snapshotEntries()
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if e.State != "closed" {
+				targets = append(targets, e)
+			}
+		}
 	}
 	var first error
-	eachEntry(func(e *Entry) {
+	for _, e := range targets {
 		if err := restoreOne(e); err != nil && first == nil {
 			first = err
 		}
-	})
+	}
 	return first
+}
+
+func restoreOne(e *Entry) error {
+	if st := processState(e.Name); st == "RUNNING" {
+		fmt.Printf("%s: already RUNNING, skipped\n", e.Name)
+		return nil
+	}
+	p, err := loadProfile(e.Profile)
+	if err != nil {
+		return err
+	}
+	mode := "fresh"
+	if len(p.ResumeCommand) > 0 && e.NativeSession != "" {
+		mode = "resume"
+	}
+	if err := spawnHolder(e.Name, mode); err != nil {
+		return err
+	}
+	if err := withRegistry(func(reg map[string]*Entry) error {
+		reg[e.Name].State = "open"
+		return nil
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("restored %s (%s)\n", e.Name, mode)
+	return nil
 }
 
 func usage() {
@@ -443,12 +375,12 @@ func usage() {
 
   roomctl open <name> --profile <p> [--workdir dir]   open a Profile-backed session
   roomctl list                                       identify all sessions
-  roomctl status [name]                              process state (native signals only)
+  roomctl status [name]                              process liveness (holder/pid signals)
   roomctl attach <name>                              operator terminal (Ctrl-] detaches)
   roomctl send <name> <text...>                      operator input, like typing
   roomctl clear <name>                               wipe context, keep identity/profile
-  roomctl close <name>                               terminate the session
-  roomctl restore [name]                             runtime-native resume of dead sessions
+  roomctl close <name>                               terminate the session (terminal)
+  roomctl restore [name]                             runtime-native resume of dead open sessions
 
 Hub Room traffic is out of scope here by design; adapters own that channel.
 `)
