@@ -286,6 +286,11 @@ func cmdClose(name string) error {
 		killHolderGroup(name) // dead holder may have orphaned the runtime
 		killOrphanRuntime(e)
 	}
+	// The holder ACKs CLOSE before its TERM/KILL grace completes; close is not
+	// done until the runtime is actually dead.
+	if err := reapRuntime(e); err != nil {
+		return err
+	}
 	return withRegistry(func(reg map[string]*Entry) error {
 		reg[e.Name].State = "closed"
 		return nil
@@ -335,10 +340,63 @@ func cmdClear(name string) error {
 	return nil
 }
 
-// cmdRestore is two-phase per the settled restore decision: the registry is the
-// topology (phase 1, already durable); each dead session is resumed through the
-// runtime-native resume command (phase 2). Closed sessions are terminal and are
-// never revived by restore.
+// reapRuntime waits for the recorded runtime to die, escalating to SIGKILL,
+// and reports if it is still alive afterwards. Close and restore must not
+// return while a previous runtime is still running.
+func reapRuntime(e *Entry) error {
+	if e.RuntimePid <= 0 {
+		return nil
+	}
+	deadline := time.Now().Add(4 * time.Second) // outlives the holder's 3s grace
+	for time.Now().Before(deadline) && alive(e.RuntimePid) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !alive(e.RuntimePid) {
+		return nil
+	}
+	killOrphanRuntime(e)
+	for i := 0; i < 20 && alive(e.RuntimePid); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if alive(e.RuntimePid) {
+		return fmt.Errorf("runtime pid %d for %q survived SIGKILL", e.RuntimePid, e.Name)
+	}
+	return nil
+}
+
+// reapHolder ensures any previous holder for a session is dead before a
+// replacement spawns. Socket first (graceful), pidfile pid as fallback for
+// socket-unreachable holders — a lost socket must not mean a lost holder.
+func reapHolder(e *Entry) error {
+	if _, _, _, err := ping(e.Name); err == nil {
+		holderCall(e.Name, "CLOSE") // holder exits once its runtime dies
+		for i := 0; i < 40 && holderAlive(e.Name); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if holderAlive(e.Name) {
+		killHolderGroup(e.Name)
+		for i := 0; i < 20 && holderAlive(e.Name); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	return reapRuntime(e)
+}
+
+func pidFilePid(name string) int {
+	b, err := os.ReadFile(filepath.Join(rootDir(), "run", name+".pid"))
+	if err != nil {
+		return 0
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return pid
+}
+
+func holderAlive(name string) bool {
+	pid := pidFilePid(name)
+	return pid > 0 && alive(pid)
+}
+
 // killOrphanRuntime force-kills the runtime recorded in the registry entry.
 // The runtime is its own session leader (Setsid for the controlling PTY), so
 // a negative pid kills its whole group. Used when the holder cannot shut it
@@ -365,20 +423,10 @@ func killHolderGroup(name string) {
 	}
 }
 
-// stopHolder asks a live holder to shut down and waits briefly for it to die.
-func stopHolder(name string) {
-	if _, _, _, err := ping(name); err != nil {
-		return
-	}
-	holderCall(name, "CLOSE")
-	for i := 0; i < 20; i++ {
-		if _, _, _, err := ping(name); err != nil {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
+// cmdRestore is two-phase per the settled restore decision: the registry is the
+// topology (phase 1, already durable); each dead session is resumed through the
+// runtime-native resume command (phase 2). Closed sessions are terminal and are
+// never revived by restore.
 func cmdRestore(name string) error {
 	var targets []*Entry
 	if name != "" {
@@ -415,7 +463,9 @@ func restoreOne(e *Entry) error {
 		fmt.Printf("%s: already RUNNING, skipped\n", e.Name)
 		return nil
 	}
-	stopHolder(e.Name) // a lingering DISCONNECTED holder must not outlive respawn
+	if err := reapHolder(e); err != nil { // a previous pair must not outlive respawn
+		return err
+	}
 	p, err := loadProfile(e.Profile)
 	if err != nil {
 		return err

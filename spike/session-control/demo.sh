@@ -15,6 +15,8 @@ cleanup() {
   "$BIN" close disc >/dev/null 2>&1 || true
   "$BIN" close orph >/dev/null 2>&1 || true
   "$BIN" close multi >/dev/null 2>&1 || true
+  "$BIN" close sock >/dev/null 2>&1 || true
+  "$BIN" close stub >/dev/null 2>&1 || true
   "$BIN" close pisess >/dev/null 2>&1 || true
   rm -rf "$ROOMCTL_HOME"
 }
@@ -145,6 +147,28 @@ for _ in 1 2 3 4 5 6 7 8; do
   sleep 0.5
 done
 [ "$(count_holders disc)" = "0" ]
+
+dead() { [ ! -e "/proc/$1/stat" ] || grep -q ") Z" "/proc/$1/stat"; }
+
+say "restore reaps a holder whose socket is unreachable"
+"$BIN" open sock --profile fixture --workdir "$PWD" >/dev/null
+oldhp=$(cat "$ROOMCTL_HOME/run/sock.pid")
+oldrp=$("$BIN" status sock | sed 's/.*runtimePid=\([0-9]*\).*/\1/')
+rm -f "$ROOMCTL_HOME/sock/sock.sock"   # holder and runtime stay alive, socket is gone
+"$BIN" restore sock >/dev/null
+expect_output "process=RUNNING" "$BIN" status sock
+[ "$(count_holders sock)" = "1" ] || { echo "FAIL: restore duplicated the sock holder"; exit 1; }
+dead "$oldhp" || { echo "FAIL: socket-less holder $oldhp survived restore"; exit 1; }
+dead "$oldrp" || { echo "FAIL: previous runtime $oldrp survived restore"; exit 1; }
+"$BIN" close sock >/dev/null
+
+say "close does not return while a TERM-ignoring runtime lives"
+printf '%s\n' '{"name":"stub","runtime":"fixture","actor":"x","command":["/bin/bash","-c","trap \"\" TERM HUP; while :; do sleep 1; done"],"sessionTemplate":"{root}/native/{name}-{ts}"}' \
+  > "$ROOMCTL_PROFILES/stub.json"
+"$BIN" open stub --profile stub --workdir "$PWD" >/dev/null
+stubrp=$("$BIN" status stub | sed 's/.*runtimePid=\([0-9]*\).*/\1/')
+"$BIN" close stub >/dev/null   # must block through the holder's TERM grace
+dead "$stubrp" || { echo "FAIL: close returned while runtime $stubrp was RUNNING"; exit 1; }
 
 say "close kills an orphaned runtime when the holder is gone"
 printf '%s\n' '{"name":"orph","runtime":"fixture","actor":"x","command":["/bin/bash","-c","trap \"\" HUP; exec sleep 300"],"sessionTemplate":"{root}/native/{name}-{ts}"}' \
