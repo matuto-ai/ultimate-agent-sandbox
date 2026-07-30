@@ -6,17 +6,19 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
 
 class Hub:
-    def __init__(self, url: str, actor: str, profile: str, state_file: str):
+    def __init__(self, url: str, actor: str, profile: str, state_file: str, wait: float = 0):
         self.url = url
         self.actor = actor
         self.profile = profile
         self.state_file = state_file
+        self.wait = wait
         self.badge = ""
         self.last_seq = 0
         try:
@@ -40,7 +42,7 @@ class Hub:
                 **({"X-Room-Badge": self.badge} if self.badge else {}),
             },
         )
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with urllib.request.urlopen(request, timeout=3 + self.wait) as response:
             return json.loads(response.read() or b"{}")
 
     def join(self) -> None:
@@ -64,11 +66,18 @@ class Hub:
             return self.raw(path, method, body)
 
     def next(self) -> Any:
-        result = self.call(f"/events?after_seq={self.last_seq}")
-        if result.get("events"):
-            self.last_seq = int(result["events"][-1]["seq"])
-            self.save()
-        return result
+        # Peer traffic only: our own events advance the cursor but are never delivered back to us.
+        deadline = time.monotonic() + self.wait
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            result = self.call(f"/events?after_seq={self.last_seq}&wait={remaining}")
+            events = result.get("events") or []
+            if events:
+                self.last_seq = int(events[-1]["seq"])
+                self.save()
+            peers = [item for item in events if item.get("actor") != self.actor]
+            if peers or time.monotonic() >= deadline:
+                return {"events": peers}
 
     def submit(self, kind: str, arguments: dict[str, Any]) -> Any:
         body = {
@@ -121,8 +130,9 @@ def main() -> None:
     parser.add_argument("--state", required=True)
     parser.add_argument("--actor", default="claude")
     parser.add_argument("--profile", default="claude-default")
+    parser.add_argument("--wait", type=float, default=0, help="seconds hub_next may long poll for traffic")
     args = parser.parse_args()
-    hub = Hub(args.hub, args.actor, args.profile, args.state)
+    hub = Hub(args.hub, args.actor, args.profile, args.state, args.wait)
 
     for line in sys.stdin:
         if not line.strip():

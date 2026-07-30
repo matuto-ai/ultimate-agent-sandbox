@@ -237,8 +237,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if parsed.path == "/participants":
                 self.reply(200, self.server.store.participants())
             elif parsed.path == "/events":
-                after = int(parse_qs(parsed.query).get("after_seq", ["0"])[0])
-                self.reply(200, {"events": self.server.store.events_after(actor, after)})
+                query = parse_qs(parsed.query)
+                after = int(query.get("after_seq", ["0"])[0])
+                # Optional long poll: pull stays cheap without a hot spin loop.
+                deadline = time.monotonic() + min(float(query.get("wait", ["0"])[0]), 30)
+                events = self.server.store.events_after(actor, after)
+                while not events and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                    events = self.server.store.events_after(actor, after)
+                self.reply(200, {"events": events})
             else:
                 self.reply(404, {"error": "not found"})
         except PermissionError as error:
