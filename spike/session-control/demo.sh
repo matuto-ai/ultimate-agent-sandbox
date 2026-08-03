@@ -20,6 +20,7 @@ cleanup() {
   "$BIN" close clro >/dev/null 2>&1 || true
   "$BIN" close stub >/dev/null 2>&1 || true
   "$BIN" close pisess >/dev/null 2>&1 || true
+  "$BIN" close ccsess >/dev/null 2>&1 || true
   rm -rf "$ROOMCTL_HOME"
 }
 trap cleanup EXIT
@@ -259,7 +260,10 @@ if "$BIN" open ccsess --profile claude-default --workdir "$ROOMCTL_HOME/ccwork";
   for _ in 1 2 3 4 5 6 7 8; do
     sleep 5
     f="$(find "$proj/projects" -name "$sess.jsonl" 2>/dev/null | head -1)"
-    if [ -n "$f" ] && [ -s "$f" ]; then ok=1; break; fi
+    # A transcript exists as soon as the session starts, so its presence proves
+    # nothing about send. Require a recorded assistant turn: that only happens
+    # if the input was actually submitted.
+    if [ -n "$f" ] && grep -aq '"type":"assistant"' "$f"; then ok=1; break; fi
   done
   if grep -aq 'Transcript saving is off' "$ROOMCTL_HOME/logs/ccsess.log" 2>/dev/null; then
     echo "claude smoke: FAILED (transcript saving disabled by inherited env marker)"
