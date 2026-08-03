@@ -17,6 +17,9 @@ import (
 	"time"
 )
 
+// submitGap separates the operator's text from its carriage return; see SUBMIT.
+const submitGap = 150 * time.Millisecond
+
 func runHolder(name, mode string) error {
 	e, err := getEntry(name)
 	if err != nil {
@@ -70,7 +73,7 @@ func runHolder(name, mode string) error {
 	}
 	defer log.Close()
 
-	var mu sync.Mutex
+	var mu, submitMu sync.Mutex
 	attached := map[net.Conn]bool{}
 	broadcast := func(b []byte) {
 		mu.Lock()
@@ -144,6 +147,36 @@ func runHolder(name, mode string) error {
 				}
 				if _, err := master.Write(b); err != nil {
 					fmt.Fprintf(c, "ERR %v\n", err)
+					return
+				}
+				fmt.Fprintln(c, "OK")
+			case "SUBMIT":
+				if len(f) != 2 {
+					fmt.Fprintln(c, "ERR usage")
+					return
+				}
+				b, err := base64.StdEncoding.DecodeString(f[1])
+				if err != nil {
+					fmt.Fprintln(c, "ERR base64")
+					return
+				}
+				// The text and its carriage return must be two PTY writes: a TUI
+				// with paste detection (Claude Code) reads a single text+CR write
+				// as pasted content and leaves it unsubmitted in the input box, so
+				// delivery succeeds and the turn never runs. Whether one write got
+				// split by the PTY was luck, so the combined form failed
+				// intermittently. Held under one lock for the whole pair, or two
+				// concurrent sends interleave into one garbled command.
+				// ponytail: fixed gap, make it profile-tunable if a runtime needs longer.
+				submitMu.Lock()
+				_, werr := master.Write(b)
+				if werr == nil {
+					time.Sleep(submitGap)
+					_, werr = master.Write([]byte("\r"))
+				}
+				submitMu.Unlock()
+				if werr != nil {
+					fmt.Fprintf(c, "ERR %v\n", werr)
 					return
 				}
 				fmt.Fprintln(c, "OK")
