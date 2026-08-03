@@ -273,6 +273,10 @@ func cmdSend(name, text string) error {
 	if err != nil {
 		return fmt.Errorf("session not running: %w", err)
 	}
+	if resp == "ERR busy" {
+		// Refused before anything reached the PTY, so retrying cannot duplicate.
+		return fmt.Errorf("another send is still in flight; nothing was written, retry is safe")
+	}
 	if resp != "OK" {
 		return fmt.Errorf("submit failed: %s", resp)
 	}
