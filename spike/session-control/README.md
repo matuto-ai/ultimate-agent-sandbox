@@ -93,15 +93,37 @@ Proven here (Pi 0.83.0, Go 1.26.5, Linux):
   creates fresh at a new path and resumes the same session at an existing
   path — verified directly).
 
+Proven against real Claude Code 2.1.220 (issue
+[#20](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/20)) — the full
+`open → attach → send → status → kill -9 → restore → clear → close` lifecycle,
+including that `--resume` restores prior conversation context and `clear` does
+not. Two defects surfaced and are fixed here:
+
+- **Session persistence died silently under an inherited env marker.** Claude
+  disables transcript saving when `CLAUDE_CODE_CHILD_SESSION` is set, which it
+  is whenever roomctl is launched from inside a Claude session — the ordinary
+  case once an agent supervises a peer. No transcript means `--resume` has
+  nothing to resume, so `restore` came back as a blank session while still
+  reporting success. `claude-default.json` now clears that variable; the
+  profile owns the environment its runtime needs. Only interactive mode honours
+  the marker, so a `-p` spot check does not reproduce it.
+- **`send` delivered input that was never submitted.** Writing the text and its
+  carriage return in one PTY write triggers Claude's paste detection: the text
+  lands in the input box, the newline becomes literal, and no turn runs. Whether
+  the PTY happened to split the write decided it, so this failed intermittently
+  — the worst shape for a supervisor. `send` now writes the text and the CR
+  separately.
+
 Not proven here:
 
-- **Claude.** The binary is absent in this environment; `claude-default.json`
-  encodes only the documented flags (`--session-id`, `--resume`). Its
-  interactive behavior must be proven on a workstation that has Claude —
-  tracked as [issue #20](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/20).
 - Pi's ~30s startup splash swallows early operator input; `send` before the
   TUI is up is lost (the demo waits it out). A production profile may want
-  Pi's extension seam for input instead of raw PTY writes.
+  Pi's extension seam for input instead of raw PTY writes. Claude has the same
+  boot-window exposure: `send` only lands once its TUI is up.
+- Claude turn-readiness detection, which stays adapter-owned per the
+  [delivery-signals research](../../docs/research/non-disruptive-delivery-signals.md);
+  the lifecycle checks above poll for observed effects rather than infer
+  readiness from the terminal.
 - No window-resize forwarding on attach; a slow attached reader can stall the
   output pump; CLOSE has a fixed 3s SIGTERM→SIGKILL grace. All acceptable at
   prototype fidelity.
