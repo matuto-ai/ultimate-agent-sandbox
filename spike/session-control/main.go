@@ -263,18 +263,34 @@ func cmdStatus(name string) error {
 }
 
 // cmdSend writes operator input to the session PTY (like typing), never Hub traffic.
+//
+// The text and its carriage return are two separate writes. A TUI with paste
+// detection (Claude Code) reads a single text+CR write as pasted content and
+// leaves it sitting unsubmitted in the input box: delivery succeeds, the turn
+// never runs, and nothing reports an error. Whether one write got split by the
+// PTY was luck, so the single-write form failed intermittently.
+// ponytail: fixed gap, make it profile-tunable if some runtime needs longer.
+const submitGap = 150 * time.Millisecond
+
 func cmdSend(name, text string) error {
 	if _, err := getEntry(name); err != nil {
 		return err
 	}
-	resp, err := holderCall(name, "WRITE "+base64.StdEncoding.EncodeToString([]byte(text+"\r")))
-	if err != nil {
-		return fmt.Errorf("session not running: %w", err)
+	write := func(b []byte) error {
+		resp, err := holderCall(name, "WRITE "+base64.StdEncoding.EncodeToString(b))
+		if err != nil {
+			return fmt.Errorf("session not running: %w", err)
+		}
+		if resp != "OK" {
+			return fmt.Errorf("write failed: %s", resp)
+		}
+		return nil
 	}
-	if resp != "OK" {
-		return fmt.Errorf("write failed: %s", resp)
+	if err := write([]byte(text)); err != nil {
+		return err
 	}
-	return nil
+	time.Sleep(submitGap)
+	return write([]byte("\r"))
 }
 
 func cmdClose(name string) error {
