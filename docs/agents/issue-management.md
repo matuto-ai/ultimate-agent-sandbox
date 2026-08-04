@@ -33,5 +33,14 @@ Gitea has no sub-issue relationship. Every decision ticket records map membershi
 - Blocking uses Gitea's native issue dependency relationship.
 - The frontier is the open, unassigned tickets carrying the map marker whose dependencies are all closed.
 - Claim a frontier ticket by assigning it to the developer driving the map.
-- Until the forge broker supports dependency mutations, wire dependencies manually in Gitea.
 - An explicit Wayfinder invocation authorizes map-body edits, ticket assignment, dependency changes, resolution comments, and ticket closure required by that workflow.
+
+## Delivery labels
+
+| Role | Label |
+| --- | --- |
+| mechanical | `delivery/mechanical` |
+| bounded | `delivery/bounded` |
+| cross-cutting | `delivery/cross-cutting` |
+| critical | `delivery/critical` |
+| unclassified | `delivery/unclassified` |
