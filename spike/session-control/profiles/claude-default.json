@@ -4,5 +4,8 @@
   "actor": "claude-agent",
   "command": ["claude", "--session-id", "{session}"],
   "resumeCommand": ["claude", "--resume", "{session}"],
-  "sessionTemplate": "{uuid}"
+  "sessionTemplate": "{uuid}",
+  "env": {
+    "CLAUDE_CODE_CHILD_SESSION": ""
+  }
 }

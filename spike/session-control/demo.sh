@@ -20,6 +20,7 @@ cleanup() {
   "$BIN" close clro >/dev/null 2>&1 || true
   "$BIN" close stub >/dev/null 2>&1 || true
   "$BIN" close pisess >/dev/null 2>&1 || true
+  "$BIN" close ccsess >/dev/null 2>&1 || true
   rm -rf "$ROOMCTL_HOME"
 }
 trap cleanup EXIT
@@ -242,6 +243,40 @@ if "$BIN" open pisess --profile pi-default --workdir "$ROOMCTL_HOME/piwork"; the
   "$BIN" close pisess || true
 else
   echo "pi smoke: SKIPPED/FAILED (pi unavailable in this environment)"
+fi
+
+say "claude smoke (real runtime; soft-fail)"
+mkdir -p "$ROOMCTL_HOME/ccwork"
+# Guards the two Claude-specific defects from issue #20: an inherited
+# CLAUDE_CODE_CHILD_SESSION kills transcript saving (so --resume has nothing to
+# resume), and a combined text+CR write is swallowed by paste detection (so the
+# turn never runs). Both are silent, so the check is that a transcript appears.
+if "$BIN" open ccsess --profile claude-default --workdir "$ROOMCTL_HOME/ccwork"; then
+  sleep 20
+  "$BIN" send ccsess "Reply with exactly: roomctl-ok" || true
+  proj="$HOME/.claude"; [ -n "${CLAUDE_CONFIG_DIR:-}" ] && proj="$CLAUDE_CONFIG_DIR"
+  sess="$("$BIN" status ccsess | sed 's/.*session=\([^ ]*\).*/\1/')"
+  ok=""
+  for _ in 1 2 3 4 5 6 7 8; do
+    sleep 5
+    f="$(find "$proj/projects" -name "$sess.jsonl" 2>/dev/null | head -1)"
+    # A transcript exists as soon as the session starts, so its presence proves
+    # nothing about send. Require a recorded assistant turn: that only happens
+    # if the input was actually submitted.
+    if [ -n "$f" ] && grep -aq '"type":"assistant"' "$f"; then ok=1; break; fi
+  done
+  if grep -aq 'Transcript saving is off' "$ROOMCTL_HOME/logs/ccsess.log" 2>/dev/null; then
+    echo "claude smoke: FAILED (transcript saving disabled by inherited env marker)"
+    ok=""
+  fi
+  if [ -n "$ok" ]; then
+    echo "claude smoke: PASS (open+send+persisted native session $sess)"
+  else
+    echo "claude smoke: SKIPPED/FAILED (no persisted transcript for $sess)"
+  fi
+  "$BIN" close ccsess || true
+else
+  echo "claude smoke: SKIPPED/FAILED (claude unavailable in this environment)"
 fi
 
 say "PASS"

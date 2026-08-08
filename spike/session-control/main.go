@@ -263,16 +263,22 @@ func cmdStatus(name string) error {
 }
 
 // cmdSend writes operator input to the session PTY (like typing), never Hub traffic.
+// SUBMIT is one holder-side operation so concurrent sends cannot interleave
+// their text and carriage returns into a single garbled command.
 func cmdSend(name, text string) error {
 	if _, err := getEntry(name); err != nil {
 		return err
 	}
-	resp, err := holderCall(name, "WRITE "+base64.StdEncoding.EncodeToString([]byte(text+"\r")))
+	resp, err := holderCall(name, "SUBMIT "+base64.StdEncoding.EncodeToString([]byte(text)))
 	if err != nil {
 		return fmt.Errorf("session not running: %w", err)
 	}
+	if resp == "ERR busy" {
+		// Refused before anything reached the PTY, so retrying cannot duplicate.
+		return fmt.Errorf("another send is still in flight; nothing was written, retry is safe")
+	}
 	if resp != "OK" {
-		return fmt.Errorf("write failed: %s", resp)
+		return fmt.Errorf("submit failed: %s", resp)
 	}
 	return nil
 }

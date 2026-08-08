@@ -17,6 +17,16 @@ import (
 	"time"
 )
 
+// submitGap separates the operator's text from its carriage return; see SUBMIT.
+const submitGap = 150 * time.Millisecond
+
+// submitWait bounds how long a SUBMIT waits for the single submit slot. It must
+// stay well under holderCall's response deadline, or a caller times out while
+// its command is still queued and the holder runs it afterwards anyway: the
+// caller reads that as a failure and a retry duplicates a command that did run.
+// Refusing with ERR busy instead is unambiguous, because nothing was written.
+const submitWait = 1500 * time.Millisecond
+
 func runHolder(name, mode string) error {
 	e, err := getEntry(name)
 	if err != nil {
@@ -71,6 +81,7 @@ func runHolder(name, mode string) error {
 	defer log.Close()
 
 	var mu sync.Mutex
+	submitSlot := make(chan struct{}, 1) // one in-flight SUBMIT, with a bounded wait
 	attached := map[net.Conn]bool{}
 	broadcast := func(b []byte) {
 		mu.Lock()
@@ -132,7 +143,7 @@ func runHolder(name, mode string) error {
 					upNow = 1
 				}
 				fmt.Fprintf(c, "OK %d %d %d\n", os.Getpid(), runtimePid, upNow)
-			case "WRITE":
+			case "SUBMIT":
 				if len(f) != 2 {
 					fmt.Fprintln(c, "ERR usage")
 					return
@@ -142,8 +153,28 @@ func runHolder(name, mode string) error {
 					fmt.Fprintln(c, "ERR base64")
 					return
 				}
-				if _, err := master.Write(b); err != nil {
-					fmt.Fprintf(c, "ERR %v\n", err)
+				// The text and its carriage return must be two PTY writes: a TUI
+				// with paste detection (Claude Code) reads a single text+CR write
+				// as pasted content and leaves it unsubmitted in the input box, so
+				// delivery succeeds and the turn never runs. Whether one write got
+				// split by the PTY was luck, so the combined form failed
+				// intermittently. Held under one lock for the whole pair, or two
+				// concurrent sends interleave into one garbled command.
+				// ponytail: fixed gap, make it profile-tunable if a runtime needs longer.
+				select {
+				case submitSlot <- struct{}{}:
+				case <-time.After(submitWait):
+					fmt.Fprintln(c, "ERR busy") // nothing written, so a retry is safe
+					return
+				}
+				_, werr := master.Write(b)
+				if werr == nil {
+					time.Sleep(submitGap)
+					_, werr = master.Write([]byte("\r"))
+				}
+				<-submitSlot
+				if werr != nil {
+					fmt.Fprintf(c, "ERR %v\n", werr)
 					return
 				}
 				fmt.Fprintln(c, "OK")
