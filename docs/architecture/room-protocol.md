@@ -19,6 +19,7 @@ A Forge issue or pull request owns the durable work lifecycle. A Run is one boun
 - At most one non-closed Run exists for a work item.
 - Several Runs may proceed concurrently in a Room, subject to Participant capacity and checkout-collision warnings.
 - Worktrees are optional; the Hub does not impose a repository-wide writer lock.
+- Context reset never edits Project files. Before another Run uses an existing checkout, that Run must observe a clean state or explicitly adopt the exact existing state; otherwise reassignment is blocked.
 - Runs are opened explicitly by a human or another permitted typed client. The Hub does not continuously select work from the backlog.
 
 ### Lifecycle
@@ -50,6 +51,12 @@ Every Run-scoped Request and Command carries `run_id` and `generation`.
 ## Participants and coordination
 
 Deployment Profiles describe Participant behavior and capabilities. Runtime state may be shared; Git, Forge, Hub, branch, and audit attribution belongs to durable Actor Identities.
+
+A Participant is a stable, named Room member. Its running process, process-bound badge, runtime-native session, and conversation context are replaceable. The Participant persists across those replacements until explicitly closed or replaced.
+
+A Participant's context generation binds to one Run when the first Run-scoped item is delivered. Pause, resume, policy migration, and ordinary process restoration retain that binding. Before traffic for a different Run may be delivered, a successful native context reset must advance the generation. Run Policy cannot waive this invariant, and compaction cannot satisfy it.
+
+Reset preserves durable Room, Forge, Project, identity, profile, and ledger state while replacing the process, badge, runtime-native session, conversation context, and transient adapter state. Old Runtime session artifacts may remain under normal retention but are never resumed or injected automatically. Closed-Run traffic remains ledger history and is never delivered to the replacement session.
 
 Peer mode is the default. A human may temporarily assign one Participant as a Run coordinator. During the spike:
 
@@ -94,7 +101,7 @@ Every Request has two clocks:
 
 Expiry escalates through reminder, coordinator when present, and human attention. It never silently cancels work.
 
-A Participant has one active work Request slot by default. A Deployment Profile or Runtime may explicitly allow more. Work Requests follow:
+A Participant has one active work Request slot by default. A Deployment Profile or Runtime may allow more slots within the same context-bound Run. Concurrent work across Runs requires another Participant. Work Requests follow:
 
 ```text
 QUEUED → DELIVERED → ACCEPTED → COMPLETED
@@ -156,6 +163,13 @@ For an implementation Run, `completed` means its pull request is accepted and re
 ## Ledger and recovery
 
 Each Room uses one append-only SQLite ledger.
+
+Context reset is fail-closed and auditable:
+
+- the ledger records reset requested, succeeded, or failed with the Participant, preceding Run, operation ID, actor, timestamp, and old/new monotonic context generation;
+- native-session handles and transcript contents remain outside the Hub ledger;
+- reset uses the existing idempotency key and an expected context generation, so stale completions and concurrent delivery attempts fail without advancing the generation;
+- failure leaves the preceding Run closed and the Participant unavailable for another Run until retry succeeds; compaction is never a fallback.
 
 - Durable commands and events receive a monotonic `room_seq`.
 - Initial clients receive a snapshot plus its sequence.

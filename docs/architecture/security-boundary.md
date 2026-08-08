@@ -69,9 +69,9 @@ Automated secret scanning and sanitized reference snapshots are deferred. The pr
 
 ## Participant and Actor authentication
 
-A supervisor-issued Participant badge binds the Room, Actor Identity, Deployment Profile, capabilities, and running process. The Hub derives authority from that badge and ignores identity or capability claims in protocol messages.
+A supervisor-issued Participant badge binds the Room, Actor Identity, Deployment Profile, capabilities, Participant, and one running process incarnation. The Hub derives authority from that badge and ignores identity or capability claims in protocol messages.
 
-Badges are private, revocable, and invalidated when their Participant stops or is replaced. Cross-identity use and reuse after revocation must fail. Runtime Launch Profile selection uses exact identity lookup with no generic, legacy, or cross-profile fallback.
+Badges are private, revocable, and invalidated when their bound process stops or is replaced, or when their Participant closes or is replaced. Cross-identity use and reuse after revocation must fail. Runtime Launch Profile selection uses exact identity lookup with no generic, legacy, or cross-profile fallback.
 
 The identity model is:
 
@@ -79,7 +79,7 @@ The identity model is:
 - **Runtime Launch Profile**: a Runtime-owned startup preset that selects invocation parameters and an Actor Identity;
 - **Actor Identity**: durable Git, Forge, Hub, branch, and audit attribution;
 - **Deployment Profile**: Room-local responsibilities, instructions, tools, and capabilities;
-- **Participant**: one running session.
+- **Participant**: a stable, named Room member bound to an Actor Identity and Deployment Profile; its process, badge, runtime-native session, and conversation context are replaceable.
 
 Pi's `pi-agent-gpt` and `pi-agent-kimi` Runtime Launch Profiles intentionally share the Pi image, Project-scoped Pi Runtime state, provider authentication, and OS user while using distinct Actor Identities and Git/Forge credentials. Shared mutable Pi state is an accepted influence risk. It does not merge their attribution, and the [independent-review eligibility rules](room-protocol.md#findings-and-independent-review) still apply.
 

@@ -37,8 +37,8 @@ Deployment-local configuration describing a Participant's responsibilities, inst
 _Avoid_: Runtime Launch Profile, fixed role, Actor Identity
 
 **Participant**:
-One live Runtime session joined to a Room under an Actor Identity and Deployment Profile.
-_Avoid_: Actor Identity, Deployment Profile, subagent
+A stable, named Room member bound to an Actor Identity and Deployment Profile. It persists across replacement of its running process, badge, runtime-native session, and conversation context until explicitly closed or replaced.
+_Avoid_: Actor Identity, Deployment Profile, running process, runtime-native session, subagent
 
 **Capability**:
 A configurable permission or workflow eligibility declared by a Deployment Profile, such as implementing, testing, advising, or independently reviewing.
