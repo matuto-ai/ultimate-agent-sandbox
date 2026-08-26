@@ -17,10 +17,14 @@ jobs:
           API: ${{ gitea.api_url }}
           REPO: ${{ gitea.repository }}
           ISSUE: ${{ gitea.event.issue.number }}
-          LABEL_IDS: "5 6 7 8"
         run: |
-          set -eu
-          for id in $LABEL_IDS; do
+          set -euo pipefail
+          label_ids="$(
+            curl -fsS -H "Authorization: token $TOKEN" \
+              "$API/repos/$REPO/issues/$ISSUE/labels" |
+              jq -r '.[] | select(.name | startswith("agent/")) | .id'
+          )"
+          for id in $label_ids; do
             curl -fsS -o /dev/null -X DELETE \
               -H "Authorization: token $TOKEN" \
               "$API/repos/$REPO/issues/$ISSUE/labels/$id"
