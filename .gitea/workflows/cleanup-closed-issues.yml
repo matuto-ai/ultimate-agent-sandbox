@@ -1,0 +1,27 @@
+name: Clean up closed issues
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  issues: write
+
+jobs:
+  cleanup:
+    runs-on: ai-agents-ci
+    steps:
+      - name: Remove agent lifecycle labels
+        env:
+          TOKEN: ${{ secrets.GITEA_TOKEN }}
+          API: ${{ gitea.api_url }}
+          REPO: ${{ gitea.repository }}
+          ISSUE: ${{ gitea.event.issue.number }}
+          LABEL_IDS: "5 6 7 8"
+        run: |
+          set -eu
+          for id in $LABEL_IDS; do
+            curl -fsS -o /dev/null -X DELETE \
+              -H "Authorization: token $TOKEN" \
+              "$API/repos/$REPO/issues/$ISSUE/labels/$id"
+          done
