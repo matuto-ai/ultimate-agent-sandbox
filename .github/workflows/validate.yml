@@ -62,7 +62,7 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
-      - name: Validate successor configuration
+      - name: Validate successor interfaces
         if: steps.changes.outputs.skip_tests != 'true'
         run: ./validate.sh
 
