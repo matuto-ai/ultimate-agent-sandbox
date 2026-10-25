@@ -1,0 +1,55 @@
+# Persistent fixture Room lifecycle
+
+This [#61](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/61) slice introduces `uas.lifecycle.Supervisor` and a deliberately **fixture-only** Docker backend. It implements persistent lifecycle/reconciliation without launching Participants, contacting model providers or Forge, or claiming a qualified production Trusted Workstation. [#62](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/62) remains responsible for real production mount, identity, resource, endpoint, confinement, and network policy.
+
+## The usable seam
+
+A trusted caller supplies:
+
+- a dedicated control-plane root, outside every Project path;
+- a `FixtureSpec`: Room, immutable Project identity/paths, local fixture image ID, and managed configuration/profile digests;
+- an exact-resource backend;
+- current human authorization and idempotent, **verified** authority-revocation callbacks.
+
+`start(spec)`, `stop()`, `destroy()`, `status()`, and `reconcile()` expose the lifecycle. Each result names its persistent instance, desired/observed state, pending managed update, exact unresolved resource names, and `fixture_only: true` / `production_launch: unqualified`. Failure phases carry `START_FAILED`, `STOP_FAILED`, or `DESTROY_FAILED` error codes. Storage-write failure is not a successful acknowledgement; restore storage and reconcile the already persisted intent before any repeat effect.
+
+The trusted caller authenticates human requests before authorizing new intent. A client cannot turn `human: true` or a profile instruction into authority. Callback implementations cannot come from request payloads. The fixture issues no Hub, Forge, Git, or Participant capabilities; its integration revoker verifies that empty set. The callback seam is **not** a production revocation implementation. A false or uncertain verification blocks the relevant effects. A future authority service must also deny new issuance for persisted stopping/destroying intent.
+
+The supervisor's lifecycle manifest is host control state, distinct from the Room Hub's application ledger. It uses a per-Room advisory lock, atomic replacement, file/directory synchronization, and durable intent before external effects. Restore validates the complete versioned manifest, canonical stored/pending specs, phase/intent pairing, timestamps, bounded leftovers, and duplicate/unknown fields before any backend observation or effect; malformed state returns `INVALID_STORE`. Fixture mount paths containing commas or control characters are rejected before even persisting intent. No second agent-execution engine or generalized event system is added. The control directory must be private trusted host state, not a Workstation mount. These mechanisms do not claim #62's complete ownership/mode, endpoint, or hostile-process protections.
+
+## Lifecycle and reconciliation
+
+- **Start** persists the new instance identity and desired state before creating resources. It creates/resumes exactly one named volume and one canonical fixture container. Repeated Start/reconcile retains those identities.
+- **Stop** first verifies Participant-authority revocation, then stops only the Workstation container. It retains the volume and control data. The supervisor remains available for status and later Start. No Hub/Broker process is killed by this backend; actual persistent Hub/Broker processes are not implemented in this fixture.
+- **Destroy** requires a new human authorization for the irreversible intent, verifies all Room authority revoked, and persists that fact **before** stopping/removing resources. It removes only verified exact resources and the exact instance control directory carrying its ownership marker. It never deletes Project roots or performs global Docker cleanup.
+- **Partial Destroy** reports exact leftovers, returns `DESTROY_FAILED`, and blocks Start/recreation. Reconcile retries the persisted authorized intent, inspecting each exact resource first. Confirmed absence skips deletion; uncertainty never means absence.
+- **Completed Destroy** publishes a minimal no-overwrite tombstone outside removable instance data. Tombstones retain Room/instance/Project IDs and lifecycle times, not transcripts, credentials, or project contents. The interface never edits an existing tombstone; mode 0400 is not a tamper-proof guarantee against privileged host access. A later explicit Start can create a new instance while preserving the previous tombstone.
+
+Docker call timeouts/lost responses are uncertain outcomes, not a reason to repeat a create/start/remove blindly. The next observation reconciles the exact named resource; if observation is unavailable, effects stop and status remains failed/unknown. The Docker backend checks required ownership labels and exact names before operations, and uses the inspected container ID for stop/remove. Unowned labels/settings are retained, not rewritten. Only the test's own uniquely named image/build directory are removed by its outer harness.
+
+Room/Project binding cannot change while an instance exists. New image/config/profile values are recorded as `pending_spec`; repeated Start, Stop/resume, and reconcile do not silently replace loaded code or alter active policy. This slice **stages** updates; it does not implement applying them through Participant restart or one-for-one Workstation replacement. Actual image mismatch is reported rather than silently repaired. Additional settings unknown to the supervisor are not synchronized or discarded.
+
+## Disposable Docker evidence
+
+The dedicated `docker-lifecycle` GitHub Actions job runs on `ubuntu-24.04`. It checks actual Docker/Go versions and daemon availability, compiles a tiny standard-library-only Go fixture, and builds it `FROM scratch` without a base-image pull or model account. The Go code is test infrastructure, not a second production language/runtime choice. The test image counts starts in a named volume and handles termination.
+
+The fixture runs non-root with a read-only root filesystem, no network, no added capabilities, no-new-privileges, bounded memory/CPU/PIDs/log rotation, a named volume, and read-only temporary Project bind mounts. No host runtime socket is mounted inside it. These conservative fixture settings are **not** the approved production policy: public egress, writable Project repositories, actual disk quotas, Broker transport/SELinux, process-bound authority, and production endpoint checks remain unqualified.
+
+Run only on an explicitly selected **disposable Docker test host**:
+
+```sh
+./tests/docker-lifecycle.sh
+```
+
+The script fails if tools/daemon are unavailable; it does not silently replace the actual Docker proof with mocks. `./validate.sh` runs local contract/recovery tests and explicitly skips the two actual-Docker cases when their fixture image is absent. CI supplies that image and runs both cases in the dedicated job. Docs-only exemption is preserved; a skipped integration job is not runtime evidence.
+
+The real integration covers:
+
+- create, repeated Start with the same actual container ID, Stop, fresh supervisor reopen, and resumed container/volume startup count;
+- actual non-root/container configuration inspection, retained control-state sentinel, and staged managed drift;
+- lost create responses reconciled by inspecting actual Docker resources;
+- failed volume cleanup after container removal, exact leftover reporting, blocked unsafe recreation, and targeted retry;
+- actual `SIGKILL` after Docker removed the container but before the supervisor completed Destroy, followed by persisted-intent recovery;
+- Project-data and unrelated-volume preservation, tombstone retention, and clean new-instance recreation.
+
+Local contract tests additionally cover authorization/revocation failure, unavailable observations, unowned resource refusal, control-state marker mismatch, symlink non-traversal, tombstone-write failure/retry, and command construction. They do not substitute for the real Docker job. Production isolation, SELinux, public-egress deny routes, host power loss, participant/session behavior, paid providers, Forge, and the later 100-cycle host-capacity proof are not established by this slice.
