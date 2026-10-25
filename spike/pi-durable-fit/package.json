@@ -1,0 +1,11 @@
+{
+  "name": "ultimate-pi-durable-bounded-spike",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "sh run-tests.sh" },
+  "dependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0"
+  }
+}
