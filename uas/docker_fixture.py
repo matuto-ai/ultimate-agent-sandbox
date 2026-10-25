@@ -23,10 +23,19 @@ class DockerFixtureBackend:
             raise BackendUnknown() from error
         if process.returncode:
             # A daemon/permission/transport error is not evidence of absence.
-            if missing_ok and any(message in process.stderr.lower() for message in (
-                "no such container:", "no such volume:", "no such object:"
-            )):
-                return None
+            if missing_ok and process.returncode == 1 and len(arguments) == 4 and arguments[:2] == ["inspect", "--type"]:
+                kind, name = arguments[2:]
+                if kind in {"container", "volume"}:
+                    absent = {f"Error: No such {kind}: {name}",
+                              f"Error response from daemon: No such {kind}: {name}",
+                              f"Error: No such object: {name}"}
+                    if kind == "volume":
+                        # Docker 28's volume OpErr is `get NAME: no such volume`.
+                        # Match the complete response and exact requested name,
+                        # never a substring in an unrelated daemon/auth error.
+                        absent.add(f"Error response from daemon: get {name}: no such volume")
+                    if process.stderr.strip().casefold() in {message.casefold() for message in absent}:
+                        return None
             raise BackendUnknown()
         return process.stdout
 

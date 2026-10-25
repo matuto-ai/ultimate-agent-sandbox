@@ -21,7 +21,8 @@ class DockerFixtureContractTests(unittest.TestCase):
                 "Image": self.state["spec"]["image_id"], "State": {"Running": running}}
 
     def test_only_explicit_not_found_means_absence(self):
-        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "Error: No such object: name")):
+        name = self.backend.name(self.state, "container")
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "Error: No such object: " + name)):
             self.assertIsNone(self.backend.inspect(self.state, "container"))
         with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "Cannot connect to Docker daemon")):
             with self.assertRaises(BackendUnknown):
@@ -73,3 +74,15 @@ class DockerFixtureContractTests(unittest.TestCase):
             self.assertEqual(["docker", "version"], run.call_args.args[0])
             self.assertNotIn("shell", run.call_args.kwargs)
             self.assertEqual(20, run.call_args.kwargs["timeout"])
+
+    def test_docker28_volume_absence_is_exact_not_generic_command_failure(self):
+        name = self.backend.name(self.state, "volume")
+        missing = f"Error response from daemon: get {name}: no such volume"
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 1, "[]\n", missing + "\n")):
+            self.assertIsNone(self.backend.inspect(self.state, "volume"))
+        for code, message in ((2, missing), (1, missing.replace(name, "different-volume")),
+                              (1, "permission denied: " + missing), (1, missing + "; daemon unavailable"),
+                              (1, "Cannot connect to the Docker daemon"), (1, "no such volume")):
+            with self.subTest(code=code, message=message), patch("subprocess.run", return_value=subprocess.CompletedProcess([], code, "", message)):
+                with self.assertRaises(BackendUnknown):
+                    self.backend.inspect(self.state, "volume")

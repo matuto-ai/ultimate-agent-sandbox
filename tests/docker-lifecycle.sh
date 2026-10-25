@@ -7,6 +7,17 @@ command -v docker
 command -v go
 docker version
 go version
+# Capture the real typed-inspect absence contract without creating a resource.
+python3 - <<'PYPROBE'
+import subprocess, uuid
+from uas.docker_fixture import DockerFixtureBackend
+name = "uas-absence-probe-" + uuid.uuid4().hex
+arguments = ["inspect", "--type", "volume", name]
+result = subprocess.run(["docker", *arguments], capture_output=True, text=True, timeout=20)
+print("Docker volume absence probe:", result.returncode, repr(result.stderr), flush=True)
+assert result.returncode == 1, "unexpected absence probe result"
+assert DockerFixtureBackend()._run(arguments, missing_ok=True) is None
+PYPROBE
 build="$(mktemp -d)"
 image=""
 cleanup() {
