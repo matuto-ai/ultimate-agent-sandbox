@@ -1,0 +1,928 @@
+<!doctype html>
+<!-- PROTOTYPE — throwaway. Selected Field Notes direction in light and dark themes, switchable via ?variant=C|D. The Run page compares a chronological iteration journey with a compact, clickable ledger of independent gate truth. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manager prototype — Field Notes light/dark study</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg:#e9e7df;
+      --surface:#f7f5ed;
+      --surface-2:#ddd9cf;
+      --text:#171a1b;
+      --muted:#626969;
+      --quiet:#858b89;
+      --line:#babbb6;
+      --accent:#1c5a61;
+      --accent-2:#103c41;
+      --good:#2f745b;
+      --warn:#9d6610;
+      --bad:#aa3832;
+      --unknown:#685f79;
+      --focus:#006bc7;
+      --shadow:0 20px 60px rgb(18 22 22 / 18%);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    * { box-sizing:border-box; }
+    html { background:var(--bg); }
+    body { margin:0; min-width:320px; background:var(--bg); color:var(--text); }
+    button,input,textarea,select { font:inherit; }
+    button,a,summary { -webkit-tap-highlight-color:transparent; }
+    button:focus-visible,a:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,[tabindex]:focus-visible { outline:3px solid var(--focus); outline-offset:3px; }
+    a { color:inherit; text-decoration:none; }
+    button { color:inherit; }
+    h1,h2,h3,p { margin-top:0; }
+    h1 { margin-bottom:12px; font-size:clamp(2rem,5vw,5.2rem); line-height:.94; letter-spacing:-.055em; }
+    h2 { margin-bottom:9px; font-size:1.08rem; letter-spacing:-.02em; }
+    h3 { margin-bottom:6px; font-size:.9rem; }
+    p { line-height:1.55; }
+    ul { margin-top:8px; }
+    .sr-only { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .muted { color:var(--muted); }
+    .quiet { color:var(--quiet); }
+    .small { font-size:.81rem; }
+    .tiny { font-size:.72rem; }
+    .caps { color:var(--quiet); font-size:.7rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }
+    .row { display:flex; align-items:center; gap:9px; }
+    .row.wrap { flex-wrap:wrap; }
+    .row.between { justify-content:space-between; }
+    .stack { display:grid; gap:12px; }
+    .stack-lg { display:grid; gap:28px; }
+    .divider { height:1px; background:var(--line); }
+    .btn { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:8px 13px; border:1px solid var(--line); border-radius:7px; background:var(--surface); color:var(--text); cursor:pointer; font-size:.79rem; font-weight:720; }
+    .btn:hover { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 6%,var(--surface)); }
+    .btn.primary { border-color:var(--accent); background:var(--accent); color:#fff; }
+    .btn.danger { border-color:var(--bad); color:var(--bad); }
+    .btn.ghost { border-color:transparent; background:transparent; }
+    .btn:disabled { opacity:.48; cursor:not-allowed; }
+    .text-link { color:var(--accent); font-weight:720; text-decoration:underline; text-underline-offset:4px; }
+    .text-link:hover { text-decoration-thickness:2px; }
+    .action-line { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+    .status { display:inline-flex; align-items:center; gap:7px; color:var(--muted); font-size:.76rem; font-weight:700; white-space:nowrap; }
+    .status::before { content:""; width:8px; height:8px; flex:0 0 auto; border-radius:50%; background:var(--unknown); }
+    .status.good::before { background:var(--good); }
+    .status.warn::before { background:var(--warn); }
+    .status.bad::before { background:var(--bad); }
+    .status.unknown::before { background:var(--unknown); }
+    .truth { color:var(--muted); font-size:.75rem; line-height:1.45; }
+    .truth strong { color:var(--text); }
+    .source { margin-left:5px; color:var(--quiet); font-size:.7rem; }
+    .avatar { display:grid; place-items:center; flex:0 0 auto; width:36px; height:36px; border-radius:50%; background:color-mix(in srgb,var(--accent) 14%,var(--surface)); color:var(--accent-2); font-size:.72rem; font-weight:850; }
+    .snapshot { margin:24px 0; padding:13px 15px; border-left:4px solid var(--bad); background:color-mix(in srgb,var(--bad) 8%,var(--surface)); font-size:.82rem; line-height:1.5; }
+    .disabled-note { width:100%; color:var(--bad); font-size:.76rem; }
+    .page-lede { max-width:760px; color:var(--muted); }
+    .page-code { margin-bottom:9px; color:var(--accent); font:800 .71rem ui-monospace,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    .page-rule { height:4px; margin:26px 0 34px; background:var(--text); }
+    details { border-top:1px solid var(--line); }
+    details:last-child { border-bottom:1px solid var(--line); }
+    summary { min-height:44px; padding:12px 4px; cursor:pointer; font-size:.82rem; font-weight:720; }
+    details>div { padding:2px 4px 15px; color:var(--muted); font-size:.81rem; line-height:1.5; }
+    progress { width:100%; height:8px; accent-color:var(--accent); }
+    .empty { padding:42px 12px; color:var(--muted); text-align:center; }
+
+    .global-nav { display:flex; align-items:center; gap:4px; }
+    .global-nav a { display:flex; align-items:center; min-height:44px; padding:8px 12px; border-radius:7px; color:var(--muted); font-size:.79rem; font-weight:720; }
+    .global-nav a:hover { color:var(--text); background:color-mix(in srgb,var(--text) 5%,transparent); }
+    .global-nav a[aria-current="page"] { color:var(--text); background:var(--surface-2); }
+    .count { min-width:23px; margin-left:7px; padding:2px 6px; border-radius:999px; background:#dfb54b; color:#35280a; font-size:.66rem; text-align:center; }
+    .project-line { display:grid; grid-template-columns:minmax(220px,1.4fr) minmax(190px,1fr) 110px 110px auto; gap:20px; align-items:center; min-height:82px; padding:14px 5px; border-bottom:1px solid var(--line); }
+    .project-line.header { min-height:34px; color:var(--quiet); font-size:.68rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .project-name { font-size:.94rem; font-weight:790; }
+    .sub { margin-top:4px; color:var(--muted); font-size:.74rem; }
+    .attention-line { display:grid; grid-template-columns:16px minmax(0,1fr) auto; gap:13px; align-items:start; width:100%; min-height:72px; padding:15px 5px; border:0; border-bottom:1px solid var(--line); background:transparent; text-align:left; cursor:pointer; }
+    .attention-line:hover { background:color-mix(in srgb,var(--accent) 5%,transparent); }
+    .signal { width:10px; height:10px; margin-top:5px; border-radius:50%; background:var(--warn); }
+    .attention-line.high .signal { background:var(--bad); }
+    .attention-line.low .signal { background:var(--unknown); }
+    .attention-title { font-size:.87rem; font-weight:770; }
+    .attention-summary { display:block; margin-top:4px; color:var(--muted); font-size:.76rem; line-height:1.4; }
+    .attention-age { color:var(--quiet); font-size:.72rem; white-space:nowrap; }
+    .run-line { display:grid; grid-template-columns:minmax(220px,1.35fr) 130px 120px auto; gap:18px; align-items:center; min-height:76px; padding:13px 5px; border-bottom:1px solid var(--line); }
+    .run-title { font-weight:770; }
+    .person-line { display:grid; grid-template-columns:minmax(180px,1.1fr) minmax(150px,.9fr) minmax(150px,.9fr) auto; gap:16px; align-items:center; min-height:70px; padding:12px 5px; border-bottom:1px solid var(--line); }
+    .event-line { display:grid; grid-template-columns:66px 12px minmax(0,1fr); gap:11px; padding:11px 0; }
+    .event-time { color:var(--quiet); font:.69rem ui-monospace,monospace; }
+    .event-dot { width:8px; height:8px; margin-top:5px; border-radius:50%; background:var(--accent); }
+    .event-title { font-size:.82rem; font-weight:730; }
+    .event-note { margin-top:3px; color:var(--muted); font-size:.75rem; }
+    .health-line { display:grid; grid-template-columns:minmax(190px,1.2fr) 150px minmax(190px,1fr) 120px auto; gap:18px; align-items:center; min-height:72px; padding:12px 5px; border-bottom:1px solid var(--line); }
+    .health-name { font-weight:770; }
+
+    .gate-list { position:relative; margin:0; padding:0; list-style:none; }
+    .gate-list::before { content:""; position:absolute; top:14px; bottom:14px; left:13px; width:2px; background:var(--line); }
+    .gate { position:relative; display:grid; grid-template-columns:28px minmax(0,1fr); gap:15px; padding:0 0 26px; }
+    .gate:last-child { padding-bottom:0; }
+    .gate-dot { z-index:1; display:grid; place-items:center; width:28px; height:28px; border:2px solid var(--line); border-radius:50%; background:var(--surface); color:var(--muted); font-size:.68rem; font-weight:900; }
+    .gate-dot.pass { border-color:var(--good); color:var(--good); }
+    .gate-dot.block { border-color:var(--bad); color:var(--bad); }
+    .gate-dot.wait { border-color:var(--warn); color:var(--warn); }
+    .gate-copy { padding-top:2px; }
+    .gate-name { font-weight:790; }
+    .gate-state { margin-left:7px; color:var(--muted); font-size:.75rem; font-weight:700; }
+    .gate-note { margin-top:5px; color:var(--muted); font-size:.8rem; line-height:1.45; }
+    .gate-meta { margin-top:7px; color:var(--quiet); font-size:.71rem; }
+    .gate-actions { margin-top:11px; }
+
+    .prototype-tools { position:fixed; z-index:70; left:50%; bottom:12px; display:flex; align-items:center; gap:12px; min-height:48px; padding:6px 10px; transform:translateX(-50%); border:1px solid rgb(120 120 120 / 34%); border-radius:10px; background:color-mix(in srgb,var(--surface) 94%,transparent); box-shadow:0 10px 32px rgb(0 0 0 / 14%); backdrop-filter:blur(12px); white-space:nowrap; }
+    .prototype-tools a { color:var(--muted); font-size:.69rem; text-decoration:underline; }
+    .prototype-tools select { min-height:38px; padding:3px 25px 3px 8px; border:0; border-radius:6px; background:color-mix(in srgb,var(--text) 7%,var(--surface)); color:var(--text); font-size:.71rem; }
+    .prototype-switcher { position:fixed; z-index:80; left:50%; bottom:13px; display:grid; grid-template-columns:44px minmax(190px,auto) 44px; align-items:center; transform:translateX(-50%); overflow:hidden; border:1px solid #737a7d; border-radius:999px; background:#080b0d; color:#f5f7f7; box-shadow:0 17px 46px rgb(0 0 0 / 34%); }
+    .prototype-switcher button { min-height:44px; border:0; background:transparent; color:inherit; cursor:pointer; }
+    .prototype-switcher button:hover { background:#242a2d; }
+    .switch-label { padding:0 13px; color:#aeb5b7; font-size:.72rem; text-align:center; white-space:nowrap; }
+    .switch-label strong { color:#fff; }
+
+    dialog { width:min(700px,calc(100vw - 22px)); max-height:min(88vh,850px); padding:0; overflow:hidden; border:1px solid var(--line); border-radius:13px; background:var(--surface); color:var(--text); box-shadow:0 28px 90px rgb(0 0 0 / 38%); }
+    dialog::backdrop { background:rgb(4 7 8 / 68%); backdrop-filter:blur(3px); }
+    .dialog-head { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:20px 22px 15px; border-bottom:1px solid var(--line); }
+    .dialog-head h2 { margin:3px 0 0; font-size:1.35rem; }
+    .dialog-body { max-height:calc(88vh - 150px); overflow:auto; padding:20px 22px; }
+    .dialog-foot { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; padding:14px 22px; border-top:1px solid var(--line); background:color-mix(in srgb,var(--text) 3%,var(--surface)); }
+    .dialog-section { padding:14px 0; border-bottom:1px solid var(--line); }
+    .field { display:grid; gap:7px; margin-top:15px; font-size:.8rem; font-weight:720; }
+    .field textarea { width:100%; padding:10px 11px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--text); font-weight:450; }
+    .check { display:flex; align-items:flex-start; gap:9px; margin-top:14px; color:var(--muted); font-size:.79rem; line-height:1.4; }
+    .check input { width:18px; height:18px; }
+    .payload { overflow:auto; margin-top:10px; padding:11px; border-radius:7px; background:color-mix(in srgb,var(--text) 8%,var(--surface)); font-size:.72rem; line-height:1.5; white-space:pre-wrap; }
+    .form-error { margin-top:10px; color:var(--bad); font-size:.8rem; font-weight:700; }
+    .receipt { margin-top:16px; padding:14px; border-left:4px solid var(--good); background:color-mix(in srgb,var(--good) 9%,var(--surface)); font-size:.8rem; }
+    .receipt.pending { border-color:var(--warn); background:color-mix(in srgb,var(--warn) 9%,var(--surface)); }
+    .drawer { position:fixed; z-index:65; top:0; right:0; width:min(470px,100vw); height:100vh; overflow:auto; padding:26px; border-left:1px solid var(--line); background:var(--surface); color:var(--text); box-shadow:-18px 0 55px rgb(0 0 0 / 20%); }
+    .drawer[hidden] { display:none; }
+    .drawer-head { display:flex; justify-content:space-between; gap:20px; margin-bottom:24px; }
+    .drawer h2 { font-size:1.5rem; }
+
+    /* E1 — Explorer Tree */
+    body.v-E1 { --bg:#e8e5dc; --surface:#f7f4eb; --surface-2:#d9d5ca; --text:#171a1b; --muted:#626867; --quiet:#858a87; --line:#bcbcb5; --accent:#174f57; --accent-2:#10383d; color-scheme:light; }
+    .t-shell { display:grid; grid-template-columns:278px minmax(0,1fr); min-height:100vh; padding-bottom:78px; }
+    .t-tree { position:sticky; top:0; height:100vh; overflow:auto; padding:26px 18px; border-right:1px solid var(--line); background:#dcd8ce; }
+    .t-brand { margin:0 8px 26px; font:850 .79rem ui-monospace,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    .t-tree .global-nav { display:grid; gap:3px; }
+    .t-tree .global-nav a { justify-content:space-between; }
+    .t-tree-label { margin:28px 10px 11px; color:var(--quiet); font-size:.67rem; font-weight:820; letter-spacing:.1em; text-transform:uppercase; }
+    .tree-list,.tree-list ul { margin:0; padding:0; list-style:none; }
+    .tree-list { position:relative; }
+    .tree-list::before { content:""; position:absolute; top:14px; bottom:18px; left:13px; width:2px; background:var(--text); }
+    .tree-project { position:relative; margin-bottom:7px; padding-left:31px; }
+    .tree-project::before { content:""; position:absolute; top:18px; left:8px; width:12px; height:12px; border:3px solid #dcd8ce; border-radius:50%; background:var(--quiet); box-shadow:0 0 0 2px var(--text); }
+    .tree-project.selected::before { background:#e0ab34; }
+    .tree-project>a { display:block; min-height:44px; padding:8px 9px; border-radius:7px; color:var(--muted); font-size:.79rem; }
+    .tree-project>a:hover,.tree-project>a[aria-current="page"] { background:var(--surface); color:var(--text); }
+    .tree-project small { display:block; margin-top:2px; color:var(--quiet); }
+    .tree-runs { position:relative; margin:3px 0 10px 15px!important; padding-left:21px!important; }
+    .tree-runs::before { content:""; position:absolute; top:-4px; bottom:19px; left:0; width:1px; background:var(--text); }
+    .tree-runs li { position:relative; }
+    .tree-runs li::before { content:""; position:absolute; top:17px; left:-20px; width:14px; height:1px; background:var(--text); }
+    .tree-runs a { display:block; min-height:40px; padding:7px 8px; border-radius:6px; color:var(--muted); font: .7rem ui-monospace,monospace; }
+    .tree-runs a:hover,.tree-runs a[aria-current="page"] { background:var(--surface); color:var(--text); }
+    .t-main { min-width:0; padding:55px clamp(22px,5vw,78px) 110px; }
+    .t-content { max-width:1240px; margin:auto; }
+    .t-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:30px; align-items:end; }
+    .t-head-meta { max-width:280px; color:var(--muted); font-size:.77rem; line-height:1.5; }
+    .t-overview { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(260px,.7fr); gap:clamp(30px,5vw,65px); }
+    .t-section { margin-top:36px; }
+    .t-run-layout { display:grid; grid-template-columns:minmax(300px,1.25fr) minmax(260px,.65fr); gap:clamp(34px,6vw,80px); }
+    .t-facts { align-self:start; padding:18px 20px; border-radius:9px; background:var(--surface); box-shadow:0 4px 22px rgb(22 26 27 / 7%); }
+    .fact { display:grid; grid-template-columns:105px 1fr; gap:10px; padding:9px 0; border-bottom:1px solid var(--line); font-size:.78rem; }
+    .fact:last-child { border-bottom:0; }
+
+    /* E2 — Fold-out Spine */
+    body.v-E2 { --bg:#eef0ea; --surface:#fbfcf8; --surface-2:#dce3dc; --text:#17201c; --muted:#64716b; --quiet:#87948d; --line:#c4ccc6; --accent:#39624e; --accent-2:#254737; color-scheme:light; }
+    .s-shell { min-height:100vh; padding-bottom:80px; }
+    .s-top { position:sticky; z-index:20; top:0; display:flex; align-items:center; justify-content:space-between; gap:24px; min-height:64px; padding:10px clamp(18px,4vw,54px); border-bottom:1px solid var(--line); background:rgb(238 240 234 / 94%); backdrop-filter:blur(13px); }
+    .s-brand { font:850 .76rem ui-monospace,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    .s-main { max-width:1450px; margin:auto; padding:52px clamp(18px,5vw,72px) 110px; }
+    .s-spine-canvas { position:relative; margin-top:38px; padding-left:42px; }
+    .s-spine-canvas::before { content:""; position:absolute; top:10px; bottom:12px; left:14px; width:3px; background:var(--text); }
+    .s-project-branch { position:relative; display:grid; grid-template-columns:minmax(190px,.62fr) minmax(300px,1.38fr); gap:28px; min-height:138px; padding:0 0 34px; }
+    .s-project-branch::before { content:""; position:absolute; top:17px; left:-34px; width:17px; height:17px; border:4px solid var(--bg); border-radius:50%; background:var(--quiet); box-shadow:0 0 0 2px var(--text); }
+    .s-project-branch.selected::before { background:#d8a331; }
+    .s-branch-name { padding-top:5px; }
+    .s-branch-name a { font-size:1.08rem; font-weight:810; }
+    .s-branch-panel { padding:20px 22px; border-left:3px solid var(--text); border-radius:0 10px 10px 0; background:var(--surface); }
+    .s-context { display:grid; grid-template-columns:minmax(250px,.63fr) minmax(0,1.37fr); gap:clamp(34px,6vw,86px); margin-top:40px; }
+    .s-context-spine { position:relative; align-self:start; padding-left:35px; }
+    .s-context-spine::before { content:""; position:absolute; top:8px; bottom:8px; left:10px; width:2px; background:var(--text); }
+    .s-context-node { position:relative; display:block; min-height:54px; padding:9px 11px; border-radius:7px; color:var(--muted); }
+    .s-context-node::before { content:""; position:absolute; top:17px; left:-30px; width:12px; height:12px; border:3px solid var(--bg); border-radius:50%; background:var(--quiet); box-shadow:0 0 0 2px var(--text); }
+    .s-context-node.active { background:var(--surface); color:var(--text); }
+    .s-context-node.active::before { background:#d8a331; }
+    .s-context-runs { margin:7px 0 18px 18px; padding:0 0 0 17px; border-left:1px solid var(--text); list-style:none; }
+    .s-context-runs a { display:block; min-height:42px; padding:8px; color:var(--muted); font:.7rem ui-monospace,monospace; }
+    .s-context-runs a[aria-current="page"] { color:var(--text); font-weight:800; }
+    .s-flow { display:grid; grid-template-columns:repeat(5,minmax(145px,1fr)); overflow:auto; margin-top:30px; border-block:3px solid var(--text); }
+    .s-flow-step { position:relative; min-height:215px; padding:24px 17px; border-right:1px solid var(--line); background:var(--surface); }
+    .s-flow-step::after { content:""; position:absolute; z-index:2; top:50%; right:-13px; width:25px; height:2px; background:var(--text); }
+    .s-flow-step:last-child::after { display:none; }
+    .s-ordinal { color:var(--quiet); font:850 1.8rem ui-monospace,monospace; }
+
+    /* E3 — Dual Rail */
+    body.v-E3 { --bg:#101416; --surface:#181e21; --surface-2:#252d31; --text:#eef2ef; --muted:#a0aaa6; --quiet:#717c78; --line:#343d3d; --accent:#71cfbd; --accent-2:#a7eee0; --good:#6bd09b; --warn:#e3b75e; --bad:#ef7d78; --unknown:#a799bd; --focus:#b4dcff; color-scheme:dark; }
+    .r-shell { min-height:100vh; padding-bottom:82px; background-image:linear-gradient(to bottom,transparent 0 97%,rgb(255 255 255 / 2.5%) 97%); background-size:100% 38px; }
+    .r-head { position:sticky; z-index:20; top:0; padding:14px clamp(18px,4vw,55px) 13px; border-bottom:1px solid var(--line); background:rgb(16 20 22 / 94%); backdrop-filter:blur(14px); }
+    .r-global-row { display:flex; align-items:center; justify-content:space-between; gap:26px; }
+    .r-brand { font:850 .75rem ui-monospace,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    .r-global { display:flex; gap:5px; }
+    .r-global a { display:flex; align-items:center; min-height:44px; padding:8px 13px; border-bottom:3px solid transparent; color:var(--muted); font-size:.78rem; font-weight:730; }
+    .r-global a:hover,.r-global a[aria-current="page"] { color:var(--text); border-color:var(--accent); }
+    .r-context { display:flex; align-items:center; gap:0; min-height:49px; margin-top:9px; padding-top:8px; border-top:1px solid var(--line); overflow:auto; }
+    .r-context-label { margin-right:18px; color:var(--quiet); font:.67rem ui-monospace,monospace; letter-spacing:.1em; }
+    .r-context-node { position:relative; display:flex; align-items:center; gap:9px; min-height:38px; padding:5px 8px; color:var(--muted); font-size:.74rem; white-space:nowrap; }
+    .r-context-node+.r-context-node { margin-left:27px; }
+    .r-context-node+.r-context-node::before { content:""; position:absolute; top:50%; right:100%; width:27px; height:1px; background:var(--line); }
+    .r-context-dot { width:12px; height:12px; border:2px solid var(--quiet); border-radius:50%; background:var(--bg); }
+    .r-context-node.active { color:var(--text); }
+    .r-context-node.active .r-context-dot { border-color:var(--accent); background:var(--accent); box-shadow:0 0 16px rgb(113 207 189 / 28%); }
+    .r-main { max-width:1400px; margin:auto; padding:52px clamp(18px,5vw,72px) 110px; }
+    .r-title { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:32px; align-items:end; padding-bottom:25px; border-bottom:4px solid var(--text); }
+    .r-title h1 { margin:0; text-transform:uppercase; }
+    .r-title-meta { max-width:290px; color:var(--muted); font-size:.77rem; line-height:1.5; }
+    .r-projects { display:grid; grid-template-columns:repeat(3,1fr); margin-top:38px; border-block:3px solid var(--text); }
+    .r-project { min-height:340px; padding:25px; border-right:1px solid var(--line); background:var(--surface); }
+    .r-project:last-child { border-right:0; }
+    .r-project-index { margin-bottom:44px; color:var(--quiet); font:850 2.7rem ui-monospace,monospace; }
+    .r-tape { display:flex; flex-wrap:wrap; align-items:center; gap:14px; min-height:58px; margin-top:25px; padding:11px 15px; background:#d7a83f; color:#17130a; font-size:.78rem; font-weight:750; }
+    .r-tape.bad { background:#9f3834; color:#fff; }
+    .r-tracks { margin-top:38px; }
+    .r-track { display:grid; grid-template-columns:190px minmax(0,1fr); min-height:108px; border-bottom:1px solid var(--line); }
+    .r-track-label { padding:20px 16px 18px 0; border-right:3px solid var(--text); }
+    .r-track-items { display:flex; align-items:center; gap:9px; padding:18px 22px; overflow:auto; }
+    .r-track-item { min-width:155px; padding:11px 13px; border-bottom:4px solid var(--line); font-size:.74rem; }
+    .r-track-item.current { border-color:var(--accent); }
+    .r-gates { display:grid; grid-template-columns:repeat(5,minmax(155px,1fr)); margin-top:40px; overflow:auto; border-block:3px solid var(--text); }
+    .r-gate { position:relative; min-height:225px; padding:24px 18px; border-right:1px solid var(--line); background:var(--surface); }
+    .r-gate::after { content:""; position:absolute; z-index:2; top:50%; right:-13px; width:25px; height:2px; background:var(--text); }
+    .r-gate:last-child::after { display:none; }
+    .r-health { margin-top:40px; border-block:3px solid var(--text); }
+
+    /* Candidate B — polished Project Spine */
+    body.v-E2 { --bg:#e8e5dc; --surface:#f7f4eb; --surface-2:#d9d5ca; --text:#171a1b; --muted:#626867; --quiet:#858a87; --line:#bcbcb5; --accent:#174f57; --accent-2:#10383d; color-scheme:light; }
+    body.v-E2 h1 { max-width:900px; font-size:clamp(2.2rem,4vw,3.75rem); line-height:1; letter-spacing:-.045em; }
+    body.v-E2 .page-rule { width:68px; height:3px; margin:22px 0 34px; background:var(--accent); }
+    body.v-E2 details { border:0; border-bottom:1px solid var(--line); }
+    body.v-E2 details:first-child { border-top:1px solid var(--line); }
+    body.v-E2 .event-title, body.v-E2 .event-note { display:block; }
+    body.v-E2 .event-note { margin-top:4px; }
+    body.v-E2 .person-line { border-bottom:0; }
+    body.v-E2 .person-line + .person-line { border-top:1px solid var(--line); }
+    body.v-E2 .t-head { display:block; }
+    body.v-E2 .t-head-meta { max-width:760px; padding-top:7px; text-align:left; }
+    .s-shell { min-height:100vh; padding-bottom:88px; }
+    .s-top { position:sticky; z-index:30; top:0; display:flex; align-items:center; justify-content:space-between; gap:28px; min-height:68px; padding:10px clamp(20px,4vw,56px); border-bottom:1px solid var(--line); background:rgb(232 229 220 / 96%); backdrop-filter:blur(14px); }
+    .s-brand { font:850 .77rem ui-monospace,monospace; letter-spacing:.11em; text-transform:uppercase; }
+    .s-frame { display:grid; grid-template-columns:274px minmax(0,1fr); max-width:1600px; min-height:calc(100vh - 68px); margin:auto; }
+    .s-project-index { position:sticky; top:68px; align-self:start; height:calc(100vh - 68px); overflow:auto; padding:32px 22px 120px; border-right:1px solid var(--line); background:#dcd8ce; }
+    .s-index-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+    .s-index-head strong { font-size:.8rem; letter-spacing:.02em; }
+    .s-index-head a { color:var(--accent); font-size:.72rem; font-weight:720; text-decoration:underline; text-underline-offset:3px; }
+    .s-project-tree,.s-project-tree ul { margin:0; padding:0; list-style:none; }
+    .s-project-item { position:relative; padding:0 0 10px 32px; }
+    .s-project-item:not(:last-child)::after { content:""; position:absolute; z-index:0; top:22px; bottom:-22px; left:10px; width:2px; background:var(--line); }
+    .s-project-dot { position:absolute; z-index:1; top:14px; left:3px; width:16px; height:16px; border:2px solid var(--quiet); border-radius:50%; background:#dcd8ce; }
+    .s-project-item.selected>.s-project-dot { border-color:var(--accent); background:#d8a536; box-shadow:0 0 0 3px #dcd8ce; }
+    .s-project-link { display:block; min-height:46px; padding:8px 9px; border-radius:8px; color:var(--muted); font-size:.79rem; }
+    .s-project-link:hover,.s-project-link[aria-current="page"] { background:var(--surface); color:var(--text); }
+    .s-project-link strong { display:block; line-height:1.25; }
+    .s-project-link small { display:block; margin-top:3px; color:var(--quiet); }
+    .s-index-runs { position:relative; margin:3px 0 7px 11px!important; padding:0 0 0 23px!important; }
+    .s-index-runs::before { content:""; position:absolute; top:0; bottom:25px; left:0; width:1px; background:var(--line); }
+    .s-index-runs li { position:relative; }
+    .s-index-runs li::before { content:""; position:absolute; top:19px; left:-22px; width:16px; height:1px; background:var(--line); }
+    .s-index-runs li::after { content:""; position:absolute; top:16px; left:-8px; width:7px; height:7px; border-radius:50%; background:var(--quiet); box-shadow:0 0 0 2px #dcd8ce; }
+    .s-index-runs li.selected::after { background:var(--accent); }
+    .s-index-runs a { display:block; min-height:44px; padding:7px 8px; border-radius:7px; color:var(--muted); font:.69rem ui-monospace,monospace; }
+    .s-index-runs a:hover,.s-index-runs a[aria-current="page"] { background:var(--surface); color:var(--text); }
+    .s-main { min-width:0; max-width:none; margin:0; padding:50px clamp(24px,5vw,72px) 120px; }
+    .s-main-content { max-width:1080px; margin:0 auto; }
+    .s-breadcrumb { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:28px; color:var(--muted); font-size:.75rem; }
+    .s-breadcrumb a { color:var(--accent); text-decoration:underline; text-underline-offset:3px; }
+    .s-breadcrumb .separator { color:var(--quiet); }
+    .s-attention-summary { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:38px; padding:13px 0; border-block:1px solid var(--line); }
+    .s-attention-summary button { min-height:40px; }
+    .s-spine-canvas { position:relative; margin-top:6px; padding:0; }
+    .s-spine-canvas::before { content:none; }
+    .s-project-branch { position:relative; display:grid; grid-template-columns:26px minmax(190px,.64fr) minmax(300px,1.36fr); gap:18px; min-height:112px; padding:0 0 28px; }
+    .s-project-branch::before { content:none; border:0; border-radius:0; box-shadow:none; }
+    .s-project-branch:not(:last-child)::before { content:""; position:absolute; z-index:0; top:22px; bottom:-22px; left:8px; width:2px; height:auto; border:0; border-radius:0; background:var(--line); box-shadow:none; }
+    .s-map-dot { z-index:1; width:17px; height:17px; margin-top:13px; border:2px solid var(--quiet); border-radius:50%; background:var(--bg); }
+    .s-project-branch:first-child .s-map-dot { border-color:var(--accent); }
+    .s-branch-name { padding-top:9px; }
+    .s-branch-name a { font-size:1rem; font-weight:800; }
+    .s-branch-panel { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:20px; align-items:start; padding:9px 0 24px; border:0; border-bottom:1px solid var(--line); border-radius:0; background:transparent; }
+    .s-branch-actions { display:flex; align-items:center; gap:6px; }
+    .s-section { margin-top:42px; }
+    .s-section:first-child { margin-top:0; }
+    .s-section-head { display:flex; align-items:baseline; justify-content:space-between; gap:18px; margin-bottom:10px; }
+    .s-section-head h2 { margin:0; font-size:1.08rem; }
+    .s-secondary { margin-top:44px; }
+    .s-secondary>h2 { margin-bottom:12px; }
+    .s-main .run-line { grid-template-columns:minmax(230px,1.4fr) 140px 110px auto; }
+    .s-main .person-line { grid-template-columns:minmax(190px,1.1fr) minmax(140px,.8fr) minmax(140px,.8fr) auto; }
+    .s-main .attention-line { padding-inline:4px; }
+    .s-main .health-line { grid-template-columns:minmax(180px,1.15fr) 135px minmax(180px,1fr) 105px auto; }
+
+    /* Variant B — Threaded Walkway revival */
+    body.v-B { --bg:#e7e6df; --surface:#f5f3eb; --surface-2:#d8d6ce; --text:#171a1b; --muted:#626767; --quiet:#858988; --line:#bbbcb8; --accent:#184f58; --accent-2:#0e363c; --good:#31715c; --warn:#9a6512; --bad:#ab302c; --unknown:#665e78; --focus:#0067c5; color-scheme:light; }
+    body.v-B .s-shell { background-color:var(--bg); background-image:repeating-linear-gradient(to bottom,transparent 0 35px,rgb(23 26 27 / 4.5%) 35px 36px); }
+    body.v-B .s-top { background:rgb(231 230 223 / 95%); }
+    body.v-B .s-main-content { max-width:1200px; }
+    body.v-B .s-project-index { background:#dcd8ce; }
+    .walk-heading { margin-bottom:32px; }
+    .walk-number { margin-bottom:9px; color:var(--accent); font:850 .72rem ui-monospace,monospace; letter-spacing:.16em; text-transform:uppercase; }
+    .walk-title-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(180px,280px); gap:34px; align-items:end; padding-bottom:27px; border-bottom:5px solid var(--text); }
+    .walk-title-row h1 { max-width:920px; margin:0; font-size:clamp(3rem,6vw,5.8rem); line-height:.88; letter-spacing:-.065em; text-transform:uppercase; }
+    .walk-title-row p { margin:16px 0 0; max-width:760px; color:var(--muted); }
+    .walk-title-meta { color:var(--muted); font-size:.77rem; line-height:1.55; }
+    .walk-tape { display:flex; flex-wrap:wrap; align-items:center; gap:16px; min-height:58px; margin:0 0 34px; padding:10px 15px; background:#e4ad36; color:#1c170d; font-size:.79rem; font-weight:760; }
+    .walk-tape.danger { background:#a43833; color:#fff; }
+    .walk-tape .btn,.walk-tape .text-link { color:inherit; }
+    .walk-corridor { display:grid; grid-template-columns:repeat(3,1fr); margin-top:34px; border-block:5px solid var(--text); }
+    .walk-door { position:relative; min-height:355px; padding:27px; border-right:1px solid var(--line); background:var(--surface); }
+    .walk-door:first-child { border-left:1px solid var(--line); }
+    .walk-door:nth-child(1) { box-shadow:inset 0 8px 0 var(--accent); }
+    .walk-door:nth-child(2) { box-shadow:inset 0 8px 0 #d39d2f; }
+    .walk-door:nth-child(3) { box-shadow:inset 0 8px 0 #9f4438; }
+    .walk-door-number { margin:14px 0 48px; color:var(--quiet); font:850 3.2rem ui-monospace,monospace; }
+    .walk-door h2 { font-size:1.45rem; line-height:1.08; }
+    .walk-door-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:25px; }
+    .walk-track-board { margin-top:34px; border-block:5px solid var(--text); background:color-mix(in srgb,var(--bg) 82%,transparent); }
+    .walk-track-row { display:grid; grid-template-columns:180px minmax(0,1fr); min-height:112px; border-bottom:1px solid var(--line); }
+    .walk-track-row:last-child { border-bottom:0; }
+    .walk-track-label { padding:23px 18px 19px 0; border-right:4px solid var(--text); font:.76rem ui-monospace,monospace; letter-spacing:.08em; }
+    .walk-track-items { display:flex; align-items:center; gap:11px; min-width:0; padding:18px 23px; overflow:auto; }
+    .walk-step { min-width:190px; min-height:66px; padding:12px 14px; border:0; border-bottom:5px solid var(--line); background:var(--surface); color:var(--text); font-size:.75rem; line-height:1.45; text-align:left; }
+    button.walk-step { cursor:pointer; }
+    .walk-step.current { border-color:#d9a331; }
+    .walk-step.good { border-color:var(--good); }
+    .walk-step.warn { border-color:var(--warn); }
+    .walk-step small { color:var(--muted); }
+    .walk-project-lower { display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:42px; margin-top:42px; }
+    .walk-ledger { padding-top:5px; }
+    .walk-ledger .event-line { border-bottom:1px solid var(--line); }
+    .walk-fact-card { align-self:start; padding:23px; border-top:8px solid #d9a331; background:var(--surface); box-shadow:0 12px 30px rgb(23 26 27 / 9%); }
+    .walk-fact { display:grid; gap:4px; padding:11px 0; border-bottom:1px solid var(--line); font-size:.79rem; }
+    .walk-fact:last-of-type { border-bottom:0; }
+    .walk-gate-grid { display:grid; grid-template-columns:repeat(2,minmax(240px,1fr)); gap:16px; }
+    .walk-gate { min-height:235px; padding:22px; border-top:8px solid var(--unknown); background:var(--surface); box-shadow:0 9px 24px rgb(23 26 27 / 7%); }
+    .walk-gate.pass { border-color:var(--good); }
+    .walk-gate.block { border-color:var(--bad); }
+    .walk-gate.wait { border-color:#d9a331; }
+    .walk-gate-code { color:var(--quiet); font:850 1.55rem ui-monospace,monospace; }
+    .walk-gate h2 { margin-top:24px; font-size:1.15rem; }
+    .walk-gate-actions { margin-top:17px; }
+    .walk-health-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin-top:34px; }
+    .walk-health-card { min-height:260px; padding:24px; border-top:8px solid var(--accent); background:var(--surface); box-shadow:0 9px 25px rgb(23 26 27 / 7%); }
+    .walk-health-card.warn { border-color:#d49c2c; }
+    .walk-health-card.bad { border-color:var(--bad); }
+    .walk-inbox { margin-top:36px; border-top:5px solid var(--text); }
+    .walk-inbox-item { display:grid; grid-template-columns:78px minmax(0,1fr) 150px; gap:22px; align-items:start; width:100%; min-height:104px; padding:21px 6px; border:0; border-bottom:1px solid var(--line); background:transparent; color:inherit; text-align:left; cursor:pointer; }
+    .walk-inbox-item:hover { background:rgb(255 255 255 / 30%); }
+    .walk-inbox-code { font:800 .7rem ui-monospace,monospace; letter-spacing:.08em; }
+
+    /* Variant C — Field Notes */
+    body.v-C { --bg:#e9e2d6; --surface:#fffaf0; --surface-2:#dcd3c4; --text:#19201d; --muted:#646a64; --quiet:#898b83; --line:#c3bcae; --accent:#155a60; --accent-2:#0d3f43; --good:#2d7357; --warn:#9a6417; --bad:#a63e32; --unknown:#6a6278; --focus:#006bc7; color-scheme:light; }
+    body.v-C .s-shell { background-color:var(--bg); background-image:linear-gradient(rgb(25 32 29 / 3.8%) 1px,transparent 1px),linear-gradient(90deg,rgb(25 32 29 / 3.8%) 1px,transparent 1px); background-size:32px 32px; }
+    body.v-C .s-top { background:rgb(233 226 214 / 95%); }
+    body.v-C .s-main-content { max-width:1160px; }
+    body.v-C .s-project-index { background:#dcd8ce; }
+    .folio-heading { position:relative; min-height:170px; margin-bottom:35px; padding:4px 0 29px 92px; border-bottom:2px solid var(--text); }
+    .folio-index { position:absolute; top:0; left:0; color:#b44937; font:900 4.2rem/.85 ui-monospace,monospace; letter-spacing:-.08em; }
+    .folio-heading h1 { max-width:940px; margin:0; font-size:clamp(3rem,6vw,5.6rem); line-height:.9; letter-spacing:-.065em; }
+    .folio-heading p { max-width:760px; margin:17px 0 0; color:var(--muted); }
+    .folio-meta { margin-top:14px; color:var(--accent); font:.72rem ui-monospace,monospace; letter-spacing:.05em; }
+    .folio-alert { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:16px; align-items:center; min-height:62px; margin-bottom:24px; padding:12px 16px; border:2px solid var(--text); background:#e0ad3e; box-shadow:6px 6px 0 var(--text); font-size:.78rem; }
+    .folio-alert .btn,.folio-alert .text-link { color:inherit; }
+    .folio-projects { display:grid; grid-template-columns:1.25fr .9fr; grid-template-rows:1fr 1fr; gap:18px; margin-top:38px; }
+    .folio-project-card { position:relative; min-height:210px; padding:24px; border:1px solid var(--line); background:var(--surface); box-shadow:7px 7px 0 color-mix(in srgb,var(--accent) 18%,var(--line)); }
+    .folio-project-card.feature { grid-row:1 / span 2; min-height:438px; padding:30px; }
+    .folio-project-card::before { content:""; position:absolute; top:0; left:0; width:100%; height:10px; background:var(--accent); }
+    .folio-project-card:nth-child(2)::before { background:#d09a2f; }
+    .folio-project-card:nth-child(3)::before { background:#a64a3b; }
+    .folio-card-number { margin:17px 0 28px; color:var(--quiet); font:900 2.8rem ui-monospace,monospace; }
+    .folio-project-card.feature .folio-card-number { margin-bottom:68px; font-size:4rem; }
+    .folio-project-card h2 { font-size:clamp(1.2rem,2.4vw,2rem); line-height:1.05; }
+    .folio-card-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:20px; }
+    .folio-case-list { display:grid; gap:16px; margin-top:34px; }
+    .folio-case { display:grid; grid-template-columns:92px minmax(0,1fr) 140px; gap:22px; align-items:center; width:100%; min-height:120px; padding:20px; border:1px solid var(--line); border-left:10px solid #d09a2f; background:var(--surface); box-shadow:6px 6px 0 color-mix(in srgb,var(--line) 72%,transparent); color:inherit; text-align:left; cursor:pointer; }
+    .folio-case.high { border-left-color:var(--bad); }
+    .folio-case-code { color:var(--quiet); font:900 1.15rem ui-monospace,monospace; }
+    .folio-project-layout,.folio-run-layout { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:30px; align-items:start; }
+    .folio-section { margin-top:34px; }
+    .folio-section-head { display:flex; align-items:baseline; justify-content:space-between; gap:18px; margin-bottom:13px; padding-bottom:10px; border-bottom:3px solid var(--text); }
+    .folio-runs { display:grid; gap:12px; }
+    .folio-run-card { display:grid; grid-template-columns:minmax(0,1fr) 150px auto; gap:18px; align-items:center; min-height:104px; padding:18px; border:1px solid var(--line); background:var(--surface); box-shadow:4px 4px 0 color-mix(in srgb,var(--line) 75%,transparent); }
+    .folio-people { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+    .folio-person { min-height:145px; padding:17px; border:1px solid var(--line); background:var(--surface); color:inherit; text-align:left; cursor:pointer; }
+    .folio-person-head { display:flex; align-items:center; gap:10px; margin-bottom:15px; }
+    .folio-side-note { position:sticky; top:92px; padding:22px; border:2px solid var(--text); background:#f4cf72; box-shadow:7px 7px 0 var(--text); }
+    .folio-side-note h2 { font-size:1.35rem; }
+    .folio-side-note details { border-color:rgb(25 32 29 / 28%); }
+    .folio-activity .event-line { border-bottom:1px solid var(--line); }
+    .folio-gates { display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:14px; }
+    .folio-gate { min-height:210px; padding:20px; border:2px solid var(--text); background:var(--surface); box-shadow:5px 5px 0 var(--line); }
+    .folio-gate.pass { box-shadow:5px 5px 0 var(--good); }
+    .folio-gate.block { box-shadow:5px 5px 0 var(--bad); }
+    .folio-gate.wait { box-shadow:5px 5px 0 #d09a2f; }
+    .folio-gate-label { display:flex; justify-content:space-between; gap:12px; color:var(--quiet); font:800 .68rem ui-monospace,monospace; letter-spacing:.08em; }
+    .folio-gate h2 { margin-top:30px; font-size:1.12rem; }
+    .folio-health-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-top:34px; }
+    .folio-health-card { min-height:280px; padding:23px; border:2px solid var(--text); background:var(--surface); box-shadow:6px 6px 0 var(--accent); }
+    .folio-health-card:nth-child(2) { box-shadow:6px 6px 0 #d09a2f; }
+    .folio-health-card:nth-child(3) { box-shadow:6px 6px 0 var(--bad); }
+
+    .run-journey { margin-bottom:34px; padding:20px 0 8px; border-bottom:2px solid var(--text); }
+    .run-journey-head { display:flex; align-items:baseline; justify-content:space-between; gap:18px; padding:0 4px 5px; }
+    .run-journey-scroll { overflow-x:auto; padding:50px 0 16px; }
+    .run-journey-track { display:grid; grid-template-columns:repeat(5,minmax(150px,1fr)); min-width:790px; margin:0; padding:0; list-style:none; }
+    .journey-step { position:relative; min-width:0; padding:0 11px; text-align:center; }
+    .journey-step:not(:last-child)::after { content:""; position:absolute; z-index:0; top:13px; left:calc(50% + 14px); width:calc(100% - 28px); height:3px; background:var(--text); }
+    .journey-step.feedback::after { top:-25px; height:39px; border:3px solid var(--warn); border-bottom:0; border-radius:24px 24px 0 0; background:none; }
+    .journey-return { display:none; position:absolute; top:-48px; left:50%; z-index:2; width:100%; color:var(--warn); font:850 .62rem ui-monospace,monospace; letter-spacing:.06em; }
+    .journey-step.feedback .journey-return { display:block; }
+    .journey-dot { position:relative; z-index:1; display:grid; place-items:center; width:28px; height:28px; margin:0 auto; border:3px solid var(--line); border-radius:50%; background:var(--surface); color:var(--quiet); font-size:.65rem; font-weight:900; }
+    .journey-step.complete .journey-dot { border-color:var(--good); background:var(--good); color:var(--surface); }
+    .journey-step.current .journey-dot { border-color:#d09a2f; background:#d09a2f; color:#211a0d; box-shadow:0 0 0 4px color-mix(in srgb,#d09a2f 22%,transparent); }
+    .journey-copy { display:block; margin-top:13px; }
+    .journey-phase { display:block; font-size:.78rem; font-weight:820; }
+    .journey-detail { display:block; margin-top:4px; color:var(--muted); font-size:.69rem; line-height:1.35; }
+    .gate-ledger { display:grid; gap:11px; }
+    .gate-ledger-row { --gate-color:var(--unknown); display:grid; grid-template-columns:66px minmax(0,1fr) 145px 20px; gap:16px; align-items:center; width:100%; min-height:88px; padding:14px 16px; border:1px solid var(--line); border-left:7px solid var(--gate-color); background:color-mix(in srgb,var(--gate-color) 8%,var(--surface)); box-shadow:3px 3px 0 color-mix(in srgb,var(--gate-color) 48%,var(--line)); color:inherit; text-align:left; cursor:pointer; }
+    .gate-ledger-row:hover { background:color-mix(in srgb,var(--gate-color) 14%,var(--surface)); }
+    .gate-ledger-row.pass { --gate-color:var(--good); }
+    .gate-ledger-row.block { --gate-color:var(--bad); }
+    .gate-ledger-row.wait { --gate-color:#d09a2f; }
+    .gate-ledger-code { color:var(--gate-color); font:900 .76rem ui-monospace,monospace; letter-spacing:.06em; }
+    .gate-ledger-copy strong,.gate-ledger-copy small { display:block; }
+    .gate-ledger-copy strong { font-size:.87rem; }
+    .gate-ledger-copy small { margin-top:5px; color:var(--muted); font-size:.73rem; line-height:1.35; }
+    .gate-ledger-state { justify-self:start; }
+    .gate-ledger-arrow { color:var(--gate-color); font-size:1.4rem; font-weight:900; }
+
+    /* Variant D — Field Notes dark theme */
+    body.v-D { --bg:#111612; --surface:#1b211c; --surface-2:#272e27; --text:#f1eadc; --muted:#b2ada2; --quiet:#7f867d; --line:#414941; --accent:#73c8b7; --accent-2:#a8ecdf; --good:#70ca98; --warn:#e1b45a; --bad:#ee7b70; --unknown:#a79bb7; --focus:#9dd4ff; color-scheme:dark; }
+    body.v-D .s-shell { background-color:var(--bg); background-image:linear-gradient(rgb(241 234 220 / 4.5%) 1px,transparent 1px),linear-gradient(90deg,rgb(241 234 220 / 4.5%) 1px,transparent 1px); background-size:32px 32px; }
+    body.v-D .s-top { background:rgb(17 22 18 / 95%); }
+    body.v-D .s-main-content { max-width:1160px; }
+    body.v-D .s-project-index { background:#171c18; }
+    body.v-D .s-project-dot { background:#171c18; }
+    body.v-D .s-project-item.selected>.s-project-dot { background:#dfa947; box-shadow:0 0 0 3px #171c18; }
+    body.v-D .s-index-runs li::after { box-shadow:0 0 0 2px #171c18; }
+    body.v-D .folio-index { color:#ef7f6d; }
+    body.v-D .folio-alert { background:#d5a43c; color:#18150d; box-shadow:6px 6px 0 #f1eadc; }
+    body.v-D .folio-side-note { border-color:#d8b15c; background:#5b4825; box-shadow:7px 7px 0 #d8b15c; }
+    body.v-D .folio-health-card { box-shadow:6px 6px 0 var(--accent); }
+    body.v-D .folio-health-card:nth-child(2) { box-shadow:6px 6px 0 #d8ad50; }
+    body.v-D .folio-health-card:nth-child(3) { box-shadow:6px 6px 0 var(--bad); }
+    body.v-D .btn.primary { color:#07130f; }
+    body.v-D .journey-step.current .journey-dot { border-color:var(--warn); background:var(--warn); }
+    body.v-D .gate-ledger-row.wait { --gate-color:var(--warn); }
+
+    .prototype-variants { display:grid; grid-template-columns:38px minmax(130px,auto) 38px; align-items:center; overflow:hidden; border-radius:7px; background:#090c10; color:#f6f7f8; }
+    .prototype-variants button { min-height:38px; border:0; background:transparent; color:inherit; cursor:pointer; }
+    .prototype-variants button:hover { background:#242a2d; }
+    .prototype-variant-copy { padding:0 10px; color:#aeb6c1; font-size:.69rem; text-align:center; }
+    .prototype-variant-copy strong { color:#fff; }
+    .prototype-divider { width:1px; height:28px; background:var(--line); }
+
+    @media(max-width:1080px) {
+      .t-overview,.t-run-layout,.s-context { grid-template-columns:1fr; }
+      .s-context-spine { max-width:380px; }
+      .r-projects { grid-template-columns:1fr; }
+      .r-project { min-height:240px; border-right:0; border-bottom:1px solid var(--line); }
+      .r-project-index { margin-bottom:20px; }
+    }
+    @media(max-width:780px) {
+      .prototype-tools { left:50%; right:auto; bottom:10px; }
+      .prototype-switcher { bottom:9px; grid-template-columns:44px minmax(155px,auto) 44px; }
+      .t-shell { grid-template-columns:1fr; }
+      .t-tree { position:static; height:auto; padding:14px; border-right:0; border-bottom:1px solid var(--line); }
+      .t-brand { margin-bottom:10px; }
+      .t-tree .global-nav { display:flex; overflow:auto; }
+      .t-tree-label,.tree-list { display:none; }
+      .t-main,.s-main,.r-main { padding:34px 16px 130px; }
+      .t-head,.r-title { grid-template-columns:1fr; }
+      .t-head h1,.r-title h1 { font-size:2.6rem; }
+      .s-top { align-items:flex-start; flex-direction:column; gap:7px; padding:12px 14px; }
+      .s-project-branch { grid-template-columns:1fr; gap:8px; }
+      .s-branch-panel { padding:15px; }
+      .s-context-spine { width:100%; }
+      .r-global-row { align-items:flex-start; flex-direction:column; gap:7px; }
+      .r-global { width:100%; overflow:auto; }
+      .r-context { width:100%; }
+      .project-line,.project-line.header,.run-line,.person-line,.health-line { grid-template-columns:1fr; gap:7px; padding:15px 5px; }
+      .project-line.header { display:none; }
+      .r-track { grid-template-columns:135px minmax(520px,1fr); }
+      dialog { width:calc(100vw - 10px); max-height:calc(100vh - 10px); border-radius:9px; }
+      .dialog-body { max-height:calc(100vh - 160px); }
+      .drawer { width:100vw; padding:20px; }
+    }
+    @media(max-width:440px) {
+      .prototype-tools a,.prototype-tools>strong,.prototype-tools label>span { display:none; }
+      .switch-label { max-width:175px; overflow:hidden; text-overflow:ellipsis; }
+      .dialog-foot { flex-direction:column-reverse; }
+      .dialog-foot .btn { width:100%; }
+      .r-context-label { display:none; }
+    }
+    @media(max-width:1180px) {
+      .s-frame { grid-template-columns:244px minmax(0,1fr); }
+      .s-project-index { padding-inline:16px; }
+      .s-main { padding-inline:30px; }
+      .s-main .run-line { grid-template-columns:minmax(210px,1.3fr) 125px 95px auto; gap:12px; }
+      .s-main .person-line { grid-template-columns:minmax(175px,1fr) minmax(125px,.7fr) minmax(125px,.7fr) auto; gap:10px; }
+    }
+    @media(max-width:900px) {
+      .s-top { position:static; align-items:flex-start; flex-direction:column; gap:6px; padding:12px 16px; }
+      .s-frame { grid-template-columns:1fr; }
+      .s-project-index { position:static; height:auto; padding:18px 16px 20px; border-right:0; border-bottom:1px solid var(--line); }
+      .s-project-tree { display:grid; grid-template-columns:repeat(3,minmax(190px,1fr)); gap:8px; overflow:auto; }
+      .s-project-item { min-width:190px; padding-left:29px; }
+      .s-project-item::after { display:none; }
+      .s-index-runs { display:none; }
+      .s-main { padding:34px 18px 120px; }
+      body.v-E2 .t-head { grid-template-columns:1fr; }
+      body.v-E2 .t-head-meta { padding-top:0; text-align:left; }
+      .s-project-branch { grid-template-columns:24px minmax(150px,.7fr) minmax(240px,1.3fr); gap:12px; }
+    }
+    @media(max-width:680px) {
+      .s-project-tree { grid-template-columns:1fr; }
+      .s-project-branch { grid-template-columns:24px minmax(0,1fr); }
+      .s-branch-panel { grid-column:2; grid-template-columns:1fr; gap:10px; }
+      .s-attention-summary { align-items:flex-start; flex-direction:column; }
+      .s-main .run-line,.s-main .person-line,.s-main .health-line { grid-template-columns:1fr; gap:8px; }
+      .prototype-tools { max-width:calc(100vw - 16px); }
+    }
+    @media(max-width:1050px) {
+      .walk-corridor,.walk-health-grid,.folio-health-grid { grid-template-columns:1fr; }
+      .walk-door { min-height:235px; border-left:1px solid var(--line); border-bottom:1px solid var(--line); }
+      .walk-door-number { margin-bottom:22px; }
+      .folio-projects { grid-template-columns:1fr; grid-template-rows:auto; }
+      .folio-project-card.feature { grid-row:auto; min-height:300px; }
+      .folio-project-card.feature .folio-card-number { margin-bottom:30px; }
+    }
+    @media(max-width:900px) {
+      .walk-project-lower,.folio-project-layout,.folio-run-layout { grid-template-columns:1fr; }
+      .walk-fact-card,.folio-side-note { position:static; }
+    }
+    @media(max-width:760px) {
+      .walk-title-row { grid-template-columns:1fr; gap:15px; }
+      .walk-title-row h1,.folio-heading h1 { font-size:2.8rem; }
+      .walk-track-board { overflow:auto; }
+      .walk-track-row { grid-template-columns:135px minmax(520px,1fr); }
+      .walk-inbox-item,.folio-case { grid-template-columns:62px minmax(0,1fr); }
+      .walk-inbox-item>:last-child,.folio-case>:last-child { grid-column:2; }
+      .walk-gate-grid,.folio-gates,.folio-people { grid-template-columns:1fr; }
+      .folio-heading { min-height:0; padding-left:0; }
+      .folio-index { position:static; margin-bottom:18px; font-size:3rem; }
+      .folio-run-card { grid-template-columns:1fr; gap:9px; }
+      .gate-ledger-row { grid-template-columns:52px minmax(0,1fr); gap:9px 13px; }
+      .gate-ledger-state { grid-column:2; }
+      .gate-ledger-arrow { display:none; }
+      .prototype-tools { gap:6px; padding:5px 6px; }
+      .prototype-tools>a,.prototype-divider,.prototype-tools label>span { display:none; }
+      .prototype-variants { grid-template-columns:36px minmax(112px,auto) 36px; }
+    }
+    @media(max-width:480px) {
+      .run-journey-head { align-items:flex-start; flex-direction:column; gap:2px; }
+      .prototype-variant-copy { max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .prototype-tools label { display:none; }
+    }
+    @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <aside id="drawer" class="drawer" hidden aria-labelledby="drawer-title">
+    <div class="drawer-head"><div><div class="caps">Detail</div><h2 id="drawer-title" tabindex="-1">Detail</h2></div><button class="btn ghost" data-close-drawer>Close</button></div>
+    <div id="drawer-body"></div>
+  </aside>
+
+  <dialog id="item-dialog" aria-labelledby="item-title">
+    <div class="dialog-head"><div><div class="caps">Needs your attention</div><h2 id="item-title" tabindex="-1">Inbox item</h2></div><button class="btn ghost" data-close-item>Close</button></div>
+    <div class="dialog-body" id="item-body"></div>
+    <div class="dialog-foot" id="item-actions"></div>
+  </dialog>
+
+  <dialog id="action-dialog" aria-labelledby="action-title" aria-describedby="action-impact">
+    <form id="action-form" method="dialog" novalidate>
+      <div class="dialog-head"><div><div class="caps">Typed Manager request</div><h2 id="action-title" tabindex="-1">Action</h2></div><button type="button" class="btn ghost" data-close-action>Close</button></div>
+      <div class="dialog-body" id="action-body"></div>
+      <div class="dialog-foot"><button type="button" class="btn" id="action-cancel" data-close-action>Cancel</button><button type="submit" class="btn primary" id="action-submit">Submit request</button></div>
+    </form>
+  </dialog>
+
+  <script>
+    const base={
+      projects:[
+        { key:"uas", name:"Ultimate Agent Sandbox", room:"ultimate-sandbox", deployment:"dep-uas-01", repository:"puglab/ultimate-agent-sandbox", work:"Waiting for human decision", latest:"Review returned human-needed · 2m", attention:2, health:"Needs attention", connection:"Connected", freshness:"Current", observed:"8 seconds ago", participants:"2 of 3 available", runs:["run-01J8ZT7G","run-01J8ZP4A"] },
+        { key:"library", name:"Project Library", room:"library-lab", deployment:"dep-library-02", repository:"puglab/project-library", work:"No active Run", latest:"Run 087 closed successfully · 17m", attention:0, health:"Operational", connection:"Connected", freshness:"Current", observed:"12 seconds ago", participants:"2 of 2 available", runs:["run-00000087"] },
+        { key:"client", name:"Client Application", room:"client-app", deployment:"dep-client-04", repository:"puglab/client-app", work:"Run paused", latest:"Credential warning observed · 31m", attention:1, health:"Degraded", connection:"Connected", freshness:"Current", observed:"14 seconds ago", participants:"1 of 2 available", runs:["run-01J91C2M"] }
+      ],
+      runs:{
+        "run-01J8ZT7G":{ project:"uas", id:"run-01J8ZT7G", generation:4, title:"Prototype remote monitoring, approval, and notifications", state:"Waiting", derived:"Human decision required", revision:"prototype-state@7", review:"Human-needed", round:5, cap:5, owner:"GPT", ownerId:"gpt", started:"42 minutes ago", current:true },
+        "run-01J8ZP4A":{ project:"uas", id:"run-01J8ZP4A", generation:3, title:"Set the successor Git and Forge security contract", state:"Completed", derived:"Closed", revision:"decision@13578", review:"Accepted", round:3, cap:5, owner:"GPT", ownerId:"gpt", started:"Yesterday", current:false },
+        "run-00000087":{ project:"library", id:"run-00000087", generation:2, title:"Promote accepted architecture notes", state:"Completed", derived:"Closed", revision:"library@4c1e", review:"Accepted", round:1, cap:3, owner:"GPT", ownerId:"gpt-docs", started:"36 minutes ago", current:false },
+        "run-01J91C2M":{ project:"client", id:"run-01J91C2M", generation:2, title:"Stabilize OAuth callback recovery", state:"Paused", derived:"Waiting for operator", revision:"4e7ad19", review:"Changes requested", round:2, cap:5, owner:"Claude", ownerId:"claude-client", started:"1 hour ago", current:true }
+      },
+      participants:{
+        uas:[
+          { id:"gpt", initials:"GP", name:"GPT", role:"Implementer", actor:"gpt", process:"Alive · incarnation 9", readiness:"At safe point", binding:"run-01J8ZT7G", last:"Requested human decision · 2m", context:68, quota:74 },
+          { id:"claude-reviewer", initials:"CL", name:"Claude", role:"Independent reviewer", actor:"claude-reviewer", process:"Alive · incarnation 4", readiness:"No Work Request", binding:"Review complete", last:"Returned human-needed · 2m", context:41, quota:88 },
+          { id:"legion", initials:"LG", name:"Legion", role:"Advisor", actor:"legion", process:"No process", readiness:"Unavailable", binding:"None", last:"Upstream preflight failed · 12m", context:0, quota:0 }
+        ],
+        library:[
+          { id:"gpt-docs", initials:"GP", name:"GPT", role:"Curator", actor:"gpt", process:"Alive · incarnation 3", readiness:"No Work Request", binding:"None", last:"Closed Run 087 · 17m", context:22, quota:79 },
+          { id:"claude-docs", initials:"CL", name:"Claude", role:"Reviewer", actor:"claude-reviewer", process:"Alive · incarnation 2", readiness:"No Work Request", binding:"None", last:"Review accepted · 19m", context:18, quota:91 }
+        ],
+        client:[
+          { id:"claude-client", initials:"CL", name:"Claude", role:"Implementer", actor:"claude", process:"Alive · incarnation 6", readiness:"At safe point", binding:"run-01J91C2M", last:"Run paused · 31m", context:57, quota:64 },
+          { id:"gpt-client", initials:"GP", name:"GPT", role:"Reviewer", actor:"gpt-reviewer", process:"No process", readiness:"Unavailable", binding:"None", last:"Credential check failed · 31m", context:0, quota:0 }
+        ]
+      },
+      gates:[
+        { name:"Candidate revision", state:"Passed", code:"pass", note:"Exact candidate prototype-state@7 is bound to this generation.", source:"Coordinator + Forge", observed:"4 minutes ago" },
+        { name:"Mechanical evidence", state:"Passed", code:"pass", note:"Three required checks passed for the exact candidate.", source:"Gate runner", observed:"4 minutes ago" },
+        { name:"Independent review", state:"Passed", code:"pass", note:"Semantic verdict human-needed is recorded on the candidate.", source:"Forge review", observed:"2 minutes ago" },
+        { name:"Review-round policy", state:"Blocked", code:"block", note:"The configured review cap is reached: 5 of 5 rounds.", source:"Run Policy", observed:"2 minutes ago", action:"extend" },
+        { name:"Human decision", state:"Waiting", code:"wait", note:"A human may extend review, accept this candidate, or stop the Run.", source:"Coordinator", observed:"2 minutes ago", action:"decision" }
+      ],
+      events:[
+        { time:"14:31", title:"Human attention requested", note:"Review round cap reached for prototype-state@7." },
+        { time:"14:29", title:"Review returned human-needed", note:"claude-reviewer · round 5 · exact review linked." },
+        { time:"14:18", title:"Forge outcome became unknown", note:"Operation op-8fe1 requires reconciliation; no retry attempted." },
+        { time:"14:12", title:"Candidate submitted", note:"GPT submitted prototype-state@7 with three evidence references." },
+        { time:"13:58", title:"Participant reached safe point", note:"GPT stopped before accepting another Work Request." }
+      ],
+      attention:[
+        { key:"review-cap", level:"high", group:"Act now", title:"Review cap reached", summary:"Run run-01J8ZT7G needs a human choice before another review round.", project:"uas", run:"run-01J8ZT7G", scope:"Ultimate Agent Sandbox · Run 01J8ZT7G", age:"2m", why:"Run Policy requested human attention after the fifth independent review round.", evidence:["Candidate prototype-state@7","3 mechanical checks passed","Review verdict: human-needed","Round cap: 5 of 5"], actions:["extend","approve","reject"] },
+        { key:"forge-unknown", level:"high", group:"Act now", title:"Forge mutation outcome unknown", summary:"One provider mutation may have partially completed and must be reconciled.", project:"uas", scope:"Ultimate Agent Sandbox · Forge access", age:"7m", why:"Provider contact occurred before the final response was lost. The Broker will not retry blindly.", evidence:["Operation op-8fe1","Assignee update confirmed","Reviewer update unknown","Audit commit available"], actions:[] },
+        { key:"credential-warning", level:"medium", group:"Monitor", title:"Credential expires soon", summary:"The Client Application Forge credential enters its rotation window in 9 days.", project:"client", scope:"Client Application · Credentials", age:"31m", why:"Health policy warns before expiry; no secret material is exposed here.", evidence:["Credential status: valid","Expiry band: 9 days","Last verification: 31m"], actions:[] }
+      ],
+      health:{
+        uas:[
+          { key:"manager", name:"Manager connection", state:"Connected", quality:"Current", source:"Manager transport", observed:"8 seconds ago", note:"Authenticated stream is current." },
+          { key:"coordination", name:"Coordination service", state:"Operational", quality:"Current", source:"Runtime heartbeat", observed:"6 seconds ago", note:"No projection drift is observed." },
+          { key:"forge", name:"Forge access", state:"Degraded", quality:"Current", source:"Broker audit", observed:"7 minutes ago", note:"One provider mutation outcome is unknown; reconciliation is pending." },
+          { key:"credential", name:"Credential", state:"Valid", quality:"Current", source:"Credential preflight", observed:"22 minutes ago", note:"The Actor Identity credential is available. Secret material is never projected." },
+          { key:"notifications", name:"Notifications", state:"Operational", quality:"Current", source:"Notification adapter", observed:"2 minutes ago", note:"The latest human-attention notification was delivered." },
+          { key:"audit", name:"Audit ledger", state:"Operational", quality:"Current", source:"Append-only audit", observed:"7 minutes ago", note:"Requested-versus-executed behavior remains available for diagnosis." }
+        ],
+        library:[
+          { key:"manager", name:"Manager connection", state:"Connected", quality:"Current", source:"Manager transport", observed:"12 seconds ago", note:"Authenticated stream is current." },
+          { key:"coordination", name:"Coordination service", state:"Operational", quality:"Current", source:"Runtime heartbeat", observed:"9 seconds ago", note:"No active Run." },
+          { key:"forge", name:"Forge access", state:"Operational", quality:"Current", source:"Broker audit", observed:"4 minutes ago", note:"No partial or unknown outcomes." },
+          { key:"credential", name:"Credential", state:"Valid", quality:"Current", source:"Credential preflight", observed:"1 hour ago", note:"Credential remains inside the trusted store." }
+        ],
+        client:[
+          { key:"manager", name:"Manager connection", state:"Connected", quality:"Current", source:"Manager transport", observed:"14 seconds ago", note:"Authenticated stream is current." },
+          { key:"coordination", name:"Coordination service", state:"Operational", quality:"Current", source:"Runtime heartbeat", observed:"11 seconds ago", note:"Run remains paused." },
+          { key:"credential", name:"Credential", state:"Expires soon", quality:"Current", source:"Credential preflight", observed:"31 minutes ago", note:"Valid now; rotation window begins in 9 days." },
+          { key:"notifications", name:"Notifications", state:"No data", quality:"No data", source:"Notification adapter", observed:"31 minutes ago", note:"No notification has been attempted in the current window." }
+        ]
+      }
+    };
+
+    const variants={ C:"Field Notes · Light", D:"Field Notes · Dark" };
+    const globalPages=["projects","inbox","health"];
+    const allPages=[...globalPages,"project","run"];
+    let lastTrigger=null,currentAction=null,actionTimer=null;
+
+    function getParam(name,fallback=""){ return new URLSearchParams(location.search).get(name)||fallback; }
+    function variant(){ const value=getParam("variant","C").toUpperCase(); return variants[value]?value:"C"; }
+    function page(){ const p=getParam("page","projects"); return allPages.includes(p)?p:"projects"; }
+    function scenario(){ const s=getParam("scenario","attention"); return ["active","attention","offline"].includes(s)?s:"attention"; }
+    function href(next,extra={}) {
+      const url=new URL(location.href); url.searchParams.set("variant",variant()); url.searchParams.set("page",next); url.searchParams.set("scenario",scenario());
+      if(globalPages.includes(next)){ url.searchParams.delete("project"); url.searchParams.delete("run"); }
+      else {
+        if(extra.project)url.searchParams.set("project",extra.project);
+        if(extra.run)url.searchParams.set("run",extra.run); else if(next==="project")url.searchParams.delete("run");
+      }
+      return url.href;
+    }
+    function setParams(values,push=true){ const url=new URL(location.href); Object.entries(values).forEach(([k,v])=>url.searchParams.set(k,v)); history[push?"pushState":"replaceState"]({},"",url); render(true); }
+    function cloneState(){
+      const state=JSON.parse(JSON.stringify(base)); state.scenario=scenario();
+      if(state.scenario==="active"){
+        const run=state.runs["run-01J8ZT7G"]; run.state="Running"; run.derived="Implementing review changes"; run.review="Changes requested"; run.round=2;
+        state.projects[0].work="Implementing review changes"; state.projects[0].attention=1;
+        state.gates[2]={name:"Independent review",state:"Waiting",code:"wait",note:"Round 2 requested changes; a new candidate is being prepared.",source:"Forge review",observed:"2 minutes ago"};
+        state.gates[3]={name:"Review-round policy",state:"Passed",code:"pass",note:"Two of five configured rounds are used.",source:"Run Policy",observed:"2 minutes ago"};
+        state.gates[4]={name:"Human decision",state:"Passed",code:"pass",note:"No human decision is required while implementation continues.",source:"Coordinator",observed:"2 minutes ago"};
+        state.attention=state.attention.filter(item=>item.key!=="review-cap");
+      }
+      if(state.scenario==="offline"){
+        const project=state.projects[0]; project.connection="Disconnected"; project.freshness="Stale"; project.observed="11 minutes ago"; project.health="Disconnected"; project.work="Last snapshot";
+        state.health.uas[0]={key:"manager",name:"Manager connection",state:"Disconnected",quality:"Stale",source:"Manager transport",observed:"11 minutes ago",note:"This is the last complete snapshot. Mutations are fenced."};
+        state.health.uas.slice(1).forEach(c=>{c.quality="Stale";c.observed="at least 11 minutes ago";});
+      }
+      state.project=state.projects.find(p=>p.key===getParam("project"))||null;
+      state.run=state.runs[getParam("run")]||null;
+      if(state.run&&!state.project)state.project=state.projects.find(p=>p.key===state.run.project);
+      state.people=state.project?state.participants[state.project.key]:[];
+      state.components=state.project?state.health[state.project.key]:[];
+      return state;
+    }
+    function stateFor(projectKey,runId=""){
+      const state=cloneState(); state.project=state.projects.find(p=>p.key===projectKey)||null; state.run=state.runs[runId]||null; state.people=state.project?state.participants[projectKey]:[]; state.components=state.project?state.health[projectKey]:[]; return state;
+    }
+    function actionable(state){ return !!state.project&&state.project.connection==="Connected"&&state.project.freshness==="Current"; }
+    function tone(value){ const v=String(value).toLowerCase(); if(["connected","current","operational","passed","valid","completed","running","alive","at safe point"].some(x=>v.includes(x)))return"good"; if(["disconnected","failed","rejected"].some(x=>v.includes(x)))return"bad"; if(["unknown","no data","no process","no work request"].some(x=>v.includes(x)))return"unknown"; return"warn"; }
+    function status(value){ return `<span class="status ${tone(value)}">${value}</span>`; }
+    function truth(value,source,observed,kind="Observed"){ return `<span class="truth"><strong>${value}</strong><span class="source">${kind} · ${source} · ${observed}</span></span>`; }
+    function avatar(person){ return `<span class="avatar" aria-hidden="true">${person.initials}</span>`; }
+    function snapshot(state){
+      if(state.project&&state.project.freshness!=="Current")return `<div class="snapshot" role="status"><strong>${state.project.name} is disconnected.</strong> Showing the last complete snapshot from ${state.project.observed}. Derived state is stale and typed mutations are unavailable.</div>`;
+      const stale=state.projects.filter(project=>project.freshness!=="Current");
+      return !state.project&&stale.length?`<div class="snapshot" role="status"><strong>${stale.map(project=>project.name).join(", ")} ${stale.length===1?"is":"are"} disconnected.</strong> Global summaries retain the last complete snapshots. Open Health for current connection detail.</div>`:"";
+    }
+    function disabledNote(state){ return !actionable(state)?`<span class="disabled-note">Unavailable while this Project snapshot is stale or disconnected.</span>`:""; }
+    function actionButton(kind,label,state,target="",cls=""){ const id=`action-${kind}-${target||state.run?.id||"context"}`; return `<button class="btn ${cls}" data-action="${kind}" data-target="${target}" data-project="${state.project?.key||""}" data-run="${state.run?.id||""}" ${actionable(state)?"":`disabled aria-describedby="${id}-reason"`}>${label}</button>${!actionable(state)?`<span id="${id}-reason" class="sr-only">Unavailable while this Project snapshot is stale or disconnected.</span>`:""}`; }
+    function pageHead(code,title,lede,meta=""){ return `<div class="page-code">${code}</div><div class="t-head"><div><h1 tabindex="-1">${title}</h1><p class="page-lede">${lede}</p></div>${meta?`<div class="t-head-meta">${meta}</div>`:""}</div><div class="page-rule"></div>`; }
+    function globalNav(state,style="global-nav"){
+      const p=page(); return `<nav class="${style}" aria-label="Global areas"><a href="${href("projects")}" data-nav aria-current="${p==="projects"||p==="project"||p==="run"?"page":"false"}">Projects</a><a href="${href("inbox")}" data-nav aria-current="${p==="inbox"?"page":"false"}">Inbox <span class="count">${state.attention.length}</span></a><a href="${href("health")}" data-nav aria-current="${p==="health"?"page":"false"}">Health</a></nav>`;
+    }
+    function runHref(projectKey,runId){ return href("run",{project:projectKey,run:runId}); }
+    function projectHref(key){ return href("project",{project:key}); }
+    function projectLines(state){ return `<div class="project-line header" aria-hidden="true"><span>Project</span><span>Current work</span><span>Runs</span><span>Health</span><span></span></div>${state.projects.map(p=>`<div class="project-line"><div><a class="project-name text-link" href="${projectHref(p.key)}" data-nav>${p.name}</a><div class="sub">${p.participants}</div></div><div><strong>${p.work}</strong><div class="sub">${p.latest}</div></div><div><strong>${p.runs.length}</strong><div class="sub">current + recent</div></div><div>${status(p.health)}</div><button class="btn ghost" data-project-detail="${p.key}">Quick view</button></div>`).join("")}`; }
+    function attentionLine(item){ return `<button class="attention-line ${item.level}" data-attention="${item.key}"><span class="signal" aria-hidden="true"></span><span><span class="attention-title">${item.title}</span><span class="attention-summary">${item.scope} · ${item.summary}</span></span><span class="attention-age">${item.age}</span></button>`; }
+    function runLines(state){
+      if(!state.project)return""; return state.project.runs.map(id=>{const r=state.runs[id];return `<div class="run-line"><div><a class="run-title text-link" href="${runHref(state.project.key,id)}" data-nav>${r.title}</a><div class="sub mono">${r.id} · generation ${r.generation}</div></div><div>${status(r.state)}<div class="sub">${r.derived}</div></div><div><strong>${r.owner}</strong><div class="sub">coordinator</div></div><a class="btn ghost" href="${runHref(state.project.key,id)}" data-nav>Open Run</a></div>`;}).join("");
+    }
+    function personLines(state){ return state.people.map(p=>`<div class="person-line"><div class="row">${avatar(p)}<div><strong>${p.name}</strong><div class="sub">${p.role} · ${p.actor}</div></div></div><div><span class="caps">Process</span><br>${status(p.process)}</div><div><span class="caps">Readiness</span><br>${status(p.readiness)}</div><button class="btn ghost" data-person="${p.id}">Details</button></div>`).join(""); }
+    function eventLines(state){ return state.events.map(e=>`<div class="event-line"><span class="event-time">${e.time}</span><span class="event-dot" aria-hidden="true"></span><span><span class="event-title">${e.title}</span><span class="event-note">${e.note}</span></span></div>`).join(""); }
+    function healthLines(state,projectKey=""){
+      if(!projectKey)return state.projects.map(p=>`<div class="health-line"><div><button class="btn ghost health-name" data-health-project="${p.key}">${p.name}</button><div class="sub">Project runtime</div></div><div>${status(p.health)}</div><div>${truth(p.freshness,"Manager connection",p.observed,"Data")}</div><div class="small muted">${p.observed}</div><button class="btn ghost" data-health-project="${p.key}">Inspect</button></div>`).join("");
+      const p=state.projects.find(x=>x.key===projectKey); return state.health[projectKey].map(c=>`<div class="health-line"><div><button class="btn ghost health-name" data-health="${c.key}" data-health-scope="${projectKey}">${c.name}</button></div><div>${status(c.state)}</div><div>${truth(c.quality,c.source,c.observed,"Data")}</div><div class="small muted">${c.observed}</div><button class="btn ghost" data-health="${c.key}" data-health-scope="${projectKey}">Details</button></div>`).join("");
+    }
+    function gateList(state){
+      if(!state.run)return""; const gates=state.run.id==="run-01J8ZT7G"?state.gates:state.gates.map((g,i)=>({...g,state:i<4?"Passed":"Passed",code:"pass",action:null,note:i===4?"The Run reached its recorded terminal outcome.":g.note}));
+      return `<ol class="gate-list">${gates.map(g=>`<li class="gate"><span class="gate-dot ${g.code}" aria-hidden="true">${g.code==="pass"?"✓":g.code==="block"?"!":"·"}</span><div class="gate-copy"><div><span class="gate-name">${g.name}</span><span class="gate-state">${g.state}</span></div><div class="gate-note">${g.note}</div><div class="gate-meta">${g.source} · ${g.observed}</div>${g.action==="extend"&&state.scenario!=="active"?`<div class="gate-actions action-line">${actionButton("extend","Add review rounds",state,"","primary")}${actionButton("override","Review scoped override",state)}</div>${disabledNote(state)}`:g.action==="decision"&&state.scenario!=="active"?`<button class="btn ghost gate-actions" data-attention="review-cap">Open human decision</button>`:""}</div></li>`).join("")}</ol>`;
+    }
+    function runActions(state){ if(!state.run||!state.run.current)return""; let html=actionButton("message","Message coordinator",state,state.run.ownerId); if(state.scenario==="active")html+=actionButton("pause","Pause Run",state); return `<div class="action-line">${html}${disabledNote(state)}</div>`; }
+    function technicalDetails(state){ return `<details><summary>Technical runtime details</summary><div><p>Runtime instance: <span class="mono">${state.project.room}</span></p><p>Deployment: <span class="mono">${state.project.deployment}</span></p><p>Writable repository: <span class="mono">${state.project.repository}</span></p><p>These identifiers support diagnosis and audit. They do not create another navigation level.</p></div></details>`; }
+    function projectBody(state){ if(!state.project)return `<div class="empty">Choose a Project first.</div>`; return `${snapshot(state)}<section class="s-section"><div class="s-section-head"><h2>Runs</h2><span>${status(state.project.health)}</span></div>${runLines(state)}</section><section class="s-secondary"><h2>Project context</h2><details open><summary>Participants · ${state.people.length}</summary><div>${personLines(state)}</div></details><details><summary>Significant activity</summary><div>${eventLines(state)}</div></details>${technicalDetails(state)}</section>`; }
+    function runBody(state){ if(!state.run||!state.project)return `<div class="empty"><strong>No Run selected.</strong><p>Choose a Project, then one of its Runs.</p><a class="btn primary" href="${href("projects")}" data-nav>Choose Project</a></div>`; return `${snapshot(state)}<div style="margin-bottom:28px">${runActions(state)}</div><div class="t-run-layout"><section><h2>Policy gates</h2>${gateList(state)}</section><aside class="t-facts"><h2>Run facts</h2><div class="fact"><span class="muted">Literal state</span><span>${state.run.state}</span></div><div class="fact"><span class="muted">Derived next move</span><span>${state.run.derived}</span></div><div class="fact"><span class="muted">Candidate</span><span class="mono">${state.run.revision}</span></div><div class="fact"><span class="muted">Review</span><span>${state.run.review} · ${state.run.round}/${state.run.cap}</span></div><div class="fact"><span class="muted">Coordinator</span><span>${state.run.owner}</span></div><details><summary>Evidence and Forge links</summary><div><button class="btn ghost" data-evidence="candidate">Candidate evidence</button><button class="btn ghost" data-evidence="review">Exact review</button><button class="btn ghost" data-evidence="logs">Completed logs</button></div></details></aside></div>`; }
+
+    function treeNav(state){
+      const selected=state.project?.key; return `<div class="t-tree-label">Project tree</div><nav aria-label="Project and Run hierarchy"><ul class="tree-list">${state.projects.map(p=>`<li class="tree-project ${selected===p.key?"selected":""}"><a href="${projectHref(p.key)}" data-nav aria-current="${page()==="project"&&selected===p.key?"page":"false"}"><strong>${p.name}</strong><small>${p.work}</small></a>${selected===p.key?`<ul class="tree-runs">${p.runs.map(id=>`<li><a href="${runHref(p.key,id)}" data-nav aria-current="${page()==="run"&&state.run?.id===id?"page":"false"}">${id}<br><small>${state.runs[id].state}</small></a></li>`).join("")}</ul>`:""}</li>`).join("")}</ul></nav>`;
+    }
+    function renderE1(state,p){
+      let content="";
+      if(p==="projects")content=`${pageHead("Global area 01","Projects","Choose a Project to enter its operating context. Runtime instances remain implementation detail, not a navigation level.","Three Projects · two current Runs · three items need you")}${snapshot(state)}<div class="t-overview"><section><h2>Project overview</h2>${projectLines(state)}</section><aside><div class="row between"><h2>Needs you</h2><a class="text-link small" href="${href("inbox")}" data-nav>All ${state.attention.length}</a></div>${state.attention.slice(0,3).map(attentionLine).join("")}</aside></div>`;
+      if(p==="inbox")content=`${pageHead("Global area 02","Inbox","Only human decisions, reconciliation, and actionable health incidents appear here. Open an item for evidence and valid actions.","Not a Message stream")}${snapshot(state)}${state.attention.map(attentionLine).join("")}`;
+      if(p==="health")content=`${pageHead("Global area 03","Health","Project runtime health is summarized globally. Open a Project check for component-level diagnosis and safe remediation.","State and data quality stay separate")}${snapshot(state)}${healthLines(state)}`;
+      if(p==="project")content=state.project?`${pageHead("Selected Project",state.project.name,"Runs, Participants, and significant activity belong to this Project view.",`${state.project.work} · ${state.project.latest}`)}${projectBody(state)}`:`${pageHead("Selected Project","Choose a Project","Project context appears only after selection.")}`;
+      if(p==="run")content=state.run?`${pageHead("Selected Run",state.run.title,`${state.run.id} · generation ${state.run.generation} · candidate ${state.run.revision}`,`${state.project.name} / ${state.run.state}`)}${runBody(state)}`:`${pageHead("Selected Run","Choose a Run","Run navigation appears beneath its selected Project.")}${runBody(state)}`;
+      return `<div class="t-shell"><aside class="t-tree"><div class="t-brand">Manager / Explorer</div>${globalNav(state)}${treeNav(state)}</aside><main class="t-main"><div class="t-content">${content}</div></main></div>`;
+    }
+
+    function topE2(state){ const names={C:"Field Notes",D:"Field Notes / Dark"}; return `<header class="s-top"><div class="s-brand">Manager / ${names[variant()]}</div>${globalNav(state)}</header>`; }
+    function projectIndex(state){ const selected=state.project?.key; return `<aside class="s-project-index"><div class="s-index-head"><strong>Projects</strong><a href="${href("projects")}" data-nav>View all</a></div><nav aria-label="Project and Run hierarchy"><ul class="s-project-tree">${state.projects.map(project=>`<li class="s-project-item ${selected===project.key?"selected":""}"><span class="s-project-dot" aria-hidden="true"></span><a class="s-project-link" href="${projectHref(project.key)}" data-nav aria-current="${page()==="project"&&selected===project.key?"page":"false"}"><strong>${project.name}</strong><small>${project.work}</small></a>${selected===project.key?`<ul class="s-index-runs">${project.runs.map(id=>`<li class="${page()==="run"&&state.run?.id===id?"selected":""}"><a href="${runHref(project.key,id)}" data-nav aria-current="${page()==="run"&&state.run?.id===id?"page":"false"}">${id}<br><small>${state.runs[id].state}</small></a></li>`).join("")}</ul>`:""}</li>`).join("")}</ul></nav></aside>`; }
+    function branchCanvas(state){ return `<div class="s-spine-canvas">${state.projects.map(project=>`<section class="s-project-branch"><span class="s-map-dot" aria-hidden="true"></span><div class="s-branch-name"><a class="text-link" href="${projectHref(project.key)}" data-nav>${project.name}</a><div class="sub">${project.participants}</div></div><div class="s-branch-panel"><div><div class="row wrap"><strong>${project.work}</strong>${status(project.health)}</div><p class="small muted" style="margin:8px 0 0">${project.latest}</p></div><div class="s-branch-actions"><a class="btn primary" href="${projectHref(project.key)}" data-nav>Open</a><button class="btn ghost" data-project-detail="${project.key}">Quick view</button></div></div></section>`).join("")}</div>`; }
+    function trail(state,p){ if(!state.project)return""; return `<nav class="s-breadcrumb" aria-label="Breadcrumb"><a href="${href("projects")}" data-nav>Projects</a><span class="separator">/</span><a href="${projectHref(state.project.key)}" data-nav ${p==="project"?`aria-current="page"`:""}>${state.project.name}</a>${state.run?`<span class="separator">/</span><span aria-current="page">${state.run.id}</span>`:""}</nav>`; }
+    function renderE2(state,p){
+      let content="";
+      if(p==="projects")content=`${pageHead("Projects","Project overview","Choose a Project to open its Runs, Participants, and recent activity.","Three Projects · two current Runs")}${snapshot(state)}<section class="s-attention-summary"><div><strong>${state.attention.length} items need you</strong><div class="sub">Human decisions and operational intervention</div></div><a class="btn" href="${href("inbox")}" data-nav>Open Inbox</a></section>${branchCanvas(state)}`;
+      if(p==="inbox")content=`${pageHead("Inbox","Attention queue","Only human decisions, reconciliation, and actionable health incidents appear here.",`${state.attention.length} unresolved`)}${snapshot(state)}${state.attention.map(attentionLine).join("")}`;
+      if(p==="health")content=`${pageHead("Health","Runtime health","Project runtime health is summarized here; component state and data quality remain separate.","Select a Project for component detail")}${snapshot(state)}${healthLines(state)}`;
+      if(p==="project")content=state.project?`${trail(state,p)}${pageHead("Project",state.project.name,"Runs, Participants, and significant activity for this Project.",`${state.project.work} · ${state.project.latest}`)}${projectBody(state)}`:`${pageHead("Project","Choose a Project","Use the Project index to open a Project.")}${branchCanvas(state)}`;
+      if(p==="run")content=state.run?`${trail(state,p)}${pageHead("Run",state.run.title,`${state.run.id} · generation ${state.run.generation}. Gate checks can pass or reopen independently.`,`${state.run.state} · ${state.run.revision}`)}${runBody(state)}`:`${pageHead("Run","Choose a Run","Select a Project, then one of its Runs.")}`;
+      return `<div class="s-shell">${topE2(state)}<div class="s-frame">${projectIndex(state)}<main class="s-main"><div class="s-main-content">${content}</div></main></div></div>`;
+    }
+
+    function topE3(state,p){
+      const context=state.project?`<nav class="r-context" aria-label="Selected context"><span class="r-context-label">CONTEXT</span><a class="r-context-node ${p==="project"?"active":""}" href="${projectHref(state.project.key)}" data-nav><span class="r-context-dot" aria-hidden="true"></span>${state.project.name}</a>${state.run?`<a class="r-context-node active" href="${runHref(state.project.key,state.run.id)}" data-nav aria-current="page"><span class="r-context-dot" aria-hidden="true"></span>${state.run.id}</a>`:""}</nav>`:`<div class="r-context"><span class="r-context-label">CONTEXT</span><span class="r-context-node"><span class="r-context-dot" aria-hidden="true"></span>Choose a Project to open its branch</span></div>`;
+      return `<header class="r-head"><div class="r-global-row"><div class="r-brand">Manager / Dual rail</div>${globalNav(state,"r-global")}</div>${context}</header>`;
+    }
+    function titleE3(code,title,meta){ return `<div class="r-title"><div><div class="page-code">${code}</div><h1 tabindex="-1">${title}</h1></div><div class="r-title-meta">${meta}</div></div>`; }
+    function renderE3(state,p){
+      let content="";
+      if(p==="projects")content=`${titleE3("GLOBAL / PROJECTS","Projects","Global areas are independent tabs. The context rail starts only after a Project is chosen.")}${snapshot(state)}<div class="r-tape ${state.attention.some(i=>i.level==='high')?"bad":""}"><strong>NEEDS YOU</strong><button class="btn ghost" data-attention="${state.attention[0].key}">${state.attention[0].title} · ${state.attention[0].age}</button><a class="text-link" href="${href("inbox")}" data-nav>All ${state.attention.length}</a></div><div class="r-projects">${state.projects.map((project,i)=>`<section class="r-project"><div class="r-project-index">0${i+1}</div><h2><a class="text-link" href="${projectHref(project.key)}" data-nav>${project.name}</a></h2><p class="muted">${project.participants}</p><div class="stack"><span>${status(project.health)}</span><strong>${project.work}</strong><span class="small muted">${project.latest}</span></div><button class="btn" style="margin-top:24px" data-project-detail="${project.key}">Quick view</button></section>`).join("")}</div>`;
+      if(p==="inbox")content=`${titleE3("GLOBAL / INBOX","Attention","This is a peer global area, not a step between Projects and Health. Items open their own context in a dialog.")}${snapshot(state)}<div style="margin-top:35px;border-top:3px solid var(--text)">${state.attention.map(attentionLine).join("")}</div>`;
+      if(p==="health")content=`${titleE3("GLOBAL / HEALTH","Health anatomy","Project runtime health is global. Inspect a Project to reveal its component layers without changing the Project-to-Run context rail.")}${snapshot(state)}<div class="r-health">${healthLines(state)}</div>`;
+      if(p==="project")content=state.project?`${titleE3("CONTEXT / PROJECT",state.project.name,`${state.project.work}. Run and Participant tracks belong to the selected Project.`)}${snapshot(state)}<div class="r-tracks"><div class="r-track"><div class="r-track-label"><strong>RUNS</strong><div class="sub">current + recent</div></div><div class="r-track-items">${state.project.runs.map(id=>{const r=state.runs[id];return `<a class="r-track-item ${r.current?"current":""} text-link" href="${runHref(state.project.key,id)}" data-nav><strong>${r.id}</strong><br><small>${r.state} · ${r.title}</small></a>`;}).join("")}</div></div><div class="r-track"><div class="r-track-label"><strong>PARTICIPANTS</strong><div class="sub">process / readiness</div></div><div class="r-track-items">${state.people.map(person=>`<button class="r-track-item btn ghost" data-person="${person.id}"><strong>${person.name}</strong><br><small>${person.process}<br>${person.readiness}</small></button>`).join("")}</div></div><div class="r-track"><div class="r-track-label"><strong>ACTIVITY</strong><div class="sub">significant events</div></div><div class="r-track-items">${state.events.slice(0,4).map(e=>`<span class="r-track-item"><strong>${e.time}</strong><br><small>${e.title}</small></span>`).join("")}</div></div></div>${technicalDetails(state)}`:`${titleE3("CONTEXT","Choose a Project","The context rail opens after Project selection.")}`;
+      if(p==="run")content=state.run?`${titleE3("CONTEXT / RUN",state.run.title,`${state.project.name} → ${state.run.id} · generation ${state.run.generation} · ${state.run.revision}. Gate checks are not lifecycle phases.`)}${snapshot(state)}<div class="r-tape"><strong>STEERING</strong>${runActions(state)}</div>${flowGates(state,"r-gates","r-gate")}<details><summary>Evidence and Run properties</summary><div>${runBody(state)}</div></details>`:`${titleE3("CONTEXT / RUN","Choose a Run","Select a Project first; its Runs then appear on the context rail.")}`;
+      return `<div class="r-shell">${topE3(state,p)}<main class="r-main">${content}</main></div>`;
+    }
+
+    function variantGates(state){
+      if(!state.run)return[];
+      return state.run.id==="run-01J8ZT7G"?state.gates:state.gates.map((gate,index)=>({...gate,state:"Passed",code:"pass",action:null,note:index===4?"The Run reached its recorded terminal outcome.":gate.note}));
+    }
+    function variantGateAction(gate,state){
+      if(state.scenario==="active")return"";
+      if(gate.action==="extend")return `<div class="walk-gate-actions action-line">${actionButton("extend","Add review rounds",state,"","primary")}${actionButton("override","Review scoped override",state)}</div>${disabledNote(state)}`;
+      if(gate.action==="decision")return `<button class="btn ghost walk-gate-actions" data-attention="review-cap">Open human decision</button>`;
+      return"";
+    }
+    function walkHead(code,title,lede,meta=""){ return `<header class="walk-heading"><div class="walk-number">${code}</div><div class="walk-title-row"><div><h1 tabindex="-1">${title}</h1><p>${lede}</p></div>${meta?`<div class="walk-title-meta">${meta}</div>`:""}</div></header>`; }
+    function walkTape(state){ const item=state.attention[0]; return item?`<div class="walk-tape ${item.level==="high"?"danger":""}"><strong>NEEDS YOU</strong><button class="btn ghost" data-attention="${item.key}">${item.title} · ${item.age}</button><a class="text-link" href="${href("inbox")}" data-nav>All ${state.attention.length}</a></div>`:""; }
+    function walkDoors(state){ return `<div class="walk-corridor">${state.projects.map((project,index)=>`<section class="walk-door"><div class="walk-door-number">0${index+1}</div><h2><a class="text-link" href="${projectHref(project.key)}" data-nav>${project.name}</a></h2><p class="muted">${project.participants}</p><div class="stack"><span>${status(project.health)}</span><strong>${project.work}</strong><span class="small muted">${project.latest}</span></div><div class="walk-door-actions"><a class="btn primary" href="${projectHref(project.key)}" data-nav>Open Project</a><button class="btn ghost" data-project-detail="${project.key}">Quick view</button></div></section>`).join("")}</div>`; }
+    function walkTracks(state){ return `<div class="walk-track-board"><div class="walk-track-row"><div class="walk-track-label"><strong>RUN TRACK</strong><div class="sub">current + recent</div></div><div class="walk-track-items">${state.project.runs.map(id=>{const run=state.runs[id];return `<a class="walk-step ${run.current?"current":"good"} text-link" href="${runHref(state.project.key,id)}" data-nav><strong>${run.title}</strong><br><small>${run.id} · ${run.state}</small></a>`;}).join("")}</div></div><div class="walk-track-row"><div class="walk-track-label"><strong>PEOPLE TRACK</strong><div class="sub">process / readiness</div></div><div class="walk-track-items">${state.people.map(person=>`<button class="walk-step ${tone(person.process)}" data-person="${person.id}"><strong>${person.name}</strong><br><small>${person.process}<br>${person.readiness}</small></button>`).join("")}</div></div><div class="walk-track-row"><div class="walk-track-label"><strong>ACTIVITY TRACK</strong><div class="sub">significant events</div></div><div class="walk-track-items">${state.events.slice(0,4).map(event=>`<span class="walk-step"><strong>${event.time}</strong><br><small>${event.title}</small></span>`).join("")}</div></div></div>`; }
+    function walkGateCards(state){ return `<div class="walk-gate-grid">${variantGates(state).map((gate,index)=>`<article class="walk-gate ${gate.code}"><div class="walk-gate-code">G${String(index+1).padStart(2,"0")}</div><h2>${gate.name}</h2>${status(gate.state)}<p class="small muted" style="margin-top:13px">${gate.note}</p><div class="tiny quiet">${gate.source} · ${gate.observed}</div>${variantGateAction(gate,state)}</article>`).join("")}</div>`; }
+    function walkHealth(state){ return `<div class="walk-health-grid">${state.projects.map(project=>`<article class="walk-health-card ${tone(project.health)}"><div class="walk-gate-code">${project.key.toUpperCase()}</div><h2 style="margin-top:28px">${project.name}</h2><p>${status(project.health)}</p><p class="muted small">Data ${project.freshness} · ${project.connection}<br>Observed ${project.observed}</p><button class="btn" data-health-project="${project.key}">Inspect components</button></article>`).join("")}</div>`; }
+    function walkInbox(state){ return `<div class="walk-inbox">${state.attention.map((item,index)=>`<button class="walk-inbox-item" data-attention="${item.key}"><span class="walk-inbox-code">${item.level==="high"?"ACT":"MON"}-${String(index+1).padStart(2,"0")}</span><span><strong>${item.title}</strong><span class="attention-summary">${item.summary}</span></span><span class="small muted">${item.scope}<br>${item.age}</span></button>`).join("")}</div>`; }
+    function renderB(state,p){
+      let content="";
+      if(p==="projects")content=`${walkHead("GLOBAL / PROJECTS","Project walkway","Open a Project doorway to enter its Runs, Participants, and significant activity.","Three Projects · two current Runs · hierarchy remains in the Project index")}${snapshot(state)}${walkTape(state)}${walkDoors(state)}`;
+      if(p==="inbox")content=`${walkHead("GLOBAL / INBOX","Attention tape","Only human decisions, reconciliation, and actionable health incidents travel here.",`${state.attention.length} unresolved · ordinary Messages stay with their Project or Run`)}${snapshot(state)}${walkInbox(state)}`;
+      if(p==="health")content=`${walkHead("GLOBAL / HEALTH","Health anatomy","Project runtime state and data quality remain separate. Open a card for component detail.","Current observations · stale and no-data states remain literal")}${snapshot(state)}${walkHealth(state)}`;
+      if(p==="project")content=state.project?`${trail(state,p)}${walkHead(`PROJECT / ${state.project.key.toUpperCase()}`,state.project.name,"Runs, people, and activity occupy separate tracks without introducing another navigation level.",`${state.project.work} · ${state.project.latest}`)}${snapshot(state)}${walkTracks(state)}<div class="walk-project-lower"><section class="walk-ledger"><div class="s-section-head"><h2>Significant activity</h2><span class="small muted">Latest first</span></div>${eventLines(state)}</section><aside class="walk-fact-card"><h2>Project note</h2><div class="walk-fact"><span class="caps">Health</span>${status(state.project.health)}</div><div class="walk-fact"><span class="caps">Current work</span><strong>${state.project.work}</strong><span class="small muted">${state.project.latest}</span></div><div class="walk-fact"><span class="caps">Participants</span><span>${state.project.participants}</span></div>${technicalDetails(state)}</aside></div>`:`${walkHead("PROJECT","Choose a Project","Use the Project index to open its operating context.")}`;
+      if(p==="run")content=state.run?`${trail(state,p)}${walkHead(`RUN / GENERATION ${state.run.generation}`,state.run.title,`${state.run.id} · candidate ${state.run.revision}. Gates are independent checks and may reopen independently.`,`${state.project.name} · literal state ${state.run.state}`)}${snapshot(state)}<div class="walk-tape"><strong>STEERING STATION</strong>${runActions(state)||status(state.run.state)}</div><div class="walk-project-lower"><section><div class="s-section-head"><h2>Independent gates</h2><span class="small muted">Not lifecycle phases</span></div>${walkGateCards(state)}</section><aside class="walk-fact-card"><h2>Run facts</h2><div class="walk-fact"><span class="caps">Literal state</span><strong>${state.run.state}</strong></div><div class="walk-fact"><span class="caps">Derived next move</span><span>${state.run.derived}</span></div><div class="walk-fact"><span class="caps">Review</span><span>${state.run.review} · ${state.run.round}/${state.run.cap}</span></div><div class="walk-fact"><span class="caps">Coordinator</span><span>${state.run.owner}</span></div><details><summary>Evidence and Forge links</summary><div><button class="btn ghost" data-evidence="candidate">Candidate evidence</button><button class="btn ghost" data-evidence="review">Exact review</button><button class="btn ghost" data-evidence="logs">Completed logs</button></div></details></aside></div>`:`${walkHead("RUN","Choose a Run","Select a Project, then one of its Runs from the index.")}`;
+      return `<div class="s-shell walk-shell">${topE2(state)}<div class="s-frame">${projectIndex(state)}<main class="s-main"><div class="s-main-content">${content}</div></main></div></div>`;
+    }
+
+    function folioHead(index,title,lede,meta=""){ return `<header class="folio-heading"><div class="folio-index">${index}</div><h1 tabindex="-1">${title}</h1><p>${lede}</p>${meta?`<div class="folio-meta">${meta}</div>`:""}</header>`; }
+    function folioAlert(state){ const item=state.attention[0]; return item?`<div class="folio-alert"><strong>PINNED</strong><button class="btn ghost" data-attention="${item.key}">${item.title} · ${item.age}</button><a class="text-link" href="${href("inbox")}" data-nav>Inbox ${state.attention.length}</a></div>`:""; }
+    function folioProjects(state){ return `<div class="folio-projects">${state.projects.map((project,index)=>`<article class="folio-project-card ${index===0?"feature":""}"><div class="folio-card-number">0${index+1}</div><h2><a class="text-link" href="${projectHref(project.key)}" data-nav>${project.name}</a></h2><p>${status(project.health)}</p><strong>${project.work}</strong><p class="small muted">${project.latest}<br>${project.participants}</p><div class="folio-card-actions"><a class="btn primary" href="${projectHref(project.key)}" data-nav>Open Project</a><button class="btn ghost" data-project-detail="${project.key}">Quick view</button></div></article>`).join("")}</div>`; }
+    function folioCases(state){ return `<div class="folio-case-list">${state.attention.map((item,index)=>`<button class="folio-case ${item.level}" data-attention="${item.key}"><span class="folio-case-code">CASE ${String(index+1).padStart(2,"0")}</span><span><strong>${item.title}</strong><span class="attention-summary">${item.summary}</span></span><span class="small muted">${item.scope}<br>${item.age}</span></button>`).join("")}</div>`; }
+    function folioRuns(state){ return `<div class="folio-runs">${state.project.runs.map(id=>{const run=state.runs[id];return `<article class="folio-run-card"><div><a class="run-title text-link" href="${runHref(state.project.key,id)}" data-nav>${run.title}</a><div class="sub mono">${run.id} · generation ${run.generation}</div></div><div>${status(run.state)}<div class="sub">${run.derived}</div></div><a class="btn" href="${runHref(state.project.key,id)}" data-nav>Open Run</a></article>`;}).join("")}</div>`; }
+    function folioPeople(state){ return `<div class="folio-people">${state.people.map(person=>`<button class="folio-person" data-person="${person.id}"><span class="folio-person-head">${avatar(person)}<span><strong>${person.name}</strong><span class="sub">${person.role} · ${person.actor}</span></span></span><span class="small">${status(person.process)}<br>${status(person.readiness)}</span></button>`).join("")}</div>`; }
+    function runJourney(state){
+      let steps;
+      if(!state.run.current)steps=[{phase:"Candidate",detail:state.run.revision,state:"complete"},{phase:"Evidence",detail:"checks recorded",state:"complete"},{phase:"Review",detail:state.run.review,state:"complete"},{phase:"Human decision",detail:"accepted",state:"complete"},{phase:"Run closed",detail:state.run.derived,state:"complete"}];
+      else if(state.run.id!=="run-01J8ZT7G")steps=[{phase:"Implementation",detail:"candidate prepared",state:"complete"},{phase:"Review",detail:state.run.review,state:"complete",feedback:true},{phase:"Implementation",detail:"changes applied",state:"complete"},{phase:"Run paused",detail:state.run.state,state:"current"},{phase:"Operator decision",detail:state.run.derived,state:"future"}];
+      else if(state.scenario==="active")steps=[{phase:"Implementation",detail:"prior candidate",state:"complete"},{phase:"Review",detail:`round ${Math.max(1,state.run.round-1)} · changes requested`,state:"complete",feedback:true},{phase:"Implementation",detail:state.run.revision,state:"current"},{phase:"Evidence",detail:"awaiting candidate",state:"future"},{phase:"Review",detail:"next round",state:"future"}];
+      else steps=[{phase:"Implementation",detail:"prior candidate",state:"complete"},{phase:"Review",detail:`round ${Math.max(1,state.run.round-1)} · changes requested`,state:"complete",feedback:true},{phase:"Implementation",detail:state.run.revision,state:"complete"},{phase:"Review",detail:`round ${state.run.round} · ${state.run.review}`,state:"complete"},{phase:"Human decision",detail:state.run.derived,state:"current"}];
+      return `<section class="run-journey" aria-labelledby="run-journey-title"><div class="run-journey-head"><h2 id="run-journey-title">Run journey</h2><span class="small muted">Chronological observations · separate from gate truth</span></div><div class="run-journey-scroll"><ol class="run-journey-track">${steps.map((step,index)=>`<li class="journey-step ${step.state} ${step.feedback?"feedback":""}"><span class="journey-return">↩ CHANGES REQUESTED</span><span class="journey-dot" aria-hidden="true">${step.state==="complete"?"✓":step.state==="current"?"●":"·"}</span><span class="journey-copy"><span class="journey-phase">${step.phase}</span><span class="journey-detail">${step.detail}</span></span></li>`).join("")}</ol></div></section>`;
+    }
+    function folioGates(state){ return `<div class="gate-ledger">${variantGates(state).map((gate,index)=>`<button class="gate-ledger-row ${gate.code}" data-gate-index="${index}" data-project="${state.project.key}" data-run="${state.run.id}" aria-label="Open ${gate.name} details"><span class="gate-ledger-code">G${String(index+1).padStart(2,"0")}</span><span class="gate-ledger-copy"><strong>${gate.name}</strong><small>${gate.note}</small></span><span class="gate-ledger-state">${status(gate.state)}</span><span class="gate-ledger-arrow" aria-hidden="true">›</span></button>`).join("")}</div>`; }
+    function folioHealth(state){ return `<div class="folio-health-grid">${state.projects.map((project,index)=>`<article class="folio-health-card"><div class="folio-case-code">SHEET 0${index+1}</div><h2 style="margin-top:34px">${project.name}</h2><p>${status(project.health)}</p><div class="walk-fact"><span class="caps">Data quality</span><strong>${project.freshness}</strong><span class="small muted">${project.connection} · ${project.observed}</span></div><button class="btn" data-health-project="${project.key}">Open health sheet</button></article>`).join("")}</div>`; }
+    function renderC(state,p){
+      let content="";
+      if(p==="projects")content=`${folioHead("P","Project field notes","A working desk for Projects, Runs, people, and the few signals that require human judgment.","GLOBAL AREA · PROJECTS")}${snapshot(state)}${folioAlert(state)}${folioProjects(state)}`;
+      if(p==="inbox")content=`${folioHead("I","Attention casebook","Each case opens its evidence and only the actions valid for that exact context.",`GLOBAL AREA · INBOX · ${state.attention.length} OPEN CASES`)}${snapshot(state)}${folioCases(state)}`;
+      if(p==="health")content=`${folioHead("H","Runtime field checks","Current state, freshness, unknown outcomes, and no-data observations retain their literal meaning.","GLOBAL AREA · HEALTH")}${snapshot(state)}${folioHealth(state)}`;
+      if(p==="project")content=state.project?`${trail(state,p)}${folioHead("P",state.project.name,"The selected Project keeps its Runs, Participants, and activity together while technical identity stays folded away.",`${state.project.work.toUpperCase()} · ${state.project.latest.toUpperCase()}`)}${snapshot(state)}<div class="folio-project-layout"><div><section class="folio-section"><div class="folio-section-head"><h2>Runs</h2>${status(state.project.health)}</div>${folioRuns(state)}</section><section class="folio-section"><div class="folio-section-head"><h2>Participants</h2><span class="small muted">Process and readiness stay separate</span></div>${folioPeople(state)}</section><section class="folio-section folio-activity"><div class="folio-section-head"><h2>Significant activity</h2><span class="small muted">Latest first</span></div>${eventLines(state)}</section></div><aside class="folio-side-note"><h2>Project note</h2><p>${status(state.project.health)}</p><div class="walk-fact"><span class="caps">Current work</span><strong>${state.project.work}</strong><span class="small">${state.project.latest}</span></div><div class="walk-fact"><span class="caps">Availability</span><span>${state.project.participants}</span></div>${technicalDetails(state)}</aside></div>`:`${folioHead("P","Choose a Project","Use the Project index to open its field notes.")}`;
+      if(p==="run")content=state.run?`${trail(state,p)}${folioHead("R",state.run.title,`${state.run.id} · generation ${state.run.generation}. Independent gate cards report truth without pretending to be sequential phases.`,`${state.project.name.toUpperCase()} · ${state.run.revision.toUpperCase()}`)}${snapshot(state)}${runJourney(state)}<div class="folio-run-layout"><section><div class="folio-section-head"><h2>Gate ledger</h2><span class="small muted">Current independent truth · select a row</span></div>${folioGates(state)}</section><aside class="folio-side-note"><h2>Run note</h2><p>${status(state.run.state)}</p><div class="walk-fact"><span class="caps">Derived next move</span><strong>${state.run.derived}</strong></div><div class="walk-fact"><span class="caps">Review</span><span>${state.run.review} · ${state.run.round}/${state.run.cap}</span></div><div class="walk-fact"><span class="caps">Coordinator</span><span>${state.run.owner}</span></div>${runActions(state)}<details><summary>Evidence and Forge links</summary><div><button class="btn ghost" data-evidence="candidate">Candidate evidence</button><button class="btn ghost" data-evidence="review">Exact review</button><button class="btn ghost" data-evidence="logs">Completed logs</button></div></details></aside></div>`:`${folioHead("R","Choose a Run","Select a Project, then one of its Runs from the index.")}`;
+      return `<div class="s-shell folio-shell">${topE2(state)}<div class="s-frame">${projectIndex(state)}<main class="s-main"><div class="s-main-content">${content}</div></main></div></div>`;
+    }
+
+    const renderers={C:renderC,D:renderC};
+    function tools(){ const keys=Object.keys(variants),current=variant(),index=keys.indexOf(current),previous=keys[(index-1+keys.length)%keys.length],next=keys[(index+1)%keys.length]; return `<div class="prototype-tools"><nav class="prototype-variants" aria-label="Prototype variants"><button data-variant="${previous}" aria-label="Previous variant">←</button><div class="prototype-variant-copy"><strong>Variant ${current}</strong> · ${variants[current]}</div><button data-variant="${next}" aria-label="Next variant">→</button></nav><span class="prototype-divider" aria-hidden="true"></span><label class="row"><span class="tiny muted">Scenario</span><select id="scenario"><option value="active" ${scenario()==="active"?"selected":""}>Active work</option><option value="attention" ${scenario()==="attention"?"selected":""}>Needs decision</option><option value="offline" ${scenario()==="offline"?"selected":""}>Disconnected</option></select></label><a href="https://git.puglab.im/attachments/08d88927-c0d6-4665-b6fe-62a62bf6aa20">Earlier study</a></div>`; }
+    function render(focus=false){ const state=cloneState(),p=page(),key=variant(); document.body.className=`v-${key}`; document.getElementById("app").innerHTML=`${renderers[key](state,p)}${tools()}`; document.title=`${variants[key]} · ${p}`; if(focus)requestAnimationFrame(()=>document.querySelector("main h1")?.focus()); }
+
+    function openDrawer(title,body){ lastTrigger=document.activeElement; const d=document.getElementById("drawer"); document.getElementById("drawer-title").textContent=title; document.getElementById("drawer-body").innerHTML=body; d.hidden=false; requestAnimationFrame(()=>document.getElementById("drawer-title").focus()); }
+    function closeDrawer(restore=true){ document.getElementById("drawer").hidden=true; if(restore&&lastTrigger?.isConnected)lastTrigger.focus(); }
+    function projectDetail(key){ const state=cloneState(),p=state.projects.find(x=>x.key===key); openDrawer(p.name,`<div class="stack"><span>${status(p.health)}</span><div><span class="caps">Current work</span><p><strong>${p.work}</strong><br><span class="muted small">${p.latest}</span></p></div><p class="small">${p.runs.length} current or recent Runs · ${p.participants} · ${p.attention} need attention</p><a class="btn primary" href="${projectHref(p.key)}" data-nav>Open Project</a><details><summary>Technical runtime identity</summary><div><p class="mono">${p.room}<br>${p.deployment}<br>${p.repository}</p></div></details></div>`); }
+    function personDetail(id){ const state=cloneState(),person=Object.values(state.participants).flat().find(p=>p.id===id); if(!person)return; const p=state.projects.find(project=>project.runs.includes(person.binding))||state.project||state.projects.find(project=>state.participants[project.key].some(x=>x.id===id)); const scoped=stateFor(p.key,p.runs[0]); const controls=person.process.includes("Alive")?`<div class="action-line">${actionButton("message","Message Participant",scoped,person.id,"primary")}</div>${disabledNote(scoped)}`:`<p class="small muted">No steering action is available because no Participant process is observed.</p>`; openDrawer(person.name,`<p class="muted">${person.role} · Actor Identity ${person.actor}</p><div class="stack"><div>${truth(person.process,"Process observation",p.observed)}</div><div>${truth(person.readiness,"Readiness observation",p.observed)}</div><div><span class="caps">Binding</span><p>${person.binding}</p></div><label class="small">Context · ${person.context}%<progress max="100" value="${person.context}">${person.context}%</progress></label><label class="small">Provider quota · ${person.quota||"No data"}${person.quota?"%":""}<progress max="100" value="${person.quota}">${person.quota}%</progress></label>${controls}</div>`); }
+    function healthProject(key){ const state=cloneState(),p=state.projects.find(x=>x.key===key); openDrawer(`${p.name} health`,`<p>${status(p.health)}</p><p class="muted">${p.connection} · data ${p.freshness} · ${p.observed}</p><div style="margin-top:18px">${healthLines(state,key)}</div>`); }
+    function healthDetail(key,scope){ const state=stateFor(scope),c=state.health[scope].find(x=>x.key===key); if(!c)return; const controls=["manager","coordination","forge","notifications","audit"].includes(c.key)?`<div class="action-line">${actionButton("recheck","Run check again",state,c.key)}</div>${disabledNote(state)}`:`<p class="small muted">Credential remediation starts through the approved authentication flow, not this read model.</p>`; openDrawer(c.name,`<div class="stack"><span>${status(c.state)}</span><div>${truth(c.quality,c.source,c.observed,"Data quality")}</div><p>${c.note}</p><details><summary>Sanitized diagnostics</summary><div><p>Project: ${state.project.name}</p><p>Check source: ${c.source}</p><p>No secret material, store paths, raw provider bodies, or unsanitized audit rows are projected.</p></div></details>${controls}</div>`); }
+    function evidenceDetail(kind){ const state=cloneState(),run=state.run; const body=kind==="logs"?`<p>Completed job log · 846 KiB · complete</p><p>Above 1 MiB the final 1 MiB remains available with truncation metadata.</p>`:kind==="review"?`<p><strong>${run?.review||"No review"}</strong> · round ${run?.round||"—"} of ${run?.cap||"—"}</p><p>The exact review is bound to ${run?.revision||"no candidate"}.</p>`:`<p class="mono">${run?.revision||"No candidate"}</p><p>Mechanical evidence is bound to this exact candidate.</p>`; openDrawer(kind==="logs"?"Completed logs":kind==="review"?"Review evidence":"Candidate evidence",body); }
+    function gateDetail(index,projectKey,runId){ const state=stateFor(projectKey,runId),gate=variantGates(state)[Number(index)];if(!gate)return;openDrawer(gate.name,`<div class="stack"><span>${status(gate.state)}</span><p>${gate.note}</p><div>${truth(gate.state,gate.source,gate.observed,"Gate state")}</div><details open><summary>How to read this</summary><div>This row reports the current truth of one independent check. It is not a lifecycle phase. The Run journey records repeated implementation and review visits separately.</div></details>${variantGateAction(gate,state)}</div>`); }
+
+    function openAttention(key){
+      const state=cloneState(),item=state.attention.find(x=>x.key===key)||base.attention.find(x=>x.key===key); if(!item)return; lastTrigger=document.activeElement;
+      document.getElementById("item-title").textContent=item.title;
+      document.getElementById("item-body").innerHTML=`<p class="page-lede">${item.summary}</p><div class="dialog-section"><span class="caps">Why this reached you</span><p>${item.why}</p>${truth(item.scope,"Manager projection",item.age,"Scope")}</div><div class="dialog-section"><span class="caps">Bound evidence</span><ul>${item.evidence.map(x=>`<li>${x}</li>`).join("")}</ul></div><details><summary>Technical action properties</summary><div>Eligibility, generation, policy version, operation identity, and audit references are validated by the owning service. Runtime instance and authenticated Actor Identity are derived, not supplied by this client.</div></details>${item.key==="forge-unknown"?`<div class="receipt"><strong>Outcome unknown — reconciliation required.</strong><p>No automatic retry will occur.</p></div>`:""}`;
+      const scoped=stateFor(item.project,item.run||"");
+      document.getElementById("item-actions").innerHTML=`<button class="btn" data-close-item>Close</button><a class="btn" href="${item.run?runHref(item.project,item.run):href(item.key==="credential-warning"||item.key==="forge-unknown"?"health":"project",{project:item.project})}" data-nav>Open ${item.run?"Run":"Health"}</a>${item.actions.map(k=>actionButton(k,k==="extend"?"Add review rounds":k==="approve"?"Approve candidate":"Stop and reject Run",scoped,"",k==="extend"?"primary":k==="reject"?"danger":"")).join("")}`;
+      const d=document.getElementById("item-dialog");d.showModal();requestAnimationFrame(()=>document.getElementById("item-title").focus());
+    }
+    function closeItem(restore=true){ const d=document.getElementById("item-dialog");if(d.open)d.close();if(restore&&lastTrigger?.isConnected)lastTrigger.focus(); }
+
+    const actionDefs={
+      message:{title:"Send Message",impact:"Queues a typed Message for the selected Participant's next safe delivery point.",submit:"Send Message",field:"Message",placeholder:"What should the Participant know?",owner:"Coordination service"},
+      pause:{title:"Pause Run",impact:"Stops new work delivery for this Run. It does not rewrite Forge state or discard work.",submit:"Pause Run",field:"Reason",placeholder:"Why should this Run pause?",owner:"Coordination service"},
+      extend:{title:"Extend review cap",impact:"Adds exactly two review rounds and records a policy amendment. It does not approve or merge the candidate.",submit:"Add 2 review rounds",field:"Justification",placeholder:"Why is another review cycle warranted?",owner:"Run Policy"},
+      approve:{title:"Approve exact candidate",impact:"Advances only the human gate for the exact candidate. It does not merge, deploy, or waive structural security invariants.",submit:"Approve candidate",field:"Approval note",placeholder:"Why is this candidate acceptable?",owner:"Gate evaluator"},
+      override:{title:"Review scoped override",impact:"Waives only the review-round-policy gate for this Run generation. Security invariants remain enforced.",submit:"Apply scoped override",field:"Required justification",placeholder:"Why should this gate be waived?",owner:"Run Policy"},
+      reject:{title:"Stop and reject Run",impact:"Stops this Run with a recorded reason. The Forge work item remains separate.",submit:"Stop and reject Run",field:"Required reason",placeholder:"Why should this Run stop?",owner:"Coordination service",destructive:true},
+      recheck:{title:"Run health check again",impact:"Requests one typed health recheck. It does not restart a service, rotate credentials, or retry an unknown Forge mutation.",submit:"Run check",field:null,owner:"Health adapter"}
+    };
+    function payload(kind,target,state,reason=""){ const value={operation_id:`mgr-${Date.now().toString(36)}`,kind}; if(kind==="message"){value.participant_id=target;value.message=reason;value.expected_sequence=18492;} else if(kind==="recheck"){value.component=target;value.expected_observation=state.project.observed;} else {value.run_id=state.run.id;value.generation=state.run.generation;value.expected_candidate=state.run.revision;if(reason)value.reason=reason;} if(kind==="extend"){value.add_rounds=2;value.expected_cap=state.run.cap;} if(kind==="override")value.gate="review-round-policy";return value; }
+    function openAction(kind,target,projectKey,runId){
+      const state=stateFor(projectKey,runId),def=actionDefs[kind];if(!def||!actionable(state))return;const returnTarget=(document.getElementById("item-dialog").open||!document.getElementById("drawer").hidden)?lastTrigger:document.activeElement;if(document.getElementById("item-dialog").open)closeItem(false);if(!document.getElementById("drawer").hidden)closeDrawer(false);lastTrigger=returnTarget;currentAction={kind,target,state};clearTimeout(actionTimer);
+      document.getElementById("action-title").textContent=def.title;document.getElementById("action-body").innerHTML=`<p id="action-impact">${def.impact}</p><div class="dialog-section"><span class="caps">Validated by</span><p>${def.owner}</p>${state.run?`<p class="mono small">${state.run.id} · generation ${state.run.generation} · ${state.run.revision}</p>`:""}</div>${def.field?`<label class="field">${def.field}<textarea id="action-reason" rows="4" required placeholder="${def.placeholder}"></textarea></label>`:""}${def.destructive?`<label class="check"><input id="action-ack" type="checkbox" required><span>I understand this stops the Run and leaves the Forge work item unchanged.</span></label>`:""}<details><summary>Request properties</summary><div><pre class="payload">${JSON.stringify(payload(kind,target,state),null,2)}</pre><p>Project runtime identity and authenticated Actor Identity are derived by the owning service.</p></div></details><div id="action-error" class="form-error" role="alert"></div><div id="action-receipt"></div>`;
+      const submit=document.getElementById("action-submit");submit.textContent=def.submit;submit.className=`btn ${def.destructive?"danger":"primary"}`;submit.disabled=false;submit.hidden=false;const d=document.getElementById("action-dialog");d.showModal();requestAnimationFrame(()=>{document.getElementById("action-title").focus();if(def.destructive)document.getElementById("action-cancel").focus();});
+    }
+    function closeAction(){clearTimeout(actionTimer);const d=document.getElementById("action-dialog");if(d.open)d.close();if(lastTrigger?.isConnected)lastTrigger.focus();}
+    function submitAction(event){event.preventDefault();if(!currentAction)return;const{kind,target,state}=currentAction,def=actionDefs[kind],reason=document.getElementById("action-reason")?.value.trim()||"",ack=document.getElementById("action-ack"),error=document.getElementById("action-error");error.textContent="";if(def.field&&!reason){error.textContent=`${def.field} is required.`;document.getElementById("action-reason").focus();return;}if(def.destructive&&ack&&!ack.checked){error.textContent="Acknowledge the stated consequence before continuing.";ack.focus();return;}const value=payload(kind,target,state,reason),submit=document.getElementById("action-submit");submit.disabled=true;document.getElementById("action-receipt").innerHTML=`<div class="receipt pending" role="status"><strong>Request pending</strong><p>The owning service is validating expected state.</p></div>`;actionTimer=setTimeout(()=>{document.getElementById("action-receipt").innerHTML=`<div class="receipt" role="status"><strong>Request confirmed</strong><p>Ledger reference <span class="mono">ledger/${Math.floor(Math.random()*9000+1000)}</span></p><details><summary>Submitted request</summary><div><pre class="payload">${JSON.stringify(value,null,2)}</pre></div></details></div>`;submit.hidden=true;},650);}
+
+    document.addEventListener("click",event=>{
+      const nav=event.target.closest("a[data-nav]");if(nav){event.preventDefault();if(document.getElementById("item-dialog").open)closeItem(false);if(!document.getElementById("drawer").hidden)closeDrawer(false);history.pushState({},"",nav.href);render(true);return;}
+      const v=event.target.closest("[data-variant]");if(v){setParams({variant:v.dataset.variant},false);return;}
+      const item=event.target.closest("[data-attention]");if(item){if(!document.getElementById("drawer").hidden)closeDrawer(false);openAttention(item.dataset.attention);return;}
+      const gate=event.target.closest("[data-gate-index]");if(gate){gateDetail(gate.dataset.gateIndex,gate.dataset.project,gate.dataset.run);return;}
+      const project=event.target.closest("[data-project-detail]");if(project){projectDetail(project.dataset.projectDetail);return;}
+      const person=event.target.closest("[data-person]");if(person){personDetail(person.dataset.person);return;}
+      const hp=event.target.closest("[data-health-project]");if(hp){healthProject(hp.dataset.healthProject);return;}
+      const health=event.target.closest("[data-health]");if(health){healthDetail(health.dataset.health,health.dataset.healthScope);return;}
+      const evidence=event.target.closest("[data-evidence]");if(evidence){evidenceDetail(evidence.dataset.evidence);return;}
+      const action=event.target.closest("[data-action]");if(action){openAction(action.dataset.action,action.dataset.target||"",action.dataset.project,action.dataset.run);return;}
+      if(event.target.closest("[data-close-drawer]")){closeDrawer();return;}
+      if(event.target.closest("[data-close-item]")){closeItem();return;}
+      if(event.target.closest("[data-close-action]")){closeAction();return;}
+    });
+    document.addEventListener("change",event=>{if(event.target.id==="scenario")setParams({scenario:event.target.value},false);});
+    document.addEventListener("keydown",event=>{if(event.key==="Escape"&&!document.getElementById("drawer").hidden){closeDrawer();return;}if(!["ArrowLeft","ArrowRight"].includes(event.key)||event.target.closest?.("input,textarea,select,[contenteditable]"))return;const keys=Object.keys(variants),index=keys.indexOf(variant()),step=event.key==="ArrowRight"?1:-1;event.preventDefault();setParams({variant:keys[(index+step+keys.length)%keys.length]},false);});
+    document.getElementById("action-form").addEventListener("submit",submitAction);
+    window.addEventListener("popstate",()=>render(true));
+    render();
+  </script>
+</body>
+</html>
