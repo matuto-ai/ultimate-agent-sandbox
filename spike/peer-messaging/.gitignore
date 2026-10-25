@@ -1,0 +1,4 @@
+.demo/
+__pycache__/
+*.sqlite
+*.log

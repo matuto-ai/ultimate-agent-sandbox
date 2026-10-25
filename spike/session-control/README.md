@@ -1,0 +1,157 @@
+# roomctl — PROTOTYPE session supervisor and deployment CLI
+
+> [!WARNING]
+> Throwaway-grade spike prototype for
+> [Prototype visible long-lived session control](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/8)
+> (map: [Chart the evolvable collaborative agent sandbox spike](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/1)).
+> It answers a design question; it is not production code.
+
+## The question
+
+What minimal supervisor and deployment CLI can reliably **open, identify,
+inspect status, attach, send operator input, clear, close, and restore**
+Profile-backed Pi and Claude sessions inside one Trusted Workstation — while
+keeping terminal control separate from the Hub's canonical agent
+communication?
+
+## The answer this artifact demonstrates
+
+One small static Go binary, stdlib only, no daemon:
+
+- **Per-session holder process.** `roomctl open` spawns a detached holder that
+  owns one PTY (the visible, addressable terminal), runs the Runtime inside
+  it, mirrors output to a scrollback log, and serves one unix socket for
+  `status` / `send` / `attach` / `close`. No central supervisor to keep alive;
+  the registry on disk is the only shared state.
+- **Registry = durable identity and topology.** `registry.json` records
+  session name, Runtime, Runtime Launch Profile, Actor Identity, workdir, and
+  the runtime-native session handle. Live state (pids, sockets) is derived
+  from pid files and native liveness signals, never from terminal content.
+- **Declarative Runtime Launch Profiles** (`profiles/*.json`): runtime,
+  Actor Identity, open command, resume command, native session template, env.
+  Adding a Runtime is a profile file, not code.
+- **Two-phase restore.** Phase 1 is free: the registry *is* the topology and
+  survives any crash. Phase 2: `roomctl restore` relaunches dead sessions
+  through the runtime-native resume command (`pi --session <file>`,
+  `claude --resume <id>`), never a replay or scrape. `close` is terminal:
+  restore never revives a closed session.
+- **Clear vs close vs restore.** `clear` mints a new native session handle and
+  relaunches under the same identity (context wiped, Participant preserved);
+  `close` terminates for good; `restore` resumes dead *open* sessions only.
+- **Fail-fast open.** `open` only reports success after the holder answers a
+  handshake proving the runtime actually started; a bad profile command fails
+  the command and leaves no registry entry.
+- **Two state axes, honestly separated.** `status` reports only *process
+  liveness* (`RUNNING / EXITED / DISCONNECTED`) from supervisor-owned holder
+  socket + pid signals — not runtime-native turn state. Turn *readiness* is a
+  separate, adapter-owned axis (see
+  [Non-disruptive delivery signals](../../docs/research/non-disruptive-delivery-signals.md));
+  roomctl never infers it from terminal output or silence.
+- **Hub separation.** roomctl is the terminal control plane only. Room
+  Messages, Requests, and Commands travel through the Hub adapters inside the
+  session (Pi extension, Claude MCP). roomctl carries no Room traffic and the
+  Hub needs no terminal access.
+
+Rejected, per the settled decisions: terminal scraping as a transport, hidden
+sessions, a central supervisor daemon, replay-based restore.
+
+## Commands
+
+```text
+roomctl open <name> --profile <p> [--workdir dir]
+roomctl list                  # identify: name, profile, runtime, actor, state, native session
+roomctl status [name]         # process liveness (holder/pid signals)
+roomctl attach <name>         # operator terminal; Ctrl-] detaches
+roomctl send <name> <text>    # operator input, delivered like typing
+roomctl clear <name>          # wipe context, keep identity/profile
+roomctl close <name>          # terminate for good
+roomctl restore [name]        # runtime-native resume of dead open sessions
+```
+
+State root: `$ROOMCTL_HOME` (default `.roomctl/`). Profiles:
+`$ROOMCTL_PROFILES` (default `profiles/`).
+
+## Run it
+
+```bash
+spike/session-control/demo.sh
+```
+
+Builds, then exercises the full lifecycle against a fixture runtime with
+assertions (open → identify → send → attach → holder-crash → restore →
+clear → close), then runs two best-effort real-runtime smokes, each skipping
+cleanly when its binary is absent:
+
+- **Pi** — open a session in a PTY, deliver an operator message, and verify the
+  reply lands in the native `--session` file.
+- **Claude** — open a session, deliver an operator message, and verify a
+  recorded assistant turn in the native transcript. A transcript exists from
+  session start, so the turn is what proves the input was submitted.
+
+## Evidence and limits
+
+Proven here (Pi 0.83.0, Go 1.26.5, Linux):
+
+- all eight operations against the fixture runtime, including restore after
+  `kill -9` of the holder;
+- real Pi: open, send, and native session persistence (`pi --session <path>`
+  creates fresh at a new path and resumes the same session at an existing
+  path — verified directly).
+
+Proven against real Claude Code 2.1.220 (issue
+[#20](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/20)) — the
+`open → attach → send → status → kill -9 → restore → clear → close` lifecycle
+driven programmatically, including that `--resume` restores prior conversation
+context and `clear` does not. Attach was exercised through a real pty:
+scrollback replay, operator input reaching the runtime through the attached
+connection, and a `Ctrl-]` (`0x1d`) detach that exits cleanly and leaves the
+session RUNNING. No human sat at a physical terminal during the run; see the
+limits below. Two defects surfaced and are fixed here:
+
+- **Session persistence died silently under an inherited env marker.** Claude
+  disables transcript saving when `CLAUDE_CODE_CHILD_SESSION` is set, which it
+  is whenever roomctl is launched from inside a Claude session — the ordinary
+  case once an agent supervises a peer. No transcript means `--resume` has
+  nothing to resume, so `restore` came back as a blank session while still
+  reporting success. `claude-default.json` now clears that variable; the
+  profile owns the environment its runtime needs. Only interactive mode honours
+  the marker, so a `-p` spot check does not reproduce it.
+- **`send` delivered input that was never submitted.** Writing the text and its
+  carriage return in one PTY write triggers Claude's paste detection: the text
+  lands in the input box, the newline becomes literal, and no turn runs. Whether
+  the PTY happened to split the write decided it, so this failed intermittently
+  — the worst shape for a supervisor. `send` now writes the text and the CR
+  separately.
+
+Not proven here:
+
+- **A human at the keyboard.** Issue #20 asked for an interactive attach with a
+  message typed by hand and a `Ctrl-]` detach. Every part of that path is
+  exercised through a pty, which is what an interactive terminal presents to the
+  process, but nobody watched the Claude TUI render live. Terminal emulator
+  quirks, window resize, and anything a real terminal does that a pty does not
+  remain unverified — and attach forwards no window-resize events at all.
+- Concurrent sends beyond the one in-flight slot are refused with an explicit
+  busy error rather than queued. That keeps a refusal unambiguous, since nothing
+  reached the PTY, but a caller that wants throughput has to retry.
+- Pi's ~30s startup splash swallows early operator input; `send` before the
+  TUI is up is lost (the demo waits it out). A production profile may want
+  Pi's extension seam for input instead of raw PTY writes. Claude has the same
+  boot-window exposure: `send` only lands once its TUI is up.
+- Claude turn-readiness detection, which stays adapter-owned per the
+  [delivery-signals research](../../docs/research/non-disruptive-delivery-signals.md);
+  the lifecycle checks above poll for observed effects rather than infer
+  readiness from the terminal.
+- No window-resize forwarding on attach; a slow attached reader can stall the
+  output pump; CLOSE has a fixed 3s SIGTERM→SIGKILL grace. All acceptable at
+  prototype fidelity.
+
+## Files
+
+- `main.go` — CLI, holder lifecycle, commands
+- `registry.go` — durable registry, profiles, template rendering
+- `holder.go` — per-session PTY/socket holder
+- `pty_linux.go` — Linux PTY + raw-terminal attach (stdlib only)
+- `profiles/` — fixture, Pi, Claude Runtime Launch Profiles
+- `fixture/fakecli.sh` — fake long-lived agent CLI for deterministic checks
+- `demo.sh` — the one-command lifecycle check
