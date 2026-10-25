@@ -1,0 +1,316 @@
+{
+  "version": 1,
+  "deployment": {
+    "id": "demo",
+    "state_root": "/srv/uas/state",
+    "manager": {
+      "url": "https://manager.example.com",
+      "client_credential_ref": "manager-client",
+      "server_trust_ref": "manager-trust"
+    },
+    "credentials": [
+      {
+        "id": "manager-client",
+        "kind": "manager-client"
+      },
+      {
+        "id": "manager-trust",
+        "kind": "manager-trust"
+      },
+      {
+        "id": "alice-git",
+        "kind": "git"
+      },
+      {
+        "id": "alice-forge",
+        "kind": "forge"
+      },
+      {
+        "id": "bob-git",
+        "kind": "git"
+      },
+      {
+        "id": "bob-forge",
+        "kind": "forge"
+      }
+    ],
+    "actors": [
+      {
+        "id": "alice",
+        "git_credential_ref": "alice-git",
+        "forge_credential_ref": "alice-forge"
+      },
+      {
+        "id": "bob",
+        "git_credential_ref": "bob-git",
+        "forge_credential_ref": "bob-forge"
+      }
+    ],
+    "images": [
+      {
+        "id": "workstation",
+        "reference": "example/uas@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "providers": [
+      {
+        "id": "pi-cloud",
+        "runtime": "pi",
+        "endpoint": "https://api.example.com/v1",
+        "model": "example-model"
+      },
+      {
+        "id": "claude-native",
+        "runtime": "claude"
+      }
+    ],
+    "audit": {
+      "retention_days": 30,
+      "max_bytes": 1048576
+    }
+  },
+  "rooms": [
+    {
+      "version": 1,
+      "id": "alpha",
+      "project": {
+        "id": "alpha",
+        "repository": "example/alpha",
+        "roots": {
+          "repo": "/srv/projects/alpha/repo",
+          "workspace": "/srv/projects/alpha/workspace",
+          "reference": "/srv/projects/alpha/reference",
+          "checkouts": "/srv/projects/alpha/checkouts"
+        }
+      },
+      "state_root": "/srv/uas/state/alpha",
+      "image": "workstation",
+      "network": {
+        "id": "net-alpha",
+        "block_host": true,
+        "block_private": true,
+        "block_metadata": true,
+        "block_other_rooms": true
+      },
+      "boundary": {
+        "non_root": true,
+        "outer_confinement": true,
+        "process_binding": true,
+        "private_endpoints": true,
+        "no_host_runtime_socket": true
+      },
+      "resources": {
+        "cpu": 2,
+        "memory_bytes": 2147483648,
+        "disk_bytes": 10737418240,
+        "pids": 256,
+        "log_bytes": 10485760
+      },
+      "profiles": [
+        {
+          "id": "worker",
+          "instructions": "Implement only authorized work; a tool declaration grants no authority.",
+          "tools": [
+            "read",
+            "edit"
+          ],
+          "capabilities": [
+            "implement",
+            "forge-read",
+            "forge-write",
+            "git-read",
+            "git-push"
+          ]
+        },
+        {
+          "id": "reviewer",
+          "instructions": "Review the exact candidate independently.",
+          "tools": [
+            "read"
+          ],
+          "capabilities": [
+            "review",
+            "forge-read",
+            "forge-write",
+            "git-read"
+          ]
+        }
+      ],
+      "policies": [
+        {
+          "id": "implementation",
+          "version": 1,
+          "gates": [
+            {
+              "id": "checks",
+              "kind": "mechanical"
+            },
+            {
+              "id": "review",
+              "kind": "attestation"
+            },
+            {
+              "id": "human-merge",
+              "kind": "decision"
+            }
+          ],
+          "protected_operations": {
+            "submit-for-review": [
+              "checks"
+            ],
+            "complete": [
+              "checks",
+              "review",
+              "human-merge"
+            ]
+          },
+          "review_return_cap": 5,
+          "queue_timeout_seconds": 300,
+          "response_timeout_seconds": 1800
+        }
+      ],
+      "default_policy": "implementation",
+      "seats": [
+        {
+          "id": "builder",
+          "participant": "builder",
+          "runtime": "pi",
+          "arguments": [],
+          "actor": "alice",
+          "profile": "worker",
+          "provider": "pi-cloud"
+        },
+        {
+          "id": "reviewer",
+          "participant": "reviewer",
+          "runtime": "claude",
+          "arguments": [],
+          "actor": "bob",
+          "profile": "reviewer",
+          "provider": "claude-native"
+        }
+      ]
+    },
+    {
+      "version": 1,
+      "id": "beta",
+      "project": {
+        "id": "beta",
+        "repository": "example/beta",
+        "roots": {
+          "repo": "/srv/projects/beta/repo",
+          "workspace": "/srv/projects/beta/workspace",
+          "reference": "/srv/projects/beta/reference",
+          "checkouts": "/srv/projects/beta/checkouts"
+        }
+      },
+      "state_root": "/srv/uas/state/beta",
+      "image": "workstation",
+      "network": {
+        "id": "net-beta",
+        "block_host": true,
+        "block_private": true,
+        "block_metadata": true,
+        "block_other_rooms": true
+      },
+      "boundary": {
+        "non_root": true,
+        "outer_confinement": true,
+        "process_binding": true,
+        "private_endpoints": true,
+        "no_host_runtime_socket": true
+      },
+      "resources": {
+        "cpu": 2,
+        "memory_bytes": 2147483648,
+        "disk_bytes": 10737418240,
+        "pids": 256,
+        "log_bytes": 10485760
+      },
+      "profiles": [
+        {
+          "id": "worker",
+          "instructions": "Implement only authorized work; a tool declaration grants no authority.",
+          "tools": [
+            "read",
+            "edit"
+          ],
+          "capabilities": [
+            "implement",
+            "forge-read",
+            "forge-write",
+            "git-read",
+            "git-push"
+          ]
+        },
+        {
+          "id": "reviewer",
+          "instructions": "Review the exact candidate independently.",
+          "tools": [
+            "read"
+          ],
+          "capabilities": [
+            "review",
+            "forge-read",
+            "forge-write",
+            "git-read"
+          ]
+        }
+      ],
+      "policies": [
+        {
+          "id": "implementation",
+          "version": 1,
+          "gates": [
+            {
+              "id": "checks",
+              "kind": "mechanical"
+            },
+            {
+              "id": "review",
+              "kind": "attestation"
+            },
+            {
+              "id": "human-merge",
+              "kind": "decision"
+            }
+          ],
+          "protected_operations": {
+            "submit-for-review": [
+              "checks"
+            ],
+            "complete": [
+              "checks",
+              "review",
+              "human-merge"
+            ]
+          },
+          "review_return_cap": 5,
+          "queue_timeout_seconds": 300,
+          "response_timeout_seconds": 1800
+        }
+      ],
+      "default_policy": "implementation",
+      "seats": [
+        {
+          "id": "builder",
+          "participant": "builder",
+          "runtime": "pi",
+          "arguments": [],
+          "actor": "alice",
+          "profile": "worker",
+          "provider": "pi-cloud"
+        },
+        {
+          "id": "reviewer",
+          "participant": "reviewer",
+          "runtime": "claude",
+          "arguments": [],
+          "actor": "bob",
+          "profile": "reviewer",
+          "provider": "claude-native"
+        }
+      ]
+    }
+  ]
+}

@@ -62,10 +62,11 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
-      - name: Placeholder validation
+      - name: Validate successor configuration
         if: steps.changes.outputs.skip_tests != 'true'
-        run: echo 'Placeholder only. Replace this step with project checks before requiring validation for merge.'
+        run: ./validate.sh
 
       - name: Report tests not applicable
         if: steps.changes.outputs.skip_tests == 'true'
-        run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; project checks are still placeholders until configured.'
+        run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; this exemption is not runtime or security evidence.'
+

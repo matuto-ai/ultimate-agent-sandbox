@@ -62,7 +62,7 @@ Room-local Project data and available Runtime provider credentials may be read, 
 
 ## Delivery and evidence
 
-The existing [23 implementation slices](docs/architecture/source-reconciliation.md#implementation-slices) start with [versioned configuration](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/59), then durable Hub state and supervisor foundations. The production modules do not exist yet. `validate.sh` and the GitHub validation workflow are placeholders; a green run is not product acceptance.
+The existing [23 implementation slices](docs/architecture/source-reconciliation.md#implementation-slices) start with [versioned configuration](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/59), then durable Hub state and supervisor foundations. The first executable seam is the [versioned configuration validator](docs/configuration.md): `python3 -m uas validate-config tests/fixtures/two-rooms.json`. It validates and normalizes configuration without starting a Room or contacting a provider. `./validate.sh` runs the current successor configuration/CLI suite, and GitHub CI invokes the same entry point. Later slices must add their own checks; a green run is not whole-product acceptance.
 
 Release requires real Pi–Claude–GitHub integration, exact-candidate review and CI, a disposable-VM two-Room security scenario, 100 Stop/Start cycles, and measured target-host limits. Synthetic lifecycle and Manager prototypes demonstrate design coherence only.
 
@@ -79,3 +79,4 @@ Release requires real Pi–Claude–GitHub integration, exact-candidate review a
 ## License
 
 [MIT](LICENSE)
+
