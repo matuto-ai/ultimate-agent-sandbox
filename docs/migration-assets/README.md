@@ -1,0 +1,39 @@
+# Archived migration evidence
+
+These are historical research snapshots and throwaway prototypes, not the successor implementation or current operational guidance. [Issue #58](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/58) remains the current specification. The human authorized publishing these selected records to repair migration access gaps; the remaining private workspace, raw forge export, reference project, and archived environment guidance are not published.
+
+## Research snapshots
+
+The five previously unpublished source commits below are retained as ancestors of the access-repair branch without changing the current source tree. Links select immutable original commits, not recreated branches. Merge the access-repair pull request with a merge commit to keep this history reachable from main.
+
+| Historical source branch | Original commit | Research report |
+| --- | --- | --- |
+| `research/homelab-envelope` | `e7c2dfc10f34712ab29dc4d62e2bd7ac7f4e345d` | [Homelab deployment envelope](https://github.com/matuto-ai/ultimate-agent-sandbox/blob/e7c2dfc10f34712ab29dc4d62e2bd7ac7f4e345d/docs/research/homelab-envelope.md) |
+| `research/orchestration-patterns` | `5fb2cd39b758e2d59cb1e0a2590c2af1344989b1` | [Orchestration patterns](https://github.com/matuto-ai/ultimate-agent-sandbox/blob/5fb2cd39b758e2d59cb1e0a2590c2af1344989b1/docs/research/orchestration-patterns.md) |
+| `research/pi-claude-adapters` | `711c3859dab36bd297f1af3d626e24a3983f0381` | [Pi and Claude adapters](https://github.com/matuto-ai/ultimate-agent-sandbox/blob/711c3859dab36bd297f1af3d626e24a3983f0381/docs/research/pi-claude-adapters.md) |
+| `research/pi-hermes-memory-inventory` | `aa1dd5f4293d2956e8a178a67b76cd0ffaeb2048` | [Memory retirement inventory](https://github.com/matuto-ai/ultimate-agent-sandbox/blob/aa1dd5f4293d2956e8a178a67b76cd0ffaeb2048/docs/research/pi-hermes-memory-inventory.md) |
+| `research/sandbox-foundations` | `1737659f98149e181f6973d4ffc90a5afa03e8b8` | [Historical sandbox foundations](https://github.com/matuto-ai/ultimate-agent-sandbox/blob/1737659f98149e181f6973d4ffc90a5afa03e8b8/docs/research/sandbox-foundations.md) |
+
+These reports retain dated assumptions, internal host names and LAN addresses, and references to source services or local checkouts that are not mirrored. They are evidence of prior research, not deployment instructions. No credentials were identified in the selected reports or attachment contents during pattern screening and review; this is not a guarantee of secret absence.
+
+## Attachments
+
+All 13 archives below preserve the original bytes, filename, UUID, size, and SHA-256. UUID directories distinguish the two same-named lifecycle workbenches. Follow the owning issue to its attachment manifest, then open the named file page and use **Download raw file**. The files are ordinary repository assets, not fabricated native GitHub issue uploads.
+
+| Owning GitHub issue | Original attachment | UUID | Bytes | SHA-256 |
+| --- | --- | --- | --- | --- |
+| [#34](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/34#preserved-attachments) | [librarian-read-path-prototype.tar.gz](682f59cf-c3e1-4b1f-91f1-bfeba6066546/librarian-read-path-prototype.tar.gz) | `682f59cf-c3e1-4b1f-91f1-bfeba6066546` | 4217 | `7985225183a5bcc619e9e2572e554b2a51e67b9ebd823f11db9b2b910b1c58a0` |
+| [#13](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/13#preserved-attachments) | [issue-11-lifecycle-contract-prototype.zip](777b5059-ee30-46d6-a60c-b9aa879348d9/issue-11-lifecycle-contract-prototype.zip) | `777b5059-ee30-46d6-a60c-b9aa879348d9` | 24940 | `62f7d859cbc8ef17603f4e598564aa21e2724c3a0d0bce3a4316625178f4d2e2` |
+| [#13](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/13#preserved-attachments) | [issue-11-lifecycle-contract-prototype.zip](71b84066-b55d-4fe0-bb8b-eeca57513d0f/issue-11-lifecycle-contract-prototype.zip) | `71b84066-b55d-4fe0-bb8b-eeca57513d0f` | 26272 | `09d3ef6980c43b51fa41495d6f25c1bc69bf354702d2eabab6d13982fac9249d` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-ui-prototype.zip](f82a034a-f745-4498-b0cd-1b89e0ff62c7/manager-ui-prototype.zip) | `f82a034a-f745-4498-b0cd-1b89e0ff62c7` | 11846 | `62ea093030343b2064959fd2f52bf4c3dac71c9528b2386613ecef3b228229c7` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-ui-five-candidate-prototype.zip](f775af88-3df5-4872-a7a7-1dfa00fca762/manager-ui-five-candidate-prototype.zip) | `f775af88-3df5-4872-a7a7-1dfa00fca762` | 26432 | `386999160bf6662d113e9ee9dd0e85b6333a9622453c9ac2847f0feb4c08dfd5` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-project-tree-prototype.zip](08d88927-c0d6-4665-b6fe-62a62bf6aa20/manager-project-tree-prototype.zip) | `08d88927-c0d6-4665-b6fe-62a62bf6aa20` | 19923 | `1ca5ca4f34803344232043059b7ef2918ba959b53b3943df294bf6ba62e209ec` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-project-spine-polish-prototype.zip](36dcda66-c7ae-4937-92c5-1eb6ab1c0bf5/manager-project-spine-polish-prototype.zip) | `36dcda66-c7ae-4937-92c5-1eb6ab1c0bf5` | 20947 | `ffde9f055a65d9d5e7cd8f25e0f3a385f05679b6196f548d526f87f2b62d60ae` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-project-spine-color-line-fix.zip](5d4e926b-a53b-495a-a994-e1f5e6f5041a/manager-project-spine-color-line-fix.zip) | `5d4e926b-a53b-495a-a994-e1f5e6f5041a` | 20912 | `7cd5aaf7f95b1521e7c485959b290c8be8656dafcf1bfbf4ea815f88ca3c1e34` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-project-spine-participant-dividers.zip](83508fab-8e1c-4a54-820c-7b112b0a19cc/manager-project-spine-participant-dividers.zip) | `83508fab-8e1c-4a54-820c-7b112b0a19cc` | 20927 | `72b47965e613c72c02148e379abef64464f5e05e8c8cffefce4cf928653aa349` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-project-spine-personality-variants.zip](cc67410d-da43-47ec-be9e-b53cc6f6d7ad/manager-project-spine-personality-variants.zip) | `cc67410d-da43-47ec-be9e-b53cc6f6d7ad` | 26082 | `65b78ee92fe2caaf4eb4102992fa942375dd51ea9b5fb8a1367cad998b3f9edf` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-project-spine-stable-a.zip](35eff486-94dd-4cc3-afa7-44da081cdb2a/manager-project-spine-stable-a.zip) | `35eff486-94dd-4cc3-afa7-44da081cdb2a` | 20963 | `4580cda93fcdfe1b68b53536e947e274853dd631356700f38efaf4815a6aacbe` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-field-notes-light-dark-run-journey.zip](def62e11-ed59-49c2-bb3a-27a6e577d90f/manager-field-notes-light-dark-run-journey.zip) | `def62e11-ed59-49c2-bb3a-27a6e577d90f` | 27796 | `0e25db8c1d3745094da51a47bc84cd9be426d10d59637c4cb6b9414f17b06586` |
+| [#12](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/12#preserved-attachments) | [manager-field-notes-section-markers.zip](c08a9a47-ec25-4832-b206-021ae0902656/manager-field-notes-section-markers.zip) | `c08a9a47-ec25-4832-b206-021ae0902656` | 27793 | `775c714b276c41863f89829deada9877f238538aa9fcc15f6c9dcbc0a47ec779` |
+
+Archive members were inspected without executing them. Open agent-written HTML in a separate browser profile. Some historical HTML versions contain links to older Gitea attachments; use the UUID table above to locate those versions on GitHub instead. The original archive bytes are deliberately unchanged. The Librarian README also retains its original sandbox path; after extracting, run its `demo.py` from the extracted location if you choose to evaluate it.
