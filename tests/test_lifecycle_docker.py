@@ -72,6 +72,19 @@ class DockerLifecycleTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail("fixture did not report persistent startup count")
 
+    def assert_running(self, result):
+        if result["phase"] != "running":
+            container = result["observed"].get("container")
+            if container and "id" in container:
+                # Read only this already ownership-verified disposable fixture.
+                state = json.loads(self.backend._run(["inspect", "--type", "container", container["id"]]))[0]["State"]
+                diagnostic = {key: state.get(key) for key in ("Status", "Error", "ExitCode", "OOMKilled")}
+                print("Fixture startup state:", json.dumps(diagnostic)[:4096], flush=True)
+                logs = subprocess.run(["docker", "logs", "--tail", "30", container["id"]],
+                                      capture_output=True, text=True, timeout=20)
+                print("Fixture startup logs:", logs.stdout[-4096:], logs.stderr[-4096:], flush=True)
+        self.assertEqual("running", result["phase"], result)
+
     def test_real_lifecycle_persistence_drift_partial_destroy_and_recreation(self):
         # Deliberately unowned sibling volume must survive all supervisor actions.
         unrelated = "uas-unowned-test-" + uuid.uuid4().hex
@@ -83,7 +96,7 @@ class DockerLifecycleTests(unittest.TestCase):
         self.addCleanup(cleanup_unrelated)
         self.backend.lose_create_response = True
         first = self.supervisor.start(self.spec)
-        self.assertEqual("running", first["phase"], first)
+        self.assert_running(first)
         container = first["observed"]["container"]["id"]
         self.wait_started(container, 1)
         actual = json.loads(self.backend._run(["inspect", "--type", "container", container]))[0]
@@ -129,7 +142,7 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assertEqual("never delete Project data", self.sentinel.read_text())
         self.assertIsNotNone(self.backend._run(["volume", "inspect", unrelated]))
         recreated = self.supervisor.start(self.spec)
-        self.assertEqual("running", recreated["phase"])
+        self.assert_running(recreated)
         self.assertNotEqual(instance, recreated["instance_id"])
         self.assertNotEqual(container, recreated["observed"]["container"]["id"])
         self.assertTrue(tombstone.is_file())
@@ -137,7 +150,7 @@ class DockerLifecycleTests(unittest.TestCase):
 
     def test_sigkill_after_actual_container_removal_reconciles_remaining_volume(self):
         first = self.supervisor.start(self.spec)
-        self.assertEqual("running", first["phase"], first)
+        self.assert_running(first)
         self.wait_started(first["observed"]["container"]["id"], 1)
         killed = subprocess.run([sys.executable, str(WORKER), str(self.root / "control")],
                                 capture_output=True, text=True, timeout=30)
