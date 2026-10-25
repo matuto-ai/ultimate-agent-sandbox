@@ -66,6 +66,8 @@ jobs:
       # Give every test-only setup/check step this condition, not the whole job.
       - name: Validate successor interfaces
         if: steps.changes.outputs.skip_tests != 'true'
+        env:
+          UAS_REQUIRE_UNIX_PEER_TESTS: "1"
         run: ./validate.sh
 
       - name: Report tests not applicable
