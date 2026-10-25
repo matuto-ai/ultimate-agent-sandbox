@@ -1,0 +1,5 @@
+node_modules/
+.home/
+.npm-cache/
+__pycache__/
+artifacts/
