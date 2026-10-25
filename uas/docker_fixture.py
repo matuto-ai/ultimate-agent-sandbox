@@ -93,6 +93,7 @@ class DockerFixtureBackend:
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true",
                    "--memory", "64m", "--cpus", "0.5", "--pids-limit", "32",
                    "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
+                   "--log-opt", "compress=false",
                    *mounts, state["spec"]["image_id"]])
 
     def start(self, state):

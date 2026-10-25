@@ -56,6 +56,8 @@ class DockerFixtureContractTests(unittest.TestCase):
         self.assertIn("--pids-limit", arguments)
         self.assertIn("--cpus", arguments)
         self.assertNotIn("--privileged", arguments)
+        log_options = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--log-opt"]
+        self.assertEqual(["max-size=1m", "max-file=1", "compress=false"], log_options)
         self.assertFalse(any("docker.sock" in value for value in arguments))
         self.assertEqual(self.state["spec"]["image_id"], arguments[-1])
 

@@ -107,6 +107,8 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assertEqual(64 * 1024 * 1024, actual["HostConfig"]["Memory"])
         self.assertEqual(500_000_000, actual["HostConfig"]["NanoCpus"])
         self.assertEqual(32, actual["HostConfig"]["PidsLimit"])
+        self.assertEqual({"Type": "local", "Config": {"max-size": "1m", "max-file": "1", "compress": "false"}},
+                         actual["HostConfig"]["LogConfig"])
         self.assertFalse(any("docker.sock" in mount["Destination"] for mount in actual["Mounts"]))
         self.assertEqual(container, self.supervisor.start(self.spec)["observed"]["container"]["id"])
         instance = first["instance_id"]
