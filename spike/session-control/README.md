@@ -2,8 +2,8 @@
 
 > [!WARNING]
 > Throwaway-grade spike prototype for
-> [Prototype visible long-lived session control](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/8)
-> (map: [Chart the evolvable collaborative agent sandbox spike](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/1)).
+> [Prototype visible long-lived session control](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/10)
+> (map: [Chart the evolvable collaborative agent sandbox spike](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/3)).
 > It answers a design question; it is not production code.
 
 ## The question
@@ -99,7 +99,7 @@ Proven here (Pi 0.83.0, Go 1.26.5, Linux):
   path — verified directly).
 
 Proven against real Claude Code 2.1.220 (issue
-[#20](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/20)) — the
+[#22](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/22)) — the
 `open → attach → send → status → kill -9 → restore → clear → close` lifecycle
 driven programmatically, including that `--resume` restores prior conversation
 context and `clear` does not. Attach was exercised through a real pty:
@@ -125,7 +125,7 @@ limits below. Two defects surfaced and are fixed here:
 
 Not proven here:
 
-- **A human at the keyboard.** Issue #20 asked for an interactive attach with a
+- **A human at the keyboard.** Issue #22 asked for an interactive attach with a
   message typed by hand and a `Ctrl-]` detach. Every part of that path is
   exercised through a pty, which is what an interactive terminal presents to the
   process, but nobody watched the Claude TUI render live. Terminal emulator

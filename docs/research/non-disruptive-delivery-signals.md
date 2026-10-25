@@ -277,7 +277,7 @@ Adapter rule for Claude:
 - Assuming absence of output means idle rather than waiting, backgrounded, disconnected, or hung.
 - Assuming Claude compaction can be observed externally from reviewed first-party surfaces.
 
-## Reproducible future harness contract for map issues #8 and #9
+## Reproducible future harness contract for map issues #10 and #11
 
 These are **required future harness contract shapes**, not claims about commands that already exist. The point is to make independent reproduction possible later without inventing undocumented runtime behavior now.
 
@@ -317,7 +317,7 @@ Required evidence artifact per run:
 - Claude tests must use only documented Anthropic surfaces: agent view states, headless JSON stream events, CLI flags, MCP reconnect behavior, channels when explicitly enabled.
 - If a test needs a state the docs do not expose directly, the harness must mark that state as adapter-inferred in the evidence.
 
-### Issue #8: delivery gating and acknowledgement timing
+### Issue #10: delivery gating and acknowledgement timing
 
 #### H8-01 ready-state immediate delivery
 - Command shape: `adapter-harness run --runtime pi-rpc --case H8-01 --fixture pi-idle-session --evidence-out out/H8-01.json`
@@ -378,7 +378,7 @@ Required evidence artifact per run:
 - Pass evidence: held queue releases only after fresh ready evidence post-resume.
 - Fail evidence: queue releases on reconnect alone with no ready evidence.
 
-### Issue #9: recovery, replacement, and conservative failure
+### Issue #11: recovery, replacement, and conservative failure
 
 #### H9-01 Pi compaction freeze
 - Command shape: `adapter-harness run --runtime pi-rpc --case H9-01 --fixture pi-compaction --evidence-out out/H9-01.json`

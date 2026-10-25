@@ -1,7 +1,7 @@
 # Peer messaging — prototype
 
 > [!WARNING]
-> Throwaway spike for [Prototype Pi and Claude peer messaging through the Hub](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/9). It answers an integration question; it is not production code.
+> Throwaway spike for [Prototype Pi and Claude peer messaging through the Hub](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/11). It answers an integration question; it is not production code.
 
 ## Question
 
@@ -33,5 +33,5 @@ A fresh `REAL_CLAUDE=1` run at the reviewed commit must additionally attest real
 
 Out of scope here:
 
-- Claude channels and interactive-session supervision, which belong to issue #20;
+- Claude channels and interactive-session supervision, which belong to issue #22;
 - production authentication, authorization, workflow policy, or network exposure.

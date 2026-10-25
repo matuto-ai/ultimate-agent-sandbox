@@ -4,7 +4,7 @@
 
 Use the native per-Project OKF bundle and deterministic file lookup for the first Librarian specification. Do not adopt Hindsight, Mnemosyne, or OpenViking, and do not build a generic backend interface or a bespoke general-purpose memory engine.
 
-The frozen two-Project comparison in [Evaluate memory-engine reuse before specifying Librarian internals](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/44) found:
+The frozen two-Project comparison in [Evaluate memory-engine reuse before specifying Librarian internals](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/46) found:
 
 - native OKF lookup passed every frozen correctness, isolation, provenance, deletion, export, and rebuild assertion at about `0.07 ms` p50;
 - Mnemosyne 3.15.1 preserved deleted source content in recall and export and did not provide the required event-time correction behavior;
@@ -21,7 +21,7 @@ The Mnemosyne evaluated was the project at <https://mnemosyne.site/en/> and its 
 
 ## Why the Librarian boundary must be reopened
 
-The [current Librarian map](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/28) establishes:
+The [current Librarian map](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/30) establishes:
 
 - OKF Markdown in protected Git as the canonical store;
 - explicit capture followed by model-assisted write-time synthesis;
@@ -243,12 +243,12 @@ This result does not justify a bespoke fact store, vector index, consolidation f
 
 ### Project decisions
 
-- [Librarian map](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/28)
-- [Agent-facing interface decision](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/29#issuecomment-5460)
-- [Canonical bundle decision](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/31#issuecomment-4874)
-- [Explicit capture decision](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/33#issuecomment-5383)
-- [Model-egress decision](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/35#issuecomment-5485)
-- [Trust-boundary decision](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/37#issuecomment-5520)
+- [Librarian map](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/30)
+- [Agent-facing interface decision](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/31#issuecomment-6397328044)
+- [Canonical bundle decision](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/33#issuecomment-6397329269)
+- [Explicit capture decision](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/35#issuecomment-6397330372)
+- [Model-egress decision](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/37#issuecomment-6397331747)
+- [Trust-boundary decision](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/39#issuecomment-6397335804)
 
 ### OpenViking
 

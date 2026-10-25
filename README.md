@@ -1,12 +1,12 @@
 # Ultimate Agent Sandbox
 
 > [!IMPORTANT]
-> This is a restoration of the existing spike, not an implementation of the successor. Source issue #56 is the approved current specification and supersedes the older topology, profile terminology, registered-Finding workflow, and pre-merge completion model below. See the [migration record](docs/migration.md) for the GitHub issue map, provenance, and missing inputs.
+> This is a restoration of the existing spike, not an implementation of the successor. [GitHub issue #58](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/58), imported from source issue #56, is the approved current specification and supersedes the older topology, profile terminology, registered-Finding workflow, and pre-merge completion model below. See the [migration record](docs/migration.md) for the GitHub issue map, provenance, and missing inputs.
 
 A spike for a sandboxed coding workstation where long-lived CLI agents can communicate, delegate, review, and escalate without a human manually relaying every handoff.
 
 > [!WARNING]
-> This repository is an active spike, not an installable replacement for the existing sandboxes. The current work is tracked in [Chart the evolvable collaborative agent sandbox spike](https://git.puglab.im/puglab/ultimate-agent-sandbox/issues/1).
+> This repository is an active spike, not an installable replacement for the existing sandboxes. The current work is tracked in [Chart the evolvable collaborative agent sandbox spike](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/3).
 
 ## Goal
 
