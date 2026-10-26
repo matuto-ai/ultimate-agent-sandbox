@@ -19,6 +19,7 @@ from .ledger import LedgerError
 MAX_OUTPUT = 1_048_576
 MAX_OBSERVATION = 48_000
 API_VERSION = "2026-03-10"
+DELIVERY_CLASSES = frozenset({"mechanical", "bounded", "cross-cutting", "critical", "unclassified"})
 _REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\Z")
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?\Z")
 def validate_route_table(rows):
@@ -158,11 +159,15 @@ class GitHubReadProvider:
             result["assignees"].sort(key=lambda user: user["id"])
         return result
 
-    def read_issue(self, number):
+    def read_issue(self, number, *, admission=False):
+        if type(admission) is not bool:
+            raise LedgerError("INVALID_ADMISSION_READ")
         if not _positive(number) or number > 9_999_999_999:
             raise LedgerError("INVALID_ISSUE")
         result = {"status": "PROVIDER_ERROR", "completeness": "unknown", "issue": None,
                   "dependencies": [], "pages": 0}
+        if admission:
+            result["delivery_class"] = {"status": "unknown", "value": None, "pages": 0}
         used = 0
         deadline = time.monotonic() + 30
         def get(path):
@@ -220,7 +225,10 @@ class GitHubReadProvider:
                 if any(type(v) is not str for v in links):
                     raise ProviderFailure("INVALID_RESPONSE")
                 if len(values) < 100 and not any(re.search(r'rel\s*=\s*["\']?next', v, re.I) for v in links):
-                    result.update(status="OK", completeness="complete")
+                    if admission:
+                        self._delivery_class(base, get, result)
+                    else:
+                        result.update(status="OK", completeness="complete")
                     return result
             result.update(status="PAGINATION_LIMIT", completeness="incomplete")
             return result
@@ -231,6 +239,44 @@ class GitHubReadProvider:
             # A trusted transport can fail unexpectedly. No exception text escapes.
             result.update(status="PROVIDER_ERROR", completeness="incomplete" if result["issue"] else "unknown")
             return result
+
+    def _delivery_class(self, base, get, result):
+        """Enumerate labels under the enclosing read's byte/time budget.
+
+        Embedded issue labels are not a completeness proof. Only the bounded
+        recognized classification is retained, never arbitrary label text.
+        """
+        ids, names, classifications = set(), set(), []
+        for page in range(1, self.max_pages + 1):
+            response, values = get(base + f"/labels?per_page=100&page={page}")
+            if response.status != 200:
+                raise ProviderFailure("PROVIDER_ERROR")
+            if type(values) is not list or len(values) > 100:
+                raise ProviderFailure("INVALID_RESPONSE")
+            for label in values:
+                if (type(label) is not dict or not _positive(label.get("id"))
+                        or type(label.get("name")) is not str
+                        or not 1 <= len(label["name"]) <= 256
+                        or any(ord(c) < 32 for c in label["name"])
+                        or label["id"] in ids or label["name"].casefold() in names):
+                    raise ProviderFailure("INVALID_RESPONSE")
+                ids.add(label["id"])
+                names.add(label["name"].casefold())
+                if label["name"].casefold().startswith("delivery:"):
+                    # Non-canonical spellings and unsupported classes remain
+                    # unknown rather than being corrected into permission.
+                    classifications.append(label["name"][len("delivery:"):]
+                                           if label["name"].startswith("delivery:") else None)
+            result["delivery_class"]["pages"] = page
+            links = [v for k, v in response.headers.items() if type(k) is str and k.lower() == "link"]
+            if any(type(v) is not str for v in links):
+                raise ProviderFailure("INVALID_RESPONSE")
+            if len(values) < 100 and not any(re.search(r'rel\s*=\s*["\']?next', v, re.I) for v in links):
+                if len(classifications) == 1 and classifications[0] in DELIVERY_CLASSES:
+                    result["delivery_class"].update(status="known", value=classifications[0])
+                result.update(status="OK", completeness="complete")
+                return
+        result.update(status="PAGINATION_LIMIT", completeness="incomplete")
 
 
 class GhTransport:
@@ -252,7 +298,7 @@ class GhTransport:
 
     def __call__(self, path):
         # Internal route defense in depth: caller cannot turn this into raw API.
-        if not re.fullmatch(r"repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*(?:/dependencies/blocked_by\?per_page=100&page=[1-9][0-9]*)?", path):
+        if not re.fullmatch(r"repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*(?:/(?:dependencies/blocked_by|labels)\?per_page=100&page=[1-9][0-9]*)?", path):
             raise ProviderFailure("INVALID_RESPONSE")
         if hashlib.sha256(self.executable.read_bytes()).hexdigest() != self.sha256:
             raise ProviderFailure("PROVIDER_ERROR")
@@ -319,7 +365,9 @@ def validate_observation(value):
     try:
         if (type(value) is not dict or set(value) not in (
                 {"status", "completeness", "issue", "dependencies", "pages"},
-                {"status", "completeness", "issue", "dependencies", "pages", "reason"})
+                {"status", "completeness", "issue", "dependencies", "pages", "reason"},
+                {"status", "completeness", "issue", "dependencies", "pages", "delivery_class"},
+                {"status", "completeness", "issue", "dependencies", "pages", "delivery_class", "reason"})
                 or value["status"] not in codes or value["completeness"] not in {"complete", "incomplete", "unknown"}
                 or (value["status"] == "OK") != (value["completeness"] == "complete")
                 or type(value["pages"]) is not int or not 0 <= value["pages"] <= 10
@@ -332,6 +380,22 @@ def validate_observation(value):
             raise ValueError()
         if "reason" in value and (value["status"] != "NOT_FOUND" or value["reason"] != "not-found-or-inaccessible"):
             raise ValueError()
+        if "delivery_class" in value:
+            classification = value["delivery_class"]
+            if (type(classification) is not dict or set(classification) != {"status", "value", "pages"}
+                    or classification["status"] not in {"known", "unknown"}
+                    or type(classification["pages"]) is not int or not 0 <= classification["pages"] <= 10):
+                raise ValueError()
+            if classification["status"] == "known":
+                if (type(classification["value"]) is not str or classification["value"] not in DELIVERY_CLASSES
+                        or value["status"] != "OK" or classification["pages"] < 1):
+                    raise ValueError()
+            elif classification["value"] is not None:
+                raise ValueError()
+            if value["status"] == "OK" and classification["pages"] < 1:
+                raise ValueError()
+            if classification["pages"] and (value["issue"] is None or value["pages"] < 1):
+                raise ValueError()
         issue = value["issue"]
         if issue is None:
             if value["completeness"] != "unknown" or value["dependencies"] or value["pages"]:
