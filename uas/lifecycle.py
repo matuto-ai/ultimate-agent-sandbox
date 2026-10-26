@@ -110,6 +110,7 @@ class Supervisor:
         self.authorize, self.revoke = authorize, revoke
         self.directory = self.root / room_id
         self._manifest = self.directory / "lifecycle.json"
+        self._participant_controller = None
 
     @contextmanager
     def _locked(self):
@@ -295,6 +296,20 @@ class Supervisor:
             state = self._read()
             return self._result(state) if state else {"room_id": self.room_id, "phase": "absent", "fixture_only": True}
 
+    def participants(self, hub, credentials):
+        """Launch the synthetic process fixture, never a production Runtime.
+
+        Uses this Room's lifecycle lock and current human authorization. Only
+        one controller is attached to a Supervisor; reconstructing a Supervisor
+        and controller fences previous authority instead of adopting old PIDs.
+        """
+        if self._participant_controller is not None:
+            raise LifecycleError("PARTICIPANT_CONTROLLER_EXISTS")
+        from .participant import FixtureParticipantController
+        controller = FixtureParticipantController(self, hub, credentials)
+        self._participant_controller = controller
+        return controller
+
     def start(self, spec: FixtureSpec):
         requested = spec.document()
         if requested["room_id"] != self.room_id:
@@ -366,6 +381,13 @@ class Supervisor:
 
     def _revoked(self, state, scope):
         try:
+            if self._participant_controller is not None:
+                if not self._participant_controller._revoke_all_locked(state):
+                    return False
+            elif (self._owned_directory(state) / "participants.json").exists():
+                # A reconstructed supervisor must reconnect the actual
+                # controller; a legacy/vacuous callback cannot vouch for seats.
+                return False
             return self.revoke(state["instance_id"], scope) is True
         except BackendUnknown:
             return False

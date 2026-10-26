@@ -59,7 +59,11 @@ implementation. Neither production provider compatibility nor quota is inferred.
    native session file confirms Runtime delivery. RPC `handled`, API return,
    helper-journal commit and in-memory presence never do. The Hub then starts
    its response clock; Participant acceptance and work completion stay separate.
-6. A lost receipt is reconciled read-only. Same-session process restoration uses
+6. A fresh same-runtime pre-effect refusal with no pending handoff is persisted
+   as `NOT_APPLIED` and permits retry after a new safe observation. If persisting
+   that classification fails, the intent stays unknown and cannot reinject.
+   Pending/uncertain handoffs never qualify as `NOT_APPLIED`.
+7. A lost receipt is reconciled read-only. Same-session process restoration uses
    a fresh fixture incarnation but matches stable logical identity, preserving
    work responsibility without injecting the same input twice. A new session or
    branch without the exact receipt cannot reuse it.
@@ -124,6 +128,7 @@ Version-specific primary references:
 The native tests cover first-ever delivery, long-turn hold/abort/settled, actual
 steer/follow-up queues, actual compaction hold/release, lost Hub receipt retry,
 Hub/process restart, retained accepted responsibility, first-flush crash hold,
+SAFE-to-busy refusal/retry and failure to persist its not-applied classification,
 native new-session fencing, missing-signal hold and process exit. Test fault
 injection only drops observations/receipts or kills the actual process; it does
 not simulate Pi lifecycle or claim end-to-end production acceptance.

@@ -154,6 +154,51 @@ class PiNativeTests(unittest.TestCase):
         self.assertEqual(self.state()['traffic']['work-1']['status'], 'ACCEPTED')
         self.assertEqual(len(self.custom()), 1)
 
+    def race_native_busy_before_inject(self):
+        self.native.rpc('prompt', message='/fixture-delay 700')
+        original = self.native._native
+        raced = False
+        def race(command, payload):
+            nonlocal raced
+            if command == 'delivery' and payload.get('action') == 'inject' and not raced:
+                raced = True
+                self.native.rpc('prompt', message='Independent native turn wins the safe-point race')
+            return original(command, payload)
+        self.native._native = race
+
+    def test_safe_to_busy_race_proven_not_applied_can_retry_once_after_settled(self):
+        self.race_native_busy_before_inject()
+        self.submit()
+        with self.assertRaisesRegex(LedgerError, 'NATIVE_NOT_SAFE'):
+            self.deliver()
+        self.assertEqual(self.native.evidence()['retryable_pre_effect_refusals'], 1)
+        self.assertEqual(self.native.evidence()['unknown_intents'], 0)
+        self.assertIsNone(self.state()['traffic']['work-1']['response_started_at'])
+        self.assertEqual(self.custom(), [])
+        self.native.rpc('prompt', message='/fixture-delay 0')
+        self.idle()
+        self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
+        self.assertEqual(self.native.evidence()['retryable_pre_effect_refusals'], 0)
+        self.assertEqual(len(self.custom()), 1)
+
+    def test_failure_persisting_not_applied_stays_unknown_and_never_reinjects(self):
+        self.race_native_busy_before_inject()
+        self.native.db.execute("CREATE TRIGGER fail_refusal BEFORE UPDATE ON handoffs "
+                               "WHEN NEW.state='NOT_APPLIED' BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END")
+        self.native.db.commit()
+        self.submit()
+        with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
+            self.deliver()
+        self.assertEqual(self.native.evidence()['unknown_intents'], 1)
+        self.assertEqual(self.native.evidence()['retryable_pre_effect_refusals'], 0)
+        self.native.db.execute('DROP TRIGGER fail_refusal')
+        self.native.db.commit()
+        self.idle()
+        with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
+            self.deliver()
+        self.assertEqual(self.custom(), [])
+        self.assertIsNone(self.state()['traffic']['work-1']['response_started_at'])
+
     def test_slow_first_flush_stays_unconfirmed_then_read_only_retry_recovers(self):
         self.native.rpc('prompt', message='/fixture-delay 1000')
         self.native.timeout = .15

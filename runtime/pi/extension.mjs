@@ -77,8 +77,13 @@ export default function (pi) {
       const existing = nativeReceipt(ctx, logical, logicalDigest);
       if (existing) return emit(ctx, request.request_id, { receipt: existing });
       if (request.action === 'reconcile') return emit(ctx, request.request_id, { error: 'native-acceptance-unconfirmed' });
-      if (request.action !== 'inject' || state(ctx).readiness !== 'safe' || pending.has(logicalDigest))
-        return emit(ctx, request.request_id, { error: 'native-not-safe' });
+      if (request.action !== 'inject') return emit(ctx, request.request_id, { error: 'invalid-action' });
+      if (pending.has(logicalDigest)) return emit(ctx, request.request_id, { error: 'native-handoff-pending' });
+      const readiness = state(ctx).readiness;
+      if (readiness !== 'safe') return emit(ctx, request.request_id, { not_applied: {
+        source: 'native-pre-effect-refusal', logical_digest: logicalDigest,
+        session_id: ctx.sessionManager.getSessionId(), runtime_id: runtimeId,
+        pending: false, readiness } });
       // External adapter has committed intent before this command. No automatic
       // retry after uncertainty. API return itself is deliberately NOT a receipt.
       pending.add(logicalDigest);

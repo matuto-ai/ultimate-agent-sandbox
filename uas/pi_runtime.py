@@ -198,16 +198,36 @@ class FixturePiRpcReceiver:
             raise LedgerError('NATIVE_SESSION_MISMATCH')
         if self.observe() is not Readiness.SAFE:
             raise LedgerError('NATIVE_NOT_SAFE')
-        if not row:
-            # Commit intent BEFORE touching Pi. Only this first admission may inject.
+        inject = not row or row[2] == 'NOT_APPLIED'
+        if inject:
+            # A fresh, explicit pre-effect refusal can permit retry. Unknown or
+            # pending handoffs cannot. Commit each intent BEFORE touching Pi.
             with self.db:
-                self.db.execute('INSERT INTO handoffs VALUES (?,?,?, ?,NULL)',
+                self.db.execute('INSERT INTO handoffs VALUES (?,?,?, ?,NULL) '
+                                'ON CONFLICT(logical_digest) DO UPDATE SET state=excluded.state,receipt=NULL',
                                 (logical_digest, json.dumps(logical, ensure_ascii=False),
                                  self._binding['session_id'], 'INTENT'))
-        action = 'reconcile' if row else 'inject'
+        action = 'inject' if inject else 'reconcile'
         payload = {**self._binding, 'logical': logical, 'action': action}
         try:
             result = self._native('delivery', payload)
+            refused = result.get('not_applied')
+            if (inject and type(refused) is dict
+                    and refused.get('source') == 'native-pre-effect-refusal'
+                    and refused.get('logical_digest') == logical_digest
+                    and refused.get('session_id') == self._binding['session_id']
+                    and refused.get('runtime_id') == self._binding['runtime_id']
+                    and refused.get('pending') is False
+                    and refused.get('readiness') in ('busy', 'compacting', 'ambiguous')):
+                try:
+                    with self.db:
+                        self.db.execute("UPDATE handoffs SET state='NOT_APPLIED' WHERE logical_digest=? AND state='INTENT'",
+                                        (logical_digest,))
+                except sqlite3.Error as error:
+                    # Failure to persist NOT_APPLIED leaves INTENT and prohibits
+                    # reinjection, even though this caller saw a refusal.
+                    raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY') from error
+                raise LedgerError('NATIVE_NOT_SAFE')
             deadline = time.monotonic() + self.timeout
             while not result.get('receipt') and action == 'inject' and result.get('handoff') == 'started':
                 if time.monotonic() >= deadline:
@@ -244,6 +264,7 @@ class FixturePiRpcReceiver:
                 'last_native_readiness': self.last_observation['readiness'],
                 'receipt_source': 'native-active-branch-and-session-file',
                 'native_receipts': self.db.execute("SELECT count(*) FROM handoffs WHERE state='CONFIRMED'").fetchone()[0],
+                'retryable_pre_effect_refusals': self.db.execute("SELECT count(*) FROM handoffs WHERE state='NOT_APPLIED'").fetchone()[0],
                 'unknown_intents': self.db.execute("SELECT count(*) FROM handoffs WHERE state='INTENT'").fetchone()[0],
                 'provider_configuration': 'separate-not-qualified', 'inference_health': 'separate-not-qualified',
                 'hang_uncertainty': 'no-native-hang-signal', 'image_digest': 'not-qualified'}
