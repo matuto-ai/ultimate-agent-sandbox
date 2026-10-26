@@ -29,7 +29,7 @@ def validate_route_table(rows):
     kinds, prefixes, signatures = set(), [], set()
     for row in rows:
         if (type(row) is not tuple or len(row) != 3 or type(row[0]) is not str
-                or row[0] not in {"help", "issue-view"} or row[0] in kinds
+                or row[0] not in {"help", "issue-view", "issue-assign-self"} or row[0] in kinds
                 or type(row[1]) is not tuple or not 1 <= len(row[1]) <= 2
                 or any(type(word) is not str or not re.fullmatch(r"(?:[a-z]+|--help)", word) for word in row[1])
                 or type(row[2]) is not str or row[2] in signatures
@@ -39,13 +39,14 @@ def validate_route_table(rows):
         kinds.add(row[0])
         prefixes.append(row[1])
         signatures.add(row[2])
-    if kinds != {"help", "issue-view"}:
+    if kinds != {"help", "issue-view", "issue-assign-self"}:
         raise LedgerError("INVALID_ROUTE_TABLE")
     return rows
 
 
 _ROUTES = validate_route_table((("help", ("--help",), "gh --help"),
-                               ("issue-view", ("issue", "view"), "gh issue view NUMBER [--repo OWNER/REPO]")))
+                               ("issue-view", ("issue", "view"), "gh issue view NUMBER [--repo OWNER/REPO]"),
+                               ("issue-assign-self", ("issue", "edit"), "gh issue edit NUMBER --add-assignee @me [--repo OWNER/REPO]")))
 _BY_KIND = {row[0]: row for row in _ROUTES}
 
 
@@ -68,7 +69,7 @@ class ReadRoute:
 
 
 def generated_help():
-    return "Read-only GitHub routes (pinned Room Project):\n" + "\n".join(row[2] for row in _ROUTES)
+    return "GitHub routes (pinned Room Project; writes require configured audit and forge-write):\n" + "\n".join(row[2] for row in _ROUTES)
 
 
 def parse_route(argv, project):
@@ -92,6 +93,25 @@ def parse_route(argv, project):
         if args[4] != project.repository:
             raise LedgerError("CROSS_PROJECT_READ_UNSUPPORTED")
     return ReadRoute("issue-view", int(args[2]))
+
+
+def parse_assignment_route(argv, project):
+    if type(project) is not GitHubProject:
+        raise LedgerError("INVALID_PROJECT")
+    if (type(argv) not in {list, tuple} or not 5 <= len(argv) <= 8
+            or any(type(arg) is not str or len(arg) > 256 for arg in argv)):
+        raise LedgerError("UNSUPPORTED_ROUTE")
+    args = list(argv)
+    if args[0] == "gh":
+        args.pop(0)
+    if (len(args) not in {5, 7} or args[:2] != list(_BY_KIND["issue-assign-self"][1])
+            or args[3:5] != ["--add-assignee", "@me"]):
+        raise LedgerError("UNSUPPORTED_ROUTE")
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", args[2]):
+        raise LedgerError("INVALID_ISSUE")
+    if len(args) == 7 and (args[5] not in {"--repo", "-R"} or args[6] != project.repository):
+        raise LedgerError("PROJECT_MISMATCH")
+    return ReadRoute("issue-assign-self", int(args[2]))
 
 
 @dataclass(frozen=True)

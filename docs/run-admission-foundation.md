@@ -1,3 +1,7 @@
+> The later [audited self-assignment slice](forge-assignment.md) adds an opt-in
+> path for currently unassigned issues, preserving the original no-write default
+> and all remaining admission/projection limits described below.
+
 # Restricted canonical Run-admission foundation
 
 This is an account-free, source-level vertical slice of [#72](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/72), **not complete or generally usable Run management**. #72's formal dependency on #69 remains unsatisfied. No production human authentication, external credential authority, Forge write/projection, human merge, deployment/image, or hostile-Hub qualification is claimed.
