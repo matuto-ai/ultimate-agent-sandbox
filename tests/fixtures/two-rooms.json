@@ -142,26 +142,26 @@
           "version": 1,
           "gates": [
             {
-              "id": "checks",
-              "kind": "mechanical"
-            },
-            {
-              "id": "review",
-              "kind": "attestation"
-            },
-            {
-              "id": "human-merge",
-              "kind": "decision"
+              "id": "fixture-artifacts",
+              "kind": "mechanical",
+              "evaluator": "artifacts",
+              "config": {
+                "items": [
+                  {
+                    "path": "README.md",
+                    "type": "file",
+                    "nonempty": true
+                  }
+                ]
+              }
             }
           ],
           "protected_operations": {
             "submit-for-review": [
-              "checks"
+              "fixture-artifacts"
             ],
             "complete": [
-              "checks",
-              "review",
-              "human-merge"
+              "fixture-artifacts"
             ]
           },
           "review_return_cap": 5,
@@ -263,26 +263,26 @@
           "version": 1,
           "gates": [
             {
-              "id": "checks",
-              "kind": "mechanical"
-            },
-            {
-              "id": "review",
-              "kind": "attestation"
-            },
-            {
-              "id": "human-merge",
-              "kind": "decision"
+              "id": "fixture-artifacts",
+              "kind": "mechanical",
+              "evaluator": "artifacts",
+              "config": {
+                "items": [
+                  {
+                    "path": "README.md",
+                    "type": "file",
+                    "nonempty": true
+                  }
+                ]
+              }
             }
           ],
           "protected_operations": {
             "submit-for-review": [
-              "checks"
+              "fixture-artifacts"
             ],
             "complete": [
-              "checks",
-              "review",
-              "human-merge"
+              "fixture-artifacts"
             ]
           },
           "review_return_cap": 5,
