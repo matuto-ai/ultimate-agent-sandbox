@@ -86,3 +86,26 @@ production integration are not proved by these host-only tests. The existing Doc
 lifecycle job is regression evidence, not proof of checkout mounting. There is no new
 configuration command for each session; the eventual supervisor/Run admission flow
 calls this seam directly.
+
+## Same-path Docker fixture integration
+
+The dedicated actual-Docker suite also exercises the allocator against a running
+persistent fixture, not only a simulated backend. The harness mounts its synthetic
+repository and checkout roots read-only at their exact host paths, then allocates a
+concurrent worktree **after** container startup. A non-root reader observes matching
+path/content digests in both primary and concurrent checkout. Host edits remain
+visible after Stop/Start of the same container; dirty release retains that data,
+and explicit fixture-human repair permits targeted removal observed by the reader.
+
+The test-image reader accepts harness-selected canonical root/checkout paths,
+rejects escapes and symlinks, reads only `uas-checkout-fixture.txt` (at most 4 KiB,
+with the mandatory `uas-checkout-fixture-v1` marker), and returns only path, size,
+SHA-256 and UID—not contents. No service exposes it to Participants. Negative cases
+cover another selected root, a symlink, a non-regular FIFO (opened nonblocking),
+oversized data and a removed path.
+
+This proves same-path **read visibility in the controlled Docker fixture**. It does
+not add writable mounts or native Git to the scratch image, qualify production
+Workstation writes, or create a per-Participant isolation boundary. Mounting the
+whole synthetic checkout root in this test is not approval of a production mount
+policy. Actual Docker execution is required: local skips are not this evidence.
