@@ -95,6 +95,10 @@ still samples readiness. Native `steer`/`follow_up` responses with disposition
 `queued` are tested as queue acceptance, **not completion**. The Hub receiver
 conservatively injects only when idle; it does not expose a Pi queue selector in
 its transport-neutral interface. During compaction and replacement it holds.
+RPC writes use unbuffered nonblocking pipes and one end-to-end command deadline.
+An incomplete/uncertain JSON frame fences that transport until process replacement;
+no subsequent command can be concatenated onto it. A real SIGSTOP + large-packet
+test proves bounded return and conservative same-session restart reconciliation.
 There is no native hang detector; an alive process and healthy transport do not
 prove inference availability. A delayed first response can retain an uncertain
 intent until a later explicit retry reconciles the receipt.

@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 import threading
@@ -63,9 +65,10 @@ class PiNativeTests(unittest.TestCase):
     def tearDown(self):
         if self.native:
             if os.environ.get('UAS_PI_EVIDENCE'):
+                events = self.native.event_snapshot()
                 evidence = {'case': self.id(), **self.native.evidence(),
-                            'rpc_event_types': sorted({event.get('type', 'unknown') for event in self.native.events}),
-                            'queue_dispositions': sorted({event.get('data', {}).get('disposition') for event in self.native.events
+                            'rpc_event_types': sorted({event.get('type', 'unknown') for event in events}),
+                            'queue_dispositions': sorted({event.get('data', {}).get('disposition') for event in events
                                 if event.get('type') == 'response' and type(event.get('data')) is dict
                                 and event['data'].get('disposition') in ('started', 'queued', 'handled')})}
                 with open(os.environ['UAS_PI_EVIDENCE'], 'a', encoding='utf8') as output:
@@ -121,7 +124,7 @@ class PiNativeTests(unittest.TestCase):
         self.native.rpc('prompt', message='/fixture-delay 0')
         self.idle()
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
-        self.assertTrue(any(e.get('type') == 'agent_settled' for e in self.native.events))
+        self.assertTrue(any(e.get('type') == 'agent_settled' for e in self.native.event_snapshot()))
 
     def test_lost_hub_confirmation_reconciles_without_second_native_injection(self):
         self.submit()
@@ -153,6 +156,49 @@ class PiNativeTests(unittest.TestCase):
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
         self.assertEqual(self.state()['traffic']['work-1']['status'], 'ACCEPTED')
         self.assertEqual(len(self.custom()), 1)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Actual stopped-process bounded pipe test requires Linux')
+    def test_sigstop_large_handoff_has_bounded_write_and_fenced_restart_recovery(self):
+        # Real native session exists before the uncertain frame, so restoration
+        # can inspect it and prove no receipt without resending the lost frame.
+        self.native.rpc('prompt', message='Create a persisted native fixture session')
+        self.idle()
+        file = self.native.initial_state['session_file']
+        self.hub.submit(self.sender, WorkRequest('work-1', 'run-1', 1, 'pi', 'x' * 16000))
+        original = self.native._native
+        def stop_before_write(command, payload):
+            if command == 'delivery' and payload.get('action') == 'inject':
+                os.kill(self.native.process.pid, signal.SIGSTOP)
+            return original(command, payload)
+        self.native._native = stop_before_write
+        # Make pipe capacity deterministic without enlarging it or changing the
+        # host: this descriptor belongs solely to this disposable child.
+        import fcntl
+        fcntl.fcntl(self.native.process.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
+        self.native.timeout = .25
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
+                self.deliver()
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertTrue(self.native.evidence()['transport_fenced'])
+            self.assertEqual(self.native.evidence()['unknown_intents'], 1)
+            self.assertIsNone(self.state()['traffic']['work-1']['response_started_at'])
+            # Resume does not authorize appending a command to the partial JSON.
+            os.kill(self.native.process.pid, signal.SIGCONT)
+            with self.assertRaisesRegex(NativeUnavailable, 'fenced'):
+                self.native.rpc('get_state')
+        finally:
+            self.native.process.kill()
+            self.native.process.wait(timeout=3)
+        self.native.close()
+        self.native = None
+        self.start(file)
+        with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
+            self.deliver()
+        self.assertEqual(self.custom(), [])
+        self.assertEqual(self.native.evidence()['unknown_intents'], 1)
+        self.assertIsNone(self.state()['traffic']['work-1']['response_started_at'])
 
     def race_native_busy_before_inject(self):
         self.native.rpc('prompt', message='/fixture-delay 700')
@@ -327,8 +373,8 @@ class PiNativeTests(unittest.TestCase):
         self.native.rpc('prompt', message='/fixture-delay 0')
         self.idle()
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
-        self.assertTrue(any(e.get('type') == 'compaction_start' for e in self.native.events))
-        self.assertTrue(any(e.get('type') == 'compaction_end' for e in self.native.events))
+        self.assertTrue(any(e.get('type') == 'compaction_start' for e in self.native.event_snapshot()))
+        self.assertTrue(any(e.get('type') == 'compaction_end' for e in self.native.event_snapshot()))
 
     def test_crash_before_first_native_flush_keeps_unknown_intent_without_reinjection(self):
         self.native.rpc('prompt', message='/fixture-delay 60000')

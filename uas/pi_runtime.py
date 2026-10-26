@@ -6,6 +6,8 @@ neither mints process badges nor launches a qualified Workstation Participant.
 import base64
 from collections import deque
 import json
+import os
+import select
 import sqlite3
 import subprocess
 import threading
@@ -52,10 +54,12 @@ class FixturePiRpcReceiver:
         self.db.commit()
         try:
             self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         except BaseException:
             self.db.close()
             raise
+        os.set_blocking(self.process.stdin.fileno(), False)
+        self._transport_fenced = False
         self._condition = threading.Condition()
         self._responses = {}
         self._notifications = {}
@@ -120,6 +124,8 @@ class FixturePiRpcReceiver:
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         with self._condition:
             while request_id not in values:
+                if self._transport_fenced:
+                    raise NativeUnavailable('native transport fenced after incomplete write')
                 if self._ended or self.process.poll() is not None:
                     raise NativeUnavailable('native process lost')
                 remaining = deadline - time.monotonic()
@@ -128,21 +134,50 @@ class FixturePiRpcReceiver:
                 self._condition.wait(remaining)
             return values.pop(request_id)
 
+    def _write(self, wire, deadline):
+        remaining = max(0, deadline - time.monotonic())
+        if not self._write_lock.acquire(timeout=remaining):
+            raise NativeUnavailable('native transport write deadline exceeded')
+        offset = 0
+        try:
+            if self._transport_fenced:
+                raise NativeUnavailable('native transport fenced; process replacement required')
+            fd = self.process.stdin.fileno()
+            while offset < len(wire):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # Even zero progress is conservatively fenced. A partial
+                    # JSON frame MUST NOT be followed by another command.
+                    self._transport_fenced = True
+                    raise NativeUnavailable('native transport write deadline exceeded; fenced')
+                try:
+                    count = os.write(fd, wire[offset:])
+                    if count <= 0:
+                        raise OSError('native pipe made no progress')
+                    offset += count
+                except BlockingIOError:
+                    select.select([], [fd], [], remaining)
+        except (OSError, ValueError) as error:
+            self._transport_fenced = True
+            raise NativeUnavailable('native transport lost; fenced') from error
+        finally:
+            if offset < len(wire):
+                self._transport_fenced = True
+            self._write_lock.release()
+
     def rpc(self, command, *, timeout=None, **fields):
+        budget = self.timeout if timeout is None else timeout
+        deadline = time.monotonic() + budget
         request_id = uuid.uuid4().hex
         wire = json.dumps({'id': request_id, 'type': command, **fields}, ensure_ascii=False).encode() + b'\n'
         with self._condition:
             self._rpc_pending.add(request_id)
         try:
-            with self._write_lock:
-                self.process.stdin.write(wire)
-                self.process.stdin.flush()
-            result = self._wait(self._responses, request_id, timeout)
+            self._write(wire, deadline)
+            result = self._wait(self._responses, request_id, max(0, deadline - time.monotonic()))
             if result.get('success') is not True:
                 raise NativeUnavailable('native command rejected: ' + str(result.get('error', 'unknown')))
             return result
-        except (OSError, ValueError) as error:
-            raise NativeUnavailable('native transport lost') from error
         finally:
             with self._condition:
                 self._rpc_pending.discard(request_id)
@@ -164,6 +199,9 @@ class FixturePiRpcReceiver:
                 self._notifications.pop(request_id, None)
 
     def observe(self):
+        if self._transport_fenced:
+            self.readiness = Readiness.AMBIGUOUS
+            return self.readiness
         if self.process.poll() is not None or self._ended:
             self.readiness = Readiness.LOST
             return self.readiness
@@ -254,12 +292,17 @@ class FixturePiRpcReceiver:
         except NativeUnavailable as error:
             raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY') from error
 
+    def event_snapshot(self):
+        with self._condition:
+            return tuple(self.events)
+
     def evidence(self):
         return {'runtime': 'Pi', 'version': self.runtime_version,
                 'authority': 'trusted-fixture-only', 'session_id': self._binding['session_id'],
                 'runtime_id': self._binding['runtime_id'],
                 'process_alive': self.process.poll() is None,
                 'adapter_readiness': self.readiness.value,
+                'transport_fenced': self._transport_fenced,
                 'signal_source': self.last_observation['source'],
                 'last_native_readiness': self.last_observation['readiness'],
                 'receipt_source': 'native-active-branch-and-session-file',
