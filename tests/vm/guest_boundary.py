@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """End-to-end synthetic two-Room enforcement in the disposable no-NIC VM."""
 import hashlib
+import fcntl
 import io
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tarfile
@@ -94,6 +96,42 @@ def connect(address):
         return connection.recv(64) == b'uas-boundary-ok\n'
 
 
+def attribute_positive_control(storage):
+    """The exact ioctl probe must succeed for an owner in the initial userns.
+
+    This fresh empty sibling is not either Room's Project or Runtime data. Run
+    the same binary as non-root, restore the probe attributes, then remove it
+    before creating any workload. EINVAL alone is not enforcement evidence.
+    """
+    from uas.guest_fixture import project_attributes
+    path = storage / 'attribute-control'
+    path.mkdir(mode=0o700)  # Never adopt an existing path.
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    original = bytearray(28)
+    try:
+        fcntl.ioctl(descriptor, 0x801C581F, original, True)
+        seeded = bytearray(original)
+        struct.pack_into('=I', seeded, 0, struct.unpack_from('=I', seeded, 0)[0] | 0x200)
+        struct.pack_into('=I', seeded, 12, 103)
+        fcntl.ioctl(descriptor, 0x401C5820, seeded)
+        os.chown(path, 65532, 65532)
+        result = subprocess.run([str(ROOT / 'fixture'), 'attributes', str(path)],
+                                user=65532, group=65532, extra_groups=[],
+                                capture_output=True, text=True, timeout=30, check=True)
+        value = json.loads(result.stdout)
+        expect(value['uid'] == 65532 and value['uid_map'].split() == ['0', '0', '4294967295'], 'positive control not initial userns owner')
+        expect(value['initial_project'] == 103 and value['clear_inherit'] == 'OK'
+               and value['change_project'] == 'OK' and value['after_clear_inherit'] is False
+               and value['after_change_project'] == 0 and project_attributes(path) == (0, True), 'FSSETXATTR positive control failed')
+        print('FSSETXATTR initial-userns positive control:', json.dumps(value), flush=True)
+    finally:
+        fcntl.ioctl(descriptor, 0x401C5820, original)
+        os.close(descriptor)
+        path.rmdir()  # Empty, exact test-created probe only; no recursive delete.
+    expect(not path.exists(), 'attribute control cleanup failed')
+    return value
+
+
 def crash_start(nonce, image, point):
     """SIGKILL a real disposable controller immediately after owned effects."""
     sys.path.insert(0, str(ROOT))
@@ -148,6 +186,7 @@ def scenario(nonce):
     STORAGE.mkdir()
     run('mount', '-o', 'prjquota,nodev,nosuid', str(device), str(STORAGE))
     prepare_storage(nonce)
+    attribute_control = attribute_positive_control(STORAGE)
     image_tar = Path('/run/uas-fixture.tar')
     with tarfile.open(image_tar, 'w') as archive:
         item = tarfile.TarInfo('fixture'); item.mode = 0o555
@@ -235,11 +274,14 @@ def scenario(nonce):
         expect(files['/proc/self/uid_map'].split() == ['0', '100000', '65536']
                and files['/proc/self/gid_map'].split() == ['0', '100000', '65536'], 'actual user namespace mapping')
         attrs = probe(room, 'attributes', str(STORAGE / room / 'workspace'))
-        expect(attrs['clear_inherit'] in ('EPERM', 'EACCES') and attrs['change_project'] in ('EPERM', 'EACCES'), 'project attribute quota escape allowed')
+        expect(attrs['clear_inherit'] in ('EPERM', 'EACCES', 'EINVAL') and attrs['change_project'] in ('EPERM', 'EACCES', 'EINVAL'), 'project attribute quota escape allowed')
+        expect(attrs['initial_project'] == ROOMS[room][0] and attrs['after_clear_inherit'] is True
+               and attrs['after_change_project'] == ROOMS[room][0], 'project attributes changed during denied attempts')
         backends[room]._quota()  # Host inode project/inherit state must remain unchanged.
         expect(files['/sys/fs/cgroup/memory.max'] == '67108864' and files['/sys/fs/cgroup/pids.max'] == '32', 'actual cgroup limits')
         quota, period = map(int, files['/sys/fs/cgroup/cpu.max'].split()); expect(quota * 2 == period, 'actual CPU quota')
-    checks['runtime'] = {'status': 'passed', 'selinux': 'Enforcing', 'docker': run('docker', 'version', '--format', '{{.Server.Version}}').strip()}
+    checks['runtime'] = {'status': 'passed', 'selinux': 'Enforcing', 'docker': run('docker', 'version', '--format', '{{.Server.Version}}').strip(),
+                         'fssetxattr_initial_userns_positive_control': attribute_control}
 
     for room in ROOMS:
         for name in ('repository', 'workspace', 'checkouts'):

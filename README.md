@@ -66,6 +66,8 @@ The existing [23 implementation slices](docs/architecture/source-reconciliation.
 
 Release requires real Pi–Claude–GitHub integration, exact-candidate review and CI, a disposable-VM two-Room security scenario, 100 Stop/Start cycles, and measured target-host limits. Synthetic lifecycle and Manager prototypes demonstrate design coherence only.
 
+The [Pi native fixture adapter](docs/pi-runtime.md) crosses the actual official Pi 1.4.0 extension/RPC surface with the durable Hub ledger using an account-free provider. It remains harness-authorized, not a qualified native Participant badge or complete reset/recovery implementation.
+
 `ai-agents-sandbox` supplies frozen behavior and proof evidence, not a permanent dependency. This product does not migrate, coordinate, modify, or retire another installation. Gitea/GitLab adapters, additional native Runtimes, GitHub Projects-board automation, Library implementation, and rich artifact review are outside first delivery. [Pi Durable research](docs/research/pi-durable-continuous-agents.md) remains exploratory; it does not replace the accepted architecture.
 
 ## References

@@ -50,14 +50,20 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
 - Workstations remain non-root, read-only-rootfs, capability-free, no-new-privileges,
   seccomp-filtered and SELinux-enforcing with distinct Room MCS labels. Guest-only
   Docker userns-remap prevents inode owners changing project IDs/inheritance;
-  actual UID mapping and denied `FSSETXATTR` attempts are required. Memory,
+  actual UID mapping and denied `FSSETXATTR` attempts are required, with unchanged
+  inode attributes afterward. The identical ioctl probe must first succeed as a
+  non-root owner in the initial user namespace on a separate empty synthetic
+  directory; its attributes are restored and it is removed before workloads.
+  Thus `EINVAL` alone cannot masquerade as quota-escape enforcement. Memory,
   CPU, PID and rotating log bounds retain the conservative Docker fixture values.
   Project mounts preserve their exact absolute paths; references remain read-only.
 - A real labelled volume is created before the network/policy and remains the
   cleanup anchor until exact owned network/policy and Runtime cleanup succeed.
   The volume precedes Runtime mkdir as well as network effects. Immutable pre-mkdir
   intent and inode identity recover SIGKILL after volume creation, mkdir and marker
-  publication; arbitrary unmarked paths are never adopted. Lost network-create
+  publication (completed-effect boundaries, not arbitrary torn writes);
+  arbitrary unmarked paths are never adopted. Dangling links and pending record
+  leftovers fail closed and retain the anchor. Lost network-create
   responses reconcile by exact observation. Failed removal
   leaves `destroy_failed` plus the anchor for targeted retry. A missing anchor
   with remaining owned resources is unknown, never a clean-absence receipt.

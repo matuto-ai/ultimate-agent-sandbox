@@ -52,6 +52,32 @@ class VMPayloadTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 payload.verify_signature_output(bad)
 
+    def test_metadata_accepts_only_one_supported_arch_record(self):
+        for arch in ("x86_64", "noarch"):
+            observed = f"fixture\t0\t1.0~rc1^git+2\t1.fc44\t{arch}\n"
+            self.assertEqual(["fixture", "0", "1.0~rc1^git+2", "1.fc44", arch],
+                             payload.package_metadata("fixture.rpm", observed))
+        good = "fixture\t0\t1\t1.fc44\tx86_64\n"
+        for bad in (good.replace("x86_64", "i686"), good.replace("x86_64", "src"),
+                    good.replace("\t0\t", "\t(none)\t"), good.replace("\t0\t", "\tbad\t"),
+                    good.replace("\t", "\\t"), good.rstrip("\n"), good + good,
+                    " " + good, good.replace("1.fc44", "1.fc44\r"), ""):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError) as caught:
+                payload.package_metadata("fixture.rpm", bad)
+            self.assertIn("'fixture.rpm'", str(caught.exception))
+            self.assertIn(repr(bad), str(caught.exception))
+            self.assertNotIn("\n", str(caught.exception))
+
+    def test_metadata_failure_diagnostic_is_bounded_and_control_escaped(self):
+        with self.assertRaises(RuntimeError) as caught:
+            payload.package_metadata("fixture.rpm", "\x1b\n" * 10000)
+        diagnostic = str(caught.exception)
+        self.assertLess(len(diagnostic), 2300)
+        self.assertIn("'fixture.rpm'", diagnostic)
+        self.assertIn("\\x1b\\n", diagnostic)
+        self.assertNotIn("\x1b", diagnostic)
+        self.assertNotIn("\n", diagnostic)
+
     def test_source_allowlist_rejects_traversal_symlinks_hardlinks_and_size(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -148,10 +174,15 @@ class VMPayloadTests(unittest.TestCase):
                     self.assertNotIn("-i", arguments)
                     self.assertNotIn("-U", arguments)
                 if arguments[0] == "dnf":
+                    self.assertIn("--forcearch=x86_64", arguments)
+                    self.assertIn("--arch=x86_64,noarch", arguments)
                     self.assertIn("--url", arguments)
                     self.assertIn("--resolve", arguments)
                     self.assertIn("--alldeps", arguments)
                     self.assertNotIn("install", arguments)
+                if arguments[0] == "rpm" and "-qp" in arguments:
+                    self.assertEqual("%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\n",
+                                     arguments[arguments.index("--queryformat") + 1])
                 if arguments[0] == "curl":
                     self.assertEqual("=https", arguments[arguments.index("--proto-redir") + 1])
                 if arguments[0] == "go":

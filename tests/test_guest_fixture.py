@@ -149,6 +149,51 @@ class GuestFixtureTests(unittest.TestCase):
                 with self.assertRaises(OwnershipConflict):
                     backend._runtime(STATE)
 
+    def test_dangling_runtime_and_record_symlinks_retain_anchor_and_evidence(self):
+        for position in range(5):
+            with self.subTest(position=position), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                backend = guest.GuestBoundaryBackend(NONCE, 'alpha'); backend.root = root / 'alpha'
+                runtime = backend._runtime_path(STATE); runtime.mkdir(parents=True)
+                with patch.object(guest, 'CONTROL', root):
+                    expected = backend._intent_value(STATE)
+                    marker, intent = backend._runtime_marker(STATE), backend._runtime_intent(STATE)
+                    marker.write_text(json.dumps({**expected, 'identity': guest.identity(runtime)}))
+                    intent.write_text(json.dumps(expected))
+                    artifact = backend._runtime_artifacts(STATE)[position]
+                    if artifact.is_dir(): artifact.rmdir()
+                    elif artifact.exists(): artifact.unlink()
+                    artifact.symlink_to(root / 'missing-target')
+                    with patch.object(guest, 'guard'), patch.object(backend, '_storage'), patch.object(backend, 'inspect', return_value=None), patch.object(backend, '_network', return_value=None), patch.object(backend, '_firewall', return_value=None), patch.object(DockerFixtureBackend, 'remove') as remove:
+                        with self.assertRaises(OwnershipConflict): backend.remove(STATE, 'volume')
+                        remove.assert_not_called()
+                        with self.assertRaises(OwnershipConflict): backend._runtime(STATE)
+                    self.assertTrue(artifact.is_symlink())
+                    self.assertTrue(os.path.lexists(marker)); self.assertTrue(os.path.lexists(intent))
+
+    def test_orphan_pending_records_and_dangling_links_are_not_clean_absence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backend = guest.GuestBoundaryBackend(NONCE, 'alpha'); backend.root = root / 'alpha'
+            backend._runtime_path(STATE).parent.mkdir(parents=True)
+            with patch.object(guest, 'CONTROL', root), patch.object(DockerFixtureBackend, 'inspect', return_value=None), patch.object(backend, '_network', return_value=None), patch.object(backend, '_firewall', return_value=None):
+                for artifact in backend._runtime_artifacts(STATE):
+                    for symlink in (False, True):
+                        if symlink: artifact.symlink_to(root / 'missing-target')
+                        else: artifact.write_text('partial publication')
+                        with self.assertRaises(BackendUnknown): backend.inspect(STATE, 'volume')
+                        artifact.unlink()
+                self.assertIsNone(backend.inspect(STATE, 'volume'))
+
+    def test_publication_never_replaces_dangling_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'owned.json'
+            for artifact in (path, path.with_suffix('.pending')):
+                artifact.symlink_to(Path(temporary) / 'missing-target')
+                with self.assertRaises(OwnershipConflict): guest.publish(path, {'owned': 'fixture'})
+                self.assertTrue(artifact.is_symlink())
+                artifact.unlink()
+
     def test_missing_volume_with_owned_network_is_unknown_not_clean_absence(self):
         backend = guest.GuestBoundaryBackend(NONCE, 'alpha')
         with patch.object(DockerFixtureBackend, 'inspect', return_value=None), patch.object(backend, '_network', return_value={'Id': 'owned'}):

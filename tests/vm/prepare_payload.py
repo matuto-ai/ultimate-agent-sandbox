@@ -135,6 +135,21 @@ def verify_signature_output(output):
         raise RuntimeError("RPM has no verified release-key signature")
 
 
+def package_metadata(filename, output):
+    """Require one bounded NEVRA record; show actionable, escaped CI failures."""
+    metadata = output.removesuffix("\n").split("\t")
+    if (len(output) > 2048 or not output.endswith("\n") or output.count("\n") != 1
+            or len(metadata) != 5
+            or not all(re.fullmatch(r"[A-Za-z0-9._+~^\-]{1,256}", item) for item in metadata)
+            or not metadata[1].isascii() or not metadata[1].isdigit()
+            or metadata[4] not in ("x86_64", "noarch")):
+        # repr prevents terminal control characters/newlines from escaping this
+        # diagnostic, and truncation bounds even malformed signed metadata.
+        detail = repr(output[:512])[:2048]
+        raise RuntimeError(f"unexpected RPM metadata for {filename[:200]!r}: {detail}")
+    return metadata
+
+
 def source_files(repository_root, paths):
     root = Path(repository_root)
     if not root.is_absolute() or root.resolve() != root or not root.is_dir():
@@ -230,7 +245,9 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
            "--installroot", str(work / "installroot"), "--setopt=reposdir=" + str(work / "repos"),
            "--setopt=cachedir=" + str(work / "cache"), "--setopt=persistdir=" + str(work / "persist"),
            "--setopt=logdir=" + str(work / "logs"), "--disableplugin=*", "--enableplugin=download"]
-    urls = package_urls(run([*dnf, "download", "--resolve", "--alldeps", "--url", "--urlprotocol=https",
+    # forcearch sets the solver basearch, not the download query's architecture
+    # filter: DNF4 otherwise selects all compatible arches, including i686.
+    urls = package_urls(run([*dnf, "download", "--arch=x86_64,noarch", "--resolve", "--alldeps", "--url", "--urlprotocol=https",
                              *PACKAGES], timeout=600))
     manifest = {"version": 1, "nonce": nonce, "release": "44", "signing_fingerprint": fingerprint,
                 "key": {"file": key.name, "sha256": hashlib.sha256(key.read_bytes()).hexdigest(), "bytes": key.stat().st_size},
@@ -243,11 +260,8 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
         if total > MAX_PACKAGE_TOTAL:
             raise RuntimeError("RPM bundle byte budget exceeded")
         verify_signature_output(run(["rpmkeys", "--dbpath", str(work / "rpmdb"), "--checksig", "--verbose", str(target)]))
-        metadata = run(["rpm", "--dbpath", str(work / "rpmdb"), "-qp", "--queryformat",
-                        "%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\n", str(target)]).strip().split("\t")
-        if (len(metadata) != 5 or not all(re.fullmatch(r"[A-Za-z0-9._+~^\-]+", item) for item in metadata)
-                or metadata[4] not in ("x86_64", "noarch")):
-            raise RuntimeError("unexpected RPM metadata")
+        metadata = package_metadata(name, run(["rpm", "--dbpath", str(work / "rpmdb"), "-qp", "--queryformat",
+                        "%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\n", str(target)]))
         with target.open("rb") as value:
             digest = hashlib.file_digest(value, "sha256").hexdigest()
         manifest["packages"].append({"file": name, "name": metadata[0], "epoch": metadata[1],

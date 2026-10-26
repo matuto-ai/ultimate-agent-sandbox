@@ -68,6 +68,8 @@ def publish(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_suffix(".pending")
+    if path.is_symlink() or temporary.is_symlink():
+        raise OwnershipConflict()
     if path.exists():
         if path.is_symlink() or path.read_text() != encoded:
             raise OwnershipConflict()
@@ -246,6 +248,11 @@ class GuestBoundaryBackend(DockerFixtureBackend):
     def _runtime_intent(self, state):
         return CONTROL / (state["instance_id"] + ".intent.json")
 
+    def _runtime_artifacts(self, state):
+        marker, intent = self._runtime_marker(state), self._runtime_intent(state)
+        return (self._runtime_path(state), marker, intent,
+                marker.with_suffix(".pending"), intent.with_suffix(".pending"))
+
     def _intent_value(self, state):
         return {"nonce": self.nonce, "room": self.room, "instance": state["instance_id"],
                 "parent": identity(self.root / "runtime"), "path": str(self._runtime_path(state))}
@@ -253,6 +260,8 @@ class GuestBoundaryBackend(DockerFixtureBackend):
     def _runtime(self, state, *, create=False):
         self._storage()
         path, marker, intent = self._runtime_path(state), self._runtime_marker(state), self._runtime_intent(state)
+        if any(item.is_symlink() for item in self._runtime_artifacts(state)):
+            raise OwnershipConflict()  # Includes dangling links; never absence.
         expected_intent = self._intent_value(state)
         if create:
             if self._inspect_object(state, "volume") is None:
@@ -286,6 +295,8 @@ class GuestBoundaryBackend(DockerFixtureBackend):
     def _remove_runtime(self, state):
         self._storage(require_selinux=False)
         path, marker, intent = self._runtime_path(state), self._runtime_marker(state), self._runtime_intent(state)
+        if any(item.is_symlink() for item in self._runtime_artifacts(state)):
+            raise OwnershipConflict()
         expected = self._intent_value(state)
         if intent.exists():
             if intent.is_symlink() or json.loads(intent.read_text()) != expected:
@@ -318,8 +329,7 @@ class GuestBoundaryBackend(DockerFixtureBackend):
             # An externally lost cleanup anchor must not turn owned policy or
             # network leftovers into a falsely successful Destroy receipt.
             if (self._network(state, policy=False) is not None or self._firewall(state) is not None
-                    or self._runtime_path(state).exists() or self._runtime_marker(state).exists()
-                    or self._runtime_intent(state).exists()):
+                    or any(os.path.lexists(item) for item in self._runtime_artifacts(state))):
                 raise BackendUnknown("guest cleanup anchor missing with owned leftovers")
         return resource
 

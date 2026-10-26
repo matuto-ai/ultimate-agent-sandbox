@@ -21,7 +21,7 @@ import (
 func emit(value any) { if err:=json.NewEncoder(os.Stdout).Encode(value); err!=nil { panic(err) } }
 func code(err error) string {
  if err==nil { return "OK" }
- for _, e:=range []struct{v error; n string}{{syscall.EDQUOT,"EDQUOT"},{syscall.ENOSPC,"ENOSPC"},{syscall.EACCES,"EACCES"},{syscall.EPERM,"EPERM"},{syscall.EROFS,"EROFS"},{syscall.ENETUNREACH,"ENETUNREACH"},{syscall.ECONNREFUSED,"ECONNREFUSED"}} {
+ for _, e:=range []struct{v error; n string}{{syscall.EINVAL,"EINVAL"},{syscall.EDQUOT,"EDQUOT"},{syscall.ENOSPC,"ENOSPC"},{syscall.EACCES,"EACCES"},{syscall.EPERM,"EPERM"},{syscall.EROFS,"EROFS"},{syscall.ENETUNREACH,"ENETUNREACH"},{syscall.ECONNREFUSED,"ECONNREFUSED"}} {
   if errors.Is(err,e.v) { return e.n }
  }
  if e,ok:=err.(net.Error);ok&&e.Timeout(){return "TIMEOUT"}
@@ -51,14 +51,16 @@ func quota(path, kind string) {
  emit(map[string]any{"error":code(err),"bytes":written,"files":count,"uid":os.Geteuid(),"probe_path":dir})
 }
 func attributes(path string){
- if !allowed(path){panic("not a synthetic tree")}
+ if !allowed(path)&&path!="/mnt/uas-boundary/attribute-control"{panic("not a synthetic tree")}
  file,err:=os.Open(path);if err!=nil{panic(err)};defer file.Close()
- original:=make([]byte,28)
- _,_,errno:=syscall.Syscall(syscall.SYS_IOCTL,file.Fd(),0x801c581f,uintptr(unsafe.Pointer(&original[0])));if errno!=0{panic(errno)}
+ read:=func() []byte {value:=make([]byte,28);_,_,e:=syscall.Syscall(syscall.SYS_IOCTL,file.Fd(),0x801c581f,uintptr(unsafe.Pointer(&value[0])));if e!=0{panic(e)};return value}
+ original:=read()
  attempt:=func(data []byte) string {_,_,e:=syscall.Syscall(syscall.SYS_IOCTL,file.Fd(),0x401c5820,uintptr(unsafe.Pointer(&data[0])));if e==0{return "OK"};return code(e)}
  inherit:=append([]byte(nil),original...);binary.LittleEndian.PutUint32(inherit,binary.LittleEndian.Uint32(inherit)&^uint32(0x200))
  project:=append([]byte(nil),original...);binary.LittleEndian.PutUint32(project[12:16],0)
- emit(map[string]any{"clear_inherit":attempt(inherit),"change_project":attempt(project),"initial_project":binary.LittleEndian.Uint32(original[12:16]),"uid":os.Geteuid()})
+ clearResult:=attempt(inherit);afterClear:=read();projectResult:=attempt(project);afterProject:=read()
+ uidMap,e:=os.ReadFile("/proc/self/uid_map");if e!=nil{panic(e)}
+ emit(map[string]any{"clear_inherit":clearResult,"change_project":projectResult,"initial_project":binary.LittleEndian.Uint32(original[12:16]),"after_clear_inherit":binary.LittleEndian.Uint32(afterClear)&0x200!=0,"after_change_project":binary.LittleEndian.Uint32(afterProject[12:16]),"uid":os.Geteuid(),"uid_map":strings.TrimSpace(string(uidMap))})
 }
 func observe(){
  result:=map[string]any{"uid":os.Geteuid(),"gid":os.Getegid()};files:=map[string]string{}
