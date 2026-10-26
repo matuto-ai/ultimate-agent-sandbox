@@ -22,6 +22,13 @@ neither branch protection nor the requirement for real security evidence before
 qualification/release. Ordinary aggregate and native-fixture checks remain fast
 and automatic; offline tests are not VM enforcement evidence.
 
+Automatic test execution ceilings are at most three minutes per workflow: aggregate
+validation one minute plus its dependent Docker lifecycle two minutes, Pi native
+three minutes, Claude native/Pi durable two minutes each. These are failure ceilings, not skipped tests or timeout-as-success.
+GitHub queue delay is outside the execution budget. A workload that no longer
+fits must be optimized or moved to deliberate qualification, not silently given
+a larger automatic budget.
+
 The selected qualification run
 installs QEMU/cloud-image tools on the disposable Ubuntu runner, then invokes
 `python3 tests/vm/run.py` as the unprivileged runner user. The normal aggregate also
