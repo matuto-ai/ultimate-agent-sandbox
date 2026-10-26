@@ -11,7 +11,6 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
-import time
 import uuid
 
 
@@ -45,10 +44,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         release = getattr(self.server, 'release', None)
+        entered = getattr(self.server, 'entered', None)
+        if entered is not None:
+            entered.set()
         if release is not None and not release.wait(timeout=15):
             self.send_error(504, 'fixture response was never released')
             return
-        time.sleep(getattr(self.server, 'delay', 0))
         text = 'fixture-only-response'
         model = request['model']
         message = {'id': 'msg_' + uuid.uuid4().hex, 'type': 'message',

@@ -99,13 +99,21 @@ receipt. Any unresolved journal intent holds the whole receiver, so another
 envelope cannot route around an ambiguous head. A recorded ACK can reconcile without reinjection after fresh same-session
 readiness. A file lock prevents simultaneous owners of one fixture journal.
 
+Replay ACK timing is **not immediate**: a deterministic fixture blocking all
+HTTP response bytes withheld the observable ACK beyond the receiver deadline.
+The adapter correctly retained an unknown handoff without starting the clock.
+Do not substitute a gateway request, pipe write, or `command_lifecycle` event for
+that missing ACK. The working-hold test therefore uses a real in-flight fixture
+control turn to prove traffic retention independently of ACK latency; it does
+not claim ACK must precede model response or turn completion.
+
 ## Validation and remaining gates
 
 The first integrated receiver passed [CI run 40330903455](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40330903455)
 for head `61c19cf505c4a7f147ecc2fe1e2d915a874d7bd3` (test-merge
 `7ad324b1d6c5c7b0bada30397ac271e34bf56a18`): five actual-native scenarios plus seven source-level cases.
 The native scenarios proved multiple turns with stdin still open, ACK clock
-timing before delayed completion, working hold, same-session native history
+gating, working hold, same-session native history
 restoration, loss of Hub return without duplicate input, actual SIGSTOP / bounded
 partial-pipe uncertainty, no uncertain replay, expiry/exit hold, and rejection of
 unsupported reset. Resume evidence comes from the native CLI's next gateway

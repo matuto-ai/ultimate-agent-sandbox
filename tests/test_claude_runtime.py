@@ -217,22 +217,27 @@ class ClaudeNativeTests(unittest.TestCase):
     def request(self, id='work-1'):
         return self.hub.snapshot()['state']['peer_traffic']['traffic'][id]
 
-    def test_long_lived_ack_starts_clock_but_working_holds_next_message(self):
+    def test_long_lived_working_hold_and_native_ack_clock_gate(self):
         self.gateway.release = threading.Event()
-        self.submit()
-        self.submit('work-2')
-        self.assertIsNone(self.request()['response_started_at'])
+        self.gateway.entered = threading.Event()
+        self.native.refresh()
         try:
-            self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
-            self.assertIsNotNone(self.request()['response_started_at'])
-            self.assertEqual(self.request()['status'], 'DELIVERED', 'runtime input acceptance is not work acceptance')
+            self.assertTrue(self.gateway.entered.wait(timeout=5), 'actual native model request must be in flight')
+            self.submit()
+            self.submit('work-2')
             self.assertIs(self.native.observe(), Readiness.BUSY)
             self.assertEqual(self.deliver()['outcome'], 'HELD')
+            self.assertIsNone(self.request()['response_started_at'])
             self.assertIsNone(self.request('work-2')['response_started_at'])
         finally:
             self.gateway.release.set()
         self.native.wait_safe()
         self.assertIsNone(self.native.process.poll())
+        self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
+        self.assertIsNotNone(self.request()['response_started_at'])
+        self.assertEqual(self.request()['status'], 'DELIVERED', 'runtime input acceptance is not work acceptance')
+        self.assertIsNone(self.request('work-2')['response_started_at'])
+        self.native.wait_safe()
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
         self.native.wait_safe()
         self.assertIsNone(self.native.process.poll(), 'stdin stays open over multiple genuine turns')
