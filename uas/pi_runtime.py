@@ -54,59 +54,51 @@ class FixturePiRpcReceiver:
         self._closed = False
         self._owns_process = process is None
         self.incarnation_id = incarnation_id
-        if runtime_version != '1.4.0':
-            raise NativeUnavailable('unsupported Pi version')
-        if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
-                or any(type(scope[key]) is not str or not scope[key] for key in ('room_id', 'participant_id', 'run_id'))
-                or any(type(scope[key]) is not int or scope[key] != 1 for key in ('generation', 'context_generation'))):
-            raise NativeUnavailable('only explicitly bound fixture Run/context generation 1 is supported')
-        self.scope = dict(scope)
-        self.runtime_version = runtime_version
-        self.timeout = timeout
-        self.db = sqlite3.connect(journal)
-        self.db.execute('PRAGMA journal_mode=WAL')
-        self.db.execute('PRAGMA synchronous=FULL')
-        self.db.execute('CREATE TABLE IF NOT EXISTS handoffs ('
-                        'logical_digest TEXT PRIMARY KEY, logical TEXT NOT NULL, '
-                        'session_id TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)')
-        self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL)')
-        previous = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
-        if previous and json.loads(previous[0]) != self.scope:
-            self.db.close()
-            raise NativeUnavailable('fixture scope cannot change without qualified native reset')
-        self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
-        self.db.commit()
+        self.db = None
+        self.process = process
+        self._reader = self._stderr = None
+        self._condition = threading.Condition()
+        self._write_lock = threading.Lock()
+        self._transport_fenced = False
         try:
+            if runtime_version != '1.4.0':
+                raise NativeUnavailable('unsupported Pi version')
+            if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
+                    or any(type(scope[key]) is not str or not scope[key] for key in ('room_id', 'participant_id', 'run_id'))
+                    or any(type(scope[key]) is not int or scope[key] != 1 for key in ('generation', 'context_generation'))):
+                raise NativeUnavailable('only explicitly bound fixture Run/context generation 1 is supported')
+            self.scope = dict(scope)
+            self.runtime_version = runtime_version
+            self.timeout = timeout
+            self.db = sqlite3.connect(journal)
+            self.db.execute('PRAGMA journal_mode=WAL')
+            self.db.execute('PRAGMA synchronous=FULL')
+            self.db.execute('CREATE TABLE IF NOT EXISTS handoffs ('
+                            'logical_digest TEXT PRIMARY KEY, logical TEXT NOT NULL, '
+                            'session_id TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)')
+            self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL)')
+            previous = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
+            if previous and json.loads(previous[0]) != self.scope:
+                raise NativeUnavailable('fixture scope cannot change without qualified native reset')
+            self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
+            self.db.commit()
             self.process = process if process is not None else subprocess.Popen(
                 argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, bufsize=0)
-        except BaseException:
-            self.db.close()
-            raise
-        try:
             os.set_blocking(self.process.stdin.fileno(), False)
-        except BaseException:
-            self.db.close()
-            if self._owns_process and self.process.poll() is None:
-                self.process.kill()
-                self.process.wait(timeout=3)
-            raise
-        self._transport_fenced = False
-        self._condition = threading.Condition()
-        self._responses = {}
-        self._notifications = {}
-        self._rpc_pending = set()
-        self._native_pending = set()
-        self.events = deque(maxlen=512)
-        self.errors = deque(maxlen=64)
-        self._ended = False
-        self._binding = None
-        self._write_lock = threading.Lock()
-        self._reader = threading.Thread(target=self._read, daemon=True)
-        self._stderr = threading.Thread(target=self._read_errors, daemon=True)
-        self._reader.start()
-        self._stderr.start()
-        try:
+            self._transport_fenced = False
+            self._responses = {}
+            self._notifications = {}
+            self._rpc_pending = set()
+            self._native_pending = set()
+            self.events = deque(maxlen=512)
+            self.errors = deque(maxlen=64)
+            self._ended = False
+            self._binding = None
+            self._reader = threading.Thread(target=self._read, daemon=True)
+            self._stderr = threading.Thread(target=self._read_errors, daemon=True)
+            self._reader.start()
+            self._stderr.start()
             state = self._native('state', {})['state']
             if state.get('api_baseline') != runtime_version or state.get('readiness') not in {r.value for r in Readiness}:
                 raise NativeUnavailable('unsupported or absent native observation')
@@ -351,30 +343,35 @@ class FixturePiRpcReceiver:
                 'hang_uncertainty': 'no-native-hang-signal', 'image_digest': 'not-qualified'}
 
     def close(self):
-        if self._closed:
-            return
+        # Every resource slot exists before initialization can fail. Retrying
+        # close may join readers after an attached owner has subsequently reaped.
         self._closed = True
         self._transport_fenced = True
         with self._condition:
             self._condition.notify_all()
-        if self._owns_process:
-            if self.process.poll() is None:
-                try:
-                    self.process.stdin.close()
-                    self.process.wait(timeout=3)
-                except (OSError, ValueError, subprocess.TimeoutExpired):
-                    self.process.kill()
-                    self.process.wait(timeout=3)
-        # An attached receiver never terminates or closes its controller's
-        # process/stdio. Controller cleanup reaps first, then closes this object.
-        if self.process.poll() is not None:
-            self._reader.join(timeout=1)
-            self._stderr.join(timeout=1)
-        if self._owns_process:
-            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
-                if not stream.closed:
+        try:
+            if self.process is not None:
+                if self._owns_process and self.process.poll() is None:
                     try:
-                        stream.close()
-                    except OSError:
-                        pass
-        self.db.close()
+                        self.process.stdin.close()
+                        self.process.wait(timeout=3)
+                    except (OSError, ValueError, subprocess.TimeoutExpired):
+                        self.process.kill()
+                        self.process.wait(timeout=3)
+                # An attached receiver never kills/closes controller resources.
+                # Its owner reaps on failure; started readers then observe EOF.
+                if self.process.poll() is not None:
+                    for thread in (self._reader, self._stderr):
+                        if thread is not None and thread.ident is not None:
+                            thread.join(timeout=1)
+                if self._owns_process:
+                    for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                        if stream is not None and not stream.closed:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+        finally:
+            if self.db is not None:
+                database, self.db = self.db, None
+                database.close()

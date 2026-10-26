@@ -179,7 +179,10 @@ prefixes whose excess read(2) would discard. A correlated application denial is
 not an uncertain transport failure. Lost receipts are not automatic tool retries.
 Ledger idempotency continues to bind each operation to its exact security context.
 
-The fixture harness runs `observe/deliver/receive` on the ledger-owning thread.
+The fixture harness runs `observe/deliver/receive` and active lifecycle actions
+on the ledger/journal-owning thread. Background readers only collect RPC events;
+they never touch SQLite. General cross-thread Stop after active attachment is not
+supported without marshaling that work back to the owner thread.
 It may service the outbound authority channel after native persistence confirms
 delivery, without holding a lifecycle lock while waiting for RPC. First-ever
 queued work starts the supported native turn; the actual faux provider produces
