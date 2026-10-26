@@ -226,7 +226,7 @@ class ClaudeSDKReceiverNativeTests(unittest.TestCase):
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
         self.native.wait_safe()
         self.assertEqual(len(self.gateway.requests), 2)
-        self.assertIsNone(self.native.process.poll(), 'one long-lived SDK host spans genuine peer turns')
+        self.assertTrue(self.native._host_alive(), 'one long-lived SDK host spans genuine peer turns')
 
     def test_lost_hub_return_resume_reconciles_once_then_real_peer_proves_history_and_fencing(self):
         self.submit(text='SDK-RECEIVER-HISTORY-NONCE')

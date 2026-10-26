@@ -1,6 +1,7 @@
 """Synthetic fixed-host faults; not native SDK or permission-path evidence."""
 from collections import deque
 import io
+from contextlib import nullcontext
 import fcntl
 import json
 from pathlib import Path
@@ -30,6 +31,9 @@ class ClaudeSDKBoundaryTests(unittest.TestCase):
         self.native.reply_id = self.native.reply = None
         self.native.event_revision = 3
         self.native.ended = False
+        self.native.closing = False
+        self.native._host_alive = Mock(return_value=True)
+        self.native._terminate_host = Mock()
 
     def test_host_policy_fence_precedes_replayed_ack_even_if_python_parser_would_accept(self):
         message_id = '11111111-1111-4111-8111-111111111111'
@@ -81,7 +85,7 @@ class ClaudeSDKBoundaryTests(unittest.TestCase):
                     output.assert_called_once()
                     self.assertTrue(self.native.signals.fenced)
                     if partial:
-                        self.native.process.terminate.assert_called()
+                        self.native._terminate_host.assert_called()
 
     def test_lost_reply_after_complete_command_stays_unknown(self):
         with patch('uas.claude_runtime.os.write', side_effect=lambda fd, data: len(data)):
@@ -89,7 +93,7 @@ class ClaudeSDKBoundaryTests(unittest.TestCase):
                 self.native._command('send')
         self.assertNotIsInstance(raised.exception, ClaudeNotApplied)
         self.assertTrue(self.native.signals.fenced)
-        self.native.process.terminate.assert_called()
+        self.native._terminate_host.assert_called()
 
     def test_locked_slot_does_not_write_or_claim_receipt(self):
         self.native.command_lock.acquire()
@@ -155,13 +159,14 @@ class ClaudeSDKBoundaryTests(unittest.TestCase):
             command.assert_not_called()
 
     def test_failed_database_spawn_or_thread_start_releases_journal_and_owned_resources(self):
-        for failure in ('database', 'spawn', 'thread'):
+        for failure in ('database', 'spawn', 'pidfd', 'blocking', 'thread', 'ready'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
                 root = Path(root)
                 binary = root / 'synthetic-binary'
                 binary.write_bytes(b'not executed')
                 child = Mock()
                 child.pid = 12345
+                child.returncode = None
                 child.poll.return_value = None
                 child.wait.return_value = 0
                 kwargs = dict(sdk_install=root, node=root / 'not-executed', cwd=root, home=root,
@@ -171,16 +176,29 @@ class ClaudeSDKBoundaryTests(unittest.TestCase):
                               'context_generation': 1})
                 target = {'database': 'uas.claude_runtime.sqlite3.connect',
                           'spawn': 'uas.claude_runtime.subprocess.Popen',
+                          'pidfd': 'uas.claude_runtime.os.pidfd_open',
+                          'blocking': 'uas.claude_runtime.os.set_blocking',
+                          'ready': 'uas.claude_runtime.FixtureClaudeReceiver._wait',
                           'thread': 'uas.claude_runtime.threading.Thread.start'}[failure]
                 with patch('uas.claude_runtime.require_loopback_namespace'), \
                      patch('uas.claude_runtime.hashlib.file_digest', return_value=SimpleNamespace(hexdigest=lambda: BINARY_SHA256)), \
-                     patch('uas.claude_runtime.os.set_blocking'), patch('uas.claude_runtime.os.killpg'):
-                    if failure == 'thread':
+                     patch('uas.claude_runtime.os.set_blocking'), patch('uas.claude_runtime.os.killpg'), \
+                     patch('uas.claude_runtime.os.pidfd_open', return_value=111), \
+                     patch('uas.claude_runtime.signal.pidfd_send_signal') as send_signal, \
+                     patch('uas.claude_runtime.select.select', return_value=([], [], [])), \
+                     patch('uas.claude_runtime.os.waitid', return_value=None), \
+                     patch('uas.claude_runtime.os.close'):
+                    if failure in ('pidfd', 'blocking', 'thread', 'ready'):
                         with patch('uas.claude_runtime.subprocess.Popen', return_value=child), \
+                             (nullcontext() if failure == 'thread' else patch('uas.claude_runtime.threading.Thread')), \
                              patch(target, side_effect=RuntimeError('fault')):
                             with self.assertRaisesRegex(RuntimeError, 'fault'):
                                 FixtureClaudeReceiver(binary, **kwargs)
-                        child.terminate.assert_called_once()
+                        import signal
+                        if failure == 'pidfd':
+                            send_signal.assert_not_called()
+                        else:
+                            send_signal.assert_any_call(111, signal.SIGTERM, None, 0)
                         child.wait.assert_called_once()
                         child.stdin.close.assert_called_once()
                         child.stdout.close.assert_called_once()

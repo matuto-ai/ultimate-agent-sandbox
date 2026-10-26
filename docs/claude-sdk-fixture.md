@@ -34,6 +34,16 @@ The Python boundary verifies the owned host/native parent and start identities.
 It never promotes the wrapper PID to native authority or clears an unknown
 intent because a replacement host reports idle.
 
+The receiver exclusively owns the host's wait/reap lifecycle. Held host/native
+pidfds provide operational liveness and identity-targeted termination; ordinary
+observations never call `Popen.poll()` or reap the host. Close checks waitable
+ownership using `waitid(P_PIDFD, ..., WNOWAIT)`, disposes the owned session group
+while its leader is still unreaped, and only then waits/reaps. An already reaped
+or unverifiable leader permits no numeric group signal: only held identities
+are terminated. No process scan or generic kill fallback is used. Constructor
+and close faults still release pipes, pidfds and journal ownership; close is
+idempotent. Network-free synthetic lifecycle tests are not native SDK evidence.
+
 The local fixture protocol admits only correlated `probe`, `send` and `close`
 commands; it cannot execute an arbitrary command or change native options.
 Frames, output buffering and the input slot are bounded. Native control and

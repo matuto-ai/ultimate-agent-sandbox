@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import select
 import signal
 import subprocess
 import tempfile
@@ -12,7 +13,8 @@ import time
 import unittest
 import uuid
 
-from uas.claude_runtime import require_loopback_namespace
+from uas.claude_runtime import (require_loopback_namespace, _dispose_sdk_process,
+                                _pidfd_alive, _sdk_native_pidfd)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +62,8 @@ class ClaudeSDKNativeTests(unittest.TestCase):
         self.binary = Path(INSTALL) / 'node_modules/@anthropic-ai/claude-code-linux-x64/claude'
         self.session_id = str(uuid.uuid4())
         self.process = None
+        self.host_pidfd = self.native_pidfd = None
+        self.readers = []
         self.addCleanup(self.close_host)
         self.samples = []
 
@@ -72,24 +76,17 @@ class ClaudeSDKNativeTests(unittest.TestCase):
     def close_host(self):
         if self.process is None:
             return
-        if self.process.poll() is None:
-            self.process.terminate()
-        try:
-            self.process.wait(timeout=4)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.process.pid, signal.SIGKILL)
-            self.process.wait(timeout=3)
-        # The test-created process group is the cleanup boundary, including a
-        # child stopped during failure injection. No unrelated process lookup.
-        try:
-            os.killpg(self.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _dispose_sdk_process(self.process, self.host_pidfd, self.native_pidfd)
         for thread in self.readers:
             thread.join(timeout=1)
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             stream.close()
         self.process = None
+        for name in ('native_pidfd', 'host_pidfd'):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
 
     def start(self, *, resume=False):
         self.events = deque(maxlen=128)
@@ -101,6 +98,7 @@ class ClaudeSDKNativeTests(unittest.TestCase):
             self.session_id, '1' if resume else '0'], cwd=ROOT,
             env={'PATH': '/usr/bin:/bin', 'HOME': str(self.home)}, start_new_session=True,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.host_pidfd = os.pidfd_open(self.process.pid, 0)
 
         def read():
             try:
@@ -126,6 +124,7 @@ class ClaudeSDKNativeTests(unittest.TestCase):
             thread.start()
         ready = self.wait(lambda e: e.get('type') == 'host-ready')
         self.native_pid = ready['native_pid']
+        self.native_pidfd = _sdk_native_pidfd(self.native_pid, self.process.pid, ready['native_start'])
         self.assertNotEqual(self.native_pid, self.process.pid, 'SDK host is not native process authority')
         self.assertEqual(ready['session_id'], self.session_id)
         self.assertEqual((ready['sdk_version'], ready['cli_version']), ('0.3.310', '2.1.310'))
@@ -138,8 +137,8 @@ class ClaudeSDKNativeTests(unittest.TestCase):
                 match = next((e for e in self.events if predicate(e)), None)
                 if match is not None:
                     return match
-                if self.process.poll() is not None or time.monotonic() >= deadline:
-                    self.fail(f'missing SDK evidence; exit={self.process.poll()} errors={list(self.errors)} events={list(self.events)}')
+                if not _pidfd_alive(self.host_pidfd) or time.monotonic() >= deadline:
+                    self.fail(f'missing SDK evidence; exit-observed={not _pidfd_alive(self.host_pidfd)} errors={list(self.errors)} events={list(self.events)}')
                 self.condition.wait(min(.1, deadline - time.monotonic()))
 
     def command(self, op, **data):
@@ -246,7 +245,7 @@ class ClaudeSDKNativeTests(unittest.TestCase):
             self.assertEqual(reply['state'], 'ambiguous')
             self.assertEqual(reply['error'], 'native-control-timeout')
             self.assertLess(time.monotonic() - started, 3)
-            self.process.wait(timeout=4)
+            self.assertTrue(select.select([self.host_pidfd], [], [], 4)[0], 'host must exit without reaping its group leader')
             self.assertEqual(self.gateway.requests, [])
             self.assertEqual(self.gateway.all_requests, [])
         finally:

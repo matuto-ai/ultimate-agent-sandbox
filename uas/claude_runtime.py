@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -32,6 +33,76 @@ class ClaudeUnavailable(RuntimeError):
 
 class ClaudeNotApplied(ClaudeUnavailable):
     """This attempt provably wrote no native input bytes; not an ACK."""
+
+
+def _pidfd_alive(fd):
+    return fd is not None and not select.select([fd], [], [], 0)[0]
+
+
+def _signal_pidfd(fd, sig):
+    if fd is not None:
+        try:
+            signal.pidfd_send_signal(fd, sig, None, 0)
+        except ProcessLookupError:
+            pass
+
+
+def _sdk_native_pidfd(pid, parent, started):
+    """Hold only the fixed host's one reported native child, not a PID lookup badge."""
+    fd = os.pidfd_open(pid, 0)
+    try:
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+        if (fields[1] != str(parent) or fields[19] != started or not _pidfd_alive(fd)):
+            raise ClaudeUnavailable('SDK native identity changed before pidfd binding')
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _dispose_sdk_process(process, host_fd, native_fd, *, grace=3):
+    """Dispose our fixed SDK session before reaping, never signal a recycled PGID.
+
+    Normal liveness uses pidfds, not Popen.poll(), so the host remains our owned
+    waitable child. A live or unreaped zombie leader reserves its numeric PID.
+    An externally reaped leader is not group authority: only held pidfds remain.
+    No process scan, process-name lookup or numeric fallback follows reaping.
+    """
+    failures = []
+    def attempt(operation):
+        try:
+            return operation()
+        except BaseException as error:
+            failures.append(error)
+    attempt(lambda: _signal_pidfd(host_fd, signal.SIGTERM))
+    if host_fd is not None:
+        attempt(lambda: select.select([host_fd], [], [], grace))  # Never reap here.
+    try:
+        # P_PIDFD also rejects a recycled PID that became a different child.
+        # The no-fd path is only failed pidfd acquisition immediately after spawn.
+        if process.returncode is not None:
+            raise ChildProcessError('host already reaped')
+        os.waitid(os.P_PIDFD if host_fd is not None else os.P_PID,
+                  host_fd if host_fd is not None else process.pid,
+                  os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        owned_unreaped = True  # None means our child is still running.
+    except ChildProcessError:
+        owned_unreaped = False
+    except BaseException as error:
+        failures.append(error)
+        owned_unreaped = False
+    if owned_unreaped:
+        def dispose_group():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        attempt(dispose_group)
+    attempt(lambda: _signal_pidfd(native_fd, signal.SIGKILL))
+    attempt(lambda: _signal_pidfd(host_fd, signal.SIGKILL))
+    attempt(lambda: process.wait(timeout=3))  # Only owned lifecycle reap.
+    if failures:
+        raise failures[0]
 
 
 def _ack_matches(event, session_id, message_id, content):
@@ -186,12 +257,14 @@ class _ClaudeJournal:
                 self.db.execute('INSERT INTO binding VALUES (1,?,?)', (json.dumps(scope), self.session_id))
 
     def _close_journal(self):
-        if self.db is not None:
-            self.db.close()
-            self.db = None
-        if self.owner is not None:
-            self.owner.close()
-            self.owner = None
+        db, self.db = self.db, None
+        owner, self.owner = self.owner, None
+        try:
+            if db is not None:
+                db.close()
+        finally:
+            if owner is not None:
+                owner.close()
 
     def _unknown(self):
         return self.db.execute('SELECT 1 FROM handoffs WHERE receipt IS NULL AND retryable != 1 LIMIT 1').fetchone()
@@ -460,6 +533,9 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                  journal, scope, resume=False, timeout=8):
         self.db = self.owner = self.process = None
         self.reader = self.stderr = None
+        self.host_pidfd = self.native_pidfd = None
+        self.close_lock = threading.RLock()
+        self.closing = False
         self.condition = threading.Condition()
         self.command_lock = threading.Lock()
         self.events = deque(maxlen=128)
@@ -478,6 +554,8 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             self.process = subprocess.Popen(argv, cwd=cwd,
                 env={'PATH': '/usr/bin:/bin', 'HOME': str(home)}, start_new_session=True,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            # Before polling or reader startup, this child is still unreaped.
+            self.host_pidfd = os.pidfd_open(self.process.pid, 0)
             os.set_blocking(self.process.stdin.fileno(), False)
             self.reader = threading.Thread(target=self._read, daemon=True)
             self.stderr = threading.Thread(target=self._errors, daemon=True)
@@ -485,12 +563,18 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             self.stderr.start()
             self._wait(lambda: self.ready)
             # Initialization is not readiness and makes no model request.
-        except BaseException:
-            self.close()
+        except BaseException as error:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                error.add_note(f'SDK cleanup also failed: {cleanup_error!r}')
             raise
 
+    def _host_alive(self):
+        return not self.closing and self.process is not None and _pidfd_alive(self.host_pidfd)
+
     def _kernel(self):
-        if not self.ready or self.process.poll() is not None or self.ended:
+        if not self.ready or not self._host_alive() or not _pidfd_alive(self.native_pidfd) or self.ended:
             raise ClaudeUnavailable('SDK host/native absent')
         try:
             fields = Path(f'/proc/{self.native_pid}/stat').read_text().rsplit(')', 1)[1].split()
@@ -509,6 +593,8 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 if type(frame) is not dict:
                     raise ValueError('invalid SDK host frame')
                 with self.condition:
+                    if self.closing:
+                        break
                     kind = frame.get('type')
                     if kind == 'host-ready':
                         if (self.ready or frame.get('host_pid') != self.process.pid
@@ -522,7 +608,10 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                         fields = Path(f'/proc/{self.native_pid}/stat').read_text().rsplit(')', 1)[1].split()
                         if fields[1] != str(self.process.pid):
                             raise ValueError('SDK host does not own native process')
-                        self.native_start = fields[19]
+                        if type(frame.get('native_start')) is not str or frame['native_start'] != fields[19]:
+                            raise ValueError('invalid SDK native start binding')
+                        self.native_start = frame['native_start']
+                        self.native_pidfd = _sdk_native_pidfd(self.native_pid, self.process.pid, self.native_start)
                         self.ready = True
                     elif kind == 'native':
                         event = frame.get('event')
@@ -564,17 +653,16 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             self.errors.append(line.decode('utf8', errors='replace'))
 
     def _terminate_host(self):
-        if self.process is not None and self.process.poll() is None:
-            try:
-                self.process.terminate()
-            except ProcessLookupError:
-                pass
+        if not self.closing:
+            with self.close_lock:
+                if not self.closing:
+                    _signal_pidfd(self.host_pidfd, signal.SIGTERM)
 
     def _wait(self, predicate):
         deadline = time.monotonic() + self.timeout
         with self.condition:
             while True:
-                if self.ended or self.process.poll() is not None or self.signals.fenced:
+                if self.ended or not self._host_alive() or self.signals.fenced:
                     raise ClaudeUnavailable('SDK/native session held: ' + self.signals.state)
                 value = predicate()
                 if value:
@@ -605,7 +693,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 try:
                     with self.condition:
                         remaining = deadline - time.monotonic()
-                        if self.ended or self.signals.fenced or self.process.poll() is not None or remaining <= 0:
+                        if self.ended or self.signals.fenced or not self._host_alive() or remaining <= 0:
                             raise ClaudeUnavailable('fixed host held before remaining command bytes')
                         count = os.write(fd, wire[offset:])
                         if count <= 0:
@@ -650,7 +738,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             return Readiness.AMBIGUOUS if self._kernel() in ('T', 't', 'Z', 'X', 'D') else Readiness.SAFE
 
     def observe(self):
-        if self.process.poll() is not None or self.ended:
+        if not self._host_alive() or self.ended:
             return Readiness.LOST
         if self._unknown() or self.signals.fenced:
             return Readiness.AMBIGUOUS
@@ -703,7 +791,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 'binary_sha256': BINARY_SHA256, 'authority': 'sdk-host-owned-fixture-only',
                 'host_pid': self.process.pid, 'native_pid': self.native_pid,
                 'session_id': self.session_id, 'incarnation_id': self.incarnation_id,
-                'process_alive': self.process.poll() is None, 'readiness': self.observe().value,
+                'process_alive': self._host_alive(), 'readiness': self.observe().value,
                 'safe_source': 'fresh-public-SDK-control-plus-exact-native-idle-listing-and-state-holds',
                 'receipt_source': 'exact-native-replay-user-message', 'transport_fenced': self.signals.fenced,
                 'native_receipts': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NOT NULL').fetchone()[0],
@@ -713,23 +801,35 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 'image_digest': 'not-qualified', 'native_reset': 'not-qualified', 'mcp_reconnect': 'not-qualified'}
 
     def close(self):
+        with self.close_lock:
+            self._close_owned()
+
+    def _close_owned(self):
+        with self.condition:
+            self.closing = True
+            if hasattr(self, 'signals'):
+                self.signals.hold('closed')
+            self.condition.notify_all()
+        failures = []
+        def attempt(operation):
+            try:
+                operation()
+            except BaseException as error:
+                failures.append(error)
         if self.process is not None:
-            self._terminate_host()
-            try:
-                self.process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, 9)
-                self.process.wait(timeout=3)
-            # Only this receiver's own newly-created process group; includes a
-            # SIGSTOPped native child if the host exited before its close timer.
-            try:
-                os.killpg(self.process.pid, 9)
-            except ProcessLookupError:
-                pass
+            process = self.process
+            attempt(lambda: _dispose_sdk_process(process, self.host_pidfd, self.native_pidfd))
             for thread in (self.reader, self.stderr):
                 if thread is not None and thread.ident is not None:
-                    thread.join(timeout=1)
-            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
-                stream.close()
+                    attempt(lambda thread=thread: thread.join(timeout=1))
+            for stream in (process.stdin, process.stdout, process.stderr):
+                attempt(stream.close)
             self.process = None
-        self._close_journal()
+        for name in ('native_pidfd', 'host_pidfd'):
+            fd = getattr(self, name)
+            setattr(self, name, None)
+            if fd is not None:
+                attempt(lambda fd=fd: os.close(fd))
+        attempt(self._close_journal)
+        if failures:
+            raise failures[0]

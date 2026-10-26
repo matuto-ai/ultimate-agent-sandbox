@@ -125,7 +125,7 @@ async function main() {
   const init = await deadline(query.initializationResult(), 'native-initialize-timeout');
   if (init.claude_code_version !== CLI_VERSION) throw new Error('unsupported-initialization');
   kernelStart = kernelIdentity().start;
-  write({type: 'host-ready', host_pid: process.pid, native_pid: child.pid, session_id: sessionId,
+  write({type: 'host-ready', host_pid: process.pid, native_pid: child.pid, native_start: kernelStart, session_id: sessionId,
     sdk_version: SDK_VERSION, cli_version: CLI_VERSION, authority: 'sdk-host-owned-fixture-only'});
   let buffer = Buffer.alloc(0);
   process.stdin.on('data', data => {
