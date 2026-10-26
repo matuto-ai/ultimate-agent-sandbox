@@ -1,6 +1,6 @@
 # Deliberate native permission qualification (#71)
 
-**Status: ask-rule run proved native attention/allow/deny; pending-close still failed.**
+**Status: bounded native attention/allow/deny/pending-close fixture qualified.**
 This does not expand `FixtureClaudeReceiver`: its tool-less policy, permanent
 attention fence, durable journal and all automatic CI budgets remain unchanged.
 It does not qualify production permissions, Supervisor badges, human authority,
@@ -140,12 +140,38 @@ The existing outer held-pidfd disposer remains responsible for cleanup. No PID
 lookup, process-group signal or post-reap numeric signal is introduced. Pure
 lifecycle tests cover controller/signal/error close, spontaneous exit, recursive
 exit notification and failed kill/exit. They are not native proof. The mandatory
-no-post-close-request assertion is unchanged and awaits separate qualification.
+no-post-close-request assertion remained unchanged and passed in the run below.
 
-Future reports capture native frames (at most 256 and 2 MiB total), up to three
+Reports capture native frames (at most 256 and 2 MiB total), up to three
 bounded gateway requests (each at most 1 MiB), capture errors and cleanup receipts.
 Evidence overflow fails rather than silently discarding earlier frames. Values
 remain fixture-only; no external provider or credentials are introduced.
+
+## Qualified bounded result
+
+[Run 40393356811](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40393356811),
+job `121819826370`, checked out exact source head
+`dc209721f01734c300ae639d3c1086d2751c857a` (tree
+`aa08fe190ea893ce49b74f267fe67b30ac7a6cfc`). All three cases passed in
+6.053 seconds, under the unchanged deliberate three-minute job cap. Complete
+job log SHA-256:
+`64eebecb5626aa81f57cb933de6a9bfb34f4e0a06ffea8afc0ad8120a64c9f26`.
+
+All three captured reports have no capture errors, fresh distinct identities,
+exact-session `requires_action`, and positive held-host/native exit plus host-reap
+receipts. Allow and deny each made two gateway requests: allow returned exactly
+one correlated Read result with the nonce; deny returned a correlated error
+without the nonce and recorded the matching terminal permission denial. The
+pending-close case made exactly one gateway request, with no tool result,
+terminal result or nonce disclosure. The stale/duplicate decision and bounded
+no-early-request assertions passed. These are actual pinned SDK/native lifecycle
+observations against a loopback fake provider, not live inference or billing.
+
+The captured allow/deny states were `running → requires_action → running`,
+followed by terminal results. No fresh post-result idle/recovery qualification is
+claimed. The exit scenario stopped at `requires_action` before owned termination.
+Pure failed-kill/timeout and concurrent-abort tests are not native fault-injection
+proof. The historical failures above remain relevant evidence, not hidden retries.
 
 ## Deliberately unresolved integration
 
@@ -158,10 +184,9 @@ terminal identity/transport/journal fences; exact replay ACK remains the sole
 receipt; tool results must not be mistaken for user replay; renewed delivery
 needs fresh liveness and exact idle identity after a qualified terminal state.
 
-The ask-rule run establishes the narrow allow/deny behavior above, not a
-completed qualification or production integration. Pending-close cancellation
-and the corrected termination order remain unproven until a reviewed manual run. Missing or unexpected
-native evidence fails the gate. No permit replay across process restoration,
+The successful run qualifies only this fixed diagnostic profile, not production
+integration or general cancellation behavior. Missing or unexpected native
+evidence still fails the gate. No permit replay across process restoration,
 `defer` continuation, production approval UI or generic permission policy engine
 is added. Actor identity, Broker capabilities, Forge authority and human merge
 remain enforced at their existing independent seams.

@@ -106,7 +106,9 @@ work exceeding the normal CI budget must move to a deliberate gate, not extend
 automatic CI timeouts.
 
 A separate [manual native-permission qualification fixture](claude-permission-qualification.md)
-prepares one explicitly decided Read request. Its first native run observed
-automatic Read acceptance instead of permission attention and failed; a stricter
-ask-rule correction awaits qualification. It neither expands this default profile
-nor qualifies Hub delivery during permission waits.
+qualifies one explicitly decided Read request: exact-source run 40393356811
+passed native attention, correlated allow/deny and pending-close termination.
+Historical ask-rule and graceful-close failures remain documented. This fixed
+diagnostic neither expands the default tool-less receiver nor qualifies Hub
+delivery during permission waits, production approval authority or post-result
+fresh-idle recovery.
