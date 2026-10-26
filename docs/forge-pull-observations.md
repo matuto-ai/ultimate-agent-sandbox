@@ -61,11 +61,22 @@ restrictions and sanitization. A controlled Python Participant crosses the
 existing kernel-authenticated socketpair into the real Broker and ledger; this
 is process-fixture evidence, not a native agent qualification.
 
-One actual-Pi route/retry scenario is defined inside the existing ordinary
-`pi-native` suite. It is **not run locally** where native qualification is
-prohibited; remote CI must supply that evidence. No workflow, package lock or Pi
-runtime payload changes are included, and no heavy qualification is added.
-Known-denied local listener probes remain excluded before aggregate execution.
+The actual-Pi route/retry scenario passed in ordinary
+[PR #115 Pi CI](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40411092089)
+for head `944b6995228f3e165b2832081d9d277b7e15469c`, checked out as synthetic
+merge `dfbee7e173a68c844b38fec1a0313f9366f5862b` with the same reviewed tree
+`f70aea4353d0f34cde93841bea9bcc6f40090f58`. All 86 Pi tests passed in
+99.776 seconds. The new case exercised the existing `gh` tool through native Pi,
+Broker and Room ledger, asserting an identical retry receipt and exactly three
+provider fixture reads, with no verdict or Run projection. The existing native
+unauthorized-route case also passed with no provider contact.
+
+This is controlled-provider, Linux same-UID process-channel evidence, not live
+GitHub credentials, provider-account qualification, inference health or a
+Workstation isolation qualification. Native qualification was **not run locally**.
+No workflow, package lock or Pi runtime payload changes are included, and no heavy
+qualification is added. Known-denied local listener probes remain excluded before
+local aggregate execution.
 
 No candidate projection is added to Run rows. `submit-for-review`, exact Gate
 policy/evidence adjudication, contribution-based independent reviewer selection,
