@@ -5,7 +5,31 @@ launcher or production qualification**. It asks whether a normal hosted CI runne
 can boot a suitable SELinux-enforcing Linux guest without KVM, credentials, user
 hardware or a paid provider account, observe its prerequisites, and remove it.
 
-The separate `vm-feasibility` workflow runs only when its harness changes. It
+The separate `vm-feasibility` workflow is a **deliberate qualification tier**, not
+a per-commit or per-PR gate. It runs through Actions **Run workflow**, or when the
+review account `puglab-reviewer` explicitly adds `qualify-vm-feasibility` to a
+same-repository PR. Only the `labeled` event is subscribed: opening a PR, pushing,
+or retaining the label across later commits never starts a VM. Other labels,
+other label senders and fork heads cannot launch this qualification job.
+
+The label event checks out its exact PR head SHA. Reviewers must record that SHA
+with the result; later relevant source changes require a new explicit decision
+(remove/re-add the label or dispatch the reviewed branch). A prior pass is not
+evidence for changed code. `gh workflow run vm-feasibility.yml --ref BRANCH` is
+the equivalent manual recipe where GitHub CLI Actions access is available.
+Do not rerun the heavy tier for documentation or unrelated commits. This changes
+neither branch protection nor the requirement for real security evidence before
+qualification/release. Ordinary aggregate and native-fixture checks remain fast
+and automatic; offline tests are not VM enforcement evidence.
+
+Automatic test execution ceilings are at most three minutes per workflow: aggregate
+validation one minute plus its dependent Docker lifecycle two minutes, Pi native
+three minutes, Claude native/Pi durable two minutes each. These are failure ceilings, not skipped tests or timeout-as-success.
+GitHub queue delay is outside the execution budget. A workload that no longer
+fits must be optimized or moved to deliberate qualification, not silently given
+a larger automatic budget.
+
+The selected qualification run
 installs QEMU/cloud-image tools on the disposable Ubuntu runner, then invokes
 `python3 tests/vm/run.py` as the unprivileged runner user. The normal aggregate also
 checks offline harness contracts; those tests do not claim that a VM booted.

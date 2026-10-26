@@ -1,27 +1,28 @@
 name: vm-feasibility
 
 on:
+  workflow_dispatch:
   pull_request:
-    paths: ['tests/vm/**', 'tests/test_vm_feasibility.py', '.github/workflows/vm-feasibility.yml']
-  push:
-    branches: [main]
-    paths: ['tests/vm/**', 'tests/test_vm_feasibility.py', '.github/workflows/vm-feasibility.yml']
+    types: [labeled]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   fedora-tcg-boot:
+    # A retained label does not rerun this expensive tier on later commits.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.label.name == 'qualify-vm-feasibility' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install only disposable-runner VM tools
         run: |
           sudo apt-get update -qq
