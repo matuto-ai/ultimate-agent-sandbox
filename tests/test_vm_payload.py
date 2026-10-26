@@ -16,6 +16,23 @@ FINGERPRINT = "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6"
 
 
 class VMPayloadTests(unittest.TestCase):
+    def test_command_does_not_inherit_account_or_npm_configuration(self):
+        import sys
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            injected={'NPM_CONFIG_USERCONFIG':'/not/read/user',
+                      'NPM_CONFIG_GLOBALCONFIG':'/not/read/global',
+                      'NPM_TOKEN':'synthetic-not-a-secret','HOME':'/not/read/home'}
+            with patch.dict(os.environ,injected):
+                output=payload.command([sys.executable,'-c',
+                    'import os,json; print(json.dumps(dict(os.environ)))'],directory=root,
+                    timeout=3,environment={'NPM_CONFIG_IGNORE_SCRIPTS':'true'})
+            observed=json.loads(output)
+            for key in injected:
+                if key!='HOME':self.assertNotIn(key,observed)
+            self.assertEqual(observed['HOME'],str(root/'home'))
+            self.assertEqual(observed['NPM_CONFIG_IGNORE_SCRIPTS'],'true')
+
     def test_requires_explicit_disposable_ci_before_any_effect(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(payload, "command") as command:
             with self.assertRaises(RuntimeError):

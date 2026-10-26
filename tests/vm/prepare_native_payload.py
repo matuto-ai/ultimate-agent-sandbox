@@ -119,10 +119,14 @@ def stage_native(work, payload, run, fetch):
         raise RuntimeError('native staging requires runner Node/npm')
     if run([node, '--version']).strip() != 'v' + NODE_VERSION:
         raise RuntimeError('native staging runner Node version mismatch')
-    empty = work / 'empty.npmrc'
-    empty.write_text('')
+    # npm rejects loading the same path as both user and global config.
+    # Separate empty files preserve sterile configuration without ambient reads.
+    user_config = (work / 'empty-user.npmrc').resolve()
+    global_config = (work / 'empty-global.npmrc').resolve()
+    user_config.write_text('')
+    global_config.write_text('')
     run([npm, 'ci', '--prefix', str(pi), '--ignore-scripts', '--no-audit', '--no-fund',
-         '--registry=https://registry.npmjs.org', '--userconfig=' + str(empty), '--globalconfig=' + str(empty),
+         '--registry=https://registry.npmjs.org', '--userconfig=' + str(user_config), '--globalconfig=' + str(global_config),
          '--cache=' + str(work / 'npm-cache'), '--fetch-retries=0', '--fetch-timeout=20000', '--update-notifier=false'],
         timeout=300, environment={'PATH': str(Path(node).parent) + ':' + os.defpath,
                                   'NPM_CONFIG_IGNORE_SCRIPTS': 'true'})

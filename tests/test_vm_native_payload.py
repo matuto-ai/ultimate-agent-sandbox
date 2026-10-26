@@ -93,6 +93,15 @@ class NativePayloadTests(unittest.TestCase):
                     patch.object(native.shutil, 'which', side_effect=lambda name: '/usr/bin/' + name):
                 result = native.stage_native(work, payload, run, fetch)
             npm = next(args for args, _ in calls if args[0].endswith('/npm'))
+            configs = [Path(next(arg.split('=',1)[1] for arg in npm if arg.startswith(option+'=')))
+                       for option in ('--userconfig','--globalconfig')]
+            self.assertNotEqual(*configs)
+            for config in configs:
+                self.assertTrue(config.is_absolute())
+                self.assertEqual(config.read_bytes(),b'')
+                self.assertEqual(config.parent,work.resolve())
+            npm_options = next(options for args,options in calls if args is npm)
+            self.assertEqual(set(npm_options['environment']), {'PATH','NPM_CONFIG_IGNORE_SCRIPTS'})
             self.assertIn('--ignore-scripts', npm)
             self.assertIn('--no-audit', npm)
             self.assertIn('--registry=https://registry.npmjs.org', npm)
