@@ -201,10 +201,70 @@ def resolve_inside(root, name, *, runtime_target=None):
     return root.joinpath(*resolved)
 
 
-def fingerprint(root):
+NCURSES_DEBUG_INDEXES = {
+    'usr/lib/.build-id/47/437b4066718b825b28e816f46c58ab30a3f7cf': 'usr/lib64/libncurses++w.so.6.6',
+    'usr/lib/.build-id/f0/1d24b6f5c772ff3f9a9e452bac67d356a96a31': 'usr/lib64/libncurses++.so.6.6',
+}
+
+
+def installed_ncurses_indexes(root, *, run):
+    """Only the documented optional C++ indexes in signed ncurses-libs.
+
+    Package installation verified signatures; this query binds exact installed
+    owner/header bytes. No extra optional package is installed for debug indexes.
+    """
+    query = '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n[%{FILENAMES}\t%{FILEMODES}\t%{FILELINKTOS}\t%{FILEFLAGS}\n]'
+    text = run('rpm', '--root', str(root), '-q', '--qf', query, 'ncurses-libs', timeout=30)
+    if len(text.encode()) > 65536:
+        raise ValueError('ncurses metadata exceeds bound')
+    rows = text.splitlines()
+    if not rows or not re.fullmatch(r'ncurses-libs\t[0-9]+:[A-Za-z0-9._+~-]+\.x86_64', rows[0]):
+        raise ValueError('invalid ncurses index owner')
+    owner = rows[0].replace('\t', '-')
+    digest_ = hashlib.sha256(text.encode()).hexdigest()
+    result = {}
+    for row in rows[1:]:
+        fields = row.split('\t')
+        if len(fields) != 4:
+            raise ValueError('malformed ncurses file metadata')
+        path, mode, target, flags = fields
+        name = path[1:] if path.startswith('/') else ''
+        if name not in NCURSES_DEBUG_INDEXES:
+            continue
+        expected = '../../../../' + NCURSES_DEBUG_INDEXES[name]
+        if (name in result or not mode.isdecimal() or not flags.isdecimal()
+                or not stat.S_ISLNK(int(mode)) or int(flags) & 64 or target != expected):
+            raise ValueError('ncurses debug index metadata mismatch')
+        result[name] = {'owner': owner, 'header_sha256': digest_, 'target': target,
+                        'missing_target': NCURSES_DEBUG_INDEXES[name]}
+    return result
+
+
+def unresolved_ncurses_index(root, key, target, indexes):
+    """A narrow manifest fact, never permission for a runtime dangling link."""
+    expected = NCURSES_DEBUG_INDEXES.get(key)
+    evidence = indexes.get(key)
+    if (expected is None or not re.fullmatch(r'usr/lib/\.build-id/[0-9a-f]{2}/[0-9a-f]{38}', key)
+            or target != '../../../../' + expected or type(evidence) is not dict
+            or set(evidence) != {'owner', 'header_sha256', 'target', 'missing_target'}
+            or evidence['target'] != target or evidence['missing_target'] != expected
+            or type(evidence['owner']) is not str or type(evidence['header_sha256']) is not str
+            or not re.fullmatch(r'ncurses-libs-[0-9]+:[A-Za-z0-9._+~-]+\.x86_64', evidence['owner'])
+            or not HEX.fullmatch(evidence['header_sha256'])):
+        return None
+    # Existing prefixes, root containment and loop bounds are still checked by
+    # the same resolver. Only this exact missing target may be represented.
+    resolved = resolve_inside(root, key, runtime_target=expected)
+    if resolved != root / expected:
+        raise ValueError('debug index target changed during resolution')
+    return {'status': 'unresolved-optional-debug-index', **evidence}
+
+
+def fingerprint(root, *, debug_indexes=None):
     """Hash every installed byte, mode and link target, rejecting special files."""
     if not root.is_absolute() or root.resolve() != root or not stat.S_ISDIR(root.lstat().st_mode):
         raise ValueError('canonical image root required')
+    debug_indexes = {} if debug_indexes is None else debug_indexes
     entries, total, inodes = [], 0, {}
     for base, dirs, names in os.walk(root, followlinks=False):
         for name in sorted(dirs + names):
@@ -230,10 +290,14 @@ def fingerprint(root):
                 try:
                     resolve_inside(root, key, runtime_target=runtime_target)
                 except FileNotFoundError as error:
-                    missing = Path(error.filename).relative_to(root).as_posix()
-                    raise FileNotFoundError('unresolved rootfs link: ' + json.dumps({
-                        'link': key[:1024], 'target': target[:1024], 'missing': missing[:1024]},
-                        ensure_ascii=True)) from None
+                    allowed = unresolved_ncurses_index(root, key, target, debug_indexes)
+                    if allowed is not None:
+                        item['debug_index'] = allowed
+                    else:
+                        missing = Path(error.filename).relative_to(root).as_posix()
+                        raise FileNotFoundError('unresolved rootfs link: ' + json.dumps({
+                            'link': key[:1024], 'target': target[:1024], 'missing': missing[:1024]},
+                            ensure_ascii=True)) from None
                 item.update(kind='symlink', target=target)
             else:
                 raise ValueError('special file in native image')
@@ -397,7 +461,8 @@ def build_rootfs(nonce, manifest, destination, *, run):
     # mkdir is umask-sensitive and RPM may adjust the installroot mode. The
     # imported image root must be traversable by both fixed unprivileged UIDs.
     root.chmod(0o755)
-    result = fingerprint(root)
+    debug_indexes = installed_ncurses_indexes(root, run=run)
+    result = fingerprint(root, debug_indexes=debug_indexes)
     manifest_path = root.with_name(root.name + '.manifest.json')
     with manifest_path.open('xb') as output:
         output.write(canonical(result.pop('manifest')))

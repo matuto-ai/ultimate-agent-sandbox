@@ -502,3 +502,33 @@ Metadata/script hashes bind this evidence. Fingerprint failures now identify
 bounded root-relative originating link, declared target and missing path;
 containment and existence checks remain unchanged. This is reviewed source,
 not a successful image or native-container qualification.
+
+### Signed optional ncurses debug indexes after run 40418174955
+
+Run 40418174955 on `349942aa` advanced through installed filesystem metadata and
+actual usrmerge shape validation, but the strict fingerprint found a missing
+optional C++ target: `usr/lib/.build-id/47/437b4066718b825b28e816f46c58ab30a3f7cf`
+points to `usr/lib64/libncurses++w.so.6.6`. The completed image manifest and native
+containers were not reached; cleanup completed. This is not a SELinux denial.
+
+The exact Fedora 44 [ncurses-libs 6.6-1 file list](https://packages.fedoraproject.org/pkgs/ncurses/ncurses-libs/fedora-44.html)
+includes both C++ build-id links while excluding the C++ binaries. The separate
+[ncurses-c++-libs file list](https://packages.fedoraproject.org/pkgs/ncurses/ncurses-c%2B%2B-libs/fedora-44.html)
+contains those binaries and the same indexes. The [package spec](https://src.fedoraproject.org/rpms/ncurses/raw/f44/f/ncurses.spec)
+explicitly splits `libncurses++*.so.6*` out of the base libs package. Only
+ncurses-libs/base are in this image dependency closure; installing optional
+libraries solely to satisfy debug indexes is unnecessary.
+
+The correction represents **only these two frozen index paths** as unresolved
+optional debug metadata when the target is absent: the `47/437b...` wide C++
+index above and `f0/1d24b6f5c772ff3f9a9e452bac67d356a96a31` for
+`usr/lib64/libncurses++.so.6.6`. The guest queries installed signature-verified
+ncurses-libs metadata and requires exact owner, canonical path, symlink mode,
+non-ghost flag and declared target. The full manifest records owner NEVRA,
+header hash, exact declared/missing target and `unresolved-optional-debug-index`;
+it does not pretend a runtime library exists. Existing targets resolve normally.
+All other dangling links remain errors, and the same containment and loop checks
+apply. There is no package addition, link deletion, generic build-id exemption,
+scriptlet enablement or security-policy change. Actual ownership for the previous
+failed guest was not separately logged; the new check must establish it in the
+next exact-head qualification rather than infer it from the web file lists.
