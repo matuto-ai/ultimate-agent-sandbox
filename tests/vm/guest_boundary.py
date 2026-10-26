@@ -49,6 +49,28 @@ def require_process_label(observed, level):
     expect(observed in (expected, expected + '\0'), 'actual SELinux label')
 
 
+def require_sibling_listener(probe, address):
+    # All bridge-to-host traffic is forbidden, including replies to host probes.
+    # Exercise the actual assigned bridge address from Beta's own namespace.
+    expect(probe('beta', 'connect', address + ':5000') ==
+           {'error': 'OK', 'reply': 'uas-boundary-ok\n'}, 'sibling bridge-address responder unhealthy')
+
+
+def denial_counter(document, chain):
+    """Read the exact input or IPv4-forward drop rule, not unrelated counters."""
+    expect(chain in ('input', 'forward'), 'unknown denial chain')
+    destination = {'payload': {'protocol': 'ip', 'field': 'daddr'}}
+    rules = [item['rule'] for item in document['nftables'] if 'rule' in item
+             and item['rule']['chain'] == chain
+             and (chain == 'input' or any(expr.get('match', {}).get('left') == destination
+                                         for expr in item['rule']['expr']))]
+    expect(len(rules) == 1 and {'drop': None} in rules[0]['expr'], 'ambiguous denial rule')
+    counters = [expr['counter'] for expr in rules[0]['expr'] if 'counter' in expr]
+    expect(len(counters) == 1 and type(counters[0].get('packets')) is int
+           and counters[0]['packets'] >= 0, 'invalid denial counter')
+    return counters[0]['packets']
+
+
 def require_engine_security():
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux changed during installation')
     options = json.loads(run('docker', 'info', '--format', '{{json .SecurityOptions}}'))
@@ -365,20 +387,20 @@ def scenario(nonce):
         expect(probe(room, 'write', str(STORAGE / room / 'references'))['error'] == 'EROFS', 'reference writable')
     checks['writable_mounts'] = {'status': 'passed', 'same_absolute_paths': True, 'references': 'EROFS'}
     state = json.loads((supervisors['alpha'].directory / 'lifecycle.json').read_text())
-    def dropped():
-        document = backends['alpha']._firewall(state)
-        return sum(expression['counter']['packets'] for item in document['nftables'] if 'rule' in item
-                   for expression in item['rule']['expr'] if 'counter' in expression)
+    def dropped(chain):
+        return denial_counter(backends['alpha']._firewall(state), chain)
     beta_ip = json.loads(run('docker', 'inspect', containers['beta']))[0]['NetworkSettings']['Networks'][backends['beta']._network_name(json.loads((supervisors['beta'].directory / 'lifecycle.json').read_text()))]['IPAddress']
-    expect(connect(beta_ip), 'sibling responder not ready from trusted guest')
+    require_sibling_listener(probe, beta_ip)
     expect(probe('alpha', 'connect', '93.184.216.34:5000') == {'error': 'OK', 'reply': 'uas-boundary-ok\n'}, 'public-address positive failed')
-    for address in ('10.89.1.1', '93.184.216.35', '169.254.169.254', '192.168.50.1', beta_ip):
-        before = dropped()
+    for address, chain in (('10.89.1.1', 'input'), ('93.184.216.35', 'input'),
+                           ('169.254.169.254', 'forward'), ('192.168.50.1', 'forward'), (beta_ip, 'forward')):
+        before = dropped(chain)
         expect(probe('alpha', 'connect', address + ':5000')['error'] == 'TIMEOUT', 'blocked destination unexpectedly reachable')
-        expect(dropped() > before, 'no real firewall denial observed')
+        expect(dropped(chain) > before, 'no exact firewall denial observed')
     expect(probe('alpha', 'connect', '[2606:4700:4700::1111]:5000')['error'] == 'ENETUNREACH', 'IPv6 must be unavailable in this IPv4 fixture')
     checks['network'] = {'status': 'passed', 'public_address_synthetic_only': True,
-                         'denied': ['host-private', 'host-public', 'LAN', 'metadata', 'sibling'], 'ipv6': 'disabled-and-filtered'}
+                         'denied': ['host-private', 'host-public', 'LAN', 'metadata', 'sibling'], 'ipv6': 'disabled-and-filtered',
+                         'sibling_positive_vantage': 'beta-own-bridge-address'}
 
     for kind in ('block', 'inode'):
         value = probe('alpha', 'quota-' + kind, str(STORAGE / 'alpha' / 'workspace'))
@@ -422,7 +444,8 @@ def scenario(nonce):
     backends['alpha'].fail_network_remove = True
     failed = supervisors['alpha'].destroy()
     expect(failed['phase'] == 'destroy_failed' and failed['observed']['volume'] is not None, 'partial destroy lost cleanup anchor')
-    expect(supervisors['beta'].status()['phase'] == 'running' and connect(beta_ip), 'destroy harmed sibling')
+    expect(supervisors['beta'].status()['phase'] == 'running', 'destroy harmed sibling')
+    require_sibling_listener(probe, beta_ip)
     backends['alpha'].fail_network_remove = False
     expect(supervisors['alpha'].destroy()['phase'] == 'destroyed', 'targeted destroy retry failed')
     expect((STORAGE / 'alpha/repository/fixture-data').read_text() == 'uas-boundary-data\n', 'Destroy deleted Project data')

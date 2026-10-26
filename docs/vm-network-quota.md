@@ -84,6 +84,16 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
   endpoint plus live host-private, host-public, LAN, metadata and sibling decoys.
   Real packet drops must increment nft counters. This proves actual filtering,
   **not real Internet reachability**. It never contacts a real metadata service.
+  Sibling health uses Beta's actual assigned bridge-IP responder from inside Beta,
+  with the exact application reply, plus its synthetic public connection and fresh
+  allocation controls. A trusted host-to-Beta positive is invalid here: the
+  deliberate all bridge-to-host deny also blocks its response packets. Alpha's
+  attempts to that same Beta address must time out and increment the exact owned
+  IPv4-forward drop counter; other chains/IPv6 counters cannot satisfy the check.
+  In [run 40359315837](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40359315837),
+  the invalid host-origin control produced Beta input drops of 3 packets/180 bytes,
+  with both forward counters zero. The harness correction preserves that deny;
+  the partial run passed runtime/attribute/write controls, not full qualification.
   Router setup/responder children enter only the parent's held network namespace
   descriptor. They do not remount sysfs or relax SELinux mount policy.
 - Fresh XFS project-quota roots hold synthetic repository/workspace/checkouts,

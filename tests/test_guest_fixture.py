@@ -1,4 +1,5 @@
 """Offline contracts only. Real kernel enforcement is mandatory in VM CI."""
+import ast
 import importlib.util
 import hashlib
 import ipaddress
@@ -29,6 +30,35 @@ STATE = {'instance_id': 'b' * 32, 'room_id': 'alpha', 'spec': {
 
 
 class GuestFixtureTests(unittest.TestCase):
+    def test_both_sibling_health_points_avoid_forbidden_host_probe(self):
+        tree = ast.parse((Path(__file__).parent / 'vm/guest_boundary.py').read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        addresses_beta = lambda node: any(isinstance(arg, ast.Name) and arg.id == 'beta_ip' for arg in node.args)
+        self.assertFalse(any(node.func.id == 'connect' and addresses_beta(node) for node in calls))
+        self.assertEqual(2, sum(node.func.id == 'require_sibling_listener' and addresses_beta(node) for node in calls))
+
+    def test_sibling_positive_uses_actual_bridge_address_inside_beta_and_exact_reply(self):
+        probe = Mock(return_value={'error': 'OK', 'reply': 'uas-boundary-ok\n'})
+        guest_script.require_sibling_listener(probe, '10.89.2.2')
+        probe.assert_called_once_with('beta', 'connect', '10.89.2.2:5000')
+        for value in ({'error': 'TIMEOUT'}, {'error': 'OK', 'reply': ''},
+                      {'error': 'OK', 'reply': 'unrelated service\n'}):
+            with self.subTest(value=value), self.assertRaises(AssertionError):
+                guest_script.require_sibling_listener(Mock(return_value=value), '10.89.2.2')
+
+    def test_denial_observation_selects_exact_rule_not_other_chain_or_ipv6_counter(self):
+        document = {'nftables': [item['add'] for item in guest.firewall_document(STATE, NONCE)['nftables']]}
+        values = iter((3, 9000, 7))
+        for item in document['nftables']:
+            for expression in item.get('rule', {}).get('expr', []):
+                if 'counter' in expression:
+                    expression['counter'] = {'packets': next(values), 'bytes': 0}
+        self.assertEqual(3, guest_script.denial_counter(document, 'input'))
+        self.assertEqual(7, guest_script.denial_counter(document, 'forward'))
+        for broken in ({'nftables': []}, {'nftables': document['nftables'] * 2}):
+            with self.assertRaises(AssertionError): guest_script.denial_counter(broken, 'forward')
+        with self.assertRaises(AssertionError): guest_script.denial_counter(document, 'output')
+
     def test_kernel_process_label_is_exact_with_only_one_optional_terminal_nul(self):
         level = 's0:c101,c102'
         expected = 'system_u:system_r:container_t:' + level
@@ -79,6 +109,10 @@ class GuestFixtureTests(unittest.TestCase):
         self.assertEqual(3, len(rules))
         self.assertEqual('input', rules[0]['chain'])
         self.assertEqual(3, len(rules[0]['expr']))  # iif + counter + drop, no private-only host filter.
+        self.assertEqual({'match': {'op': '==', 'left': {'meta': {'key': 'iifname'}},
+                                  'right': guest.network_names(STATE)[1]}}, rules[0]['expr'][0])
+        self.assertEqual({'counter': None}, rules[0]['expr'][1])
+        self.assertNotIn('"accept"', json.dumps(rules))  # No host-health or established-reply exception.
         self.assertEqual('ipv6', rules[1]['expr'][1]['match']['right'])
         self.assertIn('169.254.0.0/16', guest.DENIED_V4)
         self.assertIn('10.0.0.0/8', guest.DENIED_V4)
