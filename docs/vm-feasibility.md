@@ -34,6 +34,14 @@ installs QEMU/cloud-image tools on the disposable Ubuntu runner, then invokes
 `python3 tests/vm/run.py` as the unprivileged runner user. The normal aggregate also
 checks offline harness contracts; those tests do not claim that a VM booted.
 
+Both manual VM workflows use `tests/vm/install_runner_tools.py` for runner tools.
+It copies the stock Ubuntu 24.04 deb822 source into an owned temporary directory,
+changes only recognized Ubuntu URI fields to official HTTPS archives, and leaves
+`/etc`, suites, components and the installed signing keyring unchanged. APT keeps
+signature/hash/freshness checks and fails incomplete index updates; transport
+timeouts are 20 seconds with no implicit retries. Only the disposable hosted
+runner may execute installation, under a 10-minute setup ceiling.
+
 ## Pinned provenance
 
 `tests/vm/fedora-image.json` pins official Fedora Cloud Base Generic **44-1.7**,

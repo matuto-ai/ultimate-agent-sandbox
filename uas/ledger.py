@@ -263,6 +263,30 @@ class RoomLedger:
             db.rollback()
             raise
 
+    def operation_receipt(self, operation_id, origin, *, authorize):
+        """Trusted read-side reconciliation, not a client operation-ID endpoint.
+
+        Require fresh authority and the exact stored Origin before disclosure.
+        Callers must first validate their request's canonical equality via apply;
+        this helper only retrieves a server-derived related terminal operation.
+        """
+        _token(operation_id)
+        if type(origin) is not Origin:
+            raise LedgerError('INVALID_COMMAND')
+        canonical_origin = origin.canonical()
+        try:
+            if authorize() is not True:
+                raise LedgerError('FORBIDDEN')
+            row = self._connection().execute(
+                'SELECT canonical, receipt FROM operations WHERE id=?', (operation_id,)).fetchone()
+            if row is None:
+                return None
+            if json.loads(row['canonical'])['origin'] != canonical_origin:
+                raise LedgerError('FORBIDDEN')
+            return json.loads(row['receipt'])
+        except sqlite3.Error as error:
+            raise LedgerError('STORAGE_ERROR') from error
+
     def snapshot(self) -> dict:
         """Materialized state and sequence from one SQLite read statement/cut."""
         try:

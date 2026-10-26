@@ -20,6 +20,19 @@ after boot, 300 seconds without any new serial bytes fails and cleans up owned Q
 Progress output is liveness diagnostics, never a replacement for passing security
 assertions. No mutable guest state is reused or cached.
 
+Runner setup reads the stock Ubuntu 24.04 deb822 source and creates an owned,
+publicly readable temporary copy for APT's sandbox reader. Only recognized
+Ubuntu archive URI fields change to official HTTPS endpoints; suites,
+components and the installed Ubuntu archive `Signed-By` keyring stay unchanged.
+No `/etc` source or permission is edited. APT retains signed Release/package-hash
+and freshness verification, rejects incomplete index updates, and uses a
+20-second transport timeout with no implicit retries. Normal package installation
+and APT metadata updates remain confined to the disposable hosted runner.
+This avoids the Azure HTTP mirror route that exhausted the manual setup budget
+in run 40353107455 before any payload or guest executed; it is not new guest proof.
+See [Ubuntu archive verification](https://documentation.ubuntu.com/security/software-integrity/archive-verification/)
+and the [Ubuntu deb822 source format](https://manpages.ubuntu.com/manpages/noble/man5/sources.list.5.html).
+
 ## What runs
 
 `vm-boundary` boots the pinned, signature-verified Fedora Cloud image under

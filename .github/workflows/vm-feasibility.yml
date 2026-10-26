@@ -24,8 +24,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install only disposable-runner VM tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils gnupg
+        timeout-minutes: 10
+        run: python3 tests/vm/install_runner_tools.py feasibility
       - name: Boot verified Fedora with software emulation and no network
         run: python3 tests/vm/run.py
