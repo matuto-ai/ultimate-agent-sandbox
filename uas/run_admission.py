@@ -14,14 +14,14 @@ import select
 import time
 
 from .config import load
-from .context import MAX_RUNS
+from .context import MAX_RUNS, MAX_CONTEXT_GENERATION
 from .ledger import Command, Event, LedgerError, Origin, Transition, _json, _token
 from .peer import FixturePeerHub, Readiness, _now, _text
 from .pi_fixture import FixturePiRecipe
 
 
 class RunAdmission:
-    """One trusted, source-only human command, restricted to unused Pi contexts."""
+    """Trusted first-Run admission and canonical pause/resume, not general Run management."""
     def __init__(self, controller, broker, allocator, source, *, seats, install,
                  runtime_root, authorize_human):
         self.controller, self.hub = controller, controller.hub
@@ -59,12 +59,57 @@ class RunAdmission:
         return 'run-' + hashlib.sha256(_token(operation_id).encode()).hexdigest()
 
     def _human(self, origin, command):
-        return (type(origin) is Origin and 'human-open-run' in origin.capabilities
+        capability = ('human-control-run' if command.kind in {'run.human-pause', 'run.human-resume'}
+                      else 'human-open-run')
+        return (type(origin) is Origin and capability in origin.capabilities
                 and self.authorize_human(origin, command) is True)
 
     def _apply(self, command, origin, decide):
         return self.ledger.apply(command, origin,
             authorize=lambda o, c: self._human(o, c), decide=decide)
+
+    def pause(self, operation_id, run_id, generation, expected_revision, reason, *, human):
+        """Hold Hub traffic, not native inference or arbitrary Project writes."""
+        return self._control_run(operation_id, run_id, generation, expected_revision,
+                                 reason, human, 'ACTIVE', 'PAUSED')
+
+    def resume(self, operation_id, run_id, generation, expected_revision, reason, *, human):
+        """Resume the same binding; never reset, relaunch, migrate or re-admit."""
+        return self._control_run(operation_id, run_id, generation, expected_revision,
+                                 reason, human, 'PAUSED', 'ACTIVE')
+
+    def _control_run(self, operation_id, run_id, generation, expected_revision,
+                     reason, human, preceding, target):
+        if (type(generation) is not int or not 1 <= generation <= MAX_CONTEXT_GENERATION
+                or type(expected_revision) is not int
+                or not 0 <= expected_revision <= MAX_CONTEXT_GENERATION):
+            raise LedgerError('INVALID_RUN_CONTROL')
+        command = Command(operation_id, 'run.human-' + ('pause' if target == 'PAUSED' else 'resume'),
+            _token(run_id), generation, {'expected_revision': expected_revision, 'reason': _token(reason)})
+        def decide(state, _):
+            row = state.get('runs', {}).get(run_id)
+            if row is None:
+                raise LedgerError('UNKNOWN_RUN')
+            if row['generation'] != generation:
+                raise LedgerError('STALE_RUN_GENERATION')
+            revision = row.get('control_revision', 0)
+            if revision != expected_revision:
+                raise LedgerError('STALE_RUN_CONTROL')
+            if row['status'] != preceding:
+                raise LedgerError('INVALID_RUN_TRANSITION')
+            if revision == MAX_CONTEXT_GENERATION:
+                raise LedgerError('RUN_CONTROL_REVISION_EXHAUSTED')
+            row.update(status=target, control_revision=revision + 1,
+                       control_reason=reason)
+            # Admission remains consumed/ACTIVE; canonical Run alone controls
+            # traffic. No native ACK, request, context or checkout is rewritten.
+            FixturePeerHub._reserve_capacity(state)
+            result = {'run_id': run_id, 'generation': generation, 'status': target,
+                      'control_revision': revision + 1, 'reason': reason}
+            return Transition(state, (Event('run.paused' if target == 'PAUSED' else 'run.resumed', result),), result)
+        # Ledger authorizes every retry inside its transaction, then looks up
+        # the exact immutable receipt before evaluating current revision/state.
+        return self._apply(command, human, decide)['result']
 
     def _pending(self, run):
         return self.ledger.snapshot()['state'].get('run_admissions', {}).get(run)
@@ -341,7 +386,8 @@ class RunAdmission:
                     'policy': deepcopy(current['policy']), 'checkout': deepcopy(slot),
                     'context_generation': 1, 'implementation_request': request_id,
                     'forge_observation': receipt['operation_id'], 'human_operation': command.id,
-                    'authorization_consumed': True, 'projection': 'unavailable-no-write-support'}
+                    'authorization_consumed': True, 'control_revision': 0, 'control_reason': None,
+                    'projection': 'unavailable-no-write-support'}
                 current.pop('reservation')
                 current.update(status='ACTIVE', authorization_consumed=True, attention=None)
                 state['runs'][run] = row
