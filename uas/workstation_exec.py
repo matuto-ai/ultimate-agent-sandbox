@@ -8,6 +8,7 @@ production launch command is exposed by this source slice.
 """
 from dataclasses import dataclass
 import hmac
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -99,15 +100,21 @@ class ExecLaunch:
         self.incarnation = uuid.uuid4().hex
         self.challenge = None
         self.deadline = None
+        self._native_readiness = None
+        self.native_receiver = None
+        self.admission = None
 
     def _save(self, *, first=False):
         document = {'version': 1, 'room_id': self.seat.room_id,
                     'room_instance': self.seat.room_instance,
                     'participant_id': self.seat.participant_id, 'actor_id': self.seat.actor_id,
                     'container_id': self.seat.container_id, 'exec_id': self.exec_id,
-                    'incarnation': self.incarnation, 'state': self.state}
+                    'incarnation': self.incarnation, 'state': self.state,
+                    'native_readiness': self._native_readiness, 'admission': self.admission}
         # No challenge, credential or replayable process authority is persisted.
-        data = json.dumps(document, sort_keys=True).encode()
+        data = json.dumps(document, sort_keys=True, allow_nan=False).encode()
+        if len(data) > 16384 or (self.admission is not None and type(self.admission) is not dict):
+            raise ExecUnavailable('bounded launch journal required')
         parent = self.journal.parent.lstat()
         if (self.journal.parent.resolve() != self.journal.parent
                 or not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid()
@@ -126,7 +133,7 @@ class ExecLaunch:
                 raise ExecUnavailable('launch journal not owned')
             fd = os.open(self.journal, os.O_RDONLY | os.O_NOFOLLOW)
             with os.fdopen(fd, 'rb') as stream:
-                prior = json.loads(stream.read(4097))
+                prior = json.loads(stream.read(16385))
             if prior.get('incarnation') != self.incarnation:
                 raise ExecUnavailable('launch journal replaced')
             temporary = self.journal.with_name(self.journal.name + '.' + self.incarnation + '.tmp')
@@ -230,17 +237,96 @@ class ExecLaunch:
         if self.state != 'released' or not callable(native_ready):
             raise ExecUnavailable('not released for native attachment')
         self.endpoint.require()
-        if not alive(self.origin.pidfd) or native_ready(self) is not True:
+        if self.origin.revoked or not alive(self.origin.pidfd) or native_ready(self) is not True:
             raise ExecUnavailable('native readiness not established')
         self.endpoint.require()
-        if not alive(self.origin.pidfd):
-            raise ExecUnavailable('task exited during native attachment')
+        if self.origin.revoked or not alive(self.origin.pidfd):
+            raise ExecUnavailable('task exited or revoked during native attachment')
         self.state = 'active'
         try:
             self._save()
         except BaseException:
             self.origin.revoke()
             self.state = 'uncertain'
+            raise
+
+    @property
+    def native_readiness(self):
+        """Defensive immutable-by-ownership metadata; never a live authority."""
+        return None if self._native_readiness is None else json.loads(json.dumps(self._native_readiness))
+
+    def attach_native(self, *, journal, scope, profile_digest, timeout=8):
+        """Supervisor-only concrete fresh-native proof over exact Engine RPC.
+
+        profile_digest identifies trusted immutable payload admission; this
+        method does not itself verify that image/profile or infer binary version
+        from the extension's API-baseline field. No peer-channel read occurs.
+        """
+        from .pi_runtime import FixturePiRpcReceiver
+        if self.state != 'released' or self.native_receiver is not None:
+            raise ExecUnavailable('native attachment is one-shot after release')
+        try:
+            if (type(profile_digest) is not str or not ID.fullmatch(profile_digest)
+                    or type(scope) is not dict
+                    or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
+                    or any(type(scope[k]) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', scope[k])
+                           for k in ('room_id', 'participant_id', 'run_id'))
+                    or any(type(scope[k]) is not int or not 1 <= scope[k] < 2**53
+                           for k in ('generation', 'context_generation'))
+                    or type(self.exec_id) is not str or not ID.fullmatch(self.exec_id)
+                    or scope.get('room_id') != self.seat.room_id
+                    or scope.get('participant_id') != self.seat.participant_id):
+                raise ExecUnavailable('trusted native scope/profile required')
+            scope = dict(scope)
+            receiver = FixturePiRpcReceiver.attach_workstation(self, journal=journal,
+                                                               scope=scope, timeout=timeout)
+            self.native_receiver = receiver
+            if (receiver.incarnation_id != self.incarnation or receiver.scope != scope
+                    or receiver.runtime_version != '1.4.0'):
+                raise ExecUnavailable('native attachment binding mismatch')
+            proof = receiver.prove_fresh_context()
+            prefix = '/uas/runtime/' + self.seat.slot + '/sessions/'
+            if (type(proof) is not dict
+                    or set(proof) != {'runtime_id', 'session_id', 'session_file', 'source'}
+                    or any(type(proof[k]) is not str or not 0 < len(proof[k]) <= 1024
+                           for k in proof)
+                    or proof['source'] != 'native-empty-session-and-no-pending-messages'
+                    or any(ord(c) < 32 or ord(c) == 127 for c in proof['session_file'])
+                    or not proof['session_file'].startswith(prefix)
+                    or str(Path(proof['session_file'])) != proof['session_file']
+                    or '..' in Path(proof['session_file']).parts
+                    or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', proof[k])
+                           for k in ('runtime_id', 'session_id'))):
+                raise ExecUnavailable('bounded fresh native proof required')
+            metadata = {'version': 1, 'runtime': 'Pi', 'runtime_version': '1.4.0',
+                'profile_digest': profile_digest, 'scope': dict(scope),
+                'incarnation': self.incarnation, 'exec_id': self.exec_id,
+                'container_id': self.seat.container_id,
+                'origin_identity': list(self.origin.identity), 'native': dict(proof)}
+            canonical = json.dumps(metadata, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+            if len(canonical) > 8192:
+                raise ExecUnavailable('oversized native readiness')
+            metadata['digest'] = hashlib.sha256(canonical).hexdigest()
+            self._native_readiness = metadata
+            # activate rechecks endpoint/liveness before and after the callback,
+            # then fsyncs active state AND this proof in the existing journal.
+            self.activate(lambda launch: launch.native_receiver is receiver)
+            return receiver
+        except BaseException:
+            self._native_readiness = None
+            self.state = 'uncertain'
+            if self.origin is not None:
+                self.origin.revoke()
+            try:
+                self._save()
+            except BaseException:
+                pass  # Cleanup must still run; prior marker blocks blind relaunch.
+            try:
+                self.close_transport()
+            finally:
+                receiver, self.native_receiver = self.native_receiver, None
+                if receiver is not None:
+                    receiver.close()
             raise
 
     def revoke(self):
@@ -252,16 +338,30 @@ class ExecLaunch:
     def close_transport(self):
         # No numeric-PID kill, whole-container kill, broad cleanup or respawn.
         # Transport closure does not assert actual task exit.
-        for resource in (self.channel, self.transport):
-            if resource is not None:
-                resource.close()
+        resources = (self.channel, self.transport)
         self.channel = self.transport = None
+        error = None
+        for resource in resources:
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as failure:
+                    error = failure
+        if error is not None:
+            raise error
 
     def close(self):
         try:
             if self._owns_journal:
                 self.revoke()
         finally:
-            self.close_transport()
-            if self.origin is not None:
-                self.origin.close()
+            try:
+                self.close_transport()
+            finally:
+                try:
+                    receiver, self.native_receiver = self.native_receiver, None
+                    if receiver is not None:
+                        receiver.close()
+                finally:
+                    if self.origin is not None:
+                        self.origin.close()

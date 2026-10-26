@@ -24,6 +24,31 @@ class AdmittedPeerDispatcher:
         self.admissions, self.hub = admissions, hub
         self._connections = {}
 
+    def attach_current(self, operation, *, context_generation):
+        """Trusted Hub-local ADMIT hook; no native receiver/Engine crosses here.
+
+        Existing Hub connect owns context validation and durable attachment.
+        This inbound-only connection cannot deliver to the Runtime until a
+        separately authenticated Supervisor delivery bridge is implemented.
+        """
+        try:
+            with self.admissions.authorize(operation, None) as binding:
+                peer = self.hub._state()['definition']['participants'].get(binding.seat.participant_id)
+                if (peer is None or peer['actor_id'] != binding.seat.actor_id
+                        or self.hub.ledger.room_id != binding.seat.room_id):
+                    raise OriginDenied('Hub Actor/Room does not match admitted Participant')
+                if operation in self._connections:
+                    raise OriginDenied('admission connection already attached')
+                connection = self.hub.connect('admit-' + operation,
+                    binding.seat.participant_id, binding.incarnation,
+                    _InboundOnlyReceiver(), context_generation=context_generation)
+                self.admissions.recheck(operation, None)
+                self.attach(operation, connection)
+                return connection
+        except BaseException:
+            self.admissions.revoke(operation)
+            raise
+
     def attach(self, operation, connection):
         binding = self.admissions.binding(operation)
         if (type(connection) is not FixtureConnection or not self.hub._current(connection)
@@ -93,3 +118,8 @@ class AdmittedPeerDispatcher:
         except OSError:
             pass  # Existing operation ID provides durable retry reconciliation.
         return result
+
+
+class _InboundOnlyReceiver:
+    def accept(self, envelope):
+        raise LedgerError('SUPERVISOR_DELIVERY_UNAVAILABLE')

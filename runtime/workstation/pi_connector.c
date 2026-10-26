@@ -1,5 +1,5 @@
 /* Fixed pre-runtime rendezvous; no shell, proxy, configuration loader or fork.
- * Production compilation uses the paths below. Test builds override UAS_ROOT
+ * Fixed-profile compilation uses the paths below. Test builds override UAS_ROOT
  * only to prove the bootstrap syscall contract, never native Pi qualification.
  */
 #define _GNU_SOURCE
@@ -19,7 +19,7 @@
 #define UAS_WORKSPACE "/uas/workspace"
 #endif
 #ifndef UAS_ENDPOINT
-#define UAS_ENDPOINT "/run/uas-peer/peer.sock"
+#define UAS_ENDPOINT "/uas/peer/pi.sock"
 #endif
 
 static void fail(void) { _exit(125); }

@@ -68,7 +68,7 @@ class AdmissionTests(unittest.TestCase):
                    operation_id=operation or self.operation, epoch=epoch, readiness_digest='c'*64)
 
     def raw(self, *, change=None, fds=None, data=None):
-        document = {'version': 1, 'kind': 'ADMIT', 'operation_id': self.operation,
+        document = {'version': 1, 'kind': 'ADMIT', 'operation_id': self.operation, 'exchange_id': self.operation,
             'seat': self.seat.document(), 'incarnation': self.launch.incarnation,
             'epoch': 1, 'readiness_digest': 'c'*64, 'origin_identity': list(self.origin.identity)}
         if change:

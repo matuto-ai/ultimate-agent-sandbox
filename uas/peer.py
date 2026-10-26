@@ -367,6 +367,8 @@ class FixturePeerHub:
         for admission in reserved.get('run_admissions', {}).values():
             if admission['status'] == 'PREPARING':
                 admission['attention'] = 'x' * 256
+        for run in reserved.get('runs', {}).values():
+            run.update(control_revision=MAX_CONTEXT_GENERATION, control_reason='x' * 256)
         reserve_context_capacity(reserved)
         domain = reserved["peer_traffic"]
         widest = "x" * 256  # Ledger token bound, including future incarnations.

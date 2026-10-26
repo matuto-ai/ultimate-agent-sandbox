@@ -93,25 +93,13 @@ class _Offer:
             self.channel.close()
 
 
-def send_admit(control, *, launch, seat, operation_id, epoch, readiness_digest):
+def send_admit(control, *, launch, seat, operation_id, epoch, readiness_digest, exchange_id=None):
     """Supervisor-only. Never returns the launch object to the receiving Hub.
 
     Caller serializes against revocation and journals this operation before
     sending. After possible send, outcome is unknown until ACK/status; no retry.
     """
-    from .workstation_exec import ExecLaunch
-    if (type(launch) is not ExecLaunch or launch.state != 'active'
-            or type(seat) is not AdmissionSeat or launch.origin.revoked
-            or not alive(launch.origin.pidfd)
-            or any(getattr(launch.seat, key) != getattr(seat, key)
-                   for key in ('room_id', 'room_instance', 'participant_id', 'actor_id'))):
-        raise OriginDenied('active exact Supervisor launch required')
-    launch.endpoint.require()
-    document = {'version': 1, 'kind': 'ADMIT', 'operation_id': operation_id,
-                'seat': seat.document(), 'incarnation': launch.incarnation,
-                'epoch': epoch, 'readiness_digest': readiness_digest,
-                'origin_identity': list(launch.origin.identity)}
-    _validate_document(document, seat)
+    document = _admission_document(launch, seat, operation_id, epoch, readiness_digest, exchange_id)
     packet = _canonical(document)
     if len(packet) > LIMIT:
         raise OriginDenied('oversized admission')
@@ -121,14 +109,33 @@ def send_admit(control, *, launch, seat, operation_id, epoch, readiness_digest):
         raise OriginDenied('partial ADMIT; outcome unknown, reconcile operation')
 
 
+def _admission_document(launch, seat, operation_id, epoch, readiness_digest, exchange_id=None):
+    from .workstation_exec import ExecLaunch
+    if (type(launch) is not ExecLaunch or launch.state != 'active'
+            or type(seat) is not AdmissionSeat or launch.origin.revoked
+            or not alive(launch.origin.pidfd)
+            or any(getattr(launch.seat, key) != getattr(seat, key)
+                   for key in ('room_id', 'room_instance', 'participant_id', 'actor_id'))):
+        raise OriginDenied('active exact Supervisor launch required')
+    launch.endpoint.require()
+    document = {'version': 1, 'kind': 'ADMIT', 'operation_id': operation_id,
+                'exchange_id': operation_id if exchange_id is None else exchange_id,
+                'seat': seat.document(), 'incarnation': launch.incarnation,
+                'epoch': epoch, 'readiness_digest': readiness_digest,
+                'origin_identity': list(launch.origin.identity)}
+    _validate_document(document, seat)
+    return document
+
+
 def _validate_document(document, seat):
     if (type(document) is not dict or set(document) != {
-            'version', 'kind', 'operation_id', 'seat', 'incarnation', 'epoch',
+            'version', 'kind', 'operation_id', 'exchange_id', 'seat', 'incarnation', 'epoch',
             'readiness_digest', 'origin_identity'}
             or type(document['version']) is not int or document['version'] != 1
             or document['kind'] != 'ADMIT'
             or type(document['operation_id']) is not str
             or not OPERATION.fullmatch(document['operation_id'])
+            or type(document['exchange_id']) is not str or not OPERATION.fullmatch(document['exchange_id'])
             or type(document['incarnation']) is not str
             or not OPERATION.fullmatch(document['incarnation'])
             or type(document['epoch']) is not int or not 0 < document['epoch'] < 2**53
@@ -141,7 +148,7 @@ def _validate_document(document, seat):
         raise OriginDenied('admission does not match trusted configuration')
 
 
-def _receive_offer(control, supervisor, seats):
+def _receive_offer(control, supervisor, seats, *, commands=False):
     data, ancillary, flags, _ = control.recvmsg(LIMIT,
         socket.CMSG_SPACE(12) + socket.CMSG_SPACE(4) + socket.CMSG_SPACE(253*4),
         socket.MSG_CMSG_CLOEXEC)
@@ -160,13 +167,25 @@ def _receive_offer(control, supervisor, seats):
                 credentials.append(struct.unpack('3i', raw))
             else:
                 invalid = True
-        if invalid or len(credentials) != 1 or len(pidfds) != 1 or len(rights) != 2:
+        if invalid or len(credentials) != 1 or len(pidfds) != 1:
             raise OriginDenied('invalid ADMIT ancillary')
         if any(os.get_inheritable(fd) for fd in installed):
             raise OriginDenied('inheritable ADMIT descriptor')
         # Authenticate actual sender before accepting its asserted metadata.
         supervisor.require(Record(data, credentials[0], pidfds[0]))
         document = json.loads(data.decode('utf-8'), object_pairs_hook=_unique)
+        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE'):
+            if (rights or set(document) != {'version', 'kind', 'operation_id', 'controller', 'exchange_id'}
+                    or type(document['version']) is not int or document['version'] != 1
+                    or type(document['operation_id']) is not str
+                    or not OPERATION.fullmatch(document['operation_id'])
+                    or type(document['controller']) is not str
+                    or not OPERATION.fullmatch(document['controller'])
+                    or type(document['exchange_id']) is not str or not OPERATION.fullmatch(document['exchange_id'])):
+                raise OriginDenied('invalid private control command')
+            return document
+        if len(rights) != 2:
+            raise OriginDenied('invalid ADMIT descriptor count')
         participant = document.get('seat', {}).get('participant_id') if type(document) is dict and type(document.get('seat')) is dict else None
         seat = seats.get(participant) if type(participant) is str else None
         if seat is None:
@@ -287,6 +306,9 @@ class HubAdmission:
         except BaseException:
             self.control_lost()
             raise
+        return self._admit_offer(offer, controller, supervisor)
+
+    def _admit_offer(self, offer, controller, supervisor):
         installed = False
         try:
             with self._lock:
@@ -336,6 +358,47 @@ class HubAdmission:
         finally:
             if not installed:
                 offer.close()
+
+    def serve_once(self, control, *, on_admitted=None):
+        """One authenticated bounded control packet; I/O never owns authority lock.
+
+        The hosting loop serializes packets and must call control_lost on EOF or
+        transport failure. on_admitted is a trusted Hub-local attachment hook,
+        never deserialized or passed across the handoff. No Engine, callable or
+        control-store handle is read from the wire.
+        """
+        controller, supervisor = self.controller, self.supervisor
+        try:
+            packet = _receive_offer(control, supervisor, self.seats, commands=True)
+            if type(packet) is _Offer:
+                operation = packet.document['operation_id']
+                exchange_id = packet.document['exchange_id']
+                result = self._admit_offer(packet, controller, supervisor)
+                if on_admitted is not None:
+                    on_admitted(operation)
+            else:
+                operation = packet['operation_id']
+                exchange_id = packet['exchange_id']
+                with self._lock:
+                    if (self._closed or self._fenced or self.controller != controller
+                            or packet['controller'] != controller
+                            or self.supervisor is not supervisor or supervisor.revoked
+                            or not alive(supervisor.pidfd)):
+                        raise OriginDenied('private controller changed or fenced')
+                    self.endpoint.require()
+                    if packet['kind'] == 'REVOKE':
+                        self.revoke(operation)
+                    result = self.status(operation)
+            reply = _canonical({'version': 1, 'kind': 'REPLY', 'operation_id': operation,
+                                'controller': controller, 'exchange_id': exchange_id, 'result': result})
+            if control.send(reply) != len(reply):
+                raise OriginDenied('incomplete control reply')
+            return result
+        except BaseException:
+            # Revocation follows any consuming transaction unwind. A durable
+            # receipt is never permission to retain authority after control loss.
+            self.control_lost()
+            raise
 
     def status(self, operation):
         """Read-only reconciliation for the trusted control loop; never relaunch."""

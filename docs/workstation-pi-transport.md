@@ -171,11 +171,32 @@ trusted application uses `authorize()` through the consuming ledger transaction,
 serializing dispatch against revocation. Endpoint loss, Supervisor
 loss/revocation, malformed control traffic or control EOF fences admission.
 Revocation fences memory before durable projection and disposal; persistence
-failure still closes resources and leaves the controller fenced. The external
-control loop must detect EOF/errors promptly and call `control_lost()`—a library
-method alone is not a complete live connection monitor. It also owns serialized
-send/revoke operations, pre-send journal intent and authenticated ACK/status
-framing. These orchestration pieces remain integration work.
+failure still closes resources and leaves the controller fenced. The concrete source `AdmittedHubLoop` now monitors the private control socket,
+held Supervisor pidfd and admitted task/channel descriptors on the existing
+ledger-owning thread. Bounded polls prioritize control EOF/revocation and task
+exit over ready peer traffic; a still-pending bounded control batch defers peers.
+It never reconstructs a process from selector descriptor integers. This loop is
+not yet running in an admitted container/profile.
+
+`SupervisorAdmission` serializes single ADMIT, authenticated STATUS and REVOKE
+against the existing `ExecLaunch` journal. Intent is fsynced before FD transfer;
+unknown ACK outcomes permit status only, never another ADMIT. ACK/status must
+match the held Hub task, exact controller, operation, independent per-exchange
+correlation ID and canonical durable receipt. A delayed earlier STATUS response
+cannot satisfy a later STATUS after revocation/control change; it fails closed.
+Correlation IDs are not bearer authority or a substitute for kernel identity. Local revoke fences before waiting for bounded control I/O. Persistence
+failure closes control even when recording revocation fails; Hub EOF observation
+fences transferred authority. The control channel and initial held Hub/Supervisor
+origins must still be established by trusted container startup, not packet claims.
+
+`ExecLaunch.attach_native` concretely attaches the existing Pi RPC receiver,
+checks its fresh empty context proof and records bounded profile/scope/session
+metadata plus digest in the same launch journal. Receiver, Engine stream and
+native handoff journal remain Supervisor-only. A trusted profile digest is not
+independent verification of the Node/Pi image; that qualification is still due.
+Hub-local ADMIT attachment reuses `FixturePeerHub.connect` before ACK; its explicit
+inbound-only receiver refuses delivery until an authenticated Supervisor delivery
+bridge is independently wired. No callable or store handle crosses the wire.
 
 Tests prove a strict two-rights decoder, FD closure on rejection, Actor/mapping
 mismatch denial, actual same-UID wrong control sender denial, queued-record
@@ -248,13 +269,105 @@ before execution. No further listener attempt, escalation, alternate transport
 or bypass is authorized here. Later ordinary authorized CI may test a supported
 listener platform; that must not be reported as local success.
 
-No policy installation, VM launch, publication, credential contact, paid provider,
-user-host setting change or release qualification occurred. This private candidate now overlays remote main
-`f265b0ce262c2160e5136c167028dc84c38eb9e3` through verified content-identical local
-materialization `98246772efd8ac8bb13545f559a17eb0cb52264b`, base tree
-`f61f8c0bacf01309b7501781ce4a50ea24b9f0c5`. All 22 Claude/main files are preserved;
-all 16 incoming #98 files were verified byte/mode-identical before the explicitly
-requested successful-snapshot documentation correction. Local synthetic ancestry
-is not remote history, and no remote branch was changed. The future single draft
-integration PR must remain open through actual two-Pi/outside-Hub integration,
-not treat source or ordinary CI listener tests as completed qualification.
+No policy installation, VM launch, credential contact, paid provider or user-host
+setting change has occurred in this source work. The first reviewed ingress source
+was published as draft PR 108; the subsequent private integration candidate now
+preserves remote main `4234e67127e9af4cd8de087b85c17da3d4490948` through verified
+content-identical local materialization `cdc4d80ec519d6f6aae0e0785fff4045a55e3e35`,
+base tree `415f5449977ba9fa1fb4c30eac3351f263d18cd0`. The six Run pause/resume files
+are preserved. Existing Claude sources remain unchanged; README follows latest
+main. Local synthetic ancestry is not remote history. The one draft integration
+PR remains open; ordinary CI or initial ingress qualification does not complete
+the frozen contracts or parent issues.
+
+
+## First ordinary CI and next deliberate integration
+
+Draft [PR 108](https://github.com/matuto-ai/ultimate-agent-sandbox/pull/108), head
+`45dcf70c8515ff1a87b2a9b0769c60bac44677f1`, passed ordinary validate, Pi-native and
+Claude-native runs `40379595504`, `40379595515`, `40379595747`. All six filesystem
+bootstrap/listener cases passed in CI. These are not local listener results or
+Docker/SELinux evidence. Later control/selector additions need their own review
+and CI; the draft remains open through actual two-seat/outside-Hub integration.
+
+The smallest deliberate guest scenario reuses the no-NIC Fedora/QEMU harness,
+but needs a distinct native payload and resource profile, not changes to #98's
+synthetic limits. The existing static `/fixture` image cannot run Pi or the Hub.
+Required immutable payload contents are Node 24.22.1, locked Pi 1.4.0, fixed C
+connector, extension/offline faux provider, Python Hub/standard-library closure,
+ELF dependencies and fixed minimal init. The previous signed RPM closure includes
+Python 3.14.8 and tini-static 0.19.0-12.fc44, but is not reproducibly pinned.
+
+Before any Pi release, the scenario must admit the exact actual Engine package/API,
+container images/labels/mounts, socket creation context and user mappings. Host
+root maps to overflow UID in the sibling Hub namespace and is not acceptable as
+an unchecked control sender. A deliberately mapped nonroot Supervisor identity
+and immutable receiver-visible credentials are required. Stock-policy socket
+connect, fd-use and pidfs permissions must be observed with same-Room positives
+and sibling-Room negatives; no broad allow, permissive mode or relabeling the
+Supervisor as runtime is a fallback. Startup/idle/turn/reset RSS, CPU, PID and disk
+measurements must accompany the separately selected bounded native quota profile.
+
+
+### Concrete deliberate ingress candidate (not yet executed)
+
+`tests/vm/run_workstation.py` and `guest_workstation.py` reuse the pinned no-NIC
+Fedora/QEMU carrier, but select `native-pi-v1` explicitly. The workflow accepts
+manual dispatch or only the same-repository `qualify-native-workstation` label
+from `puglab-reviewer`, checking out that exact event head. No push/synchronize
+can trigger this heavy scenario. Root review and fast CI precede the label.
+
+The native image is assembled from the hash-bound Node/Pi/source archive and
+signed offline RPM roots with DNF scriptlets disabled. Exact file bytes, modes,
+ownership and safe links form an external whole-rootfs manifest before import.
+The fixed connector, service and probes all use `/uas/peer/pi.sock`. Hub startup
+is fixed `/opt/uas/bin/tini -- /usr/bin/python3 -m uas.workstation_service`;
+Engine attach/start conveys trusted startup metadata, while held SCM_PIDFD—not
+container init PID—establishes the actual Hub task. Two Pi execs retain their
+separate exact exec create/start/inspect corroboration.
+
+The Room uses exact MCS `s0:c101,c102`; the DAC-equivalent sibling uses
+`s0:c103,c104`. Guest-only trusted root setup requests socket object context
+`system_u:system_r:container_t:s0:c101,c102` through `setsockcreatecon`, resets it
+immediately, and never changes the Supervisor process domain. It labels only
+owned endpoint/storage inodes `container_file_t` with exact categories. Any
+stock-policy denial stops the scenario; no custom allow rule or fallback exists.
+The endpoint directories/socket modes remain 0710/0620 and are read-only mounts
+inside the Workstation. Mapped host identities are Hub 165531, Pi 165532 and
+Supervisor 165533 (receiver-visible 65531/65532/65533). Actual maps and overflow
+UID/GID settings are checked and bound into the immutable mapping digest. Actual
+`/proc/self/status` must show CapEff/CapBnd zero, NoNewPrivs 1 and Seccomp 2 for
+both Workstation and Hub; Docker create/inspect intent alone is insufficient.
+
+Initial separately named diagnostic ceilings are Workstation 1 GiB RAM, 1 CPU,
+128 PIDs, 256 MiB/8192-inode writable project quota; Hub 256 MiB RAM, 0.25 CPU,
+32 PIDs, 64 MiB/2048-inode quota. Both have read-only images, no network, dropped
+capabilities and no-new-privileges; bounded /tmp is separate tmpfs. These do not
+change #98's small synthetic profile. Startup, idle and tool phases collect real
+cgroup observations and inspect XFS enforcement/limits. Native reset/resource
+sizing, quota exhaustion and production capacity remain unqualified.
+
+The first scenario proves **ingress only**: actual Pi tool calls, exact retries
+and forged-Actor rejection reach the outside Hub ledger with exact attribution.
+It does **not** prove Alice's message is delivered into Bob's native context, or
+Bob's response into Alice's. `tool_execution_end` is not recipient acceptance.
+The Hub receiver explicitly refuses outbound delivery, and the report records
+`recipient_native_delivery_verified: false` and requires no delivery receipts.
+Actual inherited-FD transfer to another task must fence that seat; normal
+Workstation Stop must exit both held Pi tasks while the held Hub remains alive,
+then explicit control EOF fences the Hub. Owned containers/image/build scratch
+and quota mount are cleaned up; the disposable VM is removed by the runner.
+
+Next, reuse—not duplicate—the existing Hub offer/confirm reducers: a trusted
+Supervisor safe-point poll obtains a bounded offer, native `accept` runs outside
+Hub authority locks, and its authenticated receipt is confirmed under a fresh
+exact admission check. Existing native/offer journals retain unknown outcomes.
+Only recipient-native receipt/history evidence will justify a full two-way
+Alice/Bob exchange claim. Engine/RPC objects remain Supervisor-only throughout.
+
+
+The explicit staged-source closure includes `uas/forge.py` only because existing
+Hub capacity accounting imports its reducer helper. An isolated `python -I -S`
+smoke copies only allowlisted modules and exercises configure/connect/submit and
+retry, with Broker construction forbidden and `github_read.py` absent. This is
+not a credential, provider or Forge capability expansion.

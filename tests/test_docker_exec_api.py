@@ -46,6 +46,32 @@ class DockerExecAPITests(unittest.TestCase):
         self.assertFalse(hasattr(stream, 'poll'))
         stream.close()
 
+    def test_fixed_hub_attach_reuses_strict_multiplex_upgrade_not_init_pid(self):
+        header = (b'HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n'
+                  b'Connection: Upgrade\r\nUpgrade: tcp\r\n\r\n')
+        fake = FakeSocket(header + b'first-frame')
+        with patch('uas.docker_exec_api.socket.socket', return_value=fake):
+            stream = DockerExecAPI('/not-contacted').attach_hub('c'*64)
+        self.assertIn(('/containers/'+'c'*64+'/attach?stream=1&stdin=1&stdout=1&stderr=1').encode(),fake.sent)
+        self.assertEqual(fake.recv(11),b'first-frame')
+        self.assertFalse(hasattr(stream,'pid'));stream.close()
+
+    def test_hub_start_requires_exact_204_and_never_retries_ambiguous_start(self):
+        from unittest.mock import MagicMock
+        for status,body in ((204,b''),(304,b''),(500,b''),(204,b'x')):
+            connection=MagicMock()
+            response=connection.getresponse.return_value
+            response.status=status;response.read.return_value=body
+            with patch('uas.docker_exec_api._UnixHTTP',return_value=connection) as factory:
+                if status==204 and body==b'':
+                    DockerExecAPI('/not-contacted').start_hub('c'*64)
+                else:
+                    with self.assertRaises(ExecUnavailable):DockerExecAPI('/not-contacted').start_hub('c'*64)
+            self.assertEqual(factory.call_count,1)
+            connection.request.assert_called_once()
+            self.assertEqual(connection.request.call_args.args[1],'/v1.48/containers/'+'c'*64+'/start')
+            connection.close.assert_called_once()
+
     def test_bad_or_ambiguous_upgrade_closes_without_retry(self):
         for header in (b'HTTP/1.1 500 Error\r\n\r\n', b'', b'X'*8193,
                        b'HTTP/1.1 101 UPGRADED\r\nUpgrade: tcp\r\nUpgrade: tcp\r\n\r\n'):

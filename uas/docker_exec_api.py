@@ -72,7 +72,26 @@ class DockerExecAPI:
 
     def start(self, exec_id):
         path = API + '/exec/' + self._id(exec_id) + '/start'
-        body = b'{"Detach":false,"Tty":false}'
+        return self._upgrade(path, b'{"Detach":false,"Tty":false}')
+
+    def attach_hub(self, container_id):
+        """Fixed non-TTY Hub startup stdin; never infer task from init PID."""
+        path = API + '/containers/' + self._id(container_id) + '/attach?stream=1&stdin=1&stdout=1&stderr=1'
+        return self._upgrade(path, b'')
+
+    def start_hub(self, container_id):
+        """Start one already-owned immutable Hub container; no retry on ambiguity."""
+        connection = _UnixHTTP(self.socket_path, self.timeout)
+        try:
+            connection.request('POST', API + '/containers/' + self._id(container_id) + '/start',
+                               b'', {'Content-Length': '0'})
+            response = connection.getresponse()
+            if response.status != 204 or response.read(1):
+                raise ExecUnavailable('Hub start unknown; reconcile exact owned container')
+        finally:
+            connection.close()
+
+    def _upgrade(self, path, body):
         request = (f'POST {path} HTTP/1.1\r\nHost: localhost\r\n'
                    'Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\n'
                    f'Content-Length: {len(body)}\r\n\r\n').encode() + body
