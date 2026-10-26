@@ -5,6 +5,7 @@ not live credentials, production Broker isolation, Run admission or human merge.
 """
 from dataclasses import replace
 import json
+import hashlib
 import os
 import select
 import sqlite3
@@ -19,6 +20,8 @@ from uas.peer import Message, Readiness, WorkRequest
 from uas.forge import ForgeBinding, ReadOnlyForgeBroker
 from uas.github_read import GitHubProject, GitHubReadProvider, ProviderFailure, ProviderResponse
 from uas.ledger import LedgerError, RoomLedger
+from uas.lifecycle import Supervisor
+from uas.participant import FixtureCredentials
 
 
 @unittest.skipUnless(harness.INSTALL, 'Set UAS_PI_INSTALL for required actual Pi Forge integration')
@@ -36,7 +39,7 @@ class PiForgeTests(unittest.TestCase):
         self.fail_provider = False
         self.provider = GitHubReadProvider(GitHubProject('owner/repo'), self.transport)
         self.broker = ReadOnlyForgeBroker(self.ledger,
-            ForgeBinding('alpha', 'project-alpha', 'owner/repo'), self.select_provider)
+            ForgeBinding('alpha', 'fixture', 'owner/repo'), self.select_provider)
         self.controller.bind_forge(self.broker)
 
     def issue(self, number, state='open'):
@@ -233,6 +236,145 @@ class PiForgeTests(unittest.TestCase):
         self.assertNotIn('forge_observations', self.ledger.snapshot()['state'])
         denial = [event for event in self.ledger.replay(0) if event['kind'] == 'forge-record-denied']
         self.assertEqual({'code': 'AUTHORITY_REVOKED'}, denial[-1]['payload'])
+
+    def test_same_room_wrong_project_bind_and_dispatch_cannot_select_authority(self):
+        self.start()
+        wrong = ReadOnlyForgeBroker(self.ledger, ForgeBinding('alpha', 'other-project', 'owner/repo'),
+                                    self.select_provider)
+        with self.assertRaises(LedgerError) as rejected:
+            self.controller.bind_forge(wrong)
+        self.assertEqual('PROJECT_MISMATCH', rejected.exception.code)
+        original_binding = self.broker.binding
+        self.broker.binding = replace(original_binding, project_id='other-project')
+        try:
+            rejected_dispatch = self.invoke('wrong-project-binding')
+            self.assertFalse(rejected_dispatch['ok'])
+            self.assertEqual('PROJECT_MISMATCH', rejected_dispatch['error'])
+        finally:
+            self.broker.binding = original_binding
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.actors)
+
+    def test_current_project_manifest_drift_cannot_rebind_actual_pi_dispatch(self):
+        self.start()
+        # Current manifest drift cannot silently rebind the captured Project.
+        with self.supervisor._locked():
+            original_spec = self.supervisor._read()
+            drifted = json.loads(json.dumps(original_spec))
+            drifted['spec']['project_id'] = 'other-project'
+            self.supervisor._save(drifted)
+        try:
+            rejected_drift = self.invoke('wrong-current-project')
+            self.assertFalse(rejected_drift['ok'])
+            self.assertEqual('PROJECT_MISMATCH', rejected_drift['error'])
+        finally:
+            with self.supervisor._locked():
+                self.supervisor._save(original_spec)
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.actors)
+
+    def test_actual_controller_replacement_recovers_eight_pending_without_contact_or_receipt_downgrade(self):
+        self.start()
+        old_handle = self.handle
+        old_origin = old_handle.badge.origin()
+        # A previously completed observation must not be downgraded by recovery.
+        completed = self.invoke('committed-before-loss')['receipt']
+        terminal_key = hashlib.sha256(b'alpha\0committed-before-loss').hexdigest()
+        terminal_id = 'forge-terminal-' + terminal_key
+        before_terminal = self.ledger.operation_receipt(terminal_id, old_origin, authorize=lambda: True)
+        self.assertEqual(completed, before_terminal['result'])
+        calls_before = list(self.calls)
+        # Seven trusted starts plus one real Pi read interrupted at terminal
+        # commit fill all pending slots. All bind actual process authority.
+        with self.supervisor._locked():
+            for index in range(7):
+                self.broker.prepare({'id': 'interrupted-' + str(index), 'kind': 'forge-read',
+                                     'argv': ['issue', 'view', '66']}, origin=old_origin,
+                    authorize=lambda: self.controller._authority(old_handle,
+                        (old_handle.process.pid, os.getuid(), os.getgid())))
+        original_commit = self.ledger._commit
+        commits = []
+        def fail_terminal_commit():
+            commits.append(True)
+            if len(commits) == 2:
+                raise sqlite3.OperationalError('controlled interrupted terminal commit')
+            return original_commit()
+        with patch.object(self.ledger, '_commit', fail_terminal_commit):
+            interrupted = self.invoke('interrupted-7')
+        self.assertFalse(interrupted['ok'])
+        self.assertEqual('AUDIT_UNAVAILABLE', interrupted['error'])
+        calls_before = list(self.calls)
+        self.assertEqual(8, len(self.ledger.snapshot()['state']['forge_pending']))
+        self.controller.close()
+        self.assertIsNotNone(old_handle.process.poll())
+        self.supervisor = Supervisor(self.root / 'control', 'alpha', self.backend,
+                                     authorize=lambda *_: True, revoke=self.backend.revoke)
+        self.controller = self.supervisor.participants(self.hub, FixtureCredentials())
+        self.broker = ReadOnlyForgeBroker(self.ledger, ForgeBinding('alpha', 'fixture', 'owner/repo'),
+                                         self.select_provider)
+        self.controller.bind_forge(self.broker)
+        self.assertEqual({}, self.ledger.snapshot()['state']['forge_pending'])
+        self.assertEqual(calls_before, self.calls)
+        abandoned = [event for event in self.ledger.replay(0) if event['kind'] == 'forge-read-abandoned']
+        self.assertEqual(8, len(abandoned))
+        self.assertTrue(all(event['origin'] == old_origin.canonical() for event in abandoned))
+        self.assertTrue(all(event['payload']['observation'] == {
+            'completeness': 'unknown', 'status': 'AUTHORITY_LOST',
+            'controller_reason': 'CONTROLLER_REPLACED'} for event in abandoned))
+        self.assertEqual(before_terminal,
+                         self.ledger.operation_receipt(terminal_id, old_origin, authorize=lambda: True))
+        self.start()
+        self.assertNotEqual(old_handle.badge.incarnation_id, self.handle.badge.incarnation_id)
+        self.assertTrue(self.invoke('new-incarnation-read')['ok'])
+        calls_after_fresh_read = list(self.calls)
+        conflicting = self.invoke('interrupted-0')
+        self.assertFalse(conflicting['ok'])
+        self.assertEqual('ID_CONFLICT', conflicting['error'])
+        self.assertEqual(calls_after_fresh_read, self.calls)
+        conflicting_terminal = self.invoke('committed-before-loss')
+        self.assertFalse(conflicting_terminal['ok'])
+        self.assertEqual('ID_CONFLICT', conflicting_terminal['error'])
+        self.assertEqual(calls_after_fresh_read, self.calls)
+        self.assertEqual(before_terminal,
+                         self.ledger.operation_receipt(terminal_id, old_origin, authorize=lambda: True))
+
+    def test_actual_pi_lost_terminal_commit_ack_survives_controller_replacement_unchanged(self):
+        self.start()
+        old_origin = self.handle.badge.origin()
+        original_commit = self.ledger._commit
+        commits = []
+        def lose_terminal_ack():
+            commits.append(True)
+            original_commit()
+            if len(commits) == 2:
+                raise sqlite3.OperationalError('controlled lost terminal commit acknowledgement')
+        with patch.object(self.ledger, '_commit', lose_terminal_ack):
+            response = self.invoke('lost-commit-ack')
+        self.assertFalse(response['ok'])
+        self.assertEqual('AUDIT_UNAVAILABLE', response['error'])
+        terminal_id = 'forge-terminal-' + hashlib.sha256(b'alpha\0lost-commit-ack').hexdigest()
+        committed = self.ledger.operation_receipt(terminal_id, old_origin, authorize=lambda: True)
+        self.assertEqual('complete', committed['result']['observation']['completeness'])
+        self.assertEqual({}, self.ledger.snapshot()['state']['forge_pending'])
+        calls_before = list(self.calls)
+        old_handle = self.handle
+        self.controller.close()
+        self.assertIsNotNone(old_handle.process.poll())
+        self.supervisor = Supervisor(self.root / 'control', 'alpha', self.backend,
+                                     authorize=lambda *_: True, revoke=self.backend.revoke)
+        self.controller = self.supervisor.participants(self.hub, FixtureCredentials())
+        self.broker = ReadOnlyForgeBroker(self.ledger, ForgeBinding('alpha', 'fixture', 'owner/repo'),
+                                         self.select_provider)
+        self.controller.bind_forge(self.broker)
+        self.assertEqual(calls_before, self.calls)
+        self.assertEqual(committed, self.ledger.operation_receipt(terminal_id, old_origin, authorize=lambda: True))
+        self.assertFalse(any(event['kind'] == 'forge-read-abandoned' for event in self.ledger.replay(0)))
+        self.start()
+        denied_retry = self.invoke('lost-commit-ack')
+        self.assertFalse(denied_retry['ok'])
+        self.assertEqual('ID_CONFLICT', denied_retry['error'])
+        self.assertEqual(calls_before, self.calls)
+        self.assertEqual(committed, self.ledger.operation_receipt(terminal_id, old_origin, authorize=lambda: True))
 
     def test_cross_room_broker_cannot_bind_to_actual_pi_controller(self):
         self.start()

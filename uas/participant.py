@@ -158,6 +158,7 @@ class FixtureParticipantController:
             if not state or state["phase"] != "running":
                 raise LedgerError("ROOM_NOT_RUNNING")
             self.instance = state["instance_id"]
+            self.project_id = state["spec"]["project_id"]
             self.path = supervisor._owned_directory(state) / "participants.json"
             document = self._read(require_owner=False)
             if document is None:
@@ -673,7 +674,10 @@ class FixtureParticipantController:
     def _authority(self, handle, credentials):
         if self.store_failed:
             raise LedgerError("AUTHORITY_STORE_UNAVAILABLE")
-        self._room()
+        state = self._room()
+        if (state['spec']['project_id'] != self.project_id
+                or (self.forge_broker is not None and self.forge_broker.binding.project_id != self.project_id)):
+            raise LedgerError('PROJECT_MISMATCH')
         document = self._read()
         badge = handle.badge
         record = document["seats"].get(badge.participant_id)
@@ -739,9 +743,21 @@ class FixtureParticipantController:
         if (type(broker) is not ReadOnlyForgeBroker or broker.ledger is not self.hub.ledger
                 or broker.binding.room_id != self.supervisor.room_id):
             raise LedgerError('ROOM_MISMATCH')
-        if self.forge_broker is not None:
-            raise LedgerError('FORGE_ALREADY_BOUND')
-        self.forge_broker = broker
+        with self.supervisor._locked():
+            state = self._room()
+            if broker.binding.project_id != self.project_id or state['spec']['project_id'] != self.project_id:
+                raise LedgerError('PROJECT_MISMATCH')
+            if self.forge_broker is not None:
+                raise LedgerError('FORGE_ALREADY_BOUND')
+            records = self._read()['seats']
+            def fenced(origin):
+                record = records.get(origin.participant_id)
+                return (record is None or record['status'] != 'active'
+                        or record['incarnation_id'] != origin.incarnation_id)
+            # New controller construction already fences old manifest authority.
+            # Reconcile bounded old intents before making the endpoint available.
+            broker.recover_pending(fenced)
+            self.forge_broker = broker
 
     def receive(self, handle):
         """Consume one kernel-authenticated record and dispatch to #65/#60.

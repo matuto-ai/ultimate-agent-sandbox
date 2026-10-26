@@ -35,7 +35,7 @@ class ReadOnlyForgeBroker:
                    'MISSING_ACTOR_CREDENTIAL', 'INVALID_PROCESS_RECORD',
                    'AUTHORITY_STORE_UNAVAILABLE', 'INVALID_AUTHORITY_STORE',
                    'CONTROLLER_REPLACED', 'ROOM_NOT_RUNNING', 'ROOM_REPLACED', 'FORBIDDEN',
-                   'INVALID_FORGE_ENVELOPE', 'INVALID_NATIVE_FRAME'}
+                   'INVALID_FORGE_ENVELOPE', 'INVALID_NATIVE_FRAME', 'PROJECT_MISMATCH'}
         if code not in allowed:
             return
         origin = Origin('forge-audit', 'forge-audit', 'controller', 'denial-v1', ())
@@ -89,7 +89,8 @@ class ReadOnlyForgeBroker:
             # Conservative maximum terminal footprint is reserved before any
             # external contact. Peer/context admissions include this reservation.
             # Terminal receipts live in immutable operations/history, not state.
-            pending[key] = {'reserved': 'x' * 65536}
+            pending[key] = {'reserved': 'x' * 65536, 'command': command.canonical(),
+                            'origin': origin.canonical()}
             self._capacity(state)
             started = True
             return Transition(state, (Event('forge-read-started', payload),), {'status': 'pending'})
@@ -211,6 +212,36 @@ class ReadOnlyForgeBroker:
             self.ledger.apply(Command('forge-terminal-' + key, 'forge-read-result',
                 self.binding.project_id, None, terminal), origin,
                 authorize=lambda *_: True, decide=release)
+        except LedgerError as error:
+            if error.code in {'STORAGE_ERROR', 'CLOSED'}:
+                self._audit_failed = True
+                raise LedgerError('AUDIT_UNAVAILABLE') from error
+            raise
+
+    def recover_pending(self, is_fenced):
+        """Supervisor-only restart reconciliation of proven-fenced incarnations.
+
+        Pending metadata is sanitized command digest/target and original Origin,
+        not raw argv or provider output. Never re-contact or disclose receipts.
+        The controller invokes this under its lifecycle lock after reconstruction.
+        """
+        try:
+            pending = self.ledger.snapshot()['state'].get('forge_pending', {})
+            if type(pending) is not dict or len(pending) > 8:
+                raise LedgerError('INVALID_FORGE_INTENT')
+            for key, row in pending.items():
+                if type(row) is not dict or set(row) != {'reserved', 'command', 'origin'}:
+                    raise LedgerError('INVALID_FORGE_INTENT')
+                command = Command(**row['command'])
+                origin = Origin(**{**row['origin'], 'capabilities': tuple(row['origin']['capabilities'])})
+                origin.canonical()
+                intent = {'key': key, 'operation': command.id, 'origin': origin,
+                          'command': command, '_broker': self}
+                self._validate_intent(intent)
+                if is_fenced(origin) is True:
+                    self.abandon(intent, 'CONTROLLER_REPLACED')
+        except (KeyError, TypeError, ValueError) as error:
+            raise LedgerError('INVALID_FORGE_INTENT') from error
         except LedgerError as error:
             if error.code in {'STORAGE_ERROR', 'CLOSED'}:
                 self._audit_failed = True

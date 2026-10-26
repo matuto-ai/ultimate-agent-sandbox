@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
 import threading
 import time
@@ -111,6 +112,66 @@ class ClaudeListingNativeTests(unittest.TestCase):
                       receiver_observation=self.native.observe().value,
                       fixture_request_count=before)
         self.observations.append(result)
+        return result
+
+    def test_fresh_listing_while_exact_owned_process_is_stopped(self):
+        """A new query process is not necessarily a new target observation.
+
+        SIGSTOP and /proc are only failure injection/evidence for our owned
+        child, never a simulated native signal or a private Claude state read.
+        The result is diagnostic even if the public listing retains idle.
+        """
+        stopped = False
+
+        def kernel_state():
+            self.assertIsNone(self.native.process.poll())
+            status = Path(f'/proc/{self.native.process.pid}/status').read_text()
+            return next(line.split()[1] for line in status.splitlines() if line.startswith('State:'))
+
+        try:
+            self.start_unprimed()
+            time.sleep(.5)
+            baseline = self.sample('alive-before-first-input')
+            self.assertEqual(baseline['exact_identity_count'], 1)
+            self.assertEqual(len(baseline['related_rows']), 1)
+            self.assertEqual(baseline['related_rows'][0]['status'], 'idle')
+            self.native.process.send_signal(signal.SIGSTOP)
+            stopped = True
+            deadline = time.monotonic() + 2
+            while kernel_state() != 'T':
+                self.assertLess(time.monotonic(), deadline, 'owned child did not stop')
+                time.sleep(.01)
+            stopped_at = time.monotonic()
+            # Exceed the existing adapter freshness window without any input.
+            time.sleep(2.2)
+            for phase in ('stopped-query-one', 'stopped-query-two'):
+                self.assertEqual(kernel_state(), 'T')
+                sample = self.sample(phase)
+                self.assertEqual(kernel_state(), 'T', 'target must remain stopped throughout query')
+                sample.update(kernel_state='T', stopped_seconds=time.monotonic() - stopped_at)
+                # Pinned native negative evidence: this fresh query can retain
+                # idle even though the exact target cannot execute any code.
+                self.assertEqual(sample['exact_identity_count'], 1)
+                self.assertEqual(len(sample['related_rows']), 1)
+                self.assertEqual(sample['related_rows'][0]['status'], 'idle')
+                self.assertFalse(sample['authorizes_delivery'])
+                self.assertIs(self.native.observe(), Readiness.AMBIGUOUS)
+            self.native.process.send_signal(signal.SIGCONT)
+            stopped = False
+            deadline = time.monotonic() + 2
+            while kernel_state() == 'T':
+                self.assertLess(time.monotonic(), deadline, 'owned child did not continue')
+                time.sleep(.01)
+            self.sample('continued-without-input')
+            self.assertEqual(self.gateway.requests, [], 'diagnostic must make no model requests')
+            self.assertIs(self.native.observe(), Readiness.AMBIGUOUS)
+        finally:
+            if stopped and self.native is not None and self.native.process.poll() is None:
+                self.native.process.send_signal(signal.SIGCONT)
+            print(json.dumps({'probe': 'official-agents-json-stopped-target',
+                              'runtime_version': '2.1.310', 'provider': 'loopback-protocol-fixture-only',
+                              'product_readiness_changed': False,
+                              'observations': self.observations}, sort_keys=True))
 
     def turn(self, prefix, content):
         self.gateway.release.clear()
