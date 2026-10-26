@@ -25,11 +25,14 @@ jobs:
           node-version: '24.22.1'
       - name: Acquire exact official package without lifecycle scripts or account configuration
         run: sh tests/claude/install-dependencies.sh
+      - name: Acquire matching official TypeScript SDK without extra native binaries or scripts
+        run: sh tests/claude/sdk/install-dependencies.sh
       - name: Actual Claude CLI against loopback protocol fixture, never upstream
         shell: bash
         run: |
           set -euo pipefail
           runner_user="$(id -un)"
+          node_path="$(command -v node)"
           # This modifies only a disposable child network namespace. No host
           # routes, firewall, interfaces, managed policy, or credentials change.
-          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin UAS_CLAUDE_INSTALL="$2/tests/claude" sh "$2/tests/claude/run-tests.sh"' sh "$runner_user" "$PWD"
+          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" sh "$2/tests/claude/run-tests.sh"' sh "$runner_user" "$PWD" "$node_path"
