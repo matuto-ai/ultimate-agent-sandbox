@@ -58,3 +58,70 @@ test('listing success, invalid output, output cap and timeout all release tracki
     assert.equal(tracked.size, 0);
   }
 });
+
+import {nativeDiagnostic, lifecycleDiagnostic, writeHostDiagnostic} from '../../runtime/claude/sdk-diagnostics.mjs';
+
+test('startup lifecycle distinguishes live at deadline from actual native exit after cleanup', () => {
+  const child = {exitCode:null, signalCode:null};
+  const before = nativeDiagnostic(child, () => 'S');
+  assert.deepEqual(before, {state:'live',exit_code:null,signal:null,kernel:'S'});
+  child.exitCode = 7;
+  const lifecycle = lifecycleDiagnostic({phase:'native-initialize', initializationMs:1501,
+    before, child, cleanupStarted:true});
+  assert.equal(lifecycle.before_cleanup.state, 'live');
+  assert.equal(lifecycle.final_native.exit_code, 7);
+  assert.equal(lifecycle.cleanup, 'complete');
+  let wire;
+  writeHostDiagnostic({on(){},write(value){wire=value;}}, 'native-initialize-timeout',2,
+    'native-initialize-timeout',lifecycle);
+  const record = JSON.parse(wire);
+  assert.equal(record.exit_code,2); // Host status is not native status.
+  assert.equal(record.lifecycle.final_native.exit_code,7);
+  assert.ok(wire.length < 1536);
+});
+
+test('early startup and signaled exit remain typed; hostile values cannot escape lifecycle', () => {
+  const early = lifecycleDiagnostic({phase:'configuration',before:nativeDiagnostic(),cleanupStarted:true});
+  assert.equal(early.cleanup,'complete');
+  assert.equal(early.final_native.state,'not-spawned');
+  assert.equal(early.initialization_ms,null);
+  const signal = nativeDiagnostic({exitCode:null,signalCode:'SIGKILL'});
+  assert.deepEqual(signal,{state:'exited',exit_code:null,signal:'SIGKILL',kernel:null});
+  const secret = 'Authorization: Bearer fixture-only-secret\u001b';
+  const bad = lifecycleDiagnostic({phase:secret,initializationMs:Infinity,
+    before:{state:secret,exit_code:-1,signal:secret,kernel:secret,secret},
+    child:{exitCode:900,signalCode:secret},failures:Infinity,forcedKill:secret});
+  assert.ok(!JSON.stringify(bad).includes(secret));
+  assert.equal(bad.cleanup,'unavailable');
+  assert.equal(bad.cleanup_failures,255);
+  assert.equal(bad.forced_kill,false);
+  assert.equal(nativeDiagnostic({exitCode:null,signalCode:null},()=>{throw Error(secret);}).kernel,null);
+});
+
+test('cleanup diagnostics count failures without masking disposition or claiming requested kill exited', () => {
+  const child = {exitCode:null,signalCode:null,kill(){throw Error('private');}};
+  const before = nativeDiagnostic(child); let final, failures=0, forcedKill=false, finished=false;
+  closeOwned({input:{end(){throw Error('private');}},query:{close(){throw Error('private');}},
+    queries:[],child,onFailure:()=>failures++,onForcedKill:()=>{forcedKill=true;},
+    schedule:(callback,delay)=>{assert.equal(delay,2200);final=callback;return {};},
+    finish:()=>{finished=true;}});
+  assert.throws(final,/private/);
+  assert.equal(finished,true);
+  const data=lifecycleDiagnostic({phase:'native-initialize',before,child,
+    failures,forcedKill,cleanupStarted:true});
+  assert.equal(data.cleanup,'incomplete');
+  assert.equal(data.cleanup_failures,3);
+  assert.equal(data.forced_kill,true);
+  assert.equal(data.final_native.state,'live');
+});
+
+test('diagnostic writer bounds even an untrusted lifecycle and cannot escape write failure', () => {
+  const secret='Bearer private-token\n\u001b'; let wire;
+  writeHostDiagnostic({on(){},write(v){wire=v;}},secret,999,secret,
+    {phase:secret,initialization_ms:Infinity,before_cleanup:{state:secret,secret},
+      final_native:{signal:secret},cleanup:secret,cleanup_failures:-1,forced_kill:secret,secret});
+  assert.ok(wire.length<1536);
+  assert.ok(!wire.includes(secret));
+  assert.doesNotThrow(()=>writeHostDiagnostic({on(){},write(){throw Error(secret);}},
+    'startup-failed',2,null,lifecycleDiagnostic({phase:'configuration'})));
+});

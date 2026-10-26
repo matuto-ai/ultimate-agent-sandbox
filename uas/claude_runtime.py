@@ -637,6 +637,37 @@ class DirectClaudeDiagnosticReceiver(_ClaudeJournal):
         self._close_journal()
 
 
+def _sdk_lifecycle_diagnostic(value):
+    """Copy only bounded typed lifecycle facts, never arbitrary host text."""
+    native_keys = {'state', 'exit_code', 'signal', 'kernel'}
+    keys = {'phase', 'initialization_ms', 'before_cleanup', 'final_native',
+            'cleanup', 'cleanup_failures', 'forced_kill'}
+    signals = {'SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGBUS',
+               'SIGILL', 'SIGPIPE', 'SIGTRAP', 'SIGSYS', 'SIGXCPU', 'SIGXFSZ'}
+
+    def choice(item, allowed, default=None):
+        return item if type(item) is str and item in allowed else default
+
+    def integer(item, maximum):
+        return item if type(item) is int and 0 <= item <= maximum else None
+
+    def native(item):
+        item = item if type(item) is dict and set(item) == native_keys else {}
+        return {'state': choice(item.get('state'), {'not-spawned', 'live', 'exited', 'unavailable'}, 'unavailable'),
+                'exit_code': integer(item.get('exit_code'), 255),
+                'signal': choice(item.get('signal'), signals),
+                'kernel': choice(item.get('kernel'), {'R', 'S', 'D', 'Z', 'T', 't', 'X', 'I'})}
+
+    value = value if type(value) is dict and set(value) == keys else {}
+    return {'phase': choice(value.get('phase'), {'configuration', 'native-initialize', 'ready', 'unavailable'}, 'unavailable'),
+            'initialization_ms': integer(value.get('initialization_ms'), 60000),
+            'before_cleanup': native(value.get('before_cleanup')),
+            'final_native': native(value.get('final_native')),
+            'cleanup': choice(value.get('cleanup'), {'complete', 'incomplete', 'unavailable'}, 'unavailable'),
+            'cleanup_failures': integer(value.get('cleanup_failures'), 255),
+            'forced_kill': value.get('forced_kill') if type(value.get('forced_kill')) is bool else None}
+
+
 def _sdk_startup_diagnostic(lines):
     """Parse fixed bounded host codes only; arbitrary stderr is never reported."""
     reasons = {'output-limit', 'host-terminated', 'host-interrupted', 'output-loss',
@@ -650,19 +681,23 @@ def _sdk_startup_diagnostic(lines):
     unavailable = {'reason': 'unavailable', 'fence': 'unavailable', 'exit_code': None}
     records = []
     for line in lines:
-        if type(line) is not str or len(line) > 320:
+        if type(line) is not str or len(line) > 1536:
             continue
         try:
             record = json.loads(line)
         except (ValueError, TypeError):
             continue
-        if (type(record) is not dict or set(record) != {'type', 'reason', 'fence', 'exit_code'}
+        if (type(record) is not dict or set(record) not in (
+                {'type', 'reason', 'fence', 'exit_code'},
+                {'type', 'reason', 'fence', 'exit_code', 'lifecycle'})
                 or record['type'] != 'fixture-host-diagnostic'):
             continue
         records.append({
             'reason': record['reason'] if type(record['reason']) is str and record['reason'] in reasons else 'unavailable',
             'fence': record['fence'] if type(record['fence']) is str and record['fence'] in fences else 'unavailable',
             'exit_code': record['exit_code'] if type(record['exit_code']) is int and 0 <= record['exit_code'] <= 255 else None})
+        if 'lifecycle' in record:
+            records[-1]['lifecycle'] = _sdk_lifecycle_diagnostic(record['lifecycle'])
     return records[0] if len(records) == 1 else unavailable
 
 

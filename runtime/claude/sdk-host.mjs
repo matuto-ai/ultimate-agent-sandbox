@@ -2,7 +2,7 @@
 // Supervisor-owned native process or a generic launcher/protocol proxy.
 import {spawn} from 'node:child_process';
 import {createHash, randomUUID} from 'node:crypto';
-import {createReadStream, readFileSync, lstatSync, realpathSync} from 'node:fs';
+import {createReadStream, readFileSync, lstatSync, realpathSync, writeSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID, NativeState, listingState} from './sdk-policy.mjs';
@@ -10,14 +10,25 @@ import {closeOwned, collectListing, validateLoopback} from './sdk-resources.mjs'
 
 import {PermissionSlot, permissionProfile, terminatePending} from './permission-policy.mjs';
 import {PermissionNativeState} from './permission-state.mjs';
-import {writeHostDiagnostic} from './sdk-diagnostics.mjs';
+import {writeHostDiagnostic, nativeDiagnostic, lifecycleDiagnostic} from './sdk-diagnostics.mjs';
 
 const [sdkRoot, binary, cwd, home, gateway, key, sessionId, resume, nonceFile] = process.argv.slice(2);
 let query, child, state, input, closing = false, outputBytes = 0, commandActive = false;
 const permissionIncarnation = randomUUID();
 let slot;
 let kernelStart, listingStart = null;
-let stderrTail = '';
+let phase = 'configuration', initializationStart, initializationMs = null;
+let shutdownRecord, beforeCleanup, cleanupStarted = false, cleanupFailures = 0, forcedKill = false;
+const readKernel = () => kernelIdentity().state;
+const failure = () => { cleanupFailures = Math.min(255, cleanupFailures + 1); };
+process.once('exit', () => {
+  // Synchronous bounded diagnostic-only output cannot keep the host alive or
+  // be lost when the existing cleanup timer calls process.exit().
+  const lifecycle = lifecycleDiagnostic({phase, initializationMs, before:beforeCleanup,
+    child, readKernel, queries, failures:cleanupFailures, forcedKill, cleanupStarted});
+  writeHostDiagnostic({on() {}, write: wire => writeSync(2, wire)},
+    shutdownRecord?.reason, shutdownRecord?.code, shutdownRecord?.fence, lifecycle);
+});
 const queries = new Set();
 const DEADLINE = 1500;
 const write = value => {
@@ -30,13 +41,17 @@ const write = value => {
 function shutdown(reason, code = 0) {
   if (closing) return;
   closing = true; process.exitCode = code;
-  // Exactly one small typed record, even for early asynchronous shutdown.
-  writeHostDiagnostic(process.stderr, reason, code, state?.fenced);
+  shutdownRecord = {reason, code, fence:state?.fenced};
+  if (initializationStart !== undefined && initializationMs === null)
+    initializationMs = Math.min(60000, Math.max(0, Math.round(performance.now() - initializationStart)));
+  beforeCleanup = nativeDiagnostic(child, readKernel);
+  cleanupStarted = true;
   state?.hold(reason);
   // Pending permission terminates the exact child before settling; otherwise
   // preserve the default documented SDK graceful-close lifecycle.
-  const dispose = () => closeOwned({input, queries, query, child, finish: () => process.exit(code)});
-  if (slot?.pending && child) terminatePending({slot, child, reason, dispose, fail: () => process.exit(2)});
+  const dispose = () => closeOwned({input, queries, query, child,
+    onFailure:failure, onForcedKill:() => { forcedKill = true; }, finish: () => process.exit(code)});
+  if (slot?.pending && child) terminatePending({slot, child, reason, dispose, fail: () => { failure(); process.exit(2); }});
   else { slot?.cancel(reason); dispose(); }
   process.stdin.pause();
 }
@@ -119,6 +134,7 @@ async function main() {
     ANTHROPIC_BASE_URL: gateway, ANTHROPIC_API_KEY: key,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1'};
   state = nonceFile ? new PermissionNativeState(sessionId, nonceFile, permissionIncarnation) : new NativeState(sessionId); input = makeInput();
+  phase = 'native-initialize'; initializationStart = performance.now();
   query = createQuery({prompt: input, options: {
     pathToClaudeCodeExecutable: binary, cwd, env, tools: [], mcpServers: {}, strictMcpConfig: true,
     ...(nonceFile ? {...permissionProfile(), canUseTool: (name, value, options) => {
@@ -132,7 +148,8 @@ async function main() {
       if (child) throw new Error('duplicate-native-spawn');
       child = spawn(options.command, options.args, {cwd: options.cwd, env: options.env,
         signal: options.signal, stdio: ['pipe', 'pipe', 'pipe']});
-      child.stderr.on('data', data => { stderrTail = (stderrTail + data.toString('utf8')).slice(-4096); });
+      // Drain native diagnostics without retaining or exposing arbitrary content.
+      child.stderr.on('data', () => {});
       child.once('exit', () => { state.hold('native-process-lost'); write({type: 'native-exit'}); });
       return child;
     }
@@ -144,7 +161,9 @@ async function main() {
   })();
   const init = await deadline(query.initializationResult(), 'native-initialize-timeout');
   if (init.claude_code_version !== CLI_VERSION) throw new Error('unsupported-initialization');
+  initializationMs = Math.min(60000, Math.max(0, Math.round(performance.now() - initializationStart)));
   kernelStart = kernelIdentity().start;
+  phase = 'ready';
   write({type: 'host-ready', host_pid: process.pid, native_pid: child.pid, native_start: kernelStart, session_id: sessionId,
     sdk_version: SDK_VERSION, cli_version: CLI_VERSION, authority: 'sdk-host-owned-fixture-only',
     ...(nonceFile ? {permission_incarnation: permissionIncarnation} : {})});
@@ -201,7 +220,6 @@ async function main() {
   });
   process.stdin.once('end', () => shutdown('input-closed'));
 }
-main().catch(error => {
-  process.stderr.write(String(error.message).slice(0,512) + '\n' + stderrTail);
+main().catch(() => {
   shutdown('startup-failed', 2); process.exitCode = 2;
 });
