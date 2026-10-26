@@ -153,3 +153,30 @@ injection, not a native documented hung-state signal. **Issue #71 remains open.*
 
 The installed version's observed behavior, not this living documentation alone,
 must qualify each load-bearing signal.
+
+## Non-model readiness applicability investigation
+
+The supported [`claude agents --json --all` query](https://code.claude.com/docs/en/agent-view#read-session-state-from-a-script)
+reports live `pid`, `sessionId`, `status` (`busy`, `waiting`, `idle`) and
+`waitingFor` for interactive/background sessions. Background `state: working`
+also covers autonomous waits, so an instantaneously idle process alone would
+not establish a safe point. Pinned 2.1.310 exposes this command, but its
+applicability to this adapter's print-mode process is a separate question.
+
+`tests/test_claude_readiness.py` adds a diagnostic only: it suppresses the
+fixture constructor's bootstrap within the test, then runs the exact original
+CLI mode and arguments. In the mandatory loopback-only CI namespace it samples
+the public state query before any input, during a real held fixture request,
+after correlated completion, more than two seconds later, after process exit,
+and after actual same-session resume. Queries have five-second and 256-KiB
+combined-output bounds and must not add gateway requests. The probe records
+exact PID/session matches or explicit absence; **neither outcome changes
+readiness or authorizes delivery**. Native outcomes are pending the new CI gate.
+
+This is not a move to background sessions or a channel implementation.
+[Structured/piped resume cannot inject into a live background session](https://code.claude.com/docs/en/sessions#resume-a-running-background-session),
+and [channel notification writes have no acknowledgment](https://code.claude.com/docs/en/channels-reference#notification-format).
+Custom development channels are also ignored in print mode. SDK initialization,
+MCP connected, stdout silence, and this diagnostic's process-alive observation
+remain insufficient. The production-safe replacement for synthetic refresh is
+still unqualified; no paid no-op or automatic model polling is introduced.
