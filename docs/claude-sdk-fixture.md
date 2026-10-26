@@ -105,10 +105,15 @@ triggers. Qualification and adapter changes stay in one draft PR;
 work exceeding the normal CI budget must move to a deliberate gate, not extend
 automatic CI timeouts.
 
-A separate [manual native-permission qualification fixture](claude-permission-qualification.md)
-qualifies one explicitly decided Read request: exact-source run 40393356811
-passed native attention, correlated allow/deny and pending-close termination.
-Historical ask-rule and graceful-close failures remain documented. This fixed
-diagnostic neither expands the default tool-less receiver nor qualifies Hub
-delivery during permission waits, production approval authority or post-result
-fresh-idle recovery.
+The separate [manual native-permission qualification fixture](claude-permission-qualification.md)
+first qualified explicit Read attention/allow/deny/pending-close in run 40393356811.
+Its fixed nonce-Read receiver opt-in then passed actual Hub holding and allow-only
+recovery in exact-source run 40403924792: queued traffic held during attention,
+fresh non-model liveness/idle preceded resumption, and exact native replay alone
+confirmed delivery. Deny and pending-close retained traffic; a source-injected
+unknown intent stayed unresolved. Historical failures remain documented.
+
+The default receiver remains tool-less and permanently fences attention. The
+[qualified diagnostic integration](claude-permission-qualification.md#qualified-hub-holding-and-allow-only-recovery)
+does not qualify production approvals, arbitrary tool profiles, deny recovery,
+permission restoration, native reset or the full Participant acceptance scope.

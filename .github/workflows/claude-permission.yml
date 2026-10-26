@@ -39,3 +39,4 @@ jobs:
           node_path="$(command -v node)"
           # Only a disposable child network namespace; no host network changes.
           sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 UAS_CLAUDE_PERMISSION_NATIVE=1 UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" python3 "$2/tests/claude/permission/native.py"' sh "$runner_user" "$PWD" "$node_path"
+          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 UAS_CLAUDE_PERMISSION_NATIVE=1 UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" python3 "$2/tests/claude/permission/hub_native.py"' sh "$runner_user" "$PWD" "$node_path"

@@ -131,9 +131,16 @@ def require_loopback_namespace():
 
 class ClaudeSignals:
     """Bounded signal reducer. No signal, init, or connection authorizes work."""
-    def __init__(self, session_id, *, safe_for=2.0):
+    def __init__(self, session_id, *, safe_for=2.0, diagnostic_nonce_file=None):
         self.session_id = session_id
         self.safe_for = safe_for
+        self.diagnostic_nonce_file = diagnostic_nonce_file
+        self.permission_incarnation = None
+        self._permission = None
+        self.permission_decision = None
+        self.permission_result = False
+        self.permission_continuation = False
+        self.attention_seen = False
         self.pending = None
         self.command_id = None
         self.completed_id = None
@@ -151,11 +158,78 @@ class ClaudeSignals:
         self.ack = None
         self.safe_at = None
         self.state = 'working'
+        self.attention_seen = False
 
     def hold(self, state):
         self.state = state
         self.fenced = True
         self.safe_at = None
+
+    @property
+    def permission(self):
+        return dict(self._permission) if self._permission is not None else None
+
+    def attention(self, frame):
+        identity = frame.get('identity')
+        expected = {'sessionId', 'incarnation', 'invocationId', 'requestId', 'toolUseID', 'inputDigest'}
+        input_value = {'file_path': self.diagnostic_nonce_file}
+        fingerprint = hashlib.sha256(json.dumps(input_value, separators=(',', ':'),
+                                                ensure_ascii=False).encode()).hexdigest()
+        if (self.fenced or not self.diagnostic_nonce_file or not self.pending or self._permission is not None
+                or type(identity) is not dict or set(identity) != expected
+                or any(type(value) is not str or not 0 < len(value) <= 256 for value in identity.values())
+                or identity['sessionId'] != self.session_id
+                or identity['incarnation'] != self.permission_incarnation
+                or identity['invocationId'] != self.pending[0] or identity['inputDigest'] != fingerprint
+                or frame.get('toolName') != 'Read' or frame.get('input') != input_value):
+            self.hold('invalid-permission-attention')
+            return
+        self._permission = dict(identity)
+        self.attention_seen = True
+        self.state = 'needs-input'
+        self.safe_at = None
+
+    def decision(self, frame):
+        if (self.fenced or self._permission is None or frame.get('identity') != self._permission
+                or self.permission_decision is not None or frame.get('behavior') not in ('allow', 'deny')):
+            self.hold('invalid-permission-decision')
+            return
+        self.permission_decision = frame['behavior']
+        # A controller decision is not idle evidence and cannot clear any fence.
+
+    def _tool_result(self, event):
+        if (not self.pending or not self._permission or self._permission['invocationId'] != self.pending[0]
+                or self.permission_decision != 'allow' or self.permission_result
+                or 'isReplay' in event or event.get('parent_tool_use_id', True) is not None):
+            return False
+        tool_id = self._permission['toolUseID']
+        message = event.get('message')
+        blocks = message.get('content') if type(message) is dict and message.get('role') == 'user' else None
+        result = event.get('tool_use_result')
+        file = result.get('file') if type(result) is dict and result.get('type') == 'text' else None
+        return (type(blocks) is list and len(blocks) == 1 and type(blocks[0]) is dict
+                and blocks[0].get('type') == 'tool_result' and blocks[0].get('tool_use_id') == tool_id
+                and type(blocks[0].get('content')) is str and blocks[0].get('is_error', False) is False
+                and type(file) is dict and file.get('filePath') == self.diagnostic_nonce_file
+                and event.get('tool_result_meta') == [{'id': tool_id, 'permission_decision':
+                     {'decision': 'accept', 'source': 'user_temporary'}}])
+
+    def session_state(self, event):
+        if self.fenced:
+            return
+        if event.get('session_id') != self.session_id:
+            self.hold('native-identity')
+        elif event.get('state') == 'requires_action':
+            if (self.diagnostic_nonce_file is not None and self.pending
+                    and self.permission_decision is None and self.completed_id is None):
+                self.attention_seen = True
+                self.state = 'needs-input'
+                self.safe_at = None
+            else:
+                self.hold('needs-input')
+        elif event.get('state') not in ('idle', 'running'):
+            self.hold('unknown-native-state')
+        # Idle event alone never authorizes receipt or delivery.
 
     def event(self, event):
         if self.fenced:
@@ -165,7 +239,7 @@ class ClaudeSignals:
             return
         kind = event.get('type')
         if kind == 'system' and event.get('subtype') == 'init':
-            if (event.get('claude_code_version') != VERSION or event.get('tools') != []
+            if (event.get('claude_code_version') != VERSION or event.get('tools') != (['Read'] if self.diagnostic_nonce_file else [])
                     or event.get('mcp_servers') != [] or event.get('mcp_server_errors')
                     or event.get('plugin_errors')):
                 self.hold('unsupported-session')
@@ -174,6 +248,9 @@ class ClaudeSignals:
         elif kind == 'control_request' or (kind == 'system' and event.get('subtype') == 'permission_denied'):
             self.hold('needs-input')  # Conservative attention inference, not auto-approval.
         elif kind == 'user':
+            if self.diagnostic_nonce_file and self._tool_result(event):
+                self.permission_result = True
+                return  # Tool result is never a user replay receipt.
             if not self.pending or not _ack_matches(event, self.session_id, *self.pending):
                 self.hold('unmatched-acknowledgment')
             else:
@@ -183,7 +260,9 @@ class ClaudeSignals:
                     or event.get('user_message_uuid') != self.pending[0]
                     or event.get('subtype') != 'success' or event.get('is_error') is not False
                     or event.get('permission_denials') != [] or event.get('queued_turn_count') != 0
-                    or event.get('terminal_reason') != 'completed' or event.get('stop_reason') != 'end_turn'):
+                    or event.get('terminal_reason') != 'completed' or event.get('stop_reason') != 'end_turn'
+                    or (self.attention_seen and (not self._permission or self.permission_decision != 'allow'
+                                                or not self.permission_result))):
                 self.hold('needs-input' if event.get('permission_denials') else 'unknown-result')
             else:
                 self.completed_id = self.command_id
@@ -191,6 +270,23 @@ class ClaudeSignals:
                 self.state = 'idle-inferred'
                 self.safe_at = time.monotonic()
         elif kind == 'assistant':
+            if (self.diagnostic_nonce_file and self.permission_result and self.pending and self._permission
+                    and self.pending[0] == self._permission['invocationId']):
+                message = event.get('message')
+                blocks = message.get('content') if type(message) is dict and message.get('role') == 'assistant' else None
+                # SDKAssistantMessage stamps the first assistant frame only.
+                # Retain this one text continuation without advancing authority.
+                if (self.permission_decision != 'allow' or self.permission_continuation or self.ack is None
+                        or ('user_message_uuid' in event and event['user_message_uuid'] != self.pending[0])
+                        or ('user_message_uuids' in event and event['user_message_uuids'] != [self.pending[0]])
+                        or event.get('parent_tool_use_id', True) is not None or 'error' in event
+                        or type(blocks) is not list or len(blocks) != 1 or type(blocks[0]) is not dict
+                        or set(blocks[0]) != {'type', 'text'} or blocks[0]['type'] != 'text'
+                        or type(blocks[0]['text']) is not str):
+                    self.hold('unexpected-active-turn')
+                else:
+                    self.permission_continuation = True
+                return  # Never an ACK, terminal result or safe point.
             if (self.pending is None or event.get('user_message_uuid') != self.command_id
                     or 'parent_tool_use_id' not in event or event['parent_tool_use_id'] is not None):
                 self.hold('unexpected-active-turn')
@@ -520,6 +616,35 @@ class DirectClaudeDiagnosticReceiver(_ClaudeJournal):
         self._close_journal()
 
 
+def _sdk_startup_diagnostic(lines):
+    """Parse fixed bounded host codes only; arbitrary stderr is never reported."""
+    reasons = {'output-limit', 'host-terminated', 'host-interrupted', 'output-loss',
+               'unexpected-host-error', 'native-control-timeout', 'native-initialize-timeout',
+               'sdk-stream-ended', 'input-limit', 'invalid-command', 'invalid-or-concurrent-command',
+               'closed', 'host-command-failed', 'input-closed', 'startup-failed'}
+    fences = {'sdk-stream-failed', 'native-process-lost', 'native-control-timeout',
+              'native-initialize-timeout', 'native-identity', 'unsupported-profile', 'unknown-state',
+              'needs-input', 'unmatched-ack', 'unexpected-active-turn', 'unknown-or-attention-result',
+              'unknown-native-event'}
+    unavailable = {'reason': 'unavailable', 'fence': 'unavailable', 'exit_code': None}
+    records = []
+    for line in lines:
+        if type(line) is not str or len(line) > 320:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if (type(record) is not dict or set(record) != {'type', 'reason', 'fence', 'exit_code'}
+                or record['type'] != 'fixture-host-diagnostic'):
+            continue
+        records.append({
+            'reason': record['reason'] if type(record['reason']) is str and record['reason'] in reasons else 'unavailable',
+            'fence': record['fence'] if type(record['fence']) is str and record['fence'] in fences else 'unavailable',
+            'exit_code': record['exit_code'] if type(record['exit_code']) is int and 0 <= record['exit_code'] <= 255 else None})
+    return records[0] if len(records) == 1 else unavailable
+
+
 class FixtureClaudeReceiver(_ClaudeJournal):
     """Qualified tool-less SDK fixture, not a Supervisor-owned native badge.
 
@@ -530,7 +655,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
     MAX_FRAME = 256 * 1024
 
     def __init__(self, binary, *, sdk_install, node, cwd, home, gateway_url, fixture_key,
-                 journal, scope, resume=False, timeout=8):
+                 journal, scope, resume=False, timeout=8, diagnostic_nonce_file=None):
         self.db = self.owner = self.process = None
         self.reader = self.stderr = None
         self.host_pidfd = self.native_pidfd = None
@@ -545,12 +670,18 @@ class FixtureClaudeReceiver(_ClaudeJournal):
         self.native_pid = self.native_start = None
         self.reply_id = self.reply = None
         self.event_revision = 0
+        self.diagnostic_nonce_file = str(diagnostic_nonce_file) if diagnostic_nonce_file is not None else None
         try:
+            if self.diagnostic_nonce_file is not None and resume:
+                raise ClaudeUnavailable('permission diagnostic cannot resume or replay decisions')
             self._open_journal(binary, gateway_url, fixture_key, journal, scope, resume, timeout)
-            self.signals = ClaudeSignals(self.session_id, safe_for=0)
+            self.signals = ClaudeSignals(self.session_id, safe_for=0,
+                                         diagnostic_nonce_file=self.diagnostic_nonce_file)
             host = Path(__file__).resolve().parents[1] / 'runtime/claude/sdk-host.mjs'
             argv = [str(node), str(host), str(sdk_install), str(binary), str(cwd), str(home),
                     gateway_url, fixture_key, self.session_id, '1' if resume else '0']
+            if self.diagnostic_nonce_file is not None:
+                argv.append(self.diagnostic_nonce_file)
             self.process = subprocess.Popen(argv, cwd=cwd,
                 env={'PATH': '/usr/bin:/bin', 'HOME': str(home)}, start_new_session=True,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
@@ -564,10 +695,28 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             self._wait(lambda: self.ready)
             # Initialization is not readiness and makes no model request.
         except BaseException as error:
+            process = self.process
+            signals = getattr(self, 'signals', None)
+            facts = {'initialized': bool(signals and signals.initialized),
+                     'ready': self.ready, 'ended_before_cleanup': self.ended,
+                     'fenced_before_cleanup': bool(signals and signals.fenced)}
+            cleanup_succeeded = False
             try:
                 self.close()
-            except BaseException as cleanup_error:
-                error.add_note(f'SDK cleanup also failed: {cleanup_error!r}')
+                cleanup_succeeded = True
+            except BaseException:
+                # Existing cleanup attempts all resources before raising. Report
+                # its outcome without leaking arbitrary exception/stderr text.
+                pass
+            facts.update(cleanup_succeeded=cleanup_succeeded,
+                         host_returncode=process.returncode if process is not None and type(process.returncode) is int else None,
+                         host_reaped=process is not None and type(process.returncode) is int,
+                         resources_released=self.process is None and self.host_pidfd is None
+                         and self.native_pidfd is None and self.db is None and self.owner is None,
+                         host=_sdk_startup_diagnostic(list(self.errors)))
+            # Original exception/type/traceback/cause survive. All new fields are
+            # fixed codes or scalars; no error text, key, argv or session content.
+            error.add_note('SDK startup diagnostic: ' + json.dumps(facts, ensure_ascii=True, sort_keys=True))
             raise
 
     def _host_alive(self):
@@ -604,6 +753,11 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                                 or frame.get('sdk_version') != '0.3.310' or frame.get('cli_version') != VERSION
                                 or frame.get('authority') != 'sdk-host-owned-fixture-only'):
                             raise ValueError('invalid SDK host/native binding')
+                        if self.diagnostic_nonce_file is not None:
+                            incarnation = frame.get('permission_incarnation')
+                            if type(incarnation) is not str or str(uuid.UUID(incarnation)) != incarnation:
+                                raise ValueError('invalid permission fixture incarnation')
+                            self.signals.permission_incarnation = incarnation
                         self.native_pid = frame['native_pid']
                         fields = Path(f'/proc/{self.native_pid}/stat').read_text().rsplit(')', 1)[1].split()
                         if fields[1] != str(self.process.pid):
@@ -613,6 +767,11 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                         self.native_start = frame['native_start']
                         self.native_pidfd = _sdk_native_pidfd(self.native_pid, self.process.pid, self.native_start)
                         self.ready = True
+                    elif kind in ('attention', 'decision'):
+                        if self.diagnostic_nonce_file is None:
+                            raise ValueError('unexpected permission frame in tool-less fixture')
+                        getattr(self.signals, kind)(frame)
+                        self.event_revision += 1
                     elif kind == 'native':
                         event = frame.get('event')
                         if (type(event) is not dict or 'fence' not in frame
@@ -623,13 +782,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                         self.events.append(event)
                         self.event_revision += 1
                         if event.get('type') == 'system' and event.get('subtype') == 'session_state_changed':
-                            if event.get('session_id') != self.session_id:
-                                self.signals.hold('native-identity')
-                            elif event.get('state') == 'requires_action':
-                                self.signals.hold('needs-input')
-                            elif event.get('state') not in ('idle', 'running'):
-                                self.signals.hold('unknown-native-state')
-                            # Idle event alone never authorizes receipt or delivery.
+                            self.signals.session_state(event)
                         else:
                             self.signals.event(event)
                     elif kind == 'reply':
@@ -658,10 +811,14 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 if not self.closing:
                     _signal_pidfd(self.host_pidfd, signal.SIGTERM)
 
-    def _wait(self, predicate):
+    def _wait(self, predicate, *, decision_reply=False):
         deadline = time.monotonic() + self.timeout
         with self.condition:
             while True:
+                # A correlated controller reply is a decision receipt only. It
+                # grants no readiness and may precede a terminal denial fence.
+                if decision_reply and self.reply is not None:
+                    return self.reply
                 if self.ended or not self._host_alive() or self.signals.fenced:
                     raise ClaudeUnavailable('SDK/native session held: ' + self.signals.state)
                 value = predicate()
@@ -704,7 +861,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                         offset += count
                 except BlockingIOError:
                     select.select([], [fd], [], min(remaining, .05))
-            return self._wait(lambda: self.reply)
+            return self._wait(lambda: self.reply, decision_reply=op == 'decision')
         except (OSError, ValueError, ClaudeUnavailable) as error:
             if offset:
                 with self.condition:
@@ -789,9 +946,18 @@ class FixtureClaudeReceiver(_ClaudeJournal):
         return self._wait(lambda: self.signals.ack if _ack_matches(
             self.signals.ack, self.session_id, message_id, content) else None)
 
+    def fixture_decide(self, identity, behavior):
+        """Explicit fixed-fixture controller decision, never human authority."""
+        if self.diagnostic_nonce_file is None:
+            raise ClaudeUnavailable('permission controller unavailable in tool-less fixture')
+        return self._command('decision', identity=identity, behavior=behavior).get('accepted') is True
+
     def evidence(self):
         return {'runtime': 'Claude Code', 'version': VERSION, 'sdk_version': '0.3.310',
                 'binary_sha256': BINARY_SHA256, 'authority': 'sdk-host-owned-fixture-only',
+                'permission_authority': 'fixture-controller-only' if self.diagnostic_nonce_file else None,
+                'permission_attention': self.signals.permission,
+                'permission_decision': self.signals.permission_decision,
                 'host_pid': self.process.pid, 'native_pid': self.native_pid,
                 'session_id': self.session_id, 'incarnation_id': self.incarnation_id,
                 'process_alive': self._host_alive(), 'readiness': self.observe().value,
