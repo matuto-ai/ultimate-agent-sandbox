@@ -208,6 +208,12 @@ class FixturePeerHub:
 
     def _scope_permits(self, participant_id, context_generation, run_id, generation, state=None):
         state = self.ledger.snapshot()["state"] if state is None else state
+        admission = state.get('run_admissions', {}).get(run_id)
+        if admission is not None and admission['status'] != 'ACTIVE':
+            return False
+        canonical = state.get('runs', {}).get(run_id)
+        if canonical is not None and (canonical['status'] != 'ACTIVE' or canonical['generation'] != generation):
+            return False
         if "fixture_context" not in state:
             scope = state["peer_traffic"]["definition"]
             return run_id == scope["run_id"] and generation == scope["generation"] and context_generation == 1
@@ -349,6 +355,18 @@ class FixturePeerHub:
         at admission is included; its trusted owner must preserve this budget.
         """
         reserved = deepcopy(state)
+        # A canonical admission can temporarily transfer its own reserved bytes
+        # to a bounded Broker read. Model the inevitable refund, not temporary
+        # padding/slack that a new peer item could otherwise steal mid-read.
+        from .forge import ReadOnlyForgeBroker
+        for key, pending in list(reserved.get('forge_pending', {}).items()):
+            funding = pending.get('admission_funding')
+            if funding is not None and reserved.get('run_admissions', {}).get(
+                    funding['run_id'], {}).get('status') == 'PREPARING':
+                ReadOnlyForgeBroker._release_pending(reserved, key)
+        for admission in reserved.get('run_admissions', {}).values():
+            if admission['status'] == 'PREPARING':
+                admission['attention'] = 'x' * 256
         reserve_context_capacity(reserved)
         domain = reserved["peer_traffic"]
         widest = "x" * 256  # Ledger token bound, including future incarnations.

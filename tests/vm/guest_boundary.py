@@ -71,6 +71,38 @@ def denial_counter(document, chain):
     return counters[0]['packets']
 
 
+def network_diagnostics(phase, alpha_ip, bridge):
+    """Read-only guest evidence, not a policy repair or qualification assertion.
+
+    Capture exact counters before/after the existing synthetic connection. Never
+    zero counters, probe another endpoint, change routes, or relax confinement.
+    Missing tools/denied reads remain explicit unknowns rather than successes.
+    """
+    commands = [
+        ['iptables-legacy', '--version'],
+        *[['iptables-legacy', '-w', '1', '-t', table, '-L', '-n', '-v', '-x']
+          for table in ('raw', 'filter', 'nat')],
+        ['ip', '-4', 'route', 'show', 'table', 'all'],
+        ['ip', '-4', 'rule', 'show'],
+        ['ip', '-4', 'route', 'get', '93.184.216.34', 'from', alpha_ip, 'iif', bridge],
+        ['ip', '-4', 'route', 'get', alpha_ip, 'from', '93.184.216.34', 'iif', 'uas-public'],
+        ['sysctl', 'net.ipv4.ip_forward',
+         *['net.ipv4.conf.' + interface + '.' + setting
+           for interface in ('all', 'default', 'uas-public', bridge)
+           for setting in ('forwarding', 'rp_filter')]],
+        ['journalctl', '-k', '-b', '--no-pager', '-n', '20', '--grep=avc:.*denied'],
+    ]
+    for arguments in commands:
+        try:
+            output = run(*arguments, timeout=3)
+            observation = {'output': output[:4096], 'truncated': len(output) > 4096}
+        except Exception as error:
+            observation = {'error': str(error)[:512]}
+        # JSON escapes terminal control bytes from diagnostics.
+        print('Guest network diagnostic:', json.dumps({'phase': phase,
+              'command': arguments, **observation}), flush=True)
+
+
 def require_engine_security():
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux changed during installation')
     options = json.loads(run('docker', 'info', '--format', '{{json .SecurityOptions}}'))
@@ -332,18 +364,6 @@ def scenario(nonce):
         supervisors[room] = Supervisor(CONTROL / 'lifecycle', room, backends[room], authorize=lambda *_: True, revoke=lambda *_: True)
         paths = tuple(str(STORAGE / room / name) for name in ('repository', 'workspace', 'checkouts', 'references'))
         specs[room] = FixtureSpec(room, room + '-project', paths, image, 'sha256:' + 'b' * 64, 'sha256:' + 'c' * 64)
-    for point in ('volume', 'mkdir', 'marker'):
-        print('Guest boundary phase: controller crash/recovery at', point, flush=True)
-        result = subprocess.run(['python3', __file__, '--crash-start', nonce, image, point], timeout=180)
-        expect(result.returncode == -9, 'real controller crash boundary not reached: ' + point)
-        interrupted = supervisors['alpha'].status()
-        expect(interrupted['observed']['volume'] is not None and interrupted['observed']['container'] is None, 'cleanup anchor missing after ' + point)
-        expect(supervisors['alpha'].reconcile()['phase'] == 'running', 'crash recovery failed after ' + point)
-        expect(supervisors['alpha'].destroy()['phase'] == 'destroyed', 'crash recovered Destroy failed')
-        instance = interrupted['instance_id']
-        expect(not (STORAGE / 'alpha/runtime' / instance).exists(), 'runtime directory leftover after ' + point)
-        expect(not list(CONTROL.glob(instance + '.*')), 'runtime marker/intent leftover after ' + point)
-        print('Guest boundary phase: recovered and destroyed crash instance at', point, flush=True)
     backends['alpha'].lose_network_response = True
     first = supervisors['alpha'].start(specs['alpha'])
     expect(first['phase'] == 'start_failed' and first['observed']['container'] is None, 'uncertain partial create not retained')
@@ -353,7 +373,6 @@ def scenario(nonce):
         result = supervisors[room].start(specs[room])
         expect(result['phase'] == 'running', str(result))
         containers[room] = result['observed']['container']['id']
-    checks['recovery'] = {'status': 'passed', 'lost_network_response_reconciled': True, 'sigkill_boundaries': ['volume', 'mkdir', 'marker']}
     print('Guest boundary phase: both Rooms running; probing actual enforcement', flush=True)
 
     def probe(room, *args):
@@ -391,7 +410,13 @@ def scenario(nonce):
         return denial_counter(backends['alpha']._firewall(state), chain)
     beta_ip = json.loads(run('docker', 'inspect', containers['beta']))[0]['NetworkSettings']['Networks'][backends['beta']._network_name(json.loads((supervisors['beta'].directory / 'lifecycle.json').read_text()))]['IPAddress']
     require_sibling_listener(probe, beta_ip)
-    expect(probe('alpha', 'connect', '93.184.216.34:5000') == {'error': 'OK', 'reply': 'uas-boundary-ok\n'}, 'public-address positive failed')
+    alpha_ip = json.loads(run('docker', 'inspect', containers['alpha']))[0]['NetworkSettings']['Networks'][backends['alpha']._network_name(state)]['IPAddress']
+    bridge = network_names(state)[1]
+    network_diagnostics('before-public-positive', alpha_ip, bridge)
+    try:
+        expect(probe('alpha', 'connect', '93.184.216.34:5000') == {'error': 'OK', 'reply': 'uas-boundary-ok\n'}, 'public-address positive failed')
+    finally:
+        network_diagnostics('after-public-positive', alpha_ip, bridge)
     for address, chain in (('10.89.1.1', 'input'), ('93.184.216.35', 'input'),
                            ('169.254.169.254', 'forward'), ('192.168.50.1', 'forward'), (beta_ip, 'forward')):
         before = dropped(chain)
@@ -453,6 +478,21 @@ def scenario(nonce):
     expect(unowned_info['Labels']['uas-unowned'] == nonce, 'unowned resource changed')
     expect(supervisors['beta'].destroy()['phase'] == 'destroyed', 'beta destroy failed')
     checks['destroy'] = {'status': 'passed', 'project_and_unowned_preserved': True, 'targeted_retry': True}
+    # Defer expensive crash cycles until network/quota/Destroy have passed.
+    # These remain mandatory, with the same assertions and exact owned cleanup.
+    for point in ('volume', 'mkdir', 'marker'):
+        print('Guest boundary phase: controller crash/recovery at', point, flush=True)
+        result = subprocess.run(['python3', __file__, '--crash-start', nonce, image, point], timeout=180)
+        expect(result.returncode == -9, 'real controller crash boundary not reached: ' + point)
+        interrupted = supervisors['alpha'].status()
+        expect(interrupted['observed']['volume'] is not None and interrupted['observed']['container'] is None, 'cleanup anchor missing after ' + point)
+        expect(supervisors['alpha'].reconcile()['phase'] == 'running', 'crash recovery failed after ' + point)
+        expect(supervisors['alpha'].destroy()['phase'] == 'destroyed', 'crash recovered Destroy failed')
+        instance = interrupted['instance_id']
+        expect(not (STORAGE / 'alpha/runtime' / instance).exists(), 'runtime directory leftover after ' + point)
+        expect(not list(CONTROL.glob(instance + '.*')), 'runtime marker/intent leftover after ' + point)
+        print('Guest boundary phase: recovered and destroyed crash instance at', point, flush=True)
+    checks['recovery'] = {'status': 'passed', 'lost_network_response_reconciled': True, 'sigkill_boundaries': ['volume', 'mkdir', 'marker']}
     # Only harness-created exact resource; no engine-wide pruning.
     run('docker', 'volume', 'rm', unowned)
     for room in ROOMS:

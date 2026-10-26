@@ -262,7 +262,11 @@ def _normalize(config, available_credentials):
     credential(manager["server_trust_ref"], "$.deployment.manager.server_trust_ref", "manager-trust")
     actors = _named(d["actors"], "$.deployment.actors")
     for a, p in actors.values():
-        _object(a, p, ("id",), ("git_credential_ref", "forge_credential_ref"))
+        _object(a, p, ("id",), ("git_credential_ref", "forge_credential_ref", "github_user_id"))
+        # Operator-declared immutable assignment mapping, not proof of credential
+        # identity, native account access, or authority to admit a Run.
+        if "github_user_id" in a:
+            _integer(a["github_user_id"], p + ".github_user_id", maximum=2**63 - 1)
         for kind in ("git", "forge"):
             key = kind + "_credential_ref"
             if key in a:

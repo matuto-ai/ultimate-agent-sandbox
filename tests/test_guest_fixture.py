@@ -30,6 +30,41 @@ STATE = {'instance_id': 'b' * 32, 'room_id': 'alpha', 'spec': {
 
 
 class GuestFixtureTests(unittest.TestCase):
+    def test_network_diagnostics_are_bounded_read_only_and_keep_failures_unknown(self):
+        import contextlib
+        import io
+        output = io.StringIO()
+        with patch.object(guest_script, 'run', return_value='x' * 5000 + '\x1b') as run, contextlib.redirect_stdout(output):
+            guest_script.network_diagnostics('before', '10.89.1.2', 'uasfixture')
+        calls = run.call_args_list
+        self.assertEqual(10, len(calls))
+        self.assertTrue(all(call.kwargs == {'timeout': 3} for call in calls))
+        self.assertEqual(['raw', 'filter', 'nat'], [call.args[4] for call in calls[1:4]])
+        self.assertTrue(all(call.args[5:] == ('-L', '-n', '-v', '-x') for call in calls[1:4]))
+        self.assertFalse(any(arg in ('-Z', '-A', '-I', '-D', '-F', '-P', '-w=1') or '=' in arg
+                             for call in calls[:-1] for arg in call.args))
+        self.assertIn(('ip', '-4', 'route', 'get', '93.184.216.34', 'from', '10.89.1.2', 'iif', 'uasfixture'), [c.args for c in calls])
+        records = [json.loads(line.split(': ', 1)[1]) for line in output.getvalue().splitlines()]
+        self.assertTrue(all(item['truncated'] and len(item['output']) == 4096 for item in records))
+        output = io.StringIO()
+        with patch.object(guest_script, 'run', side_effect=PermissionError('denied\x1b')), contextlib.redirect_stdout(output):
+            guest_script.network_diagnostics('after', '10.89.1.2', 'uasfixture')
+        self.assertNotIn('\x1b', output.getvalue())
+        self.assertEqual(10, len(output.getvalue().splitlines()))
+        self.assertTrue(all('error' in json.loads(line.split(': ', 1)[1]) for line in output.getvalue().splitlines()))
+
+    def test_crash_cycles_remain_mandatory_after_network_quota_and_destroy(self):
+        source = (Path(__file__).parent / 'vm/guest_boundary.py').read_text()
+        crash = source.index("    for point in ('volume', 'mkdir', 'marker'):", source.index('def scenario'))
+        self.assertLess(source.index("checks['network'] ="), crash)
+        self.assertLess(source.index("checks['destroy'] ="), crash)
+        self.assertGreater(source.index("checks['recovery'] ="), crash)
+        self.assertLess(source.index("checks['recovery'] ="), source.index("checks['guest_cleanup'] ="))
+        for assertion in ('real controller crash boundary not reached:', 'cleanup anchor missing after',
+                          'crash recovery failed after', 'crash recovered Destroy failed',
+                          'runtime directory leftover after', 'runtime marker/intent leftover after'):
+            self.assertIn(assertion, source[crash:])
+
     def test_both_sibling_health_points_avoid_forbidden_host_probe(self):
         tree = ast.parse((Path(__file__).parent / 'vm/guest_boundary.py').read_text())
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]

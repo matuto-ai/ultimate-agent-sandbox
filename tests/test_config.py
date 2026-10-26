@@ -67,6 +67,19 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(room["seats"][0]["resolved"]["missing_actor_credentials"], ["git"])
             self.assertEqual(room["seats"][1]["resolved"]["credential_status"], "available")
 
+    def test_optional_github_identity_is_bounded_without_granting_readiness(self):
+        self.assertNotIn("github_user_id", admit(self.config)["deployment"]["actors"][0])
+        self.config["deployment"]["actors"][0]["github_user_id"] = 2**63 - 1
+        result = admit(self.config)
+        self.assertEqual(result["deployment"]["actors"][0]["github_user_id"], 2**63 - 1)
+        resolved = result["rooms"][0]["seats"][0]["resolved"]
+        self.assertEqual(resolved["credential_status"], "unavailable")
+        self.assertEqual(resolved["activation"], "not-evaluated")
+        for value in (True, False, 0, -1, 2**63, "7", 7.0, None):
+            with self.subTest(value=value):
+                self.config["deployment"]["actors"][0]["github_user_id"] = value
+                self.invalid(self.config, "$.deployment.actors[0].github_user_id")
+
     def test_offline_provider_configuration_does_not_probe_inference(self):
         with patch("socket.create_connection", side_effect=AssertionError("network called")):
             result = admit(self.config)

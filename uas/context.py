@@ -192,6 +192,8 @@ class FixtureContextHub:
             raise LedgerError("INVALID_TERMINAL_FACT")
         payload = {"run_id": run_id, "terminal_fact": fact.value}
         def decide(state, _):
+            if run_id in state.get('runs', {}) or run_id in state.get('run_admissions', {}):
+                raise LedgerError('CANONICAL_RUN_AUTHORITY_REQUIRED')
             run = self._domain(state)["runs"].get(run_id)
             if run is None or run["status"] != "OPEN":
                 raise LedgerError("RUN_CLOSED")

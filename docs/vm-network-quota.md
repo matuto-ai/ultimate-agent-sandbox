@@ -94,6 +94,21 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
   the invalid host-origin control produced Beta input drops of 3 packets/180 bytes,
   with both forward counters zero. The harness correction preserves that deny;
   the partial run passed runtime/attribute/write controls, not full qualification.
+  The corrected control succeeded in
+  [run 40363068406](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40363068406),
+  but Alpha's synthetic public connection timed out while every owned nft drop
+  counter stayed zero. This does **not** identify the dropping component: legacy
+  Docker raw/filter/NAT rules, exact forwarding routes and relevant AVC evidence
+  were absent. Full network/quota/Destroy qualification remains outstanding.
+  The next diagnostic candidate only reads legacy raw/filter/NAT counters, exact
+  outbound/return route lookups, IPv4 rules/routes, forwarding/rp_filter values
+  and boot-local kernel AVC denials before/after that same public connection.
+  Ten commands per snapshot each have a three-second timeout and at most 4096
+  output characters; truncation and read/tool errors are explicit unknowns.
+  There are no new external probes, counter resets or policy changes. All three
+  unchanged mandatory SIGKILL/reconcile/Destroy cycles run after the initial
+  network/quota/Destroy checks, so an early network failure avoids their cost.
+  A success receipt still requires those recovery and cleanup assertions.
   Router setup/responder children enter only the parent's held network namespace
   descriptor. They do not remount sysfs or relax SELinux mount policy.
 - Fresh XFS project-quota roots hold synthetic repository/workspace/checkouts,

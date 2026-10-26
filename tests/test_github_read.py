@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from uas.github_read import (GitHubProject, GitHubReadProvider, GhTransport, ProviderFailure,
                              ProviderResponse, generated_help, parse_route, validate_observation, validate_route_table)
@@ -146,6 +147,84 @@ class ReadProviderTests(unittest.TestCase):
                 provider.read_issue(number)
         self.assertEqual(self.calls, [])
 
+    def admission(self, labels, **kwargs):
+        return self.provider([response(issue(labels=[{"id": 999, "name": "delivery:critical"}])),
+                              response([]), *labels], **kwargs).read_issue(42, admission=True)
+
+    def test_admission_delivery_class_uses_paginated_labels_not_embedded_labels(self):
+        result = self.admission([response([{"id": 1, "name": "delivery:bounded", "description": "SECRET"}])])
+        self.assertEqual(result["delivery_class"], {"status": "known", "value": "bounded", "pages": 1})
+        self.assertEqual(result["completeness"], "complete")
+        self.assertNotIn("SECRET", json.dumps(result))
+        self.assertEqual(self.calls[-1], "repos/owner/project/issues/42/labels?per_page=100&page=1")
+        self.assertEqual(validate_observation(result), result)
+        self.assertNotIn("delivery_class", self.provider([response(issue()), response([])]).read_issue(42))
+
+    def test_admission_class_requires_one_recognized_canonical_label(self):
+        for names in ([], ["delivery:future"], ["Delivery:critical"],
+                      ["delivery:bounded", "delivery:critical"], ["ordinary"]):
+            result = self.admission([response([{"id": i + 1, "name": name} for i, name in enumerate(names)])])
+            self.assertEqual(result["delivery_class"], {"status": "unknown", "value": None, "pages": 1})
+            self.assertEqual(result["completeness"], "complete")
+            validate_observation(result)
+        for name in ("mechanical", "bounded", "cross-cutting", "critical", "unclassified"):
+            self.assertEqual(self.admission([response([{"id": 1, "name": "delivery:" + name}])])["delivery_class"]["value"], name)
+
+    def test_admission_labels_need_terminal_page_and_share_page_bound(self):
+        labels = [{"id": n, "name": "label-" + str(n)} for n in range(1, 101)]
+        labels[0]["name"] = "delivery:bounded"
+        complete = self.admission([response(labels), response([])])
+        self.assertEqual(complete["delivery_class"], {"status": "known", "value": "bounded", "pages": 2})
+        capped = self.admission([response(labels)], max_pages=1)
+        self.assertEqual((capped["status"], capped["completeness"]), ("PAGINATION_LIMIT", "incomplete"))
+        self.assertEqual(capped["delivery_class"]["status"], "unknown")
+        validate_observation(capped)
+        linked = self.admission([response([], headers={"Link": '<https://evil.invalid>; rel="next"'})], max_pages=1)
+        self.assertEqual(linked["completeness"], "incomplete")
+        self.assertNotIn("evil", " ".join(self.calls))
+
+    def test_admission_label_failures_never_retain_partial_class_as_known(self):
+        labels = [{"id": n, "name": "label-" + str(n)} for n in range(1, 101)]
+        labels[0]["name"] = "delivery:critical"
+        for last in (response({}, 403), response({}, 404), ProviderFailure("TIMEOUT"),
+                     response([labels[0]]), response([{"id": 101, "name": "label-2"}])):
+            result = self.admission([response(labels), last])
+            self.assertEqual(result["completeness"], "incomplete")
+            self.assertEqual(result["delivery_class"]["status"], "unknown")
+            self.assertIsNone(result["delivery_class"]["value"])
+            validate_observation(result)
+
+    def test_admission_label_reads_share_deadline_and_reject_malformed_facts(self):
+        with patch("uas.github_read.time.monotonic", side_effect=[0, 0, 0, 0, 0, 31]):
+            result = self.admission([])
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(len(self.calls), 2)
+        for labels in ([{"id": True, "name": "delivery:bounded"}],
+                       [{"id": 1, "name": "delivery:bounded"}] * 2,
+                       [{"id": 1, "name": "x" * 257}], [{"id": 1, "name": "bad\nname"}], {}):
+            result = self.admission([response(labels)])
+            self.assertEqual((result["status"], result["completeness"]), ("INVALID_RESPONSE", "incomplete"))
+            self.assertEqual(result["delivery_class"]["status"], "unknown")
+        with self.assertRaises(LedgerError):
+            self.provider([]).read_issue(42, admission=1)
+
+    def test_admission_label_raw_input_shares_byte_budget(self):
+        result = self.admission([response([{"id": 1, "name": "delivery:bounded", "description": "x" * 2000}])], max_bytes=1000)
+        self.assertEqual((result["status"], result["completeness"]), ("OUTPUT_LIMIT", "incomplete"))
+        self.assertEqual(result["delivery_class"]["status"], "unknown")
+        validate_observation(result)
+
+    def test_delivery_class_boundary_rejects_fabricated_or_incomplete_known_class(self):
+        result = self.admission([response([{"id": 1, "name": "delivery:bounded"}])])
+        for classification in ({"status": "known", "value": "future", "pages": 1},
+                               {"status": "known", "value": "bounded", "pages": 0},
+                               {"status": "unknown", "value": "bounded", "pages": 1},
+                               {"status": "known", "value": "bounded", "pages": True}):
+            with self.assertRaises(LedgerError):
+                validate_observation({**result, "delivery_class": classification})
+        with self.assertRaises(LedgerError):
+            validate_observation({**result, "status": "TIMEOUT", "completeness": "incomplete"})
+
 
 class GhExecutorTests(unittest.TestCase):
     def executable(self, root, content):
@@ -170,6 +249,9 @@ print('HTTP/2.0 200 OK\\nContent-Type: application/json\\n\\n[]')
             result = GhTransport(executable, digest, "actor-one", credentials)("repos/owner/project/issues/42")
             self.assertEqual(selected, [("actor-one", "github.com")])
             self.assertEqual((result.status, json.loads(result.body)), (200, []))
+            labels = GhTransport(executable, digest, "actor-one", credentials)(
+                "repos/owner/project/issues/42/labels?per_page=100&page=1")
+            self.assertEqual(labels.status, 200)
 
     def test_timeout_output_and_invalid_route_fail_closed(self):
         with tempfile.TemporaryDirectory() as root:
