@@ -93,6 +93,20 @@ class DockerFixtureBackend:
         if not value:
             raise LifecycleError("FIXTURE_BOUNDARY_" + control)
 
+    # Fixed backend policy seams. The default remains the conservative
+    # network-none/read-only fixture; callers cannot supply policy overrides.
+    def _network_name(self, state):
+        return "none"
+
+    def _security_options(self, state):
+        return ["no-new-privileges=true"]
+
+    def _volume_options(self, state):
+        return {}
+
+    def _project_writable(self, state, path):
+        return False
+
     def _project_paths(self, state):
         for path in state["spec"]["project_paths"]:
             result = observe_path(path, control="fixture.project")
@@ -119,15 +133,17 @@ class DockerFixtureBackend:
         required = self._require
         try:
             required(volume["Driver"] == "local" and volume["Scope"] == "local"
-                     and volume.get("Options") in (None, {}), "STATE_VOLUME")
+                     and (volume.get("Options") or {}) == self._volume_options(state), "STATE_VOLUME")
             config, host = resource["Config"], resource["HostConfig"]
             required(resource["Image"] == state["spec"]["image_id"], "IMAGE")
             required(config["User"] == "65532:65532", "USER")
             required(host["ReadonlyRootfs"] is True and host["Privileged"] is False, "ROOTFS")
             required(host["CapDrop"] == ["ALL"] and host["CapAdd"] in (None, []), "CAPABILITIES")
-            required(host["SecurityOpt"] in (["no-new-privileges=true"], ["no-new-privileges"]), "SECURITY_OPTIONS")
-            required(host["NetworkMode"] == "none"
-                     and set(resource["NetworkSettings"]["Networks"]) == {"none"}, "NETWORK")
+            required([value.replace("no-new-privileges=true", "no-new-privileges") for value in host["SecurityOpt"]]
+                     == [value.replace("no-new-privileges=true", "no-new-privileges") for value in self._security_options(state)],
+                     "SECURITY_OPTIONS")
+            required(host["NetworkMode"] == self._network_name(state)
+                     and set(resource["NetworkSettings"]["Networks"]) == {self._network_name(state)}, "NETWORK")
             required(host["PidMode"] == "" and host["IpcMode"] == "private" and host["UTSMode"] == ""
                      and host["UsernsMode"] == "" and host["CgroupnsMode"] == "private", "NAMESPACES")
             required(all(host[key] in (None, []) for key in ("Devices", "DeviceRequests", "DeviceCgroupRules")), "DEVICES")
@@ -154,7 +170,7 @@ class DockerFixtureBackend:
                              and mount["Driver"] == "local" and mount["RW"] is True, "STATE_MOUNT")
                 else:
                     required(destination in state["spec"]["project_paths"] and mount["Type"] == "bind"
-                             and mount["Source"] == destination and mount["RW"] is False
+                             and mount["Source"] == destination and mount["RW"] is self._project_writable(state, destination)
                              and mount["Propagation"] == "rprivate", "PROJECT_MOUNT")
             required(destinations == {"/state", *state["spec"]["project_paths"]}, "MOUNTS")
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -168,7 +184,8 @@ class DockerFixtureBackend:
             return
         labels = [value for key, item in self._labels(state, kind).items() for value in ("--label", key + "=" + item)]
         if kind == "volume":
-            self._run(["volume", "create", *labels, self.name(state, kind)])
+            options = [value for key, item in self._volume_options(state).items() for value in ("--opt", key + "=" + item)]
+            self._run(["volume", "create", *labels, *options, self.name(state, kind)])
             return
         self._project_paths(state)
         mounts = ["--mount", "type=volume,source=" + self.name(state, "volume") + ",target=/state"]
@@ -177,11 +194,13 @@ class DockerFixtureBackend:
             # Production repository read-write policy is a separate #62 launch.
             if any(character in path for character in (",", "\n", "\r")):
                 raise ValueError("unsupported fixture mount path")
-            mounts += ["--mount", f"type=bind,source={path},target={path},readonly"]
+            mode = "" if self._project_writable(state, path) else ",readonly"
+            mounts += ["--mount", f"type=bind,source={path},target={path}" + mode]
         self._run(["create", "--name", self.name(state, kind), *labels,
-                   "--user", "65532:65532", "--read-only", "--network", "none",
+                   "--user", "65532:65532", "--read-only", "--network", self._network_name(state),
                    "--ipc", "private", "--cgroupns", "private",
-                   "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true",
+                   "--cap-drop", "ALL",
+                   *[value for option in self._security_options(state) for value in ("--security-opt", option)],
                    "--memory", "64m", "--memory-swap", "64m", "--cpus", "0.5", "--pids-limit", "32",
                    "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
                    "--log-opt", "compress=false",
