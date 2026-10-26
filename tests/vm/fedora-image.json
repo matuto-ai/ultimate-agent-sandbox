@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "release": "44-1.7",
+  "filename": "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+  "image_url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+  "image_bytes": 583729152,
+  "sha256": "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f",
+  "checksum_url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-44-1.7-x86_64-CHECKSUM",
+  "keyring_url": "https://fedoraproject.org/fedora.gpg",
+  "signing_fingerprint": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6",
+  "provenance": ["https://fedoraproject.org/cloud/download/", "https://fedoraproject.org/security/"]
+}

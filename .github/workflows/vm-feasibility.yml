@@ -1,0 +1,30 @@
+name: vm-feasibility
+
+on:
+  pull_request:
+    paths: ['tests/vm/**', 'tests/test_vm_feasibility.py', '.github/workflows/vm-feasibility.yml']
+  push:
+    branches: [main]
+    paths: ['tests/vm/**', 'tests/test_vm_feasibility.py', '.github/workflows/vm-feasibility.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  fedora-tcg-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install only disposable-runner VM tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils gnupg
+      - name: Boot verified Fedora with software emulation and no network
+        run: python3 tests/vm/run.py
