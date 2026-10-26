@@ -14,6 +14,8 @@ from .kernel_origin import HeldOrigin, OriginDenied, alive, enable, receive
 from .workstation_admission import (AdmissionSeat, OPERATION, _admission_document,
                                     _canonical, _unique, send_admit)
 from .workstation_exec import ExecLaunch
+from .ledger import LedgerError, MAX_SEQUENCE
+from .peer import Readiness
 
 
 class SupervisorAdmission:
@@ -29,6 +31,8 @@ class SupervisorAdmission:
         self._authority = threading.RLock()
         self._io = control_lock  # One shared Room channel lock across every seat.
         self._fenced = False
+        self._delivery_lock = threading.Lock()
+        self._delivery_pending = None
         enable(control)
         control.settimeout(timeout)
 
@@ -145,6 +149,102 @@ class SupervisorAdmission:
                         self.launch.origin.revoke()
                         self.control.close()
             raise
+
+    def _delivery_exchange(self, kind, receipt=None):
+        with self._io:
+            try:
+                with self._authority:
+                    self._current()
+                    expected = self.launch.admission
+                    if expected is None or expected['state'] != 'admitted':
+                        raise OriginDenied('current acknowledged admission required')
+                    exchange_id = uuid.uuid4().hex
+                    packet = {'version': 1, 'kind': kind,
+                        'operation_id': expected['operation_id'], 'controller': self.controller,
+                        'exchange_id': exchange_id}
+                    if kind == 'CONFIRM_DELIVERY':
+                        packet['receipt'] = receipt
+                    data = _canonical(packet)
+                if len(data) > 8192 or self.control.send(data) != len(data):
+                    raise OriginDenied('invalid or partial delivery control command')
+                with receive(self.control) as record:
+                    self.hub_origin.require(record)
+                    reply = json.loads(record.data.decode('utf-8'), object_pairs_hook=_unique)
+                with self._authority:
+                    self._current()
+                    if (type(reply) is not dict
+                            or set(reply) != {'version','kind','operation_id','controller','exchange_id','result'}
+                            or type(reply['version']) is not int or reply['version'] != 1
+                            or reply['kind'] != 'REPLY' or reply['controller'] != self.controller
+                            or reply['operation_id'] != expected['operation_id']
+                            or reply['exchange_id'] != exchange_id or type(reply['result']) is not dict):
+                        raise OriginDenied('unmatched private delivery reply')
+                    return reply['result']
+            except TimeoutError:
+                # Keep the pending offer/native receipt. Next call reconciles
+                # through the existing native journal or exact confirmation.
+                raise
+            except BaseException:
+                self.control_lost()
+                raise
+
+    def deliver_one(self):
+        """One Supervisor-owned safe-point delivery, no native object in Hub.
+
+        Lost confirmation retries only the receipt; lost native response uses
+        the existing receiver journal's read-only reconciliation, not reinject.
+        Hub restart/control loss fences this live owner rather than restoring
+        authority from the local offer or durable native acceptance record.
+        """
+        with self._delivery_lock:
+            with self._authority:
+                self._current()
+                receiver = self.launch.native_receiver
+                if receiver is None:
+                    raise OriginDenied('owned native receiver required')
+            if self._delivery_pending is None:
+                if receiver.observe() is not Readiness.SAFE:
+                    return {'status': 'HELD'}
+                result = self._delivery_exchange('POLL_DELIVERY')
+                if set(result) == {'error'} and type(result['error']) is str:
+                    raise LedgerError(result['error'])
+                if result == {'status': 'HELD'}:
+                    return result
+                if set(result) != {'status', 'envelope'} or result['status'] != 'OFFER':
+                    self.control_lost()
+                    raise OriginDenied('invalid native delivery offer')
+                envelope = result['envelope']
+                scope = receiver.scope
+                if (type(envelope) is not dict
+                        or any(type(envelope.get(k)) is not type(v) or envelope.get(k) != v
+                               for k,v in scope.items())
+                        or envelope.get('participant_id') != self.seat.participant_id
+                        or envelope.get('incarnation_id') != self.launch.incarnation):
+                    self.control_lost()
+                    raise OriginDenied('delivery offer scope mismatch')
+                self._delivery_pending = {'envelope': envelope, 'receipt': None}
+            pending = self._delivery_pending
+            if pending['receipt'] is None:
+                with self._authority:
+                    self._current()
+                # No authority or Room control I/O lock spans native/provider I/O.
+                pending['receipt'] = receiver.accept(pending['envelope'])
+            result = self._delivery_exchange('CONFIRM_DELIVERY', pending['receipt'])
+            if set(result) == {'error'} and type(result['error']) is str:
+                raise LedgerError(result['error'])
+            confirmed = result.get('receipt')
+            if (set(result) != {'status','receipt'} or result['status'] != 'CONFIRMED'
+                    or type(confirmed) is not dict
+                    or set(confirmed) != {'room_id','operation_id','first_seq','last_seq','result'}
+                    or confirmed['room_id'] != self.seat.room_id
+                    or confirmed['operation_id'] != pending['envelope']['delivery_id'] + ':confirm'
+                    or type(confirmed['first_seq']) is not int or type(confirmed['last_seq']) is not int
+                    or not 0 < confirmed['first_seq'] <= confirmed['last_seq'] <= MAX_SEQUENCE
+                    or _canonical(confirmed['result']) != _canonical(pending['receipt'])):
+                self.control_lost()
+                raise OriginDenied('native confirmation receipt mismatch')
+            self._delivery_pending = None
+            return result
 
     def revoke(self):
         # Fence before waiting for another control exchange, then durably record.

@@ -89,7 +89,8 @@ class AdmittedHubLoop:
                     for _ in range(32):
                         if not select.select([self.control], [], [], 0)[0]:
                             break
-                        self.admissions.serve_once(self.control, on_admitted=self._attach)
+                        self.admissions.serve_once(self.control, on_admitted=self._attach,
+                                                   on_delivery=self.dispatcher.delivery)
                     control_pending = bool(select.select([self.control], [], [], 0)[0])
                 elif kind == 'task':
                     self.admissions.revoke(operation)

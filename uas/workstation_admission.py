@@ -21,10 +21,15 @@ import threading
 from types import MappingProxyType
 import uuid
 
+from .ledger import LedgerError
+
 from .kernel_origin import (HeldOrigin, OriginDenied, OriginUnavailable, ReceiverIdentity, Record,
-                            SCM_PIDFD, _identity, alive, enable)
+                            SCM_PIDFD, MAX_PACKET, _identity, alive, enable)
 
 LIMIT = 8192
+# Delivery replies carry accepted 16 KiB text plus bounded tokens, including
+# JSON ASCII expansion (at most 3x UTF-8 bytes). Commands/ADMIT stay at 8 KiB.
+DELIVERY_REPLY_LIMIT = MAX_PACKET
 TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
 DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 OPERATION = re.compile(r'[0-9a-f]{32}\Z')
@@ -174,8 +179,11 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
         # Authenticate actual sender before accepting its asserted metadata.
         supervisor.require(Record(data, credentials[0], pidfds[0]))
         document = json.loads(data.decode('utf-8'), object_pairs_hook=_unique)
-        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE'):
-            if (rights or set(document) != {'version', 'kind', 'operation_id', 'controller', 'exchange_id'}
+        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE', 'POLL_DELIVERY', 'CONFIRM_DELIVERY'):
+            expected_fields = {'version', 'kind', 'operation_id', 'controller', 'exchange_id'}
+            if document['kind'] == 'CONFIRM_DELIVERY':
+                expected_fields.add('receipt')
+            if (rights or set(document) != expected_fields
                     or type(document['version']) is not int or document['version'] != 1
                     or type(document['operation_id']) is not str
                     or not OPERATION.fullmatch(document['operation_id'])
@@ -183,6 +191,9 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
                     or not OPERATION.fullmatch(document['controller'])
                     or type(document['exchange_id']) is not str or not OPERATION.fullmatch(document['exchange_id'])):
                 raise OriginDenied('invalid private control command')
+            if document['kind'] == 'CONFIRM_DELIVERY':
+                if type(document['receipt']) is not dict or len(_canonical(document['receipt'])) > LIMIT:
+                    raise OriginDenied('bounded native receipt object required')
             return document
         if len(rights) != 2:
             raise OriginDenied('invalid ADMIT descriptor count')
@@ -208,7 +219,7 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
         result = _Offer(document, channel, origin)
         channel = origin = None
         return result
-    except (ValueError, UnicodeError, TypeError, OSError, OriginUnavailable) as error:
+    except (ValueError, UnicodeError, TypeError, RecursionError, OSError, OriginUnavailable) as error:
         raise OriginDenied('invalid ADMIT record or descriptors') from error
     finally:
         cleanup_error = None
@@ -359,13 +370,15 @@ class HubAdmission:
             if not installed:
                 offer.close()
 
-    def serve_once(self, control, *, on_admitted=None):
+    def serve_once(self, control, *, on_admitted=None, on_delivery=None):
         """One authenticated bounded control packet; I/O never owns authority lock.
 
         The hosting loop serializes packets and must call control_lost on EOF or
         transport failure. on_admitted is a trusted Hub-local attachment hook,
         never deserialized or passed across the handoff. No Engine, callable or
-        control-store handle is read from the wire.
+        control-store handle is read from the wire. on_delivery(operation,
+        kind, receipt=None) is also Hub-local and runs outside the admission
+        lock; its dispatcher must acquire current authorization itself.
         """
         controller, supervisor = self.controller, self.supervisor
         try:
@@ -388,9 +401,26 @@ class HubAdmission:
                     self.endpoint.require()
                     if packet['kind'] == 'REVOKE':
                         self.revoke(operation)
-                    result = self.status(operation)
+                    if packet['kind'] in ('STATUS', 'REVOKE'):
+                        result = self.status(operation)
+                if packet['kind'] in ('POLL_DELIVERY', 'CONFIRM_DELIVERY'):
+                    # No admission lock across application work or any native
+                    # effects. The dispatcher owns the phase's authorization.
+                    try:
+                        if on_delivery is None:
+                            raise LedgerError('DELIVERY_UNAVAILABLE')
+                        result = on_delivery(operation, packet['kind'], receipt=packet.get('receipt'))
+                    except LedgerError as error:
+                        code = error.code
+                        if type(code) is not str or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
+                            code = 'INVALID_DELIVERY_ERROR'
+                        result = {'error': code}
             reply = _canonical({'version': 1, 'kind': 'REPLY', 'operation_id': operation,
                                 'controller': controller, 'exchange_id': exchange_id, 'result': result})
+            reply_limit = (DELIVERY_REPLY_LIMIT if type(packet) is dict
+                           and packet['kind'] in ('POLL_DELIVERY','CONFIRM_DELIVERY') else LIMIT)
+            if len(reply) > reply_limit:
+                raise OriginDenied('private control reply exceeds bound')
             if control.send(reply) != len(reply):
                 raise OriginDenied('incomplete control reply')
             return result

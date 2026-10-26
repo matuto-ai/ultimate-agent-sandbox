@@ -263,12 +263,23 @@ def scenario(nonce,manifest):
         checks['hub_startup']={'status':'passed','identity':result['hub_identity'],'controller':result['controller'],
             'supervisor_label':result['supervisor_label'],'supervisor_uid':result['supervisor_uid']}
         checks['native_two_seats']={'status':'passed','seats':result['seats'],'tool_ends':result['native_tool_ends'],
-            'scope':'two real native ingress paths only','recipient_native_delivery_verified':False}
+            'scope':'two native ingress paths plus recipient native history confirmation',
+            'recipient_native_delivery_verified':True,'deliveries':result['native_deliveries']}
         state=json.loads((paths['hub']/'report.json').read_text())
         traffic=state['state']['peer_traffic']['traffic']
         expect(set(traffic)=={'native-0','native-1'},'native retries/forged/wrong-process mutated ledger')
         expect(traffic['native-0']['actor_id']=='actor-a' and traffic['native-1']['actor_id']=='actor-b','native Actor attribution disagrees')
-        expect(all(not item['deliveries'] for item in traffic.values()),'ingress-only scenario unexpectedly claims recipient delivery')
+        expect(len(result['native_deliveries'])==2,'missing actual recipient native acceptance')
+        for index,recipient in ((0,'bob'),(1,'alice')):
+            delivery=result['native_deliveries'][index]
+            stored=traffic['native-'+str(index)]['deliveries']
+            expect(set(stored)=={recipient} and delivery['recipient']==recipient,
+                   'Hub/native recipient binding mismatch')
+            receipt=delivery['hub_receipt']['result']
+            expect(all(stored[recipient].get(key)==value for key,value in receipt.items()),
+                   'native receipt does not match durable Hub confirmation')
+            expect(delivery['native_receipt']['source']=='native-active-branch-and-session-file',
+                   'native acceptance must cite active branch and session file')
         checks['actor_attribution']={'status':'passed','room_seq':state['room_seq'],'traffic':{key:value['actor_id'] for key,value in traffic.items()}}
         expect(result['wrong_process_fenced'],'real inherited descriptor wrong-process negative failed')
         checks['wrong_process']={'status':'passed','actual_pi_scm_rights_to_other_node_task':True}

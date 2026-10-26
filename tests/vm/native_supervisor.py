@@ -13,7 +13,7 @@ import threading
 
 from uas.docker_exec_api import DockerExecAPI
 from uas.kernel_origin import HeldOrigin, ReceiverIdentity, _identity, alive, enable, probe, receive
-from uas.peer import Readiness
+from uas.peer import Readiness, digest
 from uas.workstation_admission import AdmissionSeat, _canonical
 from uas.workstation_control import SupervisorAdmission
 from uas.workstation_exec import EndpointLease, ExecLaunch, ExecSeat
@@ -45,7 +45,7 @@ def scenario(config, peer_fd, control_fd):
     peer_lease=EndpointLease(config['peer_path'],owner=165533,group=165532)
     control_lease=EndpointLease(config['control_path'],owner=165533,group=165531)
     result={'supervisor_label':Path('/proc/self/attr/current').read_text().rstrip('\0\n'),
-            'supervisor_uid':os.getuid(),'seats':[]}
+            'supervisor_uid':os.getuid(),'seats':[],'native_deliveries':[]}
     with ExitStack() as stack:
         peer=stack.enter_context(closing(socket.socket(fileno=peer_fd)))
         control_listener=stack.enter_context(closing(socket.socket(fileno=control_fd)))
@@ -113,6 +113,34 @@ def scenario(config, peer_fd, control_fd):
             launch.native_receiver.rpc('prompt',message='Run the fixed account-free peer ingress test.')
             settled(launch.native_receiver,3)
             expect(clients[index].status()['installed'],'seat unexpectedly unavailable')
+            # Next candidate: recipient acceptance, not tool_execution_end,
+            # establishes Alice -> Bob and then Bob -> Alice native delivery.
+            recipient = 1-index
+            target = launches[recipient].native_receiver
+            target.rpc('prompt',message='/fixture-tools '+encoded([]))
+            deadline = time.monotonic()+12
+            while True:
+                delivered = clients[recipient].deliver_one()
+                if delivered['status'] == 'CONFIRMED':
+                    break
+                expect(time.monotonic()<deadline,'recipient native delivery did not become safe')
+                time.sleep(.05)
+            rows = target.db.execute("SELECT logical,receipt FROM handoffs WHERE state='CONFIRMED'").fetchall()
+            expect(len(rows)==1,'recipient must have exactly one native acceptance')
+            logical,native_receipt = (json.loads(value) for value in rows[0])
+            expect(logical['id']=='native-'+str(index)
+                   and logical['participant_id']==('bob' if index==0 else 'alice')
+                   and native_receipt['logical_digest']==digest(logical),
+                   'native acceptance does not match exact logical peer message')
+            expect(native_receipt['source']=='native-active-branch-and-session-file'
+                   and native_receipt['session_id']==target.evidence()['session_id'],
+                   'recipient active native history/session receipt missing')
+            expect(delivered['receipt']['result']['participant_id']==('bob' if index==0 else 'alice'),
+                   'Hub confirmed wrong recipient')
+            result['native_deliveries'].append({'sender':'alice' if index==0 else 'bob',
+                'recipient':'bob' if index==0 else 'alice', 'logical':logical,
+                'native_receipt':native_receipt,'hub_receipt':delivered['receipt']})
+            settled(target,0)  # Recipient turn must settle before the reply script.
         # Actual Pi duplicate FD -> Python SCM_RIGHTS transfer -> different Node
         # task. Same UID/file description cannot acquire Alice kernel authority.
         print('UAS_NATIVE_PHASE:wrong-process',flush=True)

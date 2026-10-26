@@ -11,7 +11,7 @@ import re
 from .kernel_origin import OriginDenied, OriginUnavailable, receive
 from .ledger import LedgerError, Origin, _json
 from .lifecycle import _unique_object
-from .peer import FixtureConnection, FixturePeerHub
+from .peer import FixtureConnection, FixturePeerHub, Readiness
 from .workstation_admission import HubAdmission, _canonical
 
 REQUEST = re.compile(r'[0-9a-f]{32}\Z')
@@ -23,6 +23,8 @@ class AdmittedPeerDispatcher:
             raise OriginDenied('trusted admission and existing Hub required')
         self.admissions, self.hub = admissions, hub
         self._connections = {}
+        self._delivery_offers = {}
+        self._delivery_confirmed = set()
 
     def attach_current(self, operation, *, context_generation):
         """Trusted Hub-local ADMIT hook; no native receiver/Engine crosses here.
@@ -62,6 +64,56 @@ class AdmittedPeerDispatcher:
         if operation in self._connections:
             raise OriginDenied('admission connection already attached')
         self._connections[operation] = connection
+
+    def delivery(self, operation, kind, receipt=None):
+        """Trusted Supervisor safe-point poll/receipt, never participant traffic.
+
+        Only immutable bounded offers cross the private channel. The native
+        effect happens in Supervisor between these existing ledger phases.
+        One outstanding offer per seat survives lost poll/confirmation replies;
+        it is not restart authority or a second durable workflow journal.
+        """
+        with self.admissions.authorize(operation, None):
+            connection = self._connections.get(operation)
+            if connection is None:
+                raise LedgerError('STALE_CONNECTION')
+            authorize = lambda: self.admissions.recheck(operation, None)
+            if kind == 'POLL_DELIVERY':
+                if operation in self._delivery_confirmed:
+                    self._delivery_offers.pop(operation, None)
+                    self._delivery_confirmed.discard(operation)
+                offer = self._delivery_offers.get(operation)
+                if offer is None:
+                    # The authenticated Supervisor polls only after its owned
+                    # native receiver observed SAFE; acceptance rechecks SAFE.
+                    self.hub.observe(connection, Readiness.SAFE)
+                    offer = self.hub.prepare_delivery(connection, authorize=authorize)
+                    if offer is None:
+                        return {'status': 'HELD'}
+                    self._delivery_offers[operation] = offer
+                else:
+                    # Re-evaluate cancellation, Run pause and context scope even
+                    # when replaying a lost poll response. No native effect yet.
+                    refreshed = self.hub.prepare_delivery(connection,
+                        traffic_id=offer.envelope['id'], authorize=authorize)
+                    if refreshed is None:
+                        return {'status': 'HELD'}
+                    if refreshed != offer:
+                        raise LedgerError('DELIVERY_FENCED')
+                if (not authorize() or not self.hub._current(connection, safe=True,
+                        observation_id=offer.observation_id)):
+                    raise LedgerError('DELIVERY_FENCED')
+                result = {'status': 'OFFER', 'envelope': offer.envelope}
+                return result
+            if kind == 'CONFIRM_DELIVERY':
+                offer = self._delivery_offers.get(operation)
+                if offer is None:
+                    raise LedgerError('UNCONFIRMED_DELIVERY')
+                confirmed = self.hub.confirm_delivery(connection, offer, receipt,
+                                                       authorize=authorize)
+                self._delivery_confirmed.add(operation)
+                return {'status': 'CONFIRMED', 'receipt': confirmed}
+            raise LedgerError('INVALID_DELIVERY_COMMAND')
 
     @staticmethod
     def _decode(data):

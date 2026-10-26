@@ -309,7 +309,7 @@ Supervisor as runtime is a fallback. Startup/idle/turn/reset RSS, CPU, PID and d
 measurements must accompany the separately selected bounded native quota profile.
 
 
-### Concrete deliberate ingress candidate (not yet executed)
+### Concrete deliberate native candidate (guest qualification pending)
 
 `tests/vm/run_workstation.py` and `guest_workstation.py` reuse the pinned no-NIC
 Fedora/QEMU carrier, but select `native-pi-v1` explicitly. The workflow accepts
@@ -347,27 +347,33 @@ change #98's small synthetic profile. Startup, idle and tool phases collect real
 cgroup observations and inspect XFS enforcement/limits. Native reset/resource
 sizing, quota exhaustion and production capacity remain unqualified.
 
-The first scenario proves **ingress only**: actual Pi tool calls, exact retries
-and forged-Actor rejection reach the outside Hub ledger with exact attribution.
-It does **not** prove Alice's message is delivered into Bob's native context, or
-Bob's response into Alice's. `tool_execution_end` is not recipient acceptance.
-The Hub receiver explicitly refuses outbound delivery, and the report records
-`recipient_native_delivery_verified: false` and requires no delivery receipts.
-Actual inherited-FD transfer to another task must fence that seat; normal
-Workstation Stop must exit both held Pi tasks while the held Hub remains alive,
-then explicit control EOF fences the Hub. Owned containers/image/build scratch
-and quota mount are cleaned up; the disposable VM is removed by the runner.
+The first frozen candidate (`a8d2f170`, tree `6d2d709c`) was **ingress only**:
+Pi tool calls, exact retries and forged-Actor rejection were intended to reach
+the outside Hub ledger, without recipient native delivery. Its deliberate run
+40390271361 stopped in npm payload staging before launching a guest. It supplies
+no native-container/stock-policy evidence. Ordinary CI passed separately.
 
-Next, reuse—not duplicate—the existing Hub offer/confirm reducers: a trusted
-Supervisor safe-point poll obtains a bounded offer, native `accept` runs outside
-Hub authority locks, and its authenticated receipt is confirmed under a fresh
-exact admission check. Existing native/offer journals retain unknown outcomes.
-Only recipient-native receipt/history evidence will justify a full two-way
-Alice/Bob exchange claim. Engine/RPC objects remain Supervisor-only throughout.
+The private next candidate adds one bounded authenticated Supervisor poll and
+confirmation seam. `POLL_DELIVERY` requires the current exact admission and an
+owned receiver safe-point observation. The Hub reuses its existing offer reducer
+and holds at most one immutable pending offer per seat. The Supervisor alone
+calls its native receiver's `accept`, outside admission and Room control locks.
+`CONFIRM_DELIVERY` carries only the existing receipt and uses the same Hub confirm
+reducer under fresh admission authorization with a pure transaction-time recheck.
+Delivery replies are bounded at 64 KiB, sufficient for the existing 16 KiB
+text contract including worst-case ASCII JSON expansion and bounded tokens.
+ADMIT and incoming control commands retain their 8 KiB bound; oversized ingress
+text is rejected before admission, not stranded as an undeliverable head item.
+Each control exchange has its own correlation ID; the stable admission operation
+is never retransmitted. Lost native outcomes use the existing native journal;
+lost confirmation ACKs retry only that receipt, never reinjection. No new durable
+workflow engine, Engine object, RPC receiver or Broker enters the Hub.
 
-
-The explicit staged-source closure includes `uas/forge.py` only because existing
-Hub capacity accounting imports its reducer helper. An isolated `python -I -S`
-smoke copies only allowlisted modules and exercises configure/connect/submit and
-retry, with Broker construction forbidden and `github_read.py` absent. This is
-not a credential, provider or Forge capability expansion.
+The revised deliberate scenario must prove Alice -> Bob -> Alice using each
+recipient's `native-active-branch-and-session-file` receipt and matching exact
+Hub ledger confirmation. `tool_execution_end` alone is not acceptance. These
+source changes and injected-receiver tests are **not** actual native delivery
+qualification. Actual inherited-FD transfer to another task must still fence
+that seat; Workstation Stop must exit both held Pi tasks while the held Hub stays
+alive, then explicit control EOF fences the Hub. Owned artifacts are cleaned up.
+No new heavy run or publication is implied by this private candidate.
