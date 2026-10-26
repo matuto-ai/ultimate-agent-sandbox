@@ -280,6 +280,14 @@ class Supervisor:
                 "error": {"destroy_failed": "DESTROY_FAILED", "start_failed": "START_FAILED",
                           "stop_failed": "STOP_FAILED"}.get(state["phase"])}
 
+    def checkouts(self, source, *, writer_quiescent=None):
+        """Host Git allocation under this Room's lifecycle/authorization lock.
+
+        This does not mount a checkout or qualify a production Workstation.
+        """
+        from .checkouts import CheckoutAllocator
+        return CheckoutAllocator(self, source, writer_quiescent=writer_quiescent)
+
     def status(self):
         with self._locked():
             state = self._read()
