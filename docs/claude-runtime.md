@@ -205,3 +205,14 @@ Custom development channels are also ignored in print mode. SDK initialization,
 MCP connected, stdout silence, and this diagnostic's process-alive observation
 remain insufficient. The production-safe replacement for synthetic refresh is
 still unqualified; no paid no-op or automatic model polling is introduced.
+
+### Target responsiveness qualification
+
+The next diagnostic suspends only the fixture-owned print process with
+`SIGSTOP`, confirms Linux `/proc/<owned-pid>/status` reports it stopped, waits
+longer than two seconds, and runs two fresh public listing commands. It then
+continues that same process without sending input. No model request, private
+Claude state file, native mode change, or readiness promotion is involved.
+The native outcome is pending. A query's own completion time cannot by itself
+establish that the target responded; an OS stopped check can establish only
+the kernel-visible stopped condition, not native event-loop responsiveness.
