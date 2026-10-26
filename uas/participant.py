@@ -7,10 +7,12 @@ credential is loaded; FixtureCredentials contains synthetic references only.
 """
 from dataclasses import asdict, dataclass
 import array
+import errno
 import json
 import os
 from pathlib import Path
 import select
+import re
 import socket
 import struct
 import subprocess
@@ -42,7 +44,7 @@ class FixtureSeat:
     def document(self):
         for value in (self.participant_id, self.actor_id, self.profile_id):
             _token(value)
-        if self.runtime != "fixture" or self.provider_host != "forge.fixture.invalid":
+        if self.runtime not in {"fixture", "pi-fixture"} or self.provider_host != "forge.fixture.invalid":
             raise LedgerError("FIXTURE_ONLY")
         for values in (self.capabilities, self.required_credentials, self.arguments):
             if type(values) is not tuple or len(values) > 32:
@@ -124,6 +126,8 @@ class ProcessHandle:
     pidfd: int
     connection: object
     runtime_directory: Path
+    protocol: str = "fixture"
+    managed_receiver: object = None
 
 
 class FixtureParticipantController:
@@ -244,6 +248,8 @@ class FixtureParticipantController:
         if type(seat) is not FixtureSeat:
             raise LedgerError("INVALID_SEAT")
         definition = seat.document()
+        if seat.runtime != "fixture":
+            raise LedgerError("FIXTURE_ONLY")
         if self.store_failed:
             raise LedgerError("AUTHORITY_STORE_UNAVAILABLE")
         with self.supervisor._locked():
@@ -328,6 +334,153 @@ class FixtureParticipantController:
                 if child_socket is not None:
                     child_socket.close()
 
+    def launch_pi(self, seat, recipe):
+        """Explicit fixed Pi fixture recipe, not a generic spawn/adopt API.
+
+        The controller owns the sole child/pidfd/socket. Native attachment may
+        wait on RPC, so it runs outside the lifecycle lock. Pending authority
+        is never usable; Stop/revoke/replacement may cancel that handshake.
+        """
+        from .pi_fixture import FixturePiRecipe
+        if type(seat) is not FixtureSeat or type(recipe) is not FixturePiRecipe:
+            raise LedgerError("INVALID_SEAT")
+        definition = seat.document()
+        if seat.runtime != "pi-fixture" or seat.arguments:
+            raise LedgerError("FIXTURE_ONLY")
+        if self.store_failed:
+            raise LedgerError("AUTHORITY_STORE_UNAVAILABLE")
+        handle = None
+        receiver = None
+        hub_socket = child_socket = process = None
+        pidfd = None
+        runtime_directory = None
+        incarnation = None
+        try:
+            with self.supervisor._locked():
+                state = self._room()
+                self.supervisor._allowed("participant-start", state)
+                document = self._read()
+                previous = document["seats"].get(seat.participant_id)
+                if previous and previous["seat"] != definition:
+                    raise LedgerError("SEAT_BINDING_CONFLICT")
+                if previous and previous["status"] == "closed":
+                    raise LedgerError("PARTICIPANT_CLOSED")
+                if previous and previous["epoch"] == MAX_EPOCH:
+                    raise LedgerError("AUTHORITY_EPOCH_EXHAUSTED")
+                old = self.handles.get(seat.participant_id)
+                if previous and previous["status"] == "active" and old and self._alive(old):
+                    raise LedgerError("ALREADY_RUNNING")
+                if not previous and len(document["seats"]) >= MAX_SEATS:
+                    raise LedgerError("AUTHORITY_CAPACITY")
+                scope = self.hub._state()["definition"]["participants"].get(seat.participant_id)
+                if not scope or scope["actor_id"] != seat.actor_id:
+                    raise LedgerError("PEER_BINDING_CONFLICT")
+                run = self.hub._state()["definition"]
+                expected_scope = {"room_id": self.supervisor.room_id, "participant_id": seat.participant_id,
+                                  "run_id": run["run_id"], "generation": run["generation"], "context_generation": 1}
+                if recipe.scope != expected_scope:
+                    raise LedgerError("PEER_BINDING_CONFLICT")
+                incarnation = "process-" + uuid.uuid4().hex
+                epoch = previous["epoch"] + 1 if previous else 1
+                record = {"seat": definition, "epoch": epoch, "incarnation_id": incarnation,
+                          "status": "starting", "reason": "explicit-start", "pid": None}
+                document["seats"][seat.participant_id] = record
+                if self.credentials.missing(definition):
+                    record.update(status="disabled", reason="missing-credential")
+                self._save(document)
+                if old:
+                    self._dispose(old)
+                    self.handles.pop(seat.participant_id, None)
+                if record["status"] == "disabled":
+                    raise LedgerError("MISSING_ACTOR_CREDENTIAL")
+                badge = Badge(self.supervisor.room_id, self.instance, self.controller_id, seat.actor_id,
+                              seat.participant_id, seat.profile_id, seat.capabilities, incarnation, epoch)
+                hub_socket, child_socket = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+                hub_socket.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+                hub_socket.settimeout(2)
+                child_socket.setblocking(False)
+                runtime_directory = Path(tempfile.mkdtemp(prefix="uas-participant-runtime-"))
+                process = recipe.spawn(child_socket, runtime_directory)
+                # Only the exact direct child is eligible; no native PID claim
+                # or adoption by UID is accepted during receiver attachment.
+                if not isinstance(process, subprocess.Popen):
+                    raise LedgerError("INVALID_NATIVE_PROCESS")
+                pidfd = os.pidfd_open(process.pid, 0)
+                handle = ProcessHandle(badge, process, hub_socket, pidfd, None, runtime_directory, "pi")
+                self.handles[seat.participant_id] = handle
+                record["pid"] = process.pid
+                self._save(document)  # Pending process identity before unlocking.
+                child_socket.close()
+                child_socket = None
+
+            receiver = recipe.attach(process, badge)  # Native RPC, never under lock.
+            if (getattr(receiver, "process", None) is not process
+                    or getattr(receiver, "incarnation_id", None) != badge.incarnation_id
+                    or getattr(receiver, "scope", None) != expected_scope):
+                raise LedgerError("INVALID_NATIVE_RECEIVER")
+            with self.supervisor._locked():
+                state = self._room()
+                self.supervisor._allowed("participant-start", state)
+                document = self._read()
+                current = document["seats"].get(seat.participant_id)
+                if (self.store_failed or self.handles.get(seat.participant_id) is not handle
+                        or incarnation in self.fenced or not current
+                        or current["status"] != "starting" or current["epoch"] != epoch
+                        or current["incarnation_id"] != incarnation or current["seat"] != definition):
+                    raise LedgerError("AUTHORITY_REVOKED")
+                if not self._alive(handle):
+                    raise LedgerError("PROCESS_EXITED")
+                if self.credentials.missing(definition):
+                    self._fence(document, seat.participant_id, "disabled", "missing-credential")
+                    raise LedgerError("MISSING_ACTOR_CREDENTIAL")
+                handle.managed_receiver = receiver
+                handle.connection = self.hub.connect("attach-" + uuid.uuid4().hex, seat.participant_id,
+                                                     incarnation, receiver)
+                current.update(status="active", reason="launched")
+                self._save(document)
+                return handle
+        except BaseException:
+            if incarnation is not None:
+                self.fenced.add(incarnation)
+                # Never overwrite a concurrent close, replacement, new owner,
+                # or destroyed Room. Cleanup remains independent of this write.
+                try:
+                    with self.supervisor._locked():
+                        document = self._read()
+                        current = document["seats"].get(seat.participant_id)
+                        if (current and current["incarnation_id"] == incarnation
+                                and current["status"] in {"starting", "active"}):
+                            self._fence(document, seat.participant_id, "revoked", "launch-failed")
+                except (LedgerError, OSError):
+                    pass
+            try:
+                if handle is not None:
+                    with self.supervisor._locked():
+                        handle.managed_receiver = receiver
+                        self._dispose(handle)
+                elif process is not None and isinstance(process, subprocess.Popen):
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=3)
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        if stream is not None:
+                            stream.close()
+            finally:
+                with self.supervisor._locked():
+                    if self.handles.get(seat.participant_id) is handle:
+                        self.handles.pop(seat.participant_id, None)
+                if handle is None:
+                    if pidfd is not None:
+                        os.close(pidfd)
+                    if hub_socket is not None:
+                        hub_socket.close()
+                    if runtime_directory is not None:
+                        self._remove_empty_runtime_directory(runtime_directory)
+            raise
+        finally:
+            if child_socket is not None:
+                child_socket.close()
+
     @staticmethod
     def _alive(handle):
         return handle.pidfd >= 0 and not select.select([handle.pidfd], [], [], 0)[0]
@@ -356,7 +509,7 @@ class FixtureParticipantController:
         return True
 
     @staticmethod
-    def _packet(channel):
+    def _record(channel):
         data, ancillary, flags, _ = channel.recvmsg(MAX_PACKET, socket.CMSG_SPACE(_UCRED.size), socket.MSG_CMSG_CLOEXEC)
         credentials = []
         invalid = bool(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
@@ -374,12 +527,22 @@ class FixtureParticipantController:
                 invalid = True
         if invalid or len(credentials) != 1 or not data:
             raise LedgerError("INVALID_PROCESS_RECORD")
+        return data, credentials[0]
+
+    @staticmethod
+    def _decode_packet(data):
         try:
             message = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object)
             _json(message)  # rejects excessive nesting, nonfinite numbers, etc.
         except (ValueError, UnicodeError, RecursionError) as error:
             raise LedgerError("INVALID_PROCESS_RECORD") from error
-        return message, credentials[0]
+        return message
+
+    @staticmethod
+    def _packet(channel):
+        # Parser-only test seam. Public receive authenticates before decoding.
+        data, credentials = FixtureParticipantController._record(channel)
+        return FixtureParticipantController._decode_packet(data), credentials
 
     def receive(self, handle):
         """Consume one kernel-authenticated record and dispatch to #65/#60.
@@ -388,11 +551,21 @@ class FixtureParticipantController:
         complete ledger transaction share that lock with revocation/Stop/Destroy.
         Replies can be lost; exact authorized retry retains ledger idempotency.
         """
+        request_id = None
         try:
-            message, credentials = self._packet(handle.channel)
+            data, credentials = self._record(handle.channel)
             with self.supervisor._locked():
                 try:
                     self._authority(handle, credentials)
+                    message = self._decode_packet(data)
+                    if handle.protocol == "pi":
+                        if (type(message) is dict and type(message.get("request_id")) is str
+                                and re.fullmatch(r"[0-9a-f]{32}", message["request_id"])):
+                            request_id = message["request_id"]
+                        if (request_id is None or set(message) != {"request_id", "envelope"}
+                                or type(message["envelope"]) is not dict):
+                            raise LedgerError("INVALID_NATIVE_FRAME")
+                        message = message["envelope"]
                     receipt = self.hub.submit(handle.connection, message, origin=handle.badge.origin(),
                                               authorize=lambda: self._authority(handle, credentials))
                 except LedgerError as error:
@@ -408,6 +581,8 @@ class FixtureParticipantController:
             result = {"ok": True, "receipt": receipt}
         except LedgerError as error:
             result = {"ok": False, "error": error.code}
+        if handle.protocol == "pi":
+            result = {"request_id": request_id, **result}
         try:
             handle.channel.send(_json(result).encode())
         except (BrokenPipeError, ConnectionResetError):
@@ -420,7 +595,7 @@ class FixtureParticipantController:
         record.update(status=status, reason=reason, epoch=min(MAX_EPOCH, record["epoch"] + 1))
         self._save(document)
         handle = self.handles.get(participant)
-        if handle is not None and self.hub._current(handle.connection):
+        if handle is not None and handle.connection is not None and self.hub._current(handle.connection):
             self.hub.observe(handle.connection, Readiness.LOST)
 
     def revoke(self, participant, *, close=False):
@@ -450,7 +625,7 @@ class FixtureParticipantController:
             self.credentials.set_available(reference, available)
             document = self._read()
             for participant, record in document["seats"].items():
-                if record["status"] == "active" and self.credentials.missing(record["seat"]):
+                if record["status"] in {"starting", "active"} and self.credentials.missing(record["seat"]):
                     try:
                         self._fence(document, participant, "disabled", "missing-credential")
                     finally:
@@ -489,6 +664,18 @@ class FixtureParticipantController:
             return False
 
     @staticmethod
+    def _remove_empty_runtime_directory(directory):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                raise
+            # Native state/unexpected files are retained, never recursively
+            # removed. Pi's explicit persistent recipe directory is not ours.
+
+    @staticmethod
     def _dispose(handle):
         if handle.process.poll() is None:
             handle.process.terminate()
@@ -497,14 +684,25 @@ class FixtureParticipantController:
             except subprocess.TimeoutExpired:
                 handle.process.kill()
                 handle.process.wait(timeout=2)
-        handle.channel.close()
-        if handle.pidfd >= 0:
-            os.close(handle.pidfd)
-            handle.pidfd = -1
-        handle.process.stdin.close()
-        handle.process.stdout.close()
-        if handle.runtime_directory.exists():
-            handle.runtime_directory.rmdir()  # Never recursively delete data.
+        receiver_error = None
+        try:
+            if handle.managed_receiver is not None:
+                try:
+                    handle.managed_receiver.close()
+                    handle.managed_receiver = None
+                except Exception as error:
+                    receiver_error = error
+        finally:
+            handle.channel.close()
+            if handle.pidfd >= 0:
+                os.close(handle.pidfd)
+                handle.pidfd = -1
+            for stream in (handle.process.stdin, handle.process.stdout, handle.process.stderr):
+                if stream is not None:
+                    stream.close()
+            FixtureParticipantController._remove_empty_runtime_directory(handle.runtime_directory)
+        if receiver_error is not None:
+            raise LedgerError("NATIVE_RECEIVER_CLOSE_FAILED") from receiver_error
 
     def snapshot(self):
         with self.supervisor._locked():
