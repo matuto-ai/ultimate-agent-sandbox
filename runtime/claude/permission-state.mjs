@@ -6,7 +6,7 @@ export class PermissionNativeState extends NativeState {
     super(sessionId);
     this.file = file; this.incarnation = incarnation;
     this.attention = null; this.decision = null; this.toolResult = false;
-    this.needsInput = false;
+    this.needsInput = false; this.continuationSeen = false;
   }
   permission(frame) {
     if (this.fenced) return;
@@ -49,6 +49,20 @@ export class PermissionNativeState extends NativeState {
           || meta[0].permission_decision?.source !== 'user_temporary')
         return this.hold('unmatched-permission-result');
       this.toolResult = true; this.revision++; return; // Never an ACK.
+    }
+    if (e.type === 'assistant' && this.toolResult && this.pending?.uuid === this.attention?.invocationId) {
+      const blocks = e.message?.content;
+      // Public SDK stamps only the first assistant frame. This one bounded
+      // text continuation carries no receipt/readiness authority of its own.
+      if (this.decision !== 'allow' || this.continuationSeen || !this.ack
+          || (Object.hasOwn(e, 'user_message_uuid') && e.user_message_uuid !== this.pending.uuid)
+          || (Object.hasOwn(e, 'user_message_uuids')
+              && JSON.stringify(e.user_message_uuids) !== JSON.stringify([this.pending.uuid]))
+          || e.parent_tool_use_id !== null || e.message?.role !== 'assistant' || e.error !== undefined
+          || !Array.isArray(blocks) || blocks.length !== 1 || blocks[0]?.type !== 'text'
+          || typeof blocks[0].text !== 'string' || Object.keys(blocks[0]).length !== 2)
+        return this.hold('unexpected-active-turn');
+      this.continuationSeen = true; this.revision++; return;
     }
     if (e.type === 'result' && this.needsInput) {
       if (this.decision !== 'allow' || !this.toolResult || !this.attention

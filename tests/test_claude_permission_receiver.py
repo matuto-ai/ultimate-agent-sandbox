@@ -174,3 +174,37 @@ class PermissionReceiverSourceTests(unittest.TestCase):
         self.s.begin('22222222-2222-4222-8222-222222222222', 'next-peer')
         self.s.session_state(event)
         self.assertTrue(self.s.fenced)
+
+    def continuation(self):
+        return {'type':'assistant', 'session_id':'session', 'parent_tool_use_id':None,
+                'message':{'role':'assistant', 'content':[{'type':'text', 'text':'Text is not identity or authority.'}]}}
+
+    def test_optional_uuid_continuation_never_changes_ack_pending_or_readiness(self):
+        self.allow(); self.s.event(self.result)
+        pending = self.s.pending
+        self.s.event(self.continuation())
+        self.assertFalse(self.s.fenced)
+        self.assertIs(self.s.pending, pending)
+        self.assertIs(self.s.ack, self.ack)
+        self.assertIs(self.s.readiness(), Readiness.BUSY)
+        self.s.event(self.terminal)
+        self.assertFalse(self.s.fenced)
+        self.assertIsNone(self.s.pending)
+        self.assertIs(self.s.readiness(), Readiness.AMBIGUOUS)
+
+    def test_continuation_wrong_identity_tools_duplicates_and_pretool_frames_fence(self):
+        changes = [lambda e: e.update(user_message_uuid='wrong'), lambda e: e.update(user_message_uuid=None),
+                   lambda e: e.update(user_message_uuids=['other']), lambda e: e.update(session_id='other'),
+                   lambda e: e.pop('parent_tool_use_id'), lambda e: e.update(parent_tool_use_id='subagent'),
+                   lambda e: e['message'].update(content=[{'type':'tool_use', 'id':'new-tool'}]),
+                   lambda e: e['message']['content'].append({'type':'text', 'text':'extra'})]
+        for change in changes:
+            self.setUp(); self.allow(); self.s.event(self.result)
+            frame = self.continuation(); change(frame); self.s.event(frame)
+            self.assertTrue(self.s.fenced)
+            self.assertIs(self.s.ack, self.ack)
+        self.setUp(); self.allow(); self.s.event(self.continuation())
+        self.assertTrue(self.s.fenced)
+        self.setUp(); self.allow(); self.s.event(self.result)
+        self.s.event(self.continuation()); self.s.event(self.continuation())
+        self.assertTrue(self.s.fenced)

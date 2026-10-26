@@ -72,3 +72,25 @@ test('synchronous and asynchronous diagnostic output failures cannot interrupt c
     stream.destroy();
   }
 });
+const continuation = () => e({type:'assistant',parent_tool_use_id:null,
+  message:{role:'assistant',content:[{type:'text',text:'Any fixture text is not identity or authority.'}]}});
+test('one optional-UUID post-tool text continuation leaves ACK/pending/attention untouched',()=>{
+  const s=waiting();s.decided(identity,'allow');s.event(tool());
+  const pending=s.pending;s.event(continuation());
+  assert.equal(s.fenced,null);assert.equal(s.pending,pending);assert.equal(s.ack,replay);
+  assert.equal(s.state(),'ambiguous');
+  s.event(terminal);assert.equal(s.fenced,null);assert.equal(s.pending,null);
+  assert.notEqual(s.state(),'safe'); // Independent fresh probe still required.
+});
+test('continuation cannot introduce wrong identity, tools, duplicate or pre-tool activity',()=>{
+  const mutations=[e=>{e.user_message_uuid='wrong';},e=>{e.user_message_uuid=null;},
+    e=>{e.user_message_uuids=['other'];},e=>{e.session_id='other';},
+    e=>{delete e.parent_tool_use_id;},e=>{e.parent_tool_use_id='subagent';},
+    e=>{e.message.content=[{type:'tool_use',id:'new-tool'}];},
+    e=>{e.message.content.push({type:'text',text:'extra'});}];
+  for(const mutate of mutations){const s=waiting();s.decided(identity,'allow');s.event(tool());
+    const frame=continuation();mutate(frame);s.event(frame);assert.ok(s.fenced);assert.equal(s.ack,replay);}
+  const early=waiting();early.decided(identity,'allow');early.event(continuation());assert.ok(early.fenced);
+  const duplicate=waiting();duplicate.decided(identity,'allow');duplicate.event(tool());
+  duplicate.event(continuation());duplicate.event(continuation());assert.ok(duplicate.fenced);
+});

@@ -139,6 +139,7 @@ class ClaudeSignals:
         self._permission = None
         self.permission_decision = None
         self.permission_result = False
+        self.permission_continuation = False
         self.attention_seen = False
         self.pending = None
         self.command_id = None
@@ -269,6 +270,23 @@ class ClaudeSignals:
                 self.state = 'idle-inferred'
                 self.safe_at = time.monotonic()
         elif kind == 'assistant':
+            if (self.diagnostic_nonce_file and self.permission_result and self.pending and self._permission
+                    and self.pending[0] == self._permission['invocationId']):
+                message = event.get('message')
+                blocks = message.get('content') if type(message) is dict and message.get('role') == 'assistant' else None
+                # SDKAssistantMessage stamps the first assistant frame only.
+                # Retain this one text continuation without advancing authority.
+                if (self.permission_decision != 'allow' or self.permission_continuation or self.ack is None
+                        or ('user_message_uuid' in event and event['user_message_uuid'] != self.pending[0])
+                        or ('user_message_uuids' in event and event['user_message_uuids'] != [self.pending[0]])
+                        or event.get('parent_tool_use_id', True) is not None or 'error' in event
+                        or type(blocks) is not list or len(blocks) != 1 or type(blocks[0]) is not dict
+                        or set(blocks[0]) != {'type', 'text'} or blocks[0]['type'] != 'text'
+                        or type(blocks[0]['text']) is not str):
+                    self.hold('unexpected-active-turn')
+                else:
+                    self.permission_continuation = True
+                return  # Never an ACK, terminal result or safe point.
             if (self.pending is None or event.get('user_message_uuid') != self.command_id
                     or 'parent_tool_use_id' not in event or event['parent_tool_use_id'] is not None):
                 self.hold('unexpected-active-turn')

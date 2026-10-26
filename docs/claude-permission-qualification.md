@@ -237,8 +237,8 @@ before confirming the second exact replay and clock. Deny and pending-close
 retain the queue. A separately labelled injected-journal fault checks that even
 successful permission resolution cannot erase an unknown intent. Native versions,
 process/session identity, journal receipts, Hub state and fixture provider calls
-are recorded. These new assertions have **not run natively**; neither source
-passes nor the previous standalone native run qualify this integration.
+are recorded. Their first native round failed as documented below; neither
+source passes nor the previous standalone native run qualify this integration.
 
 No local namespace/listener/native execution is used for this change. Review the
 exact source before explicitly selecting the mandatory isolated qualification
@@ -246,3 +246,36 @@ tier. If post-result idle is absent or the unchanged budget is exceeded, the gat
 fails rather than accepting terminal success as readiness or extending automatic
 CI budgets. Production authority, authenticated inference, reset, compaction,
 reconnect and cross-Run admission remain outside this slice.
+
+
+## First Hub integration round and bounded continuation correction
+
+[Run 40401046723](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40401046723),
+job `121846658724`, checked out exact head
+`62aa02b44a83cdef6c942f368faddb0f5724ec26` (tree
+`ed5b6070f578225eb85ff0be03f5301c3082e78d`). The standalone three scenarios
+passed in 5.821 seconds. The four Hub scenarios took 11.993 seconds: deny hold
+and pending-close passed; allow recovery errored and source-injected unknown
+intent preservation failed while awaiting accepted terminal state. All seven
+reports contain positive held-host/native exit and host-reap receipts. Full log
+SHA-256: `6bf70de5f4c872b396b5b9f4a41f40dace9dff8e77f6c91898f88fccd6e69c47`.
+
+The failed allow cases captured exact replay, genuine attention, a correlated
+Read result, terminal UUID and native idle. Offline replay identifies the first
+fence at the post-tool assistant text frame: it has no `user_message_uuid`.
+Official SDK 0.3.310 `SDKAssistantMessage` (`sdk.d.ts`, lines 3688–3704) declares
+that field optional and documents first-frame stamping, not a stamp on every
+assistant frame. The fixture's previous reducer incorrectly required every
+assistant frame to repeat it. This is not evidence of a missing native idle,
+and the failure does not justify relaxing the fresh probe or journal fences.
+
+The diagnostic-only correction retains one text-only continuation after an
+already validated allow/tool-result for its single owned pending invocation.
+Session and explicit top-level parent must match; a present invocation UUID
+must match, and any supplied consumed-UUID list must contain only that invocation.
+Pre-tool missing correlation, new tool-use, duplicate continuation and mismatched
+identity still fence. Text is never used to infer identity. This frame changes
+neither receipt, pending work nor readiness: an exact terminal UUID and subsequent
+fresh non-model liveness/idle remain mandatory. The default tool-less policy is
+unchanged. Source regressions pass; this corrected continuation path has **not
+been requalified natively**, and no safe resumption claim follows from this round.
