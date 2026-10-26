@@ -32,6 +32,11 @@ This avoids the Azure HTTP mirror route that exhausted the manual setup budget
 in run 40353107455 before any payload or guest executed; it is not new guest proof.
 See [Ubuntu archive verification](https://documentation.ubuntu.com/security/software-integrity/archive-verification/)
 and the [Ubuntu deb822 source format](https://manpages.ubuntu.com/manpages/noble/man5/sources.list.5.html).
+The runner image also uses the exact literal `mirror+file:/etc/apt/apt-mirrors.txt`,
+verified in its [tagged source configuration](https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/scripts/build/configure-apt-sources.sh).
+That one input representation is replaced, not followed; arbitrary mirror files,
+alternate spellings, queries and fragments remain rejected. The earlier parser
+rejected it before APT in the five-second run 40358024317, producing no guest evidence.
 
 ## What runs
 

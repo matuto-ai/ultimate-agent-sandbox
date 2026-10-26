@@ -25,6 +25,16 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
 
 class VMRunnerToolsTests(unittest.TestCase):
+    def test_exact_documented_runner_mirror_indirection_is_replaced_not_followed(self):
+        stock = STOCK.replace('http://azure.archive.ubuntu.com/ubuntu/', tools.RUNNER_MIRROR)
+        with patch.object(Path, 'read_text', side_effect=AssertionError('must not open mirror file')):
+            self.assertEqual(tools.official_sources(STOCK), tools.official_sources(stock))
+        for uri in ('mirror+file:///etc/apt/apt-mirrors.txt', 'mirror+file:/tmp/apt-mirrors.txt',
+                    tools.RUNNER_MIRROR + '/', tools.RUNNER_MIRROR + '?extra=1',
+                    tools.RUNNER_MIRROR + '#fragment', 'file:/etc/apt/apt-mirrors.txt'):
+            with self.subTest(uri=uri), self.assertRaises(ValueError):
+                tools.official_sources(STOCK.replace('http://azure.archive.ubuntu.com/ubuntu/', uri))
+
     def test_only_uri_fields_change_suites_components_and_signing_stay_exact(self):
         result = tools.official_sources(STOCK)
         untouched = lambda value: [line for line in value.splitlines() if not line.startswith('URIs:')]

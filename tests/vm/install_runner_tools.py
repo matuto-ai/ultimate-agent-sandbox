@@ -13,12 +13,16 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 
 SOURCE = Path('/etc/apt/sources.list.d/ubuntu.sources')
 KEYRING = '/usr/share/keyrings/ubuntu-archive-keyring.gpg'
 BASE = ('qemu-system-x86', 'qemu-utils', 'cloud-image-utils', 'gnupg')
 EXTRA = ('dnf', 'dnf-plugins-core', 'rpm', 'createrepo-c', 'genisoimage')
 FIELDS = {'Types', 'URIs', 'Suites', 'Components', 'Signed-By', 'Architectures'}
+# Literal emitted by runner-images ubuntu24/20261012.334 configure-apt-sources.sh.
+# Recognize its syntax only; never open or follow the mirror file's candidates.
+RUNNER_MIRROR = 'mirror+file:/etc/apt/apt-mirrors.txt'
 
 
 def official_sources(stock):
@@ -51,8 +55,10 @@ def official_sources(stock):
         uris = fields['URIs'].split()
         allowed = {scheme + host + '/ubuntu' for scheme in ('http://', 'https://')
                    for host in ('azure.archive.ubuntu.com', 'archive.ubuntu.com', 'security.ubuntu.com')}
-        if not uris or any(uri.rstrip('/') not in allowed for uri in uris):
-            raise ValueError('unsupported Ubuntu archive URI')
+        if not uris or any(uri != RUNNER_MIRROR and uri.rstrip('/') not in allowed for uri in uris):
+            # Identify unsupported format without echoing URI credentials/query.
+            schemes = sorted({urlsplit(uri).scheme[:32] for uri in uris})
+            raise ValueError('unsupported Ubuntu archive URI scheme(s): ' + repr(schemes))
         destination = ('https://security.ubuntu.com/ubuntu' if fields['Suites'] == 'noble-security'
                        else 'https://archive.ubuntu.com/ubuntu')
         output.extend('URIs: ' + destination + '\n' if line.startswith('URIs:') else line for line in lines)
