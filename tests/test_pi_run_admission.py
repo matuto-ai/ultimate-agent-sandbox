@@ -306,3 +306,155 @@ class RunAdmissionTests(unittest.TestCase):
         self.assertEqual([], self.allocator.status())
         self.assertEqual({}, self.hub._state()['traffic'])
         self.assertFalse(next(iter(self.ledger.snapshot()['state']['run_admissions'].values()))['authorization_consumed'])
+
+    def test_pause_holds_real_pi_queued_request_and_resume_keeps_exact_binding(self):
+        from dataclasses import replace
+        from uas.peer import Message
+        row = self.open()
+        control = replace(self.human, capabilities=('human-control-run',))
+        handle = self.controller.handles['builder']
+        native = handle.connection.receiver
+        original_context = deepcopy(self.hub.contexts._row('builder'))
+        dirty = self.repo / 'human-dirty.txt'
+        dirty.write_text('preserve owned work\n')
+        paused = self.admission.pause('pause', row['run_id'], 1, 0, 'human-hold', human=control)
+        self.assertEqual('PAUSED', paused['status'])
+        self.assertEqual('HELD', self.hub.deliver(handle.connection)['outcome'])
+        self.assertEqual(0, native.evidence()['native_receipts'])
+        self.error('STALE_GENERATION', lambda: self.hub.submit(handle.connection,
+            Message('paused-message', row['run_id'], 1, 'reviewer', 'must remain held')))
+        self.assertEqual('QUEUED', self.hub._state()['traffic'][row['implementation_request']]['status'])
+        self.assertEqual(original_context, self.hub.contexts._row('builder'))
+        self.assertEqual(row, self.open())  # Immutable admission, not current status.
+        before_calls = len(self.calls)
+        self.admission.resume('resume', row['run_id'], 1, 1, 'human-continue', human=control)
+        self.assertEqual('CONFIRMED', self.hub.deliver(handle.connection)['outcome'])
+        self.assertEqual('HELD', self.hub.deliver(handle.connection)['outcome'])
+        self.assertEqual(1, native.evidence()['native_receipts'])
+        self.assertEqual(before_calls, len(self.calls))
+        self.assertIs(handle, self.controller.handles['builder'])
+        current = self.ledger.snapshot()['state']['runs'][row['run_id']]
+        for key in ('generation', 'policy', 'checkout', 'context_generation', 'implementation_request'):
+            self.assertEqual(row[key], current[key])
+        self.assertEqual('preserve owned work\n', dirty.read_text())
+
+    def test_pause_between_native_receipt_and_hub_confirmation_preserves_unknown_offer(self):
+        from dataclasses import replace
+        row = self.open()
+        control = replace(self.human, capabilities=('human-control-run',))
+        handle = self.controller.handles['builder']
+        native = handle.connection.receiver
+        accept = native.accept
+        def pause_before_ack(envelope):
+            receipt = accept(envelope)
+            self.admission.pause('pause-late', row['run_id'], 1, 0, 'late-ack', human=control)
+            return receipt
+        with patch.object(native, 'accept', pause_before_ack):
+            self.error('FORBIDDEN', lambda: self.hub.deliver(handle.connection))
+        request = row['implementation_request']
+        offer = deepcopy(self.hub._state()['offers'][request])
+        self.assertEqual('UNCONFIRMED', offer['builder']['outcome'])
+        self.assertEqual('QUEUED', self.hub._state()['traffic'][request]['status'])
+        self.assertIsNone(self.hub._state()['traffic'][request]['response_started_at'])
+        self.assertEqual(1, native.evidence()['native_receipts'])
+        self.assertEqual('HELD', self.hub.deliver(handle.connection)['outcome'])
+        self.assertEqual(offer, self.hub._state()['offers'][request])
+        self.admission.resume('resume-late', row['run_id'], 1, 1, 'reconcile-receipt', human=control)
+        self.assertEqual('CONFIRMED', self.hub.deliver(handle.connection)['outcome'])
+        self.assertEqual(1, native.evidence()['native_receipts'])
+        self.assertEqual('CONFIRMED', self.hub._state()['offers'][request]['builder']['outcome'])
+
+    def test_pause_racing_activation_serializes_after_canonical_commit(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from copy import copy
+        from dataclasses import replace
+        import threading
+        run = self.admission.run_id('human-open')
+        control = replace(self.human, capabilities=('human-control-run',))
+        entered, attempting = threading.Event(), threading.Event()
+        def pause():
+            with RoomLedger(self.root / 'room.db', 'alpha') as ledger:
+                admission = copy(self.admission)
+                admission.__dict__.pop('_apply', None)  # Do not copy main-thread instrumentation.
+                admission.ledger = ledger
+                self.assertTrue(entered.wait(10))
+                attempting.set()
+                return admission.pause('race-pause', run, 1, 0, 'hold', human=control)
+        apply = self.admission._apply
+        def activate_with_racer(command, origin, decide):
+            if command.kind == 'run.admission-attempt-result':
+                def raced(state, cmd):
+                    entered.set()
+                    self.assertTrue(attempting.wait(5))
+                    return decide(state, cmd)
+                return apply(command, origin, raced)
+            return apply(command, origin, decide)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(pause)
+            with patch.object(self.admission, '_apply', activate_with_racer):
+                row = self.open()
+            self.assertEqual('PAUSED', future.result(timeout=10)['status'])
+        self.assertEqual('ACTIVE', row['status'])
+        self.assertEqual('PAUSED', self.ledger.snapshot()['state']['runs'][run]['status'])
+        self.assertEqual('HELD', self.hub.deliver(self.controller.handles['builder'].connection)['outcome'])
+        self.assertEqual(1, len(self.hub._state()['traffic']))
+
+    def test_pause_resume_does_not_claim_unknown_native_intent_resolved(self):
+        from dataclasses import replace
+        row = self.open()
+        control = replace(self.human, capabilities=('human-control-run',))
+        handle = self.controller.handles['builder']
+        native = handle.connection.receiver
+        native.rpc('prompt', message='/fixture-delay 2000')
+        native.timeout = .15
+        self.error('UNCONFIRMED_NATIVE_DELIVERY', lambda: self.hub.deliver(handle.connection))
+        self.assertEqual(1, native.evidence()['unknown_intents'])
+        before = deepcopy(self.hub._state())
+        self.admission.pause('pause-unknown', row['run_id'], 1, 0, 'unknown-handoff', human=control)
+        self.assertEqual('HELD', self.hub.deliver(handle.connection)['outcome'])
+        self.admission.resume('resume-unknown', row['run_id'], 1, 1, 'explicit-continue', human=control)
+        self.assertEqual(before, self.hub._state())
+        self.assertEqual(1, native.evidence()['unknown_intents'])
+        self.assertEqual('QUEUED', self.hub._state()['traffic'][row['implementation_request']]['status'])
+
+    def test_saturated_admitted_run_retains_maximal_pause_resume_headroom(self):
+        from dataclasses import replace
+        from uas.context import FixtureRun, MAX_RUNS, MAX_CONTEXT_GENERATION
+        from uas.ledger import Command, Event, Transition
+        from uas.peer import WorkRequest
+        row = self.open()
+        control = replace(self.human, capabilities=('human-control-run',))
+        # A synthetic revision near the bound exercises maximal numeric growth;
+        # the admission, Git checkout and Pi process above are actual fixtures.
+        def near_limit(state, _):
+            state['runs'][row['run_id']]['control_revision'] = MAX_CONTEXT_GENERATION - 2
+            return Transition(state, (Event('fixture.revision-near-limit', {}),), {})
+        for index in range(MAX_RUNS - 2):
+            self.hub.contexts.open_run('control-context-' + str(index),
+                FixtureRun('r' + str(index) + 'x' * 250, MAX_CONTEXT_GENERATION))
+        sender = self.hub.connect('control-background', 'reviewer', 'background-incarnation', object())
+        for size in (16384, 1):
+            for index in range(100):
+                try:
+                    self.hub.submit(sender, WorkRequest('fill-' + str(size) + '-' + str(index),
+                        'bootstrap', 1, 'other', 'x' * size))
+                except LedgerError as error:
+                    self.assertEqual('QUEUE_CAPACITY_EXHAUSTED', error.code)
+                    break
+            else:
+                self.fail('unbounded capacity')
+        # Grow the revision only AFTER saturation at revision zero, checking
+        # the previously reserved widest numeric footprint as well as reason.
+        self.ledger.apply(Command('near-limit', 'fixture.revision', row['run_id'], 1, {}),
+            control, authorize=lambda *_: True, decide=near_limit)
+        before = deepcopy(self.hub._state())
+        paused = self.admission.pause('full-pause', row['run_id'], 1,
+            MAX_CONTEXT_GENERATION - 2, 'p' * 256, human=control)
+        resumed = self.admission.resume('full-resume', row['run_id'], 1,
+            MAX_CONTEXT_GENERATION - 1, 'r' * 256, human=control)
+        self.assertEqual(MAX_CONTEXT_GENERATION - 1, paused['control_revision'])
+        self.assertEqual(MAX_CONTEXT_GENERATION, resumed['control_revision'])
+        self.assertEqual(before, self.hub._state())
+        self.assertEqual('QUEUED', self.hub._state()['traffic'][row['implementation_request']]['status'])
+        self.assertEqual(0, self.controller.handles['builder'].connection.receiver.evidence()['native_receipts'])
+        self.hub._reserve_capacity(self.ledger.snapshot()['state'])
