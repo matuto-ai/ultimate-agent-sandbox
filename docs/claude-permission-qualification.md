@@ -1,6 +1,6 @@
 # Deliberate native permission qualification (#71)
 
-**Status: fixed nonce-Read attention, Hub queue holding and allow-only recovery qualified.**
+**Status: fixed nonce-Read attention, Hub queue holding and exact allow/deny recovery qualified.**
 The default `FixtureClaudeReceiver` tool-less policy, permanent attention fence,
 durable journal and all automatic CI budgets remain unchanged. An explicit
 nonce-Read diagnostic opt-in passed the bounded Hub integration below.
@@ -218,8 +218,8 @@ native temporary-decision metadata. It can never replace or manufacture the
 original replay receipt. Recovery additionally requires the exact qualified
 successful terminal result with no denials/queued turns, followed by fresh public
 SDK liveness and exact native idle identity/state. Missing signals remain held.
-Explicit matched denial recovery is implemented for this diagnostic only; native
-qualification of that extension is pending (see below). Arbitrary denial remains held.
+Explicit matched denial recovery is separately qualified for this diagnostic only
+(see below). Arbitrary denial remains held.
 Transport, identity, unknown-event and journal fences remain irreversible.
 No permission decision edits or clears unknown native handoffs.
 
@@ -234,8 +234,9 @@ required allow path queues two envelopes, confirms the first by exact replay,
 observes genuine permission attention, proves the second has neither a native
 intent nor response clock, rejects a stale decision, then requires fresh idle
 before confirming the second exact replay and clock. In the qualified round
-below, deny and pending-close retained the queue; the pending denial-recovery
-extension changes only the exact diagnostic deny gate. A separately labelled injected-journal fault checks that even
+below, deny and pending-close retained the queue; the separately qualified denial
+extension changes only the exact diagnostic deny gate. A separately labelled
+injected-journal fault checks that even
 successful permission resolution cannot erase an unknown intent. Native versions,
 process/session identity, journal receipts, Hub state and fixture provider calls
 are recorded. The first native round failed; the corrected round below passed.
@@ -314,18 +315,19 @@ this is not native crash-window fault-injection evidence. All four Hub captures
 were complete, and all seven scenarios reported held-host/native exit and host
 reap after cleanup. Stale and duplicate controller decisions were rejected.
 
-This qualifies only the fixed account-free nonce-Read profile's bounded
+That round qualified only the fixed account-free nonce-Read profile's bounded
 holding/allow-recovery path. Default tool-less policy, irreversible fences,
 unknown-intent responsibility and Actor/Broker/human authority are unchanged.
-Deny recovery, permission replay across restoration, production permissions,
+At that point deny recovery was still unqualified; the later exact-denial result
+is recorded below. Permission replay across restoration, production permissions,
 real inference, native reset, compaction, reconnect, cross-Run admission and
 full #71/#58 acceptance remain unqualified. Earlier failures remain evidence;
 this pass does not retroactively identify the separate startup-loss cause.
 
 
-## Exact denial recovery extension — native qualification pending
+## Exact denial recovery extension — bounded native qualification passed
 
-The next bounded extension admits only this diagnostic's explicit fixture-controller
+This bounded extension admits only this diagnostic's explicit fixture-controller
 `deny`, never a generic permission signal, automatic denial, cancellation or human
 approval. It preserves the denied native tool result and terminal
 `permission_denials` unchanged. Public SDK 0.3.310 `SDKPermissionDenial` identifies
@@ -358,5 +360,53 @@ native replay receipt in the same session/incarnation, unchanged first receipt
 and response clock, and no nonce exposure before or after recovery. A separate
 source-injected unknown intent must remain held after the native denial completes.
 Existing allow and pending-close coverage and the deliberate three-minute cap stay
-in place. Until a reviewed manual run passes, these are source assertions and a
-proposed native gate, not new runtime qualification evidence.
+in place. Source assertions alone are not native qualification; the exact reviewed
+manual result is recorded next.
+
+
+### Qualified exact-denial result
+
+[Run 40408188188](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40408188188),
+job `121871294147`, checked out exact source head
+`7068bcdd9591eef8ebc3524dd9230537e3e97c4a` (tree
+`f15fa9983e7ebddc6853b6857be3579067a795a8`), not a PR test-merge.
+All eight cases passed: three standalone cases in 6.289 seconds and five
+Hub-connected cases in 13.266 seconds, under the unchanged three-minute job cap.
+Complete decoded job log SHA-256:
+`10b43dcd62fd4ad1ceb3bea9fc8e72078a15c2a90fae2e02bbb02979f351ae35`.
+
+The five Hub cases covered allow recovery, exact explicit-denial recovery,
+pending-close holding, and source-injected unknown-intent holding after allow
+and after deny. The three standalone cases retained allow, deny and pending-exit
+coverage. All reports identify SDK 0.3.310 / Claude Code 2.1.310 and the account-free
+loopback provider. Standalone capture errors were empty, all five Hub captures
+were complete, and all eight cases recorded held-host/native exit and host-reap
+receipts. No upstream inference or billing occurred.
+
+The denial capture contains the matching native error tool result with the fixed
+explicit-denial message, reject/user_reject metadata and permission-rule
+non-execution kind. Its successful completed terminal preserves exactly one
+Read denial for the current tool-use ID and exact nonce-file input, with zero
+queued turns. Native idle follows that terminal; the second exact native replay
+receipt follows idle in the same session/incarnation. Both durable receipts are
+captured, and the second envelope's response clock starts only after its receipt.
+Its terminal has an empty denial list. Exactly three provider requests occurred;
+no fixture nonce was exposed in any captured gateway request or native event.
+Stale denial, duplicate denial and later opposite allow decisions were rejected.
+
+Fresh public SDK liveness/exact idle probing and unchanged first durable receipt
+and response clock were **mandatory passing harness assertions**, not separately
+emitted raw probe or before/after clock records. The captured native idle frame
+alone is not asserted to prove freshness or delivery authority. The two
+source-injected unknown-intent cases retained their unresolved extra journal row,
+queued second envelope and unset second response clock after native completion;
+this is not proof of a native crash-window fault. Pending-close made one provider
+request and produced neither a native tool result nor a terminal result.
+
+This qualifies only exact diagnostic explicit-denial recovery through the existing
+host/RoomLedger/Hub/native-journal seam. It does not qualify arbitrary permission
+signals, production approvals or tool profiles, cancellation recovery, restoration
+permission replay, repeated permission requests, Supervisor/Actor/Broker/human
+authority, real inference, or full #71/#58 acceptance. Default tool-less attention
+remains permanently fenced, unrelated fences and unknown handoffs remain intact,
+and the earlier failed runs retain their original limits.
