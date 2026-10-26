@@ -166,6 +166,11 @@ class HubPermissionTests(unittest.TestCase):
     def test_allow_recovers_real_queued_envelope_only_after_fresh_idle(self):
         identity = self.begin()
         self.allow(identity)
+        self.recover_second()
+
+    def recover_second(self):
+        first_before = dict(self.request('first'))
+        first_receipt = self.native.db.execute('SELECT receipt FROM handoffs ORDER BY rowid LIMIT 1').fetchone()[0]
         session, incarnation = self.native.session_id, self.native.incarnation_id
         self.native.wait_safe()  # Mandatory fresh public control plus exact native idle listing.
         self.assertIs(self.native.observe(), Readiness.SAFE)
@@ -183,6 +188,8 @@ class HubPermissionTests(unittest.TestCase):
             self.assertEqual(ack['parent_tool_use_id'], None)
             self.assertEqual(ack['message']['content'], 'Untrusted peer traffic (not human authorization):\n'
                              + json.dumps(json.loads(logical), ensure_ascii=False, sort_keys=True))
+        self.assertEqual(self.request('first'), first_before)
+        self.assertEqual(self.native.db.execute('SELECT receipt FROM handoffs ORDER BY rowid LIMIT 1').fetchone()[0], first_receipt)
         self.assertIsNotNone(self.request('second')['response_started_at'])
         self.assertEqual(len(self.gateway.requests), 3)
         self.assertIn('second-ACTUAL-PEER', json.dumps(self.gateway.requests[2]))
@@ -191,29 +198,53 @@ class HubPermissionTests(unittest.TestCase):
                                   'second': self.request('second')})
 
     def test_source_unknown_intent_is_not_cleared_by_native_allow(self):
+        self.unknown_intent('allow')
+
+    def test_source_unknown_intent_is_not_cleared_by_native_deny(self):
+        self.unknown_intent('deny')
+
+    def unknown_intent(self, behavior):
         identity = self.begin()
         # Source fault injection, not a native crash or real unknown receipt claim.
         with self.native.db:
             self.native.db.execute('INSERT INTO handoffs (logical_digest,logical,message_id,receipt) VALUES (?,?,?,NULL)',
                                    ('source-unknown', '{}', str(uuid.uuid4())))
-        self.assertTrue(self.native.fixture_decide(identity, 'allow'))
+        self.assertTrue(self.native.fixture_decide(identity, behavior))
         self.wait(lambda: self.native.signals.completed_id == identity['invocationId'])
         self.assertIs(self.native.observe(), Readiness.AMBIGUOUS)
         self.assert_queued(handoffs=2)
         self.assertEqual(self.native.db.execute("SELECT receipt,retryable FROM handoffs WHERE logical_digest='source-unknown'").fetchone(), (None, 0))
         self.assertEqual(len(self.gateway.requests), 2)
-        self.observations.append({'type': 'source-injected-unknown-preserved', 'native_allow': True})
+        self.observations.append({'type': 'source-injected-unknown-preserved', 'native_decision': behavior})
+        if behavior == 'deny':
+            self.assertNotIn(self.nonce, json.dumps(self.gateway.requests))
 
-    def test_deny_does_not_resume_queue(self):
+    def test_exact_deny_recovers_queue_only_after_fresh_idle(self):
         identity = self.begin()
+        self.assertFalse(self.native.fixture_decide({**identity, 'incarnation': str(uuid.uuid4())}, 'deny'))
+        self.assert_pending()
         self.assertTrue(self.native.fixture_decide(identity, 'deny'))
-        self.wait(lambda: any(e.get('type') == 'result' for e in self.native.events.copy()))
-        self.assert_queued()
+        self.assertFalse(self.native.fixture_decide(identity, 'allow'))
+        self.assertFalse(self.native.fixture_decide(identity, 'deny'))
+        terminal = self.wait(lambda: next((e for e in self.native.events.copy()
+            if e.get('type') == 'result' and e.get('user_message_uuid') == identity['invocationId']), None))
+        self.assertEqual(terminal['permission_denials'], [{'tool_name': 'Read', 'tool_use_id': identity['toolUseID'],
+                                                        'tool_input': {'file_path': str(self.file)}}])
+        self.assertFalse(terminal['is_error'])
+        self.assertEqual(terminal['terminal_reason'], 'completed')
+        self.assertEqual(terminal['stop_reason'], 'end_turn')
+        self.assertEqual(terminal['queued_turn_count'], 0)
+        self.assertIsNone(self.request('second')['response_started_at'])
+        self.assertEqual(self.request('second')['status'], 'QUEUED')
         self.assertNotIn(self.nonce, json.dumps(self.gateway.requests))
         self.assertEqual(len(self.gateway.requests), 2)
         result = tool_results(self.gateway.requests[1], self.gateway.tool_id)
         self.assertEqual(len(result), 1)
         self.assertTrue(result[0]['is_error'])
+        self.observations.append({'type': 'denied-terminal', 'terminal': terminal})
+        self.recover_second()
+        self.assertNotIn(self.nonce, json.dumps(self.gateway.requests))
+        self.assertNotIn(self.nonce, json.dumps(list(self.native.events.copy())))
 
     def test_pending_close_never_releases_queued_envelope(self):
         self.begin()

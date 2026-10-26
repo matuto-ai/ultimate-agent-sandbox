@@ -18,16 +18,17 @@ export function validateLoopback(devices, ipv4, ipv6) {
   }
 }
 
-export function closeOwned({input, queries, query, child, finish, schedule = setTimeout}) {
+export function closeOwned({input, queries, query, child, finish, schedule = setTimeout, onFailure = () => {}, onForcedKill = () => {}}) {
   // Install the final disposition BEFORE any third-party/library cleanup.
   const timer = schedule(() => {
-    try { if (child?.exitCode === null) child.kill('SIGKILL'); }
+    try { if (child?.exitCode === null) { onForcedKill(); child.kill('SIGKILL'); } }
+    catch (error) { onFailure(); throw error; }
     finally { finish(); }
   }, 2200);
   timer.unref?.();
-  try { input?.end(); } catch {}
-  for (const process of queries) { try { process.kill('SIGKILL'); } catch {} }
-  try { query?.close(); } catch {}
+  try { input?.end(); } catch { onFailure(); }
+  for (const process of queries) { try { process.kill('SIGKILL'); } catch { onFailure(); } }
+  try { query?.close(); } catch { onFailure(); }
   return timer;
 }
 
