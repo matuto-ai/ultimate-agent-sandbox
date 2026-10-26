@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from uas.claude_runtime import BINARY_SHA256, ClaudeNotApplied, ClaudeSignals, ClaudeUnavailable, FixtureClaudeReceiver, VERSION, require_loopback_namespace
+from uas.claude_runtime import BINARY_SHA256, ClaudeNotApplied, ClaudeSignals, ClaudeUnavailable, DirectClaudeDiagnosticReceiver, VERSION, require_loopback_namespace
 from uas.ledger import LedgerError, RoomLedger
 from uas.peer import FixtureParticipant, FixturePeerHub, Readiness, WorkRequest
 
@@ -26,11 +26,11 @@ class ClaudeSignalTests(unittest.TestCase):
         self.emit(type='system', subtype='init', claude_code_version=VERSION, tools=[], mcp_servers=[])
 
     def ack(self):
-        self.emit(type='user', uuid='message', isReplay=True, parent_tool_use_id=None,
+        self.emit(type='user', uuid='11111111-1111-4111-8111-111111111111', isReplay=True, parent_tool_use_id=None,
                   message={'role': 'user', 'content': 'text'})
 
     def result(self, **fields):
-        self.emit(**dict(type='result', user_message_uuid='message', subtype='success', is_error=False,
+        self.emit(**dict(type='result', user_message_uuid='11111111-1111-4111-8111-111111111111', subtype='success', is_error=False,
                          permission_denials=[], queued_turn_count=0, terminal_reason='completed', stop_reason='end_turn', **fields))
 
     def test_init_and_silence_are_not_safe(self):
@@ -38,7 +38,7 @@ class ClaudeSignalTests(unittest.TestCase):
         self.assertIs(self.signals.readiness(), Readiness.AMBIGUOUS)
 
     def test_only_correlated_ack_then_terminal_success_yields_inferred_idle(self):
-        self.signals.begin('message', 'text')
+        self.signals.begin('11111111-1111-4111-8111-111111111111', 'text')
         self.initialized()
         self.ack()
         self.assertIs(self.signals.readiness(), Readiness.BUSY)
@@ -52,15 +52,15 @@ class ClaudeSignalTests(unittest.TestCase):
                          {'message': {'role': 'user', 'content': 'different'}}):
             with self.subTest(override=override):
                 self.setUp()
-                self.signals.begin('message', 'text')
-                event = {'type': 'user', 'session_id': 'session', 'uuid': 'message', 'isReplay': True,
+                self.signals.begin('11111111-1111-4111-8111-111111111111', 'text')
+                event = {'type': 'user', 'session_id': 'session', 'uuid': '11111111-1111-4111-8111-111111111111', 'isReplay': True,
                          'message': {'role': 'user', 'content': 'text'}, 'parent_tool_use_id': None, **override}
                 self.signals.event(event)
                 self.assertIsNone(self.signals.ack)
                 self.assertTrue(self.signals.fenced)
 
     def test_result_without_ack_and_unexpected_tools_hold(self):
-        self.signals.begin('message', 'text')
+        self.signals.begin('11111111-1111-4111-8111-111111111111', 'text')
         self.initialized()
         self.result()
         self.assertTrue(self.signals.fenced)
@@ -72,7 +72,7 @@ class ClaudeSignalTests(unittest.TestCase):
         for state in ('needs-input', 'unknown', 'transport-loss', 'unresponsive-inferred', 'replacement'):
             with self.subTest(state=state):
                 self.setUp()
-                self.signals.begin('message', 'text')
+                self.signals.begin('11111111-1111-4111-8111-111111111111', 'text')
                 self.initialized()
                 self.ack()
                 self.signals.hold(state)
@@ -90,27 +90,27 @@ class ClaudeSignalTests(unittest.TestCase):
 
     def test_unexpected_activity_invalidates_prior_safe_point(self):
         for event in ({'type': 'command_lifecycle', 'command_uuid': 'other', 'state': 'started'},
-                      {'type': 'command_lifecycle', 'command_uuid': 'message', 'state': 'queued'},
+                      {'type': 'command_lifecycle', 'command_uuid': '11111111-1111-4111-8111-111111111111', 'state': 'queued'},
                       {'type': 'assistant', 'user_message_uuid': 'other'},
-                      {'type': 'assistant', 'user_message_uuid': 'message'}):
+                      {'type': 'assistant', 'user_message_uuid': '11111111-1111-4111-8111-111111111111'}):
             with self.subTest(event=event):
                 self.setUp()
-                self.signals.begin('message', 'text')
+                self.signals.begin('11111111-1111-4111-8111-111111111111', 'text')
                 self.initialized()
                 self.ack()
                 self.result()
-                self.emit(type='command_lifecycle', command_uuid='message', state='completed')
+                self.emit(type='command_lifecycle', command_uuid='11111111-1111-4111-8111-111111111111', state='completed')
                 self.assertIs(self.signals.readiness(), Readiness.SAFE)
                 self.emit(**event)
                 self.assertIs(self.signals.readiness(), Readiness.AMBIGUOUS)
 
     def test_prior_completed_lifecycle_can_trail_next_invocation_start(self):
-        self.signals.begin('message', 'text')
+        self.signals.begin('11111111-1111-4111-8111-111111111111', 'text')
         self.initialized()
         self.ack()
         self.result()
         self.signals.begin('second', 'second text')
-        self.emit(type='command_lifecycle', command_uuid='message', state='completed')
+        self.emit(type='command_lifecycle', command_uuid='11111111-1111-4111-8111-111111111111', state='completed')
         self.assertFalse(self.signals.fenced)
         self.assertIs(self.signals.readiness(), Readiness.BUSY)
 
@@ -149,7 +149,7 @@ class ClaudeConstructionTests(unittest.TestCase):
                         with patch('uas.claude_runtime.subprocess.Popen', return_value=child), \
                              patch(target, side_effect=RuntimeError('fault')):
                             with self.assertRaisesRegex(RuntimeError, 'fault'):
-                                FixtureClaudeReceiver(binary, **kwargs)
+                                DirectClaudeDiagnosticReceiver(binary, **kwargs)
                         child.terminate.assert_called_once()
                         child.wait.assert_called_once()
                         child.stdin.close.assert_called_once()
@@ -158,7 +158,7 @@ class ClaudeConstructionTests(unittest.TestCase):
                     else:
                         with patch(target, side_effect=RuntimeError('fault')):
                             with self.assertRaisesRegex(RuntimeError, 'fault'):
-                                FixtureClaudeReceiver(binary, **kwargs)
+                                DirectClaudeDiagnosticReceiver(binary, **kwargs)
                 with open(str(root / 'intent.db') + '.owner', 'a+b') as owner:
                     fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -166,7 +166,7 @@ class ClaudeConstructionTests(unittest.TestCase):
 class ClaudeWriteTests(unittest.TestCase):
     """Synthetic boundary faults, not native permission/attention evidence."""
     def setUp(self):
-        self.native = FixtureClaudeReceiver.__new__(FixtureClaudeReceiver)
+        self.native = DirectClaudeDiagnosticReceiver.__new__(DirectClaudeDiagnosticReceiver)
         self.native.session_id = 'session'
         self.native.timeout = .1
         self.native.signals = ClaudeSignals('session')
@@ -182,7 +182,7 @@ class ClaudeWriteTests(unittest.TestCase):
         self.native.signals.safe_at -= 3
         with patch('uas.claude_runtime.os.write') as write:
             with self.assertRaises(ClaudeNotApplied):
-                self.native._write('message', 'text', peer=True)
+                self.native._write('11111111-1111-4111-8111-111111111111', 'text', peer=True)
             write.assert_not_called()
         self.assertIsNone(self.native.signals.pending)
         self.assertFalse(self.native.signals.fenced)
@@ -191,7 +191,7 @@ class ClaudeWriteTests(unittest.TestCase):
         self.native.signals.begin('other', 'existing text')
         with patch('uas.claude_runtime.os.write') as write:
             with self.assertRaises(ClaudeNotApplied):
-                self.native._write('message', 'text')
+                self.native._write('11111111-1111-4111-8111-111111111111', 'text')
             write.assert_not_called()
         self.assertEqual(self.native.signals.pending, ('other', 'existing text'))
 
@@ -200,7 +200,7 @@ class ClaudeWriteTests(unittest.TestCase):
         try:
             with patch('uas.claude_runtime.os.write') as write:
                 with self.assertRaises(ClaudeNotApplied):
-                    self.native._write('message', 'text', peer=True)
+                    self.native._write('11111111-1111-4111-8111-111111111111', 'text', peer=True)
                 write.assert_not_called()
         finally:
             self.native.write_lock.release()
@@ -210,7 +210,7 @@ class ClaudeWriteTests(unittest.TestCase):
         self.native.process.stdin.fileno.side_effect = ValueError('closed input')
         with patch('uas.claude_runtime.os.write') as write:
             with self.assertRaises(ClaudeNotApplied):
-                self.native._write('message', 'text', peer=True)
+                self.native._write('11111111-1111-4111-8111-111111111111', 'text', peer=True)
             write.assert_not_called()
         self.assertIsNone(self.native.signals.pending)
         self.assertEqual(self.native.signals.state, 'transport-loss')
@@ -229,13 +229,13 @@ class ClaudeWriteTests(unittest.TestCase):
                     with patch('uas.claude_runtime.os.write', side_effect=write) as output, \
                          patch('uas.claude_runtime.select.select'):
                         with self.assertRaises(ClaudeUnavailable) as raised:
-                            self.native._write('message', 'text', peer=True)
+                            self.native._write('11111111-1111-4111-8111-111111111111', 'text', peer=True)
                         self.assertEqual(isinstance(raised.exception, ClaudeNotApplied), not partial)
                         output.assert_called_once()
                     self.assertEqual(self.native.signals.state, state)
                     self.assertTrue(self.native.signals.fenced)
                     self.assertIs(self.native.signals.readiness(), Readiness.AMBIGUOUS)
-                    self.assertEqual(self.native.signals.pending, ('message', 'text') if partial else None)
+                    self.assertEqual(self.native.signals.pending, ('11111111-1111-4111-8111-111111111111', 'text') if partial else None)
 
 
 INSTALL = os.environ.get('UAS_CLAUDE_INSTALL')
@@ -265,7 +265,7 @@ class ClaudeNativeTests(unittest.TestCase):
         self.start()
 
     def start(self, *, resume=False):
-        self.native = FixtureClaudeReceiver(self.binary, cwd=self.root, home=self.home,
+        self.native = DirectClaudeDiagnosticReceiver(self.binary, cwd=self.root, home=self.home,
                          gateway_url=f'http://127.0.0.1:{self.gateway.server_port}', fixture_key=self.gateway.key,
                          journal=self.root / 'intent.db', scope=self.scope, resume=resume)
         self.connection = self.hub.connect('attach-' + self.native.incarnation_id, 'claude', self.native.incarnation_id, self.native)

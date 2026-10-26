@@ -11,7 +11,7 @@ from unittest.mock import patch
 import uuid
 
 from claude.readiness_probe import MAX_OUTPUT, query, summarize
-from uas.claude_runtime import FixtureClaudeReceiver, require_loopback_namespace
+from uas.claude_runtime import DirectClaudeDiagnosticReceiver, require_loopback_namespace
 from uas.peer import Readiness
 
 
@@ -96,8 +96,8 @@ class ClaudeListingNativeTests(unittest.TestCase):
         # Only skip the fixture's synthetic bootstrap; do not replace native
         # stdout, events, state-query output, arguments, or signal processing.
         # This diagnostic deliberately cannot hand traffic through the Hub.
-        with patch.object(FixtureClaudeReceiver, 'refresh', lambda _self: None):
-            self.native = FixtureClaudeReceiver(self.binary, cwd=self.root, home=self.home,
+        with patch.object(DirectClaudeDiagnosticReceiver, 'refresh', lambda _self: None):
+            self.native = DirectClaudeDiagnosticReceiver(self.binary, cwd=self.root, home=self.home,
                 gateway_url=self.env['ANTHROPIC_BASE_URL'], fixture_key=self.gateway.key,
                 journal=self.root / 'intent.db', scope=self.scope, resume=resume)
 

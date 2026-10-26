@@ -1,5 +1,19 @@
 # Claude Code conservative fixture seam (#71)
 
+## Current default: supported non-model SDK readiness
+
+The fixed account-free `FixtureClaudeReceiver` now uses the official TypeScript
+SDK 0.3.310 with the same exact Claude Code 2.1.310 native binary. See
+[supported SDK fixture](claude-sdk-fixture.md) for the actual qualification run,
+source limits and durable integration. Fresh public control liveness plus exact
+native idle/state evidence replaces synthetic constructor bootstrap and manual
+model-turn refresh. SDK host and native PID remain distinct; neither is a
+qualified Supervisor badge. Unknown intents still hold and never reinject.
+
+The direct-CLI sections below are historical/diagnostic evidence, **not** the
+default receiver's readiness or bootstrap policy. Listing alone remains unsafe:
+the stopped-target negative finding below is unchanged.
+
 ## Pre-implementation decision and evidence boundary
 
 The exact `fe32b7a5af4ea6df4d86d77c67a379091597eded` source tree, issue #71,
@@ -55,9 +69,11 @@ The CLI emitted `tools: []` and `mcp_servers: []`. `--bare` still reported
 built-in plugin/skill metadata; this is not a claim that the binary has no
 built-in extensions. No external plugin or tool was configured or executed.
 
-## Implemented fixture receiver and durable Hub integration
+## Historical direct-CLI diagnostic and durable Hub proof
 
-`uas.claude_runtime.FixtureClaudeReceiver` owns an actual long-lived native
+`uas.claude_runtime.DirectClaudeDiagnosticReceiver` retains the historical direct-CLI
+proof. It is explicit diagnostic-only and is never a fallback for the default SDK
+receiver. It owns an actual long-lived native
 process's stdin; only fixed tool-less CLI arguments are admitted. It retains a
 single explicit fixture Run and context generation 1. The constructor checks
 the exact binary and loopback-only interfaces plus IPv4/IPv6 route tables before
