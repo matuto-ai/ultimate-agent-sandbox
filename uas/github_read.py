@@ -29,7 +29,7 @@ def validate_route_table(rows):
     kinds, prefixes, signatures = set(), [], set()
     for row in rows:
         if (type(row) is not tuple or len(row) != 3 or type(row[0]) is not str
-                or row[0] not in {"help", "issue-view", "issue-assign-self"} or row[0] in kinds
+                or row[0] not in {"help", "issue-view", "issue-assign-self", "pr-view"} or row[0] in kinds
                 or type(row[1]) is not tuple or not 1 <= len(row[1]) <= 2
                 or any(type(word) is not str or not re.fullmatch(r"(?:[a-z]+|--help)", word) for word in row[1])
                 or type(row[2]) is not str or row[2] in signatures
@@ -39,14 +39,15 @@ def validate_route_table(rows):
         kinds.add(row[0])
         prefixes.append(row[1])
         signatures.add(row[2])
-    if kinds != {"help", "issue-view", "issue-assign-self"}:
+    if kinds != {"help", "issue-view", "issue-assign-self", "pr-view"}:
         raise LedgerError("INVALID_ROUTE_TABLE")
     return rows
 
 
 _ROUTES = validate_route_table((("help", ("--help",), "gh --help"),
                                ("issue-view", ("issue", "view"), "gh issue view NUMBER [--repo OWNER/REPO]"),
-                               ("issue-assign-self", ("issue", "edit"), "gh issue edit NUMBER --add-assignee @me [--repo OWNER/REPO]")))
+                               ("issue-assign-self", ("issue", "edit"), "gh issue edit NUMBER --add-assignee @me [--repo OWNER/REPO]"),
+                               ("pr-view", ("pr", "view"), "gh pr view NUMBER [--repo OWNER/REPO]")))
 _BY_KIND = {row[0]: row for row in _ROUTES}
 
 
@@ -66,6 +67,7 @@ class GitHubProject:
 class ReadRoute:
     kind: str
     issue_number: int | None = None
+    pull_number: int | None = None
 
 
 def generated_help():
@@ -83,7 +85,9 @@ def parse_route(argv, project):
         args.pop(0)
     if args == list(_BY_KIND["help"][1]):
         return ReadRoute("help")
-    if len(args) not in {3, 5} or args[:2] != list(_BY_KIND["issue-view"][1]):
+    kind = next((kind for kind in ("issue-view", "pr-view")
+                 if args[:2] == list(_BY_KIND[kind][1])), None)
+    if len(args) not in {3, 5} or kind is None:
         raise LedgerError("UNSUPPORTED_ROUTE")
     if not re.fullmatch(r"[1-9][0-9]{0,9}", args[2]):
         raise LedgerError("INVALID_ISSUE")
@@ -92,7 +96,8 @@ def parse_route(argv, project):
             raise LedgerError("UNSUPPORTED_ROUTE")
         if args[4] != project.repository:
             raise LedgerError("CROSS_PROJECT_READ_UNSUPPORTED")
-    return ReadRoute("issue-view", int(args[2]))
+    return (ReadRoute("pr-view", pull_number=int(args[2])) if kind == "pr-view"
+            else ReadRoute("issue-view", int(args[2])))
 
 
 def parse_assignment_route(argv, project):
@@ -154,6 +159,12 @@ class GitHubReadProvider:
             raise LedgerError("INVALID_PROVIDER_LIMIT")
         self.project, self.transport = project, transport
         self.max_pages, self.max_bytes = max_pages, max_bytes
+
+    def read_pull(self, number):
+        """Read-only PR/review observations, never submission or Gate evidence."""
+        from .github_pr import GitHubPullProvider
+        return GitHubPullProvider(self.project, self.transport, max_pages=self.max_pages,
+                                  max_bytes=self.max_bytes).read_pull(number)
 
     def _issue(self, value, number=None, *, assignments=False):
         base = "https://api.github.com/repos/" + self.project.repository
@@ -318,7 +329,7 @@ class GhTransport:
 
     def __call__(self, path):
         # Internal route defense in depth: caller cannot turn this into raw API.
-        if not re.fullmatch(r"repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/issues/[1-9][0-9]*(?:/(?:dependencies/blocked_by|labels)\?per_page=100&page=[1-9][0-9]*)?", path):
+        if not re.fullmatch(r"repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/(?:issues/[1-9][0-9]*(?:/(?:dependencies/blocked_by|labels)\?per_page=100&page=[1-9][0-9]*)?|pulls/[1-9][0-9]*(?:/reviews\?per_page=100&page=[1-9][0-9]*)?)", path):
             raise ProviderFailure("INVALID_RESPONSE")
         if hashlib.sha256(self.executable.read_bytes()).hexdigest() != self.sha256:
             raise ProviderFailure("PROVIDER_ERROR")

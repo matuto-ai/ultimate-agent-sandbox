@@ -1,3 +1,7 @@
+> [Exact PR and review observations](forge-pull-observations.md) now add the
+> read-only `gh pr view NUMBER` prerequisite. These facts do not submit a Run,
+> pass a Gate or infer an independent-review verdict.
+
 > The optional [audited self-assignment extension](forge-assignment.md) adds one
 > write route. The read provider and its external `GhTransport` remain read-only;
 > this extension does not qualify the full Forge surface or production boundary.

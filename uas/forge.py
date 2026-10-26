@@ -113,6 +113,8 @@ class ReadOnlyForgeBroker:
         code = None
         try:
             route = parse_route(envelope['argv'], self.project)
+            if admission and route.kind != 'issue-view':
+                raise LedgerError('UNSUPPORTED_ROUTE')
         except LedgerError as error:
             route, code = None, error.code
         payload = {'request_digest': digest, 'project_id': self.binding.project_id,
@@ -215,6 +217,10 @@ class ReadOnlyForgeBroker:
             provider = self.provider_for_actor(intent['origin'].actor_id)
             if provider.project != self.project:
                 raise LedgerError('PROVIDER_BINDING_MISMATCH')
+            if intent['route'].kind == 'pr-view':
+                from .github_pr import validate_pull_observation
+                return validate_pull_observation(provider.read_pull(intent['route'].pull_number),
+                                                 self.project, intent['route'].pull_number)
             number = intent['route'].issue_number
             outcome = validate_observation(provider.read_issue(number, admission=True)
                 if intent['admission'] else provider.read_issue(number))
