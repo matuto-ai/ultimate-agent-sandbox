@@ -316,3 +316,30 @@ else: a.reconcile()
         self.assertTrue(path.exists())
         no_observer = self.supervisor.checkouts(io.StringIO(json.dumps(self.config)))
         self.assertEqual('WRITER_NOT_QUIESCENT', self.secondary(no_observer.reconcile())['reason'])
+
+    def test_store_capacity_rejects_before_store_or_git_effects(self):
+        self.pair()
+        before = self.allocator.manifest.read_bytes()
+        worktrees = self.git(self.repo, 'worktree', 'list', '--porcelain')
+        for limits in ({'MAX_SLOTS': 2}, {'MAX_STORE_BYTES': len(before) + 1}):
+            with self.subTest(limits=limits), patch.multiple('uas.checkouts', **limits):
+                self.error('CHECKOUT_CAPACITY_EXCEEDED', lambda: self.allocator.allocate('run-3', 'alice'))
+                self.assertEqual(before, self.allocator.manifest.read_bytes())
+                self.assertEqual(worktrees, self.git(self.repo, 'worktree', 'list', '--porcelain'))
+                self.assertEqual(2, len(self.allocator.status()))
+        # Capacity failure does not destroy or erase ownership tombstones/state.
+        self.assertEqual(2, len(self.reopen().status()))
+
+    def test_capacity_reserves_post_create_identity_before_git_add(self):
+        self.allocator.allocate('run-1', 'alice')
+        before = self.allocator.manifest.read_bytes()
+        save = self.allocator._save
+        def narrow_capacity(state):
+            from uas.lifecycle import _canonical
+            # Enough for raw creating/null identity but not the completed record.
+            with patch('uas.checkouts.MAX_STORE_BYTES', len(_canonical(state).encode('utf-8')) + 1):
+                save(state)
+        with patch.object(self.allocator, '_save', narrow_capacity):
+            self.error('CHECKOUT_CAPACITY_EXCEEDED', lambda: self.allocator.allocate('run-2', 'bob'))
+        self.assertEqual(before, self.allocator.manifest.read_bytes())
+        self.assertEqual([], list(self.slots.iterdir()))

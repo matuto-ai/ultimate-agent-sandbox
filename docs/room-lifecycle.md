@@ -52,4 +52,52 @@ The real integration covers:
 - actual `SIGKILL` after Docker removed the container but before the supervisor completed Destroy, followed by persisted-intent recovery;
 - Project-data and unrelated-volume preservation, tombstone retention, and clean new-instance recreation.
 
+## Enforced fixture execution admission
+
+The lifecycle now calls the backend's mandatory `admit(state)` after creation,
+before Start/resume, after a successful start observation, and when reconciling an
+already-running fixture. `DockerFixtureBackend.start` also repeats admission
+immediately before starting the inspected container ID. Creation arguments and
+ownership labels are not treated as evidence that the actual boundary matches.
+
+Admission reads the actual Docker container, named volume, daemon seccomp
+support, and no-follow Project directory observations. It requires the exact
+fixture image, non-root user, read-only root filesystem and Project binds,
+Room-owned plain local state volume, dropped capabilities, no-new-privileges,
+default seccomp support, private namespaces, network-none, no devices or
+published ports, disabled restart policy, bounded memory/swap/CPU/PIDs/logs, and
+retained kernel path masks. Missing metadata or unavailable observations fail
+closed. A mismatched setting reports `START_FAILED` with a specific
+`FIXTURE_BOUNDARY_*` reason; no automatic configuration repair occurs.
+
+Admission is separate from ownership inspection: a rejected owned container
+remains visible and can still be explicitly stopped/destroyed. Reconciliation of
+drift in an already-running fixture reports failure and the actual running state;
+it does not claim that reporting failure has stopped it. This is not a continuous
+watchdog or Participant authority revocation service. The daemon and the local
+fixture image remain trusted test infrastructure, not adversaries.
+
+The dedicated Docker job additionally proves two created mismatches (a changed
+PID bound and a writable synthetic Project mount) remain in Docker's `created`
+state with no workload output, repeated reconciliation does not start them, and
+targeted Destroy succeeds. A stopped fixture with a changed PID bound cannot
+resume; explicit test-operator repair permits recovery. Running drift is reported
+without silent rewrite, and Stop/Destroy remains available.
+
+The fixture's bounded `--probe` mode runs inside the actual container and reports
+kernel UID/GID, capability sets, no-new-privileges, seccomp mode and cgroup-v2
+memory/CPU/PID bounds. Direct root/Project writes must fail specifically `EROFS`
+(not mere permission denial); a TEST-NET connection must fail locally with
+`ENETUNREACH`, with only loopback present. No resource exhaustion or escape test
+is performed. The synthetic Project directory is writable by DAC so the read-only
+mount, not file ownership, supplies the negative write evidence.
+
+These checks qualify only this conservative fixture. Network-none is **not**
+public-egress filtering. SELinux transport, disk quotas, process-bound badges,
+hostile path-replacement/mount-lease races and production launch remain
+unqualified. The production launcher stays disabled. The earlier local skip rule
+now applies to all four actual-Docker cases, not only the original two. A runner
+without Docker/Go/cgroup-v2/default seccomp support must fail this integration,
+not silently substitute mock evidence or relax confinement.
+
 Local contract tests additionally cover authorization/revocation failure, unavailable observations, unowned resource refusal, control-state marker mismatch, symlink non-traversal, tombstone-write failure/retry, and command construction. They do not substitute for the real Docker job. Production isolation, SELinux, public-egress deny routes, host power loss, participant/session behavior, paid providers, Forge, and the later 100-cycle host-capacity proof are not established by this slice.

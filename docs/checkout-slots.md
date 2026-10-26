@@ -50,7 +50,11 @@ Git effects follow durable intent. Restart reconciles a completed add/remove aft
 lost control flow. Partial Git state that cannot be proved remains retained and
 blocks allocation pending explicit repair. Branches created during an incomplete
 add are not reset or deleted speculatively. Storage and Git errors are not success
-receipts. This is process-crash evidence, not a power-loss guarantee.
+receipts. Store admission enforces 1,000 recorded slots and 1 MiB before writing
+intent or attempting Git creation; exhaustion returns `CHECKOUT_CAPACITY_EXCEEDED`
+without damaging the prior manifest. Ownership tombstones are not automatically
+pruned to hide capacity exhaustion. Operator-directed archival/retention is not
+implemented here. This is process-crash evidence, not a power-loss guarantee.
 
 Git runs without ambient account/config environment, hooks, fsmonitor or transport;
 repository-configured filter processes are unsupported and rejected before checkout.

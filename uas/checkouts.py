@@ -16,6 +16,10 @@ from .config import load
 from .lifecycle import LifecycleError, _canonical, _path, _unique_object
 
 
+MAX_SLOTS = 1000
+MAX_STORE_BYTES = 1_048_576
+
+
 def _identifier(value):
     return type(value) is str and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}", value) is not None
 
@@ -101,14 +105,14 @@ class CheckoutAllocator:
         if not self.manifest.exists():
             return {**binding, 'slots': {}}
         try:
-            if self.manifest.is_symlink() or self.manifest.stat().st_size > 1_048_576:
+            if self.manifest.is_symlink() or self.manifest.stat().st_size > MAX_STORE_BYTES:
                 raise ValueError()
             state = json.loads(self.manifest.read_text(), object_pairs_hook=_unique_object)
             if type(state) is not dict or set(state) != set(binding) | {'slots'}:
                 raise ValueError()
             if any(_canonical(state[k]) != _canonical(v) for k, v in binding.items()):
                 raise ValueError()
-            if type(state['slots']) is not dict or len(state['slots']) > 1000:
+            if type(state['slots']) is not dict or len(state['slots']) > MAX_SLOTS:
                 raise ValueError()
             for key, slot in state['slots'].items():
                 if not (key == 'primary' or re.fullmatch(r'[0-9a-f]{32}', key)):
@@ -139,11 +143,20 @@ class CheckoutAllocator:
             raise LifecycleError('INVALID_CHECKOUT_STORE') from error
 
     def _save(self, state):
+        encoded = _canonical(state).encode('utf-8')
+        # Reserve the eventual observed device/inode fields before Git add.
+        # A valid creating intent must also fit its ready/recovery record.
+        capacity_state = {**state, 'slots': {key: {**slot,
+            'identity': slot['identity'] if slot['identity'] is not None else
+                {'directory': [2**64 - 1] * 2, 'git_metadata': [2**64 - 1] * 2}}
+            for key, slot in state['slots'].items()}}
+        if len(state['slots']) > MAX_SLOTS or len(_canonical(capacity_state).encode('utf-8')) > MAX_STORE_BYTES:
+            raise LifecycleError('CHECKOUT_CAPACITY_EXCEEDED')
         temporary = self.manifest.parent / ('.checkouts-' + uuid.uuid4().hex)
         descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
-            with os.fdopen(descriptor, 'w') as output:
-                output.write(_canonical(state)); output.flush(); os.fsync(output.fileno())
+            with os.fdopen(descriptor, 'wb') as output:
+                output.write(encoded); output.flush(); os.fsync(output.fileno())
             os.replace(temporary, self.manifest)
             self.supervisor._sync_directory(self.manifest.parent)
         finally:

@@ -93,7 +93,9 @@ class FixtureSpec:
 class Supervisor:
     """Serialize one Room's intent/effects; preserve owned/unowned distinction.
 
-    backend: inspect/create/start/stop/remove exact fixture resources.
+    backend: inspect/create/admit/start/stop/remove exact fixture resources.
+    admit re-observes the actual boundary before Start/resume/reconciliation;
+    ownership alone never authorizes execution. Stop/Destroy do not need admission.
     authorize(action, room_id, instance_id): current trusted human authorization.
     revoke(instance_id, scope): idempotently revoke and VERIFY authority; must
     return literal True. Scope is 'participants' on Stop, 'all' on Destroy.
@@ -332,6 +334,7 @@ class Supervisor:
                 if kind == "container":
                     if resource["image_id"] != state["spec"]["image_id"]:
                         raise LifecycleError("MANAGED_IMAGE_DRIFT")
+                    self.backend.admit(state)
                     if not resource["running"]:
                         try:
                             self.backend.start(state)
@@ -340,6 +343,7 @@ class Supervisor:
                         resource = self.backend.inspect(state, kind)
                         if resource is None or not resource.get("running"):
                             raise BackendUnknown()
+                        self.backend.admit(state)
             state["phase"], state["leftovers"] = "running", []
         except (BackendUnknown, OwnershipConflict, LifecycleError) as error:
             state["phase"] = "start_failed"

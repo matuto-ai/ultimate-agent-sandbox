@@ -40,4 +40,11 @@ Actual Runtime-state mounts, running non-root identity, outer confinement, publi
 
 A cloud sandbox may allow socketpairs while denying new Unix listeners. In that case the local socketpair observation is real, but the four listener/descriptor-dependent cases are explicitly skipped locally; that is not cross-process or endpoint proof. CI sets `UAS_REQUIRE_UNIX_PEER_TESTS=1`, so unavailable real Unix sockets fail the suite rather than silently skipping it. The existing dedicated Docker lifecycle job remains required for its separate two real-container cases. Neither job qualifies production SELinux, public-egress policy or disk quotas.
 
-Next #62 integration must join these observations to the real launch boundary and prove every missing control on a suitable disposable host, without weakening policy to fit the test runner. Then #63 can bind actual processes/epochs and #61 can verify non-empty endpoint revocation. For the event → triage → test flow, a later authenticated event intake must submit an idempotent application command and deliver it to a real agent adapter, with test/result evidence returned to the ledger; this preflight does not invent that execution engine or select Pi Durable.
+The [fixture lifecycle admission](room-lifecycle.md#enforced-fixture-execution-admission)
+now reuses the no-follow path observer and checks the actual Docker boundary before
+fixture execution, with real-container denial and kernel-probe CI coverage. This
+does not promote the desired production plan to launchable: its network-none,
+read-only Project mounts and plain named volume do not qualify production egress,
+writable Projects, SELinux endpoint transport or disk quotas.
+
+Further #62 integration must prove those missing controls on a suitable disposable host, without weakening policy to fit the test runner. Then #63 can bind actual processes/epochs and #61 can verify non-empty endpoint revocation. For the event → triage → test flow, a later authenticated event intake must submit an idempotent application command and deliver it to a real agent adapter, with test/result evidence returned to the ledger; this preflight does not invent that execution engine or select Pi Durable.
