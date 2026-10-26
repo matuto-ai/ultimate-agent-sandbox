@@ -2,8 +2,10 @@
 
 This slice connects the existing fixture `Supervisor`, #60 `RoomLedger`, and #65
 peer domain to **actual disposable Linux processes**. It is not a production
-launcher, native Pi/Claude adapter, Broker, or qualification of #62's Workstation
-boundary. **#63 stays open** until that integration is demonstrated.
+launcher, Broker, or qualification of #62's Workstation boundary. The
+[fixed Pi same-Run adapter](pi-runtime.md#supervisor-owned-pi-same-run-fixture-integration)
+now uses this authority seam with an actual official Pi process; Claude and
+production Runtime/Workstation integration remain open. **#63 stays open**.
 
 ## Narrow API and authority
 
@@ -85,10 +87,11 @@ seats that require the missing reference. Repair permits explicit affected-seat
 launch without Room restart. These references contain no real credential bytes
 and their availability does not claim real account/provider qualification.
 
-Receiver acceptance is still #65's existing disk-backed fixture or a trusted test
-receiver supplied at launch. This slice proves authenticated outbound process
-submission, not native Runtime inbox delivery, safe points, context reset, or
-contribution-policy evaluation. Existing Actor-keyed ledger history is retained;
+The synthetic `launch` receiver is still #65's disk-backed fixture or a trusted
+test receiver. The separately fixed `launch_pi` path attaches the native Pi
+receiver to the same owned child/pidfd and adds authenticated native peer tools;
+see its linked evidence and limits. Neither path qualifies cross-Run context
+reset, production isolation, or contribution-policy evaluation. Existing Actor-keyed ledger history is retained;
 process/model/seat replacement supplies no operation to erase or reattribute it.
 
 ## Evidence and remaining boundary
