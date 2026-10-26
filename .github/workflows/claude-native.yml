@@ -32,4 +32,4 @@ jobs:
           runner_user="$(id -un)"
           # This modifies only a disposable child network namespace. No host
           # routes, firewall, interfaces, managed policy, or credentials change.
-          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin UAS_CLAUDE_INSTALL="$2/tests/claude" python3 "$2/tests/claude/probe.py"' sh "$runner_user" "$PWD"
+          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin UAS_CLAUDE_INSTALL="$2/tests/claude" sh "$2/tests/claude/run-tests.sh"' sh "$runner_user" "$PWD"

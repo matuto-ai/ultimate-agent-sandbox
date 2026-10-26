@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 
 
@@ -43,6 +44,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.split('?')[0] != '/v1/messages':
             self.send_error(404)
             return
+        time.sleep(getattr(self.server, 'delay', 0))
         text = 'fixture-only-response'
         model = request['model']
         message = {'id': 'msg_' + uuid.uuid4().hex, 'type': 'message',
@@ -74,7 +76,10 @@ def main():
     assert json.loads((package / 'package.json').read_text())['version'] == '2.1.310'
     binary = package / 'claude'
     # Native test refuses a routable namespace, even if the caller forgot it.
-    assert all(line.split()[0] == 'lo' for line in Path('/proc/net/route').read_text().splitlines()[1:])
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from uas.claude_runtime import require_loopback_namespace
+    require_loopback_namespace()
     with tempfile.TemporaryDirectory(prefix='uas-claude-probe-') as root:
         gateway = Gateway(('127.0.0.1', 0), Handler)
         gateway.key = 'fixture-only-' + uuid.uuid4().hex
