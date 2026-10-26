@@ -532,3 +532,30 @@ apply. There is no package addition, link deletion, generic build-id exemption,
 scriptlet enablement or security-policy change. Actual ownership for the previous
 failed guest was not separately logged; the new check must establish it in the
 next exact-head qualification rather than infer it from the web file lists.
+
+### Coreutils split index and bounded failure inventory
+
+Run 40421159623 on `ef5551f1` passed the prior ncurses traversal and next failed
+at `usr/lib/.build-id/f2/ced0172d0e9e58f7a646abd3b7dea17799d34f`, pointing to
+missing `usr/bin/coreutils.single`. Guard and installed Engine/policy checks
+passed; no completed image, Docker startup or native scenario was reached.
+Cleanup completed. The ten fallback report failures are not ten executed tests.
+
+The [exact Fedora coreutils 9.10-5 file list](https://packages.fedoraproject.org/pkgs/coreutils/coreutils/fedora-44-updates.html)
+contains this build-id but not the optional single binary. The [f44 spec](https://src.fedoraproject.org/rpms/coreutils/raw/f44/f/coreutils.spec)
+excludes `*.single` from coreutils and assigns it to the separate, conflicting
+coreutils-single package. This one frozen index now uses the same explicit
+unresolved-debug representation, but requires its own installed signed
+**coreutils** owner/path/target evidence, never ncurses owner reuse. No extra
+package is installed, and no other build-id path is exempted.
+
+Unknown missing targets are now inventoried before fingerprint failure instead
+of failing on only the first. The scan still never returns a manifest when any
+unknown missing target exists. It retains at most 16 facts and 60,000 encoded
+bytes, reports total count and explicit truncation, and queries exact installed
+owner/header path+target for retained paths only (fixed RPM query, 10-second
+per-query limit, bounded metadata and owner count). Owner-query failure remains
+a diagnostic fact, never authorization. Escapes, cycles, special files and
+other containment violations still fail immediately. This is bounded diagnosis,
+not a generic dangling-link exception or an assertion that missing executables
+exist. Actual exact image/native qualification remains pending.

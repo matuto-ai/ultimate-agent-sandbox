@@ -156,8 +156,8 @@ class NativeRootfsTests(unittest.TestCase):
             if args[0] == 'rpm':
                 if '--root' not in args:
                     return 'rpm-0:6.0.2-1.fc44.x86_64\n'
-                if args[-1] == 'ncurses-libs':
-                    return 'ncurses-libs\t0:6.6-1.fc44.x86_64\n'
+                if args[-1] in ('ncurses-libs', 'coreutils'):
+                    return args[-1] + '\t0:6.6-1.fc44.x86_64\n'
                 if '%{PRETRANS}' in args:
                     return '\n'.join('posix.symlink("bin", "/'+name+'")' for name in rootfs.USRMERGE_GHOSTS)
                 return 'filesystem\tx86_64\n' + ''.join(

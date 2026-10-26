@@ -114,5 +114,40 @@ class NativeDebugIndexTests(unittest.TestCase):
                 self.assertEqual(item['kind'], 'symlink')
                 self.assertNotIn('debug_index', item)
 
+    def coreutils_fixture(self):
+        key = 'usr/lib/.build-id/f2/ced0172d0e9e58f7a646abd3b7dea17799d34f'
+        target = '../../../../usr/bin/coreutils.single'
+        (self.root / 'usr/bin').mkdir(exist_ok=True)
+        path = self.root / key; path.parent.mkdir(parents=True, exist_ok=True); path.symlink_to(target)
+        text = 'coreutils\t0:9.11-2.fc44.x86_64\n/' + key + '\t41471\t' + target + '\t0\n'
+        def run(*args, **kwargs):
+            self.assertEqual(args[:4], ('rpm', '--root', str(self.root), '-q'))
+            self.assertEqual(args[-1], 'coreutils')
+            return text
+        evidence = rootfs.installed_debug_indexes(self.root, 'coreutils', run=run)
+        return key, {**self.evidence(), **evidence}, text
+
+    def test_exact_coreutils_split_index_is_owner_bound_unresolved_fact(self):
+        key, evidence, text = self.coreutils_fixture()
+        value = rootfs.fingerprint(self.root, debug_indexes=evidence)
+        item = next(item for item in value['manifest']['entries'] if item['path'] == key)
+        self.assertEqual(item['debug_index']['owner'], 'coreutils-0:9.11-2.fc44.x86_64')
+        self.assertEqual(item['debug_index']['status'], 'unresolved-optional-debug-index')
+        self.assertEqual(item['debug_index']['missing_target'], 'usr/bin/coreutils.single')
+        self.assertFalse((self.root / 'usr/bin/coreutils.single').exists())
+        self.assertEqual(item['debug_index']['header_sha256'], hashlib.sha256(text.encode()).hexdigest())
+
+    def test_coreutils_index_cannot_use_ncurses_owner_in_header_or_evidence(self):
+        key, evidence, text = self.coreutils_fixture()
+        evidence[key]['owner'] = 'ncurses-libs-0:6.6-1.fc44.x86_64'
+        with self.assertRaises(FileNotFoundError): rootfs.fingerprint(self.root, debug_indexes=evidence)
+        with self.assertRaises(ValueError):
+            rootfs.installed_debug_indexes(self.root, 'coreutils',
+                run=lambda *a, **k: text.replace('coreutils\t', 'ncurses-libs\t'))
+        # Correctly named ncurses header still cannot assert a coreutils-owned path.
+        other = rootfs.installed_debug_indexes(self.root, 'ncurses-libs',
+            run=lambda *a, **k: text.replace('coreutils\t', 'ncurses-libs\t'))
+        self.assertNotIn(key, other)
+
 
 if __name__ == '__main__': unittest.main()
