@@ -31,7 +31,7 @@ test('allow and tool result cannot clear attention; terminal still requires fres
   s.event(e({type:'system',subtype:'session_state_changed',state:'idle'}));
   assert.equal(s.state(),null); // Not safe: host still must perform fresh control + listing.
 });
-test('denial cannot recover',()=>{const s=waiting();s.decided(identity,'deny');s.event(terminal);assert.ok(s.fenced);});
+test('denial without matched result cannot recover',()=>{const s=waiting();s.decided(identity,'deny');s.event(terminal);assert.ok(s.fenced);});
 test('missing tool result, wrong correlation, duplicate and forged replay fence',()=>{
   const mutations=[t=>{t.message.content[0].tool_use_id='other';},t=>{t.isReplay=true;},
     t=>{t.tool_use_result.file.filePath='/other';},t=>{t.tool_result_meta[0].permission_decision.source='config';}];
@@ -93,4 +93,48 @@ test('continuation cannot introduce wrong identity, tools, duplicate or pre-tool
   const early=waiting();early.decided(identity,'allow');early.event(continuation());assert.ok(early.fenced);
   const duplicate=waiting();duplicate.decided(identity,'allow');duplicate.event(tool());
   duplicate.event(continuation());duplicate.event(continuation());assert.ok(duplicate.fenced);
+});
+
+import {DENIAL_MESSAGE} from '../../runtime/claude/permission-policy.mjs';
+const deniedTool = () => e({type:'user',parent_tool_use_id:null,
+  message:{role:'user',content:[{type:'tool_result',tool_use_id:'tool-1',is_error:true,content:DENIAL_MESSAGE}]},
+  tool_use_result:'Error: '+DENIAL_MESSAGE,
+  tool_result_meta:[{id:'tool-1',non_execution_kind:'permission-rule',permission_decision:{decision:'reject',source:'user_reject'}}]});
+const deniedTerminal = () => ({...terminal,permission_denials:[{tool_name:'Read',tool_use_id:'tool-1',tool_input:{file_path:'/fixture/nonce'}}]});
+test('exact denial completes only its invocation, preserves evidence and needs independent idle',()=>{
+  const s=waiting();s.decided(identity,'deny');s.event(deniedTool());
+  assert.equal(s.ack,replay);assert.equal(s.state(),'ambiguous');
+  s.event(continuation());const result=deniedTerminal();const before=JSON.stringify(result);s.event(result);
+  assert.equal(s.fenced,null);assert.equal(s.pending,null);assert.equal(s.completed,invocation);
+  assert.equal(JSON.stringify(result),before);assert.equal(s.ack,replay);assert.notEqual(s.state(),'safe');
+  s.event(e({type:'system',subtype:'session_state_changed',state:'idle'}));assert.equal(s.state(),null);
+  const next='33333333-3333-4333-8333-333333333333';s.begin(next,'next');
+  s.event({...replay,uuid:next,message:{role:'user',content:'next'}});
+  s.event({...terminal,user_message_uuid:next});assert.equal(s.fenced,null);assert.equal(s.pending,null);
+});
+test('denied result rejects arbitrary errors, cancellation, metadata mismatch and opposite decision',()=>{
+  const mutations=[t=>{t.message.content[0].is_error=false;},t=>{t.message.content[0].content='cancelled';},
+    t=>{t.tool_use_result='Error: cancelled';},t=>{t.tool_result_meta[0].permission_decision.source='config';},
+    t=>{delete t.tool_result_meta[0].non_execution_kind;},t=>{t.tool_result_meta.push(t.tool_result_meta[0]);},
+    t=>{t.tool_result_meta[0]=null;},t=>{t.message.content[0].tool_use_id='other';},t=>{t.isReplay=true;}];
+  for(const mutate of mutations){const s=waiting();s.decided(identity,'deny');const t=deniedTool();mutate(t);s.event(t);assert.ok(s.fenced);assert.equal(s.ack,replay);}
+  const s=waiting();s.decided(identity,'allow');s.event(deniedTool());assert.ok(s.fenced);
+  const d=waiting();d.decided(identity,'deny');d.event(deniedTool());d.event(deniedTool());assert.ok(d.fenced);
+});
+test('denied terminal requires one exact authoritative denial and original replay',()=>{
+  const mutations=[t=>{delete t.permission_denials;},t=>{t.permission_denials=[];},
+    t=>{t.permission_denials.push(t.permission_denials[0]);},t=>{t.permission_denials[0].tool_name='Write';},
+    t=>{t.permission_denials[0].tool_use_id='other';},t=>{t.permission_denials[0].tool_input.file_path='/other';},
+    t=>{t.permission_denials[0].tool_input.limit=1;},t=>{t.permission_denials[0].extra=true;},
+    t=>{t.user_message_uuid='other';},t=>{t.queued_turn_count=1;},t=>{t.terminal_reason='interrupted';},
+    t=>{t.is_error=true;},t=>{t.stop_reason='tool_use';}];
+  for(const mutate of mutations){const s=waiting();s.decided(identity,'deny');s.event(deniedTool());const t=deniedTerminal();mutate(t);s.event(t);assert.ok(s.fenced);}
+  const s=waiting();s.decided(identity,'deny');s.event(deniedTool());s.ack=null;s.event(deniedTerminal());assert.ok(s.fenced);
+});
+test('matched deny cannot clear irreversible or advisory permission fences',()=>{
+  for(const reason of ['transport','native-identity','unknown-native-event','journal']){
+    const s=waiting();s.decided(identity,'deny');s.hold(reason);s.event(deniedTool());s.event(deniedTerminal());assert.equal(s.fenced,reason);
+  }
+  const s=waiting();s.decided(identity,'deny');s.event(e({type:'system',subtype:'permission_denied'}));
+  s.event(deniedTool());s.event(deniedTerminal());assert.ok(s.fenced);
 });

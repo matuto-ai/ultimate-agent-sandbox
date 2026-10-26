@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest.mock import Mock
 
-from uas.claude_runtime import ClaudeSignals, FixtureClaudeReceiver, ClaudeUnavailable
+from uas.claude_runtime import ClaudeSignals, FixtureClaudeReceiver, ClaudeUnavailable, FIXTURE_DENIAL_MESSAGE
 from uas.peer import Readiness
 from uas.ledger import LedgerError
 
@@ -86,7 +86,7 @@ class PermissionReceiverSourceTests(unittest.TestCase):
                     self.s.attention(bad)
                 self.assertTrue(self.s.fenced)
 
-    def test_deny_and_irreversible_fences_cannot_recover(self):
+    def test_unmatched_deny_and_irreversible_fences_cannot_recover(self):
         self.s.attention(self.attention)
         self.s.decision({'identity':self.identity, 'behavior':'deny'})
         self.assertIs(self.s.readiness(), Readiness.BUSY)
@@ -208,3 +208,68 @@ class PermissionReceiverSourceTests(unittest.TestCase):
         self.setUp(); self.allow(); self.s.event(self.result)
         self.s.event(self.continuation()); self.s.event(self.continuation())
         self.assertTrue(self.s.fenced)
+
+
+class DenialReceiverSourceTests(PermissionReceiverSourceTests):
+    """Reuse allow safety/probe/journal assertions with the exact denied shape."""
+    def setUp(self):
+        super().setUp()
+        self.result['message']['content'][0].update(is_error=True, content=FIXTURE_DENIAL_MESSAGE)
+        self.result['tool_use_result'] = 'Error: ' + FIXTURE_DENIAL_MESSAGE
+        self.result['tool_result_meta'] = [{'id':'tool', 'non_execution_kind':'permission-rule',
+                                           'permission_decision':{'decision':'reject','source':'user_reject'}}]
+        self.terminal['permission_denials'] = [{'tool_name':'Read','tool_use_id':'tool',
+                                               'tool_input':{'file_path':'/fixture/nonce.txt'}}]
+
+    def allow(self):
+        self.s.attention(self.attention)
+        self.s.decision({'identity':self.identity, 'behavior':'deny'})
+
+    def test_malformed_tool_result_cannot_be_receipt(self):
+        changes = [lambda e: e.update(isReplay=True), lambda e: e.update(tool_use_result='Error: cancelled'),
+                   lambda e: e['message']['content'][0].update(is_error=False),
+                   lambda e: e['message']['content'][0].update(content='cancelled'),
+                   lambda e: e['tool_result_meta'][0].update(non_execution_kind='other'),
+                   lambda e: e['tool_result_meta'][0]['permission_decision'].update(source='config'),
+                   lambda e: e['message']['content'][0].update(tool_use_id='other')]
+        for change in changes:
+            self.setUp(); self.allow(); event=copy.deepcopy(self.result); change(event)
+            self.s.event(event); self.assertTrue(self.s.fenced); self.assertIs(self.s.ack,self.ack)
+
+    def test_denied_terminal_exact_record_and_unmodified_evidence(self):
+        mutations = [lambda e: e.pop('permission_denials'), lambda e: e.update(permission_denials=[]),
+                     lambda e: e['permission_denials'].append(e['permission_denials'][0]),
+                     lambda e: e['permission_denials'][0].update(tool_name='Write'),
+                     lambda e: e['permission_denials'][0].update(tool_use_id='other'),
+                     lambda e: e['permission_denials'][0]['tool_input'].update(file_path='/other'),
+                     lambda e: e['permission_denials'][0]['tool_input'].update(limit=1),
+                     lambda e: e['permission_denials'][0].update(extra=True),
+                     lambda e: e.update(queued_turn_count=1), lambda e: e.update(is_error=True)]
+        for mutate in mutations:
+            self.setUp(); self.allow(); self.s.event(self.result)
+            event=copy.deepcopy(self.terminal); mutate(event); self.s.event(event); self.assertTrue(self.s.fenced)
+        self.setUp(); self.allow(); self.s.event(self.result)
+        before=copy.deepcopy(self.terminal); self.s.event(self.terminal)
+        self.assertFalse(self.s.fenced); self.assertEqual(before,self.terminal); self.assertIs(self.s.ack,self.ack)
+
+    def test_advisory_permission_signal_stays_irreversible(self):
+        self.allow(); self.s.event({'type':'system','subtype':'permission_denied','session_id':'session'})
+        self.s.event(self.result); self.s.event(self.terminal); self.assertTrue(self.s.fenced)
+
+
+    def test_denial_requires_ack_and_cannot_recover_other_fences_or_later_denials(self):
+        self.allow(); self.s.event(self.result); self.s.ack=None; self.s.event(self.terminal)
+        self.assertTrue(self.s.fenced)
+        for reason in ('transport-loss','native-identity','unknown-signal','journal'):
+            self.setUp(); self.allow(); self.s.hold(reason); self.s.event(self.result); self.s.event(self.terminal)
+            self.assertTrue(self.s.fenced); self.assertEqual(self.s.state,reason)
+        self.setUp(); self.allow(); self.s.event(self.result); self.s.event(self.result)
+        self.assertTrue(self.s.fenced)
+        self.setUp(); self.s.attention(self.attention)
+        self.s.decision({'identity':self.identity,'behavior':'allow'}); self.s.event(self.result)
+        self.assertTrue(self.s.fenced)
+        self.setUp(); self.allow(); self.s.event(self.result); self.s.event(self.terminal)
+        next_id='22222222-2222-4222-8222-222222222222'; self.s.begin(next_id,'next')
+        self.s.event({**self.ack,'uuid':next_id,'message':{'role':'user','content':'next'}})
+        self.s.event({**self.terminal,'user_message_uuid':next_id})
+        self.assertTrue(self.s.fenced)  # Old denial is never valid for a new turn.
