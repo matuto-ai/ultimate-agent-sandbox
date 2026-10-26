@@ -130,9 +130,9 @@ class NativePermissionTests(unittest.TestCase):
         self.process = None
         self.host_pidfd = self.native_pidfd = None
         self.readers = []
-        self.addCleanup(self.close_host)
         self.samples = []
         self.addCleanup(self.report)
+        self.addCleanup(self.close_host)
 
     def close_gateway(self):
         self.gateway.shutdown()
@@ -143,6 +143,14 @@ class NativePermissionTests(unittest.TestCase):
         if self.process is None:
             return
         _dispose_sdk_process(self.process, self.host_pidfd, self.native_pidfd)
+        # Observe held identities before releasing descriptors. Report only after
+        # disposal; successful setup or a generic runner cleanup line is no proof.
+        host_exited = self.host_pidfd is not None and not _pidfd_alive(self.host_pidfd)
+        native_exited = self.native_pidfd is not None and not _pidfd_alive(self.native_pidfd)
+        host_reaped = self.process.returncode is not None
+        self.samples.append({'type': 'cleanup', 'host_exited': host_exited,
+                             'native_exited': native_exited,
+                             'host_reaped': host_reaped})
         for reader in self.readers:
             reader.join(timeout=1)
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
@@ -153,6 +161,9 @@ class NativePermissionTests(unittest.TestCase):
             if fd is not None:
                 os.close(fd)
                 setattr(self, name, None)
+        self.assertTrue(host_exited, 'owned host identity must exit during cleanup')
+        self.assertTrue(native_exited, 'owned native identity must exit during cleanup')
+        self.assertTrue(host_reaped, 'owned host must be reaped during cleanup')
 
     def start(self):
         self.events = deque(maxlen=256)

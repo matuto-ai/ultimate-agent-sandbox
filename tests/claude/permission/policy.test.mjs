@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {PermissionSlot, exactRead} from './policy.mjs';
+import {PermissionSlot, exactRead, permissionProfile} from './policy.mjs';
 
 function fixture() {
   let attention;
@@ -67,4 +67,11 @@ test('already aborted or failed attention publication never permits execution', 
     {signal:new AbortController().signal, requestId:'r', toolUseID:'t'});
   assert.equal(result.behavior, 'deny'); assert.equal(result.interrupt, true);
   assert.equal(broken.pending, null); assert.equal(broken.closed, true);
+});
+
+test('qualification profile asks for every Read before native auto-approval', () => {
+  assert.deepEqual(permissionProfile(), {tools:['Read'], permissionMode:'default',
+    permissionPrompts:'host', settings:{permissions:{ask:['Read']}}});
+  const mutable = permissionProfile(); mutable.settings.permissions.ask.length = 0;
+  assert.deepEqual(permissionProfile().settings.permissions.ask, ['Read']);
 });

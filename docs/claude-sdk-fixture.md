@@ -106,6 +106,7 @@ work exceeding the normal CI budget must move to a deliberate gate, not extend
 automatic CI timeouts.
 
 A separate [manual native-permission qualification fixture](claude-permission-qualification.md)
-now prepares one explicitly decided Read request. Its native scenarios are not
-yet executed; it neither expands this default profile nor qualifies Hub delivery
-during permission waits.
+prepares one explicitly decided Read request. Its first native run observed
+automatic Read acceptance instead of permission attention and failed; a stricter
+ask-rule correction awaits qualification. It neither expands this default profile
+nor qualifies Hub delivery during permission waits.

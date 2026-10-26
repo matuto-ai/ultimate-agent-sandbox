@@ -1,6 +1,13 @@
 // Qualification-only one-shot callback correlation. Not Hub or human authority.
 import {createHash} from 'node:crypto';
 
+// Public transient flag settings, not user/project configuration writes.
+// Ask rules precede native in-working-directory Read auto-approval.
+export function permissionProfile() {
+  return {tools:['Read'], permissionMode:'default', permissionPrompts:'host',
+    settings:{permissions:{ask:['Read']}}};
+}
+
 export function exactRead(toolName, input, file) {
   return toolName === 'Read' && input !== null && typeof input === 'object'
     && !Array.isArray(input) && Object.keys(input).length === 1 && input.file_path === file;

@@ -4,7 +4,7 @@ import {createHash, randomUUID} from 'node:crypto';
 import {createReadStream, readFileSync, lstatSync, realpathSync} from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {PermissionSlot, exactRead} from './policy.mjs';
+import {PermissionSlot, permissionProfile} from './policy.mjs';
 import {validateLoopback, closeOwned} from '../../../runtime/claude/sdk-resources.mjs';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID} from '../../../runtime/claude/sdk-policy.mjs';
 
@@ -63,16 +63,13 @@ async function main() {
   const {query:createQuery} = await import(pathToFileURL(path.join(packageRoot, 'sdk.mjs')));
   input = source();
   query = createQuery({prompt:input, options:{
-    pathToClaudeCodeExecutable:binary, cwd, sessionId, tools:['Read'],
+    pathToClaudeCodeExecutable:binary, cwd, sessionId, ...permissionProfile(),
     mcpServers:{}, strictMcpConfig:true, disallowedTools:['mcp__*'], settingSources:[],
-    permissionMode:'default', permissionPrompts:'host', model:'claude-sonnet-4-6',
+    model:'claude-sonnet-4-6',
     extraArgs:{bare:null, restricted:null, 'replay-user-messages':null},
     env:{PATH:'/usr/bin:/bin', HOME:home, CLAUDE_CONFIG_DIR:path.join(home,'config'),
       ANTHROPIC_BASE_URL:gateway, ANTHROPIC_API_KEY:key, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',
       CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS:'1'},
-    hooks:{PreToolUse:[{hooks:[async event => ({hookSpecificOutput:{hookEventName:'PreToolUse',
-      permissionDecision:exactRead(event.tool_name, event.tool_input, file) ? 'ask' : 'deny',
-      permissionDecisionReason:'Fixed qualification Read requires explicit fixture-controller decision'}})]}]},
     canUseTool:(name, value, options) => {
       if (!slot) throw new Error('permission-before-invocation');
       return slot.request(name, value, options);

@@ -25,13 +25,59 @@ Each attempt has a stable Broker observation ID. Before read contact, the Broker
 
 Known eligibility failures record `PREPARING` admission attention with authorization unconsumed. Storage uncertainty retains intent/ownership for explicit recovery. There is no background retry, backlog selection, scheduler, label-triggered opening, selector, batch intake, or coordinator privilege.
 
+## Explicit pause/resume
+
+The same `RunAdmission` owner exposes `pause(operation_id, run_id, generation,
+expected_revision, reason, human=...)` and `resume(...)`. These typed trusted
+calls require the separate `human-control-run` capability and the fresh scoped
+human authorization callback on every attempt, including exact retries. The
+callback is still not human authentication. The bounded reason is a token,
+recorded with the authenticated origin in the ledger.
+
+`ACTIVE → PAUSED → ACTIVE` preserves Run generation, native context generation,
+policy, issue/Participant binding, checkout, implementation request, and
+consumed admission. A separate monotonic `control_revision` starts at zero and
+increments on each transition. Callers must supply the current revision; an old
+Resume cannot apply to a later pause cycle with the same Run generation. At the
+maximum revision (`2**53 - 1`), new controls fail closed. Existing canonical rows
+without that field are treated as revision zero. The immutable exact operation
+receipt is returned before current revision/state checks, but only after fresh
+authorization. A retried admission still returns its original ACTIVE receipt,
+not the mutable current Run status; read the canonical ledger projection for
+current state.
+
+Pause is a **Hub traffic hold, not native inference interruption or verified
+process stop**. Work already handed to Pi may continue, including Project-file
+changes. New Run-scoped submissions, offers and confirmations are fenced by
+the existing canonical Run scope gate. An in-flight native receipt arriving
+after pause leaves its durable Hub offer UNCONFIRMED; neither control changes
+that unknown into success, cancellation or failure. Resume does not contact the
+provider, relaunch, reset, automatically deliver, or inject another request.
+Normal safe-point delivery may subsequently reconcile the same native receipt
+without reinjection; an unresolved native intent remains unknown. Policy
+migration, process restoration and native stop remain distinct operations.
+
+Control commits serialize with admission on the existing RoomLedger. A control
+cannot queue itself against a pending admission: before canonical activation it
+fails UNKNOWN_RUN; after activation it applies only to the exact current
+revision. Reserved projection capacity includes the largest future revision and
+reason, so ordinary traffic cannot consume already-admitted control headroom.
+
+Admission withdrawal is deliberately still unavailable. Current admission can
+allocate Git state and launch an owned Pi outside its final activation lock;
+merely writing a withdrawn tombstone would fence final activation but could
+still permit an in-flight launch. Safe cancellation requires explicit stage and
+ownership reconciliation before it can claim cancellation or resource release.
+Held admissions retain their exact owned process, context and checkout for
+inspection/explicit same-root refresh. No new orphan or cleanup state is added.
+
 ## Exact specification boundary
 
 The frozen #58/#72 contracts require fresh facts, exact human authority, unique non-closed work-item ownership, policy/checkout/context binding, conflict attention, and no authorization consumption on capacity failure. This restricted path implements those source invariants for an **already correctly assigned issue**; the protocol explicitly calls Forge lifecycle labels projections, not locks. No accepted sentence makes successful assignment-write/label projection a precondition for a correctly preassigned issue, so no-write source admission can be exercised without inventing #68/#69 behavior. Nevertheless, the formal dependency graph is unchanged and this is not #72 acceptance.
 
 Canonical Run rows explicitly report `projection: unavailable-no-write-support`. This does not mean a projection succeeded, is absent, or was reconciled. #68/#69 still own audited mutations, uncertain-write reconciliation and the idempotent projection outbox. The existing RoomLedger read audit is not the required Deployment-level Forge audit service.
 
-**Deliberately unavailable:** admission withdrawal/retargeting, Participant Run Requests/proposal approval, canonical pause/resume, policy migration, coordinator changes, force-stop/terminal stop, canonical Run completion and later cross-Run admission. A held intent retains its issue/Participant/checkout; another issue cannot take that seat. Explicit same-root refresh can resolve repaired facts, but changing one's mind requires later withdrawal/native-reset work. Do not advertise this as general operational Run management or bypass these limitations with fixture close/reset calls. No production CLI/Manager action is exposed.
+**Deliberately unavailable:** admission withdrawal/retargeting, Participant Run Requests/proposal approval, policy migration, coordinator changes, force-stop/terminal stop, canonical Run completion and later cross-Run admission. A held intent retains its issue/Participant/checkout; another issue cannot take that seat. Explicit same-root refresh can resolve repaired facts, but changing one's mind requires later withdrawal/native-reset work. Do not advertise this as general operational Run management or bypass these limitations with fixture close/reset calls. No production CLI/Manager action is exposed.
 
 The controlled Pi recipe has no built-in coding tools and uses a local faux provider. Evidence proves **delivery of an implementation Work Request**, not autonomous issue implementation, paid inference, live GitHub permissions, or the full Pi/Claude/review/merge lifecycle.
 
@@ -41,5 +87,7 @@ The controlled Pi recipe has no built-in coding tools and uses a local faux prov
 ./validate.sh
 UAS_PI_INSTALL=/path/to/locked/pi-install sh tests/pi/run-tests.sh
 ```
+
+`test_run_control.py` covers fresh scoped authority, immutable retry/reopen/replay, stale generation/revision, ABA fencing, concurrent same-revision controls, exhaustion, control-commit rollback and lost-acknowledgement recovery. Actual Pi admission tests additionally cover paused queued delivery, same-binding resume, dirty-byte retention, activation/control serialization, late-ACK reconciliation without reinjection and literal native unknown retention, and maximal control revision/reason growth after peer/context capacity saturation.
 
 `test_run_admission.py` covers typed authority/capability refusal, exact selectors, immutable IDs, bounded policy/context/shared projection capacity and a concurrent separate-SQLite-connection reservation race. `test_pi_run_admission.py` crosses actual Git, actual official Pi and controlled GitHub responses: durable canonical admission/delivery, exact retries, conflict/unknown/dependency holds, explicit refresh, Git-effect and activation-acknowledgement loss, native exit, stale-read recovery and late process revocation. Provider/configuration tests cover bounded label pagination and immutable-ID validation. Existing Claude/CI/VM policy sources are unchanged; no VM or paid provider is triggered by this work.
