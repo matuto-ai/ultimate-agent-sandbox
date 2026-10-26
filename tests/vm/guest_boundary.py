@@ -20,6 +20,11 @@ PAYLOAD = Path('/mnt/uas-payload')
 ROOT = Path('/opt/uas-fixture')
 REQUIRED_PACKAGES = ('moby-engine', 'docker-cli', 'container-selinux', 'nftables',
                      'iproute', 'xfsprogs', 'policycoreutils', 'shadow-utils')
+# Fedora's signed service already passes --selinux-enabled. Repeating that
+# directive in daemon.json is an error, not stronger enforcement. Actual engine
+# security options are mandatory below and again on every backend admission.
+DOCKER_CONFIGURATION = {'storage-driver': 'overlay2', 'userns-remap': 'uas-remap',
+                        'exec-opts': ['native.cgroupdriver=systemd']}
 REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota',
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
 
@@ -35,6 +40,13 @@ def run(*arguments, timeout=90):
 def expect(value, message):
     if not value:
         raise AssertionError(message)
+
+
+def require_engine_security():
+    expect(run('getenforce').strip() == 'Enforcing', 'SELinux changed during installation')
+    options = json.loads(run('docker', 'info', '--format', '{{json .SecurityOptions}}'))
+    expect(isinstance(options, list) and {'name=selinux', 'name=userns'} <= set(options),
+           'Docker SELinux and user namespace enforcement required before scenario')
 
 
 def verify_payload(nonce, manifest_hash):
@@ -93,10 +105,9 @@ def install(nonce, manifest_hash):
     Path('/etc/subuid').write_text('uas-remap:100000:65536\n')
     Path('/etc/subgid').write_text('uas-remap:100000:65536\n')
     Path('/etc/docker').mkdir(exist_ok=True)
-    Path('/etc/docker/daemon.json').write_text(json.dumps({'selinux-enabled': True, 'storage-driver': 'overlay2', 'userns-remap': 'uas-remap',
-                                                        'exec-opts': ['native.cgroupdriver=systemd']}))
+    Path('/etc/docker/daemon.json').write_text(json.dumps(DOCKER_CONFIGURATION))
     run('systemctl', 'start', 'docker', timeout=120)
-    expect(run('getenforce').strip() == 'Enforcing', 'SELinux changed during installation')
+    require_engine_security()
     print('Guest installed roots:', run('rpm', '-q', '--queryformat',
           '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n', *REQUIRED_PACKAGES), flush=True)
 
@@ -404,9 +415,10 @@ def main():
         expect(set(checks) == REQUIRED, 'incomplete scenario')
     except Exception:
         print(traceback.format_exc()[-16384:], flush=True)
-        for command in (['journalctl', '-u', 'docker', '--no-pager', '-n', '30'], ['dmesg', '--level=err,warn']):
+        for command in (['journalctl', '-u', 'docker', '--no-pager', '-n', '30'], ['dmesg', '--level=err,warn'],
+                        ['nft', '-j', 'list', 'ruleset']):
             try:
-                print(run(*command)[-8192:], flush=True)
+                print('Guest diagnostic:', command, run(*command)[-8192:], flush=True)
             except Exception:
                 pass
         checks = {name: {'status': 'failed', 'error': 'SCENARIO_FAILED'} for name in REQUIRED}

@@ -127,8 +127,8 @@ def main():
                     path = directory / name
                     if path.exists():
                         with path.open('rb') as source:
-                            source.seek(max(0, path.stat().st_size - 65536))
-                            print(name + ' tail:', source.read(65536).decode(errors='replace'), flush=True)
+                            source.seek(max(0, path.stat().st_size - 131072))
+                            print(name + ' tail:', source.read(131072).decode(errors='replace'), flush=True)
                 raise
     finally:
         print('VM boundary cleanup:', json.dumps({'temporary_directory_removed': directory is None or not directory.exists(),

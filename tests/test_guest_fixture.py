@@ -1,6 +1,7 @@
 """Offline contracts only. Real kernel enforcement is mandatory in VM CI."""
 import importlib.util
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -67,6 +68,15 @@ class GuestFixtureTests(unittest.TestCase):
         self.assertEqual(guest.canonical_firewall(expected), guest.canonical_firewall(observed))
         observed['nftables'].pop()
         self.assertNotEqual(guest.canonical_firewall(expected), guest.canonical_firewall(observed))
+
+    def test_denied_prefix_union_is_already_canonical_for_nft_interval_merging(self):
+        networks = [ipaddress.ip_network(value) for value in guest.DENIED_V4]
+        self.assertEqual(networks, list(ipaddress.collapse_addresses(networks)))
+        self.assertEqual([ipaddress.ip_network('224.0.0.0/3')], list(ipaddress.collapse_addresses(
+            [ipaddress.ip_network('224.0.0.0/4'), ipaddress.ip_network('240.0.0.0/4')])))
+        for address in ('224.0.0.0', '239.255.255.255', '240.0.0.0', '255.255.255.255'):
+            self.assertTrue(any(ipaddress.ip_address(address) in network for network in networks))
+        self.assertFalse(any(ipaddress.ip_address('93.184.216.34') in network for network in networks))
 
     def test_default_docker_fixture_remains_network_none_read_only_no_extra_labels(self):
         backend = DockerFixtureBackend()
@@ -281,6 +291,18 @@ class GuestFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'not this disposable boot'):
                 guest_script.install_packages(NONCE, {'packages': []})
             run.assert_not_called()
+
+    def test_fedora_service_owns_selinux_flag_and_actual_engine_enforcement_is_required(self):
+        self.assertNotIn('selinux-enabled', guest_script.DOCKER_CONFIGURATION)
+        self.assertEqual('uas-remap', guest_script.DOCKER_CONFIGURATION['userns-remap'])
+        self.assertEqual('overlay2', guest_script.DOCKER_CONFIGURATION['storage-driver'])
+        with patch.object(guest_script, 'run', side_effect=['Enforcing', '["name=selinux", "name=userns"]']):
+            guest_script.require_engine_security()
+        for options in ('[]', '["name=selinux"]', '["name=userns"]', '{}'):
+            with patch.object(guest_script, 'run', side_effect=['Enforcing', options]), self.assertRaises(AssertionError):
+                guest_script.require_engine_security()
+        with patch.object(guest_script, 'run', return_value='Permissive'), self.assertRaises(AssertionError):
+            guest_script.require_engine_security()
 
     def test_guest_verifies_local_repository_metadata_before_package_effects(self):
         with tempfile.TemporaryDirectory() as temporary:
