@@ -106,7 +106,7 @@ class PeerTests(unittest.TestCase):
             before = self.state()["traffic"]["request-1"]
             self.assertEqual("QUEUED", before["status"])
             self.assertIsNone(before["response_started_at"])
-            self.assertEqual("UNCONFIRMED", next(iter(self.state()["offers"].values()))["outcome"])
+            self.assertEqual("UNCONFIRMED", self.state()["offers"]["request-1"]["bob"]["outcome"])
             return accept(envelope)
         self.b.receiver.accept = inspect
         self.hub.deliver(self.b)
@@ -228,6 +228,19 @@ class PeerTests(unittest.TestCase):
         self.assert_code("STALE_CONNECTION", lambda: self.hub.observe(old, Readiness.SAFE))
         self.assert_code("CONTEXT_MISMATCH", lambda: self.hub.connect("bad-context", "bob", "bob-2", self.b.receiver, context_generation=2))
 
+    def test_retired_incarnation_cannot_replay_old_confirmation_as_current(self):
+        self.request()
+        self.ready()
+        self.command("accept")
+        previous = self.b
+        self.b = self.connect("bob", 2)
+        self.ready()
+        before = self.hub.snapshot()
+        self.assert_code("INCARNATION_RETIRED", lambda: self.hub.connect(
+            "retired-attach", "bob", "bob-1", previous.receiver))
+        self.assertEqual(before, self.hub.snapshot())
+        self.command("complete")
+
     def test_receiver_rejects_changed_envelope_or_binding_even_after_reopen(self):
         self.request()
         self.ready()
@@ -255,7 +268,7 @@ class PeerTests(unittest.TestCase):
         self.assert_code("FORBIDDEN", lambda: self.hub.deliver(self.b))
         self.assertEqual(1, len(self.b.receiver.inbox()))
         self.assertIsNone(self.state()["traffic"]["request-1"]["response_started_at"])
-        self.assertEqual("UNCONFIRMED", next(iter(self.state()["offers"].values()))["outcome"])
+        self.assertEqual("UNCONFIRMED", self.state()["offers"]["request-1"]["bob"]["outcome"])
         self.b.receiver.accept = accept
         self.ready()
         self.assertEqual(1, len(self.b.receiver.inbox()))
@@ -350,27 +363,107 @@ class PeerTests(unittest.TestCase):
             hub.submit(b, RequestCommand("done", "run-1", 1, "request-0", "complete"))
             accept(2)
 
-    def test_state_size_bound_rolls_back_and_remains_readable_after_restart(self):
+    def test_admission_reserves_delivery_capacity_for_broadcast_and_restart(self):
         text = "x" * 16_384
+        admitted = []
         for index in range(100):
             before = self.hub.snapshot()
             try:
-                self.hub.submit(self.a, Message(f"bounded-{index}", "run-1", 1, "bob", text))
+                id = f"bounded-{index}"
+                self.hub.submit(self.a, Message(id, "run-1", 1, "*", text))
+                admitted.append(id)
             except LedgerError as error:
-                self.assertEqual("INVALID_JSON", error.code)
+                self.assertEqual("QUEUE_CAPACITY_EXHAUSTED", error.code)
                 self.assertEqual(before, self.hub.snapshot())
                 break
         else:
-            self.fail("Room state should enforce its existing one-MiB bound")
-        self.hub.observe(self.b, Readiness.SAFE)
+            self.fail("Room admission must reserve lifecycle capacity")
+        self.assertGreater(len(admitted), 1)
+        self.ledger.close()
+        self.ledger = RoomLedger(self.root / "room.db", "alpha")
+        self.hub = FixturePeerHub(self.ledger)
+        self.b = self.connect("bob", attachment="bounded-restart-bob")
+        self.c = self.connect("carol", attachment="bounded-restart-carol")
+        for connection in (self.b, self.c):
+            self.ready(connection)
+            self.assertEqual(admitted, [item["id"] for item in connection.receiver.inbox()])
+        for item in self.state()["traffic"].values():
+            self.assertEqual({"bob", "carol"}, set(item["deliveries"]))
         before = self.hub.snapshot()
-        self.assert_code("INVALID_JSON", lambda: self.hub.deliver(self.b))
-        self.assertEqual(before, self.hub.snapshot())
-        self.assertEqual([], self.b.receiver.inbox())
-        self.assertEqual({}, self.state()["offers"])
         self.ledger.close()
         self.ledger = RoomLedger(self.root / "room.db", "alpha")
         self.assertEqual(before, self.ledger.snapshot())
+
+    def test_admission_reserves_request_completion_and_cancellation_capacity(self):
+        admitted = []
+        for index in range(100):
+            before = self.hub.snapshot()
+            try:
+                id = f"request-bounded-{index}"
+                self.hub.submit(self.a, WorkRequest(id, "run-1", 1, "bob", "x" * 16_384))
+                admitted.append(id)
+            except LedgerError as error:
+                self.assertEqual("QUEUE_CAPACITY_EXHAUSTED", error.code)
+                self.assertEqual(before, self.hub.snapshot())
+                break
+        else:
+            self.fail("request budget should be bounded")
+        self.assertGreater(len(admitted), 1)
+        # An unknown receiver effect at saturation must not consume the budget
+        # needed to present retained responsibility to a replacement process.
+        accept = self.b.receiver.accept
+        self.b.receiver.accept = lambda envelope: (accept(envelope), None)[1]
+        self.assert_code("UNCONFIRMED_DELIVERY", lambda: self.ready())
+        self.assertEqual(1, len(self.b.receiver.inbox()))
+        self.assertIsNone(self.state()["traffic"][admitted[0]]["response_started_at"])
+        # Replacement uses maximum allowed incarnation and attachment IDs.
+        receiver = FixtureReceiver(self.root / "wide.db", "alpha", "bob", "x" * 256)
+        self.receivers.append(receiver)
+        self.b = self.hub.connect("y" * 256, "bob", "x" * 256, receiver)
+        self.ready()
+        self.assertEqual(admitted, [item["id"] for item in receiver.inbox()])
+        self.assertEqual(1, self.state()["offers"][admitted[0]]["bob"]["superseded_unconfirmed"]["count"])
+        # Hold maximum encoded reasons on every accepted request at once.
+        for id in admitted:
+            self.command("block", id, reason="\n" * 8_192)
+        for index, id in enumerate(admitted):
+            if index % 2:
+                self.hub.cancel("cancel-" + id, id, "x" * 16_384)
+            else:
+                self.command("accept", id)
+                self.command("complete", id)
+        self.assertTrue(all(item["status"] in {"COMPLETED", "CANCELLED"}
+                            for item in self.state()["traffic"].values()))
+        before = self.hub.snapshot()
+        self.ledger.close()
+        self.ledger = RoomLedger(self.root / "room.db", "alpha")
+        self.assertEqual(before, self.ledger.snapshot())
+
+    def test_payload_limit_accounts_for_json_escaping_and_utf8(self):
+        for index, (text, extra) in enumerate((("\n" * 8_192, "\n"), ("😀" * 4_096, "😀"))):
+            self.hub.submit(self.a, Message(f"max-text-{index}", "run-1", 1, "bob", text))
+            before = self.hub.snapshot()
+            self.assert_code("INVALID_PAYLOAD", lambda: self.hub.submit(
+                self.a, Message(f"oversize-text-{index}", "run-1", 1, "bob", text + extra)))
+            self.assertEqual(before, self.hub.snapshot())
+
+    def test_replaced_unknown_offer_remains_explicit_in_projection_and_ledger(self):
+        self.request()
+        accept = self.b.receiver.accept
+        self.b.receiver.accept = lambda envelope: (accept(envelope), None)[1]
+        self.assert_code("UNCONFIRMED_DELIVERY", lambda: self.ready())
+        previous = copy.deepcopy(self.state()["offers"]["request-1"]["bob"])
+        self.b = self.connect("bob", 2)
+        self.ready()
+        current = self.state()["offers"]["request-1"]["bob"]
+        self.assertEqual("CONFIRMED", current["outcome"])
+        self.assertEqual({"count": 1, "first_seq": previous["offer_seq"], "last_seq": previous["offer_seq"]},
+                         current["superseded_unconfirmed"])
+        historical = self.ledger.replay(previous["offer_seq"] - 1, limit=1)[0]
+        self.assertEqual("UNCONFIRMED", historical["payload"]["outcome"])
+        self.assertEqual(previous["delivery_id"], historical["payload"]["delivery_id"])
+        latest = self.ledger.replay(current["offer_seq"] - 1, limit=1)[0]
+        self.assertEqual(previous["delivery_id"], latest["payload"]["supersedes_unconfirmed"])
 
     @unittest.skipUnless(os.name == "posix", "requires actual SIGKILL and POSIX subprocess pipes")
     def test_real_process_crashes_at_receiver_and_hub_commit_boundaries(self):

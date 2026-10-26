@@ -4,13 +4,14 @@ FixturePeerHub is a trusted, in-process fixture entry point, NOT an authenticate
 endpoint. #63 must supply process-bound authority before a production transport
 can expose this domain. The Hub is the sole owner of traffic state and receipts.
 """
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import uuid
 
-from uas.ledger import Command, Event, LedgerError, Origin, RoomLedger, Transition, _json, _token
+from uas.ledger import Command, Event, LedgerError, Origin, RoomLedger, Transition, MAX_SEQUENCE, _json, _token
 
 
 class Readiness(Enum):
@@ -67,6 +68,8 @@ class FixtureConnection:
     receiver: object
 
 
+MAX_TEXT_BYTES = 16_384
+
 TERMINAL = {"COMPLETED", "DECLINED", "CANCELLED"}
 TRANSITIONS = {
     "accept": ({"DELIVERED", "DEFERRED", "BLOCKED"}, "ACCEPTED"),
@@ -83,7 +86,7 @@ def _now():
 
 
 def _text(value):
-    if type(value) is not str or not value or len(value.encode("utf-8")) > 16_384:
+    if type(value) is not str or not value or len(_json(value).encode("utf-8")) - 2 > MAX_TEXT_BYTES:
         raise LedgerError("INVALID_PAYLOAD")
     return value
 
@@ -156,6 +159,19 @@ class FixturePeerHub:
         binding = {"participant_id": participant_id, "incarnation_id": incarnation_id,
                    "context_generation": context_generation, "attachment_id": operation_id}
         def decide(state, _):
+            current = state["peer_traffic"]["connections"].get(participant_id)
+            if current and current["incarnation_id"] != incarnation_id:
+                # Incarnations are never recycled. Use immutable attachment
+                # history rather than an unbounded list in materialized state.
+                cursor, through = 0, self.ledger.snapshot()["room_seq"]
+                while cursor < through:
+                    events = self.ledger.replay(cursor, through_seq=through, limit=1000)
+                    if any(event["kind"] == "peer.attached"
+                           and event["payload"]["participant_id"] == participant_id
+                           and event["payload"]["incarnation_id"] == incarnation_id
+                           for event in events):
+                        raise LedgerError("INCARNATION_RETIRED")
+                    cursor = events[-1]["room_seq"]
             state["peer_traffic"]["connections"][participant_id] = {
                 **binding, "readiness": Readiness.AMBIGUOUS.value, "observation_id": None}
             return self._transition(state, "peer.attached", binding, binding)
@@ -274,8 +290,51 @@ class FixturePeerHub:
         if command.kind == "peer.work-request":
             record.update(status="QUEUED", response_started_at=None, reason=None, attention=None)
         domain["traffic"][command.id] = record
+        self._reserve_capacity(state)
         return self._transition(state, "peer.submitted", {"traffic_id": command.id, "recipients": recipients},
                                 {"traffic_id": command.id, "admission": "QUEUED"})
+
+    @staticmethod
+    def _reserve_capacity(state):
+        """Admit only if every admitted item can reach its largest projection.
+
+        Reserve all recipient offers/receipts, reasons, clocks and connection
+        replacement metadata before returning QUEUED. Immutable event history
+        grows on disk, not in this bounded projection. Other Room state present
+        at admission is included; its trusted owner must preserve this budget.
+        """
+        reserved = deepcopy(state)
+        domain = reserved["peer_traffic"]
+        widest = "x" * 256  # Ledger token bound, including future incarnations.
+        timestamp = "x" * 32  # UTC ISO timestamp emitted by _now().
+        for participant in domain["definition"]["participants"]:
+            domain["connections"][participant] = {
+                "participant_id": participant, "incarnation_id": widest,
+                "context_generation": 1, "attachment_id": widest,
+                "readiness": "compacting", "observation_id": widest}
+            domain["cursors"][participant] = MAX_SEQUENCE
+        for item in domain["traffic"].values():
+            domain["offers"][item["id"]] = {}
+            for participant in item["recipients"]:
+                receipt = {"delivery_id": "delivery-" + "x" * 64, "digest": "x" * 64,
+                           "participant_id": participant, "incarnation_id": widest,
+                           "context_generation": 1}
+                item["deliveries"][participant] = {**receipt, "confirmed_at": timestamp}
+                domain["offers"][item["id"]][participant] = {
+                    "delivery_id": receipt["delivery_id"], "digest": receipt["digest"],
+                    "incarnation_id": widest, "context_generation": 1,
+                    "outcome": "UNCONFIRMED", "offer_seq": MAX_SEQUENCE,
+                    "superseded_unconfirmed": {"count": MAX_SEQUENCE, "first_seq": MAX_SEQUENCE,
+                                                "last_seq": MAX_SEQUENCE}}
+            if item["kind"] == "peer.work-request":
+                item.update(status="COMPLETED", response_started_at=timestamp,
+                            reason="x" * MAX_TEXT_BYTES, attention="BLOCKED")
+        try:
+            _json(reserved)
+        except LedgerError as error:
+            if error.code != "INVALID_JSON":
+                raise
+            raise LedgerError("QUEUE_CAPACITY_EXHAUSTED") from error
 
     def _request_command(self, state, connection, command):
         domain, payload = state["peer_traffic"], command.payload
@@ -380,10 +439,25 @@ class FixturePeerHub:
                 request = state["peer_traffic"]["traffic"][envelope["id"]]
                 if request.get("status") in TERMINAL:
                     raise LedgerError("DELIVERY_FENCED")
-                state["peer_traffic"]["offers"][envelope["delivery_id"]] = {
-                    "envelope": envelope, "digest": envelope_digest, "outcome": "UNCONFIRMED"}
-                return self._transition(state, "peer.delivery.offered", {"delivery_id": envelope["delivery_id"]},
-                                        {"delivery_id": envelope["delivery_id"]})
+                offers = state["peer_traffic"]["offers"].setdefault(envelope["id"], {})
+                previous = offers.get(connection.participant_id)
+                history = deepcopy(previous["superseded_unconfirmed"]) if previous else {
+                    "count": 0, "first_seq": 0, "last_seq": 0}
+                superseded = None
+                if previous and previous["outcome"] == "UNCONFIRMED":
+                    history["count"] += 1
+                    history["first_seq"] = history["first_seq"] or previous["offer_seq"]
+                    history["last_seq"] = previous["offer_seq"]
+                    superseded = previous["delivery_id"]
+                offer = {"delivery_id": envelope["delivery_id"], "digest": envelope_digest,
+                         "incarnation_id": connection.incarnation_id,
+                         "context_generation": connection.context_generation,
+                         "outcome": "UNCONFIRMED", "offer_seq": self.ledger.snapshot()["room_seq"] + 1,
+                         "superseded_unconfirmed": history}
+                offers[connection.participant_id] = offer
+                return self._transition(state, "peer.delivery.offered", {
+                    **offer, "traffic_id": envelope["id"], "participant_id": connection.participant_id,
+                    "supersedes_unconfirmed": superseded}, {"delivery_id": envelope["delivery_id"]})
             authorize = lambda: self._current(connection, safe=True, observation_id=observation)
             def offer_allowed():
                 current_item = self._state()["traffic"].get(item["id"], {})
@@ -403,9 +477,10 @@ class FixturePeerHub:
                 raise LedgerError("UNCONFIRMED_DELIVERY")
             def confirm(state, _, envelope=envelope, receipt=receipt):
                 domain = state["peer_traffic"]
-                offer = domain["offers"].get(envelope["delivery_id"])
+                offer = domain["offers"].get(envelope["id"], {}).get(connection.participant_id)
                 request = domain["traffic"][envelope["id"]]
-                if not offer or offer["digest"] != receipt["digest"] or request.get("status") in TERMINAL:
+                if (not offer or offer["delivery_id"] != envelope["delivery_id"]
+                        or offer["digest"] != receipt["digest"] or request.get("status") in TERMINAL):
                     raise LedgerError("DELIVERY_FENCED")
                 offer["outcome"] = "CONFIRMED"
                 now = _now()
