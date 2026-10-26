@@ -218,16 +218,19 @@ class ClaudeNativeTests(unittest.TestCase):
         return self.hub.snapshot()['state']['peer_traffic']['traffic'][id]
 
     def test_long_lived_ack_starts_clock_but_working_holds_next_message(self):
-        self.gateway.delay = .8
+        self.gateway.release = threading.Event()
         self.submit()
         self.submit('work-2')
         self.assertIsNone(self.request()['response_started_at'])
-        self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
-        self.assertIsNotNone(self.request()['response_started_at'])
-        self.assertEqual(self.request()['status'], 'DELIVERED', 'runtime input acceptance is not work acceptance')
-        self.assertIs(self.native.observe(), Readiness.BUSY)
-        self.assertEqual(self.deliver()['outcome'], 'HELD')
-        self.assertIsNone(self.request('work-2')['response_started_at'])
+        try:
+            self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
+            self.assertIsNotNone(self.request()['response_started_at'])
+            self.assertEqual(self.request()['status'], 'DELIVERED', 'runtime input acceptance is not work acceptance')
+            self.assertIs(self.native.observe(), Readiness.BUSY)
+            self.assertEqual(self.deliver()['outcome'], 'HELD')
+            self.assertIsNone(self.request('work-2')['response_started_at'])
+        finally:
+            self.gateway.release.set()
         self.native.wait_safe()
         self.assertIsNone(self.native.process.poll())
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')

@@ -44,6 +44,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.split('?')[0] != '/v1/messages':
             self.send_error(404)
             return
+        release = getattr(self.server, 'release', None)
+        if release is not None and not release.wait(timeout=15):
+            self.send_error(504, 'fixture response was never released')
+            return
         time.sleep(getattr(self.server, 'delay', 0))
         text = 'fixture-only-response'
         model = request['model']
