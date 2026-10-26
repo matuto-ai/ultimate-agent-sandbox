@@ -21,6 +21,18 @@ WORKER = Path(__file__).parent / "fixtures/lifecycle_worker.py"
 class FaultBackend(DockerFixtureBackend):
     lose_create_response = False
     fail_volume_remove = False
+    create_drift = None
+
+    def _run(self, arguments, **kwargs):
+        if arguments[0] == "create" and self.create_drift:
+            arguments = list(arguments)
+            if self.create_drift == "pids":
+                arguments[arguments.index("--pids-limit") + 1] = "16"
+            elif self.create_drift == "mount":
+                arguments = [item.removesuffix(",readonly") if item.startswith("type=bind,") else item for item in arguments]
+            else:
+                raise AssertionError("unknown synthetic drift")
+        return super()._run(arguments, **kwargs)
 
     def create(self, state, kind):
         super().create(state, kind)
@@ -41,6 +53,7 @@ class DockerLifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.project = self.root / "project"
         self.project.mkdir()
+        self.project.chmod(0o777)  # Probe must fail EROFS, not discretionary EACCES.
         self.sentinel = self.project / "user-owned.txt"
         self.sentinel.write_text("never delete Project data")
         self.backend = FaultBackend()
@@ -85,6 +98,25 @@ class DockerLifecycleTests(unittest.TestCase):
                 print("Fixture startup logs:", logs.stdout[-4096:], logs.stderr[-4096:], flush=True)
         self.assertEqual("running", result["phase"], result)
 
+    def assert_kernel_boundary(self, container):
+        # Real fixture process, not caller flags or a forged inspect object.
+        probe = json.loads(self.backend._run(["exec", container, "/fixture", "--probe", str(self.project)]))
+        print("Fixture kernel boundary:", json.dumps(probe, sort_keys=True), flush=True)
+        self.assertEqual([], probe["errors"])
+        self.assertEqual((65532, 65532), (probe["uid"], probe["gid"]))
+        self.assertEqual("0" * 16, probe["process"]["CapEff"])
+        self.assertEqual("0" * 16, probe["process"]["CapBnd"])
+        self.assertEqual("1", probe["process"]["NoNewPrivs"])
+        self.assertEqual("2", probe["process"]["Seccomp"])
+        self.assertEqual("67108864", probe["cgroup"]["memory.max"])
+        self.assertEqual("32", probe["cgroup"]["pids.max"])
+        quota, period = map(int, probe["cgroup"]["cpu.max"].split())
+        self.assertEqual(period, quota * 2)
+        self.assertEqual(["lo"], probe["interfaces"])
+        self.assertEqual("ENETUNREACH", probe["network_connect"])
+        self.assertEqual("EROFS", probe["root_write"])
+        self.assertEqual("EROFS", probe["project_write"])
+
     def test_real_lifecycle_persistence_drift_partial_destroy_and_recreation(self):
         # Deliberately unowned sibling volume must survive all supervisor actions.
         unrelated = "uas-unowned-test-" + uuid.uuid4().hex
@@ -99,6 +131,7 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assert_running(first)
         container = first["observed"]["container"]["id"]
         self.wait_started(container, 1)
+        self.assert_kernel_boundary(container)
         actual = json.loads(self.backend._run(["inspect", "--type", "container", container]))[0]
         self.assertEqual("65532:65532", actual["Config"]["User"])
         self.assertEqual("none", actual["HostConfig"]["NetworkMode"])
@@ -122,6 +155,7 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assertEqual(instance, resumed["instance_id"])
         self.assertEqual(container, resumed["observed"]["container"]["id"])
         self.wait_started(container, 2)
+        self.assert_kernel_boundary(container)
         changed = replace(self.spec, config_digest="sha256:" + "d" * 64,
                           profile_digest="sha256:" + "e" * 64)
         staged = self.supervisor.start(changed)
@@ -149,6 +183,54 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assertNotEqual(container, recreated["observed"]["container"]["id"])
         self.assertTrue(tombstone.is_file())
         self.assertTrue(any(scope == "all" for _, scope in self.revocations))
+
+    def test_actual_created_boundary_drift_never_starts_and_remains_destroyable(self):
+        # Deliberately alter only this disposable synthetic fixture. The mount
+        # case contains no real Project data; neither rejected container starts.
+        for drift, reason in (("pids", "RESOURCE_LIMITS"), ("mount", "PROJECT_MOUNT")):
+            with self.subTest(drift=drift):
+                self.backend.create_drift = drift
+                failed = self.supervisor.start(self.spec)
+                self.assertEqual("start_failed", failed["phase"], failed)
+                self.assertEqual("FIXTURE_BOUNDARY_" + reason, failed["leftovers"][0]["reason"])
+                container = failed["observed"]["container"]["id"]
+                actual = json.loads(self.backend._run(["inspect", "--type", "container", container]))[0]
+                self.assertEqual("created", actual["State"]["Status"])
+                self.assertFalse(actual["State"]["Running"])
+                self.assertEqual("", self.backend._run(["logs", container]))
+                again = self.reopen().reconcile()
+                self.assertEqual("start_failed", again["phase"])
+                self.assertEqual(container, again["observed"]["container"]["id"])
+                self.assertEqual("destroyed", self.reopen().destroy()["phase"])
+                self.assertEqual("never delete Project data", self.sentinel.read_text())
+        self.backend.create_drift = None
+        self.assert_running(self.supervisor.start(self.spec))
+
+    def test_actual_resume_and_running_drift_fail_closed_without_silent_repair(self):
+        first = self.supervisor.start(self.spec)
+        self.assert_running(first)
+        container = first["observed"]["container"]["id"]
+        self.wait_started(container, 1)
+        self.assertEqual("stopped", self.supervisor.stop()["phase"])
+        # Tighten, never exhaust, the test container's process cap.
+        self.backend._run(["update", "--pids-limit", "16", container])
+        failed = self.reopen().start(self.spec)
+        self.assertEqual("start_failed", failed["phase"])
+        self.assertFalse(failed["observed"]["container"]["running"])
+        actual = json.loads(self.backend._run(["inspect", "--type", "container", container]))[0]
+        self.assertEqual(16, actual["HostConfig"]["PidsLimit"])
+        self.assertNotIn("fixture start=2", self.backend._run(["logs", container]))
+        # Explicit test-operator repair, not a supervisor rewrite of drift.
+        self.backend._run(["update", "--pids-limit", "32", container])
+        self.assert_running(self.reopen().reconcile())
+        self.wait_started(container, 2)
+        self.assert_kernel_boundary(container)
+        self.backend._run(["update", "--pids-limit", "16", container])
+        failed = self.reopen().reconcile()
+        self.assertEqual("start_failed", failed["phase"])
+        self.assertTrue(failed["observed"]["container"]["running"])
+        self.assertEqual("stopped", self.reopen().stop()["phase"])
+        self.assertEqual("destroyed", self.reopen().destroy()["phase"])
 
     def test_sigkill_after_actual_container_removal_reconciles_remaining_volume(self):
         first = self.supervisor.start(self.spec)

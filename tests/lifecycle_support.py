@@ -53,6 +53,10 @@ class FileFixtureBackend:
         self.path(state, "container").write_text(json.dumps(resource))
         self._after("start")
 
+    def admit(self, state):
+        # Simulator seam only. Real Docker admission is integration-tested.
+        self._before("admit")
+
     def stop(self, state):
         self._before("stop")
         resource = self.inspect(state, "container")

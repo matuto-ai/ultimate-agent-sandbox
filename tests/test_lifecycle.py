@@ -116,6 +116,36 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual("start_failed", result["phase"])
         self.assertEqual([], self.backend.calls)
 
+    def test_boundary_admission_rejection_before_first_start_resume_and_running_reconcile(self):
+        with patch.object(self.backend, "admit", side_effect=LifecycleError("FIXTURE_BOUNDARY_RESOURCE_LIMITS")):
+            failed = self.supervisor.start(self.spec)
+        self.assertEqual("start_failed", failed["phase"])
+        self.assertFalse(failed["observed"]["container"]["running"])
+        self.assertNotIn("start", self.backend.calls)
+        self.assertEqual("FIXTURE_BOUNDARY_RESOURCE_LIMITS", failed["leftovers"][0]["reason"])
+        self.assertEqual("running", self.reopen().reconcile()["phase"])
+        self.assertEqual("stopped", self.supervisor.stop()["phase"])
+        self.backend.calls.clear()
+        with patch.object(self.backend, "admit", side_effect=LifecycleError("FIXTURE_BOUNDARY_PROJECT_MOUNT")):
+            self.assertEqual("start_failed", self.reopen().start(self.spec)["phase"])
+            self.assertNotIn("start", self.backend.calls)
+        self.assertEqual("running", self.reopen().reconcile()["phase"])
+        with patch.object(self.backend, "admit", side_effect=LifecycleError("FIXTURE_BOUNDARY_PROJECT_MOUNT")):
+            failed = self.reopen().reconcile()
+            self.assertEqual("start_failed", failed["phase"])
+            self.assertTrue(failed["observed"]["container"]["running"])
+            self.assertEqual("stopped", self.reopen().stop()["phase"])
+            self.assertEqual("destroyed", self.reopen().destroy()["phase"])
+
+    def test_admission_observation_failure_never_becomes_success_even_if_running(self):
+        self.supervisor.start(self.spec)
+        self.backend.fail_before.add("admit")
+        failed = self.reopen().reconcile()
+        self.assertEqual("start_failed", failed["phase"])
+        self.assertTrue(failed["observed"]["container"]["running"])
+        self.backend.fail_before.clear()
+        self.assertEqual("running", self.reopen().reconcile()["phase"])
+
     def test_human_authorization_required_for_actions_not_payload_claim(self):
         self.authorized = False
         self.error("FORBIDDEN", lambda: self.supervisor.start(self.spec))

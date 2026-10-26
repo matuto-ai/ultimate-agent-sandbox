@@ -1,24 +1,130 @@
 """Docker command/observation contract tests; these are not container evidence."""
 import json
 import subprocess
+import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
 from uas.docker_fixture import DockerFixtureBackend
-from uas.lifecycle import BackendUnknown, OwnershipConflict
+from uas.lifecycle import BackendUnknown, LifecycleError, OwnershipConflict
 
 
 class DockerFixtureContractTests(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.project = Path(self.temp.name) / "project"
+        self.project.mkdir()
         self.backend = DockerFixtureBackend()
         self.state = {"instance_id": "a" * 32, "room_id": "alpha", "spec": {
             "image_id": "sha256:" + "b" * 64, "config_digest": "sha256:" + "c" * 64,
-            "profile_digest": "sha256:" + "d" * 64, "project_paths": ["/tmp/fixture-project"]}}
+            "profile_digest": "sha256:" + "d" * 64, "project_paths": [str(self.project)]}}
 
     def object(self, *, running=False):
         return {"Id": "exact-container-id", "Name": "/" + self.backend.name(self.state, "container"),
                 "Config": {"Labels": self.backend._labels(self.state, "container")},
                 "Image": self.state["spec"]["image_id"], "State": {"Running": running}}
+
+    def admitted_object(self, *, running=False):
+        resource = self.object(running=running)
+        resource["Config"]["User"] = "65532:65532"
+        resource["HostConfig"] = {
+            "ReadonlyRootfs": True, "Privileged": False, "CapDrop": ["ALL"], "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges=true"], "NetworkMode": "none",
+            "PidMode": "", "IpcMode": "private", "UTSMode": "", "UsernsMode": "", "CgroupnsMode": "private",
+            "Devices": [], "DeviceRequests": None, "DeviceCgroupRules": None,
+            "PublishAllPorts": False, "PortBindings": {}, "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "Memory": 67108864, "MemorySwap": 67108864, "NanoCpus": 500000000, "PidsLimit": 32,
+            "LogConfig": {"Type": "local", "Config": {"max-size": "1m", "max-file": "1", "compress": "false"}},
+            "MaskedPaths": ["/proc/kcore", "/proc/keys", "/proc/timer_list", "/sys/firmware"],
+            "ReadonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"]}
+        resource["NetworkSettings"] = {"Networks": {"none": {}}}
+        resource["Mounts"] = [
+            {"Type": "volume", "Name": self.backend.name(self.state, "volume"), "Destination": "/state", "Driver": "local", "RW": True},
+            {"Type": "bind", "Source": str(self.project), "Destination": str(self.project), "RW": False, "Propagation": "rprivate"}]
+        return resource
+
+    def volume_object(self):
+        return {"Name": self.backend.name(self.state, "volume"), "Labels": self.backend._labels(self.state, "volume"),
+                "Driver": "local", "Scope": "local", "Options": None}
+
+    def observed_run(self, resource, volume=None):
+        volume = self.volume_object() if volume is None else volume
+        def run(arguments, **_):
+            if arguments[0] == "info":
+                return '["name=seccomp,profile=builtin"]'
+            if arguments[:3] == ["inspect", "--type", "volume"]:
+                return json.dumps([volume])
+            if arguments[:3] == ["inspect", "--type", "container"]:
+                return json.dumps([resource])
+            return ""
+        return run
+
+    def test_admission_precedes_exact_id_start_and_running_recheck_is_read_only(self):
+        with patch.object(self.backend, "_run", side_effect=self.observed_run(self.admitted_object())) as run:
+            self.backend.start(self.state)
+        self.assertEqual(["start", "exact-container-id"], run.call_args.args[0])
+        self.assertTrue(all(call.args[0][0] in {"inspect", "info"} for call in run.call_args_list[:-1]))
+        with patch.object(self.backend, "_run", side_effect=self.observed_run(self.admitted_object(running=True))) as run:
+            self.backend.start(self.state)
+        self.assertTrue(all(call.args[0][0] in {"inspect", "info"} for call in run.call_args_list))
+
+    def test_boundary_drift_rejects_start_without_mutation_but_preserves_cleanup(self):
+        mutations = [
+            ("USER", lambda r: r["Config"].update(User="0:0")),
+            ("ROOTFS", lambda r: r["HostConfig"].update(ReadonlyRootfs=False)),
+            ("ROOTFS", lambda r: r["HostConfig"].update(Privileged=True)),
+            ("CAPABILITIES", lambda r: r["HostConfig"].update(CapAdd=["SYS_ADMIN"])),
+            ("SECURITY_OPTIONS", lambda r: r["HostConfig"].update(SecurityOpt=["seccomp=unconfined"])),
+            ("SECURITY_OPTIONS", lambda r: r["HostConfig"].update(SecurityOpt=["label=disable"])),
+            ("NETWORK", lambda r: r["HostConfig"].update(NetworkMode="host")),
+            ("NETWORK", lambda r: r["NetworkSettings"]["Networks"].update(bridge={})),
+            ("NAMESPACES", lambda r: r["HostConfig"].update(PidMode="host")),
+            ("NAMESPACES", lambda r: r["HostConfig"].update(IpcMode="host")),
+            ("NAMESPACES", lambda r: r["HostConfig"].update(UsernsMode="host")),
+            ("DEVICES", lambda r: r["HostConfig"].update(Devices=[{"PathOnHost": "/dev/kvm"}])),
+            ("PORTS", lambda r: r["HostConfig"].update(PublishAllPorts=True)),
+            ("RESTART_POLICY", lambda r: r["HostConfig"].update(RestartPolicy={"Name": "always", "MaximumRetryCount": 0})),
+            ("RESOURCE_LIMITS", lambda r: r["HostConfig"].update(Memory=0)),
+            ("RESOURCE_LIMITS", lambda r: r["HostConfig"].update(PidsLimit=-1)),
+            ("RESOURCE_LIMITS", lambda r: r["HostConfig"].update(NanoCpus=0)),
+            ("LOG_LIMITS", lambda r: r["HostConfig"]["LogConfig"]["Config"].update({"max-file": "2"})),
+            ("MASKED_PATHS", lambda r: r["HostConfig"].update(MaskedPaths=[])),
+            ("READONLY_PATHS", lambda r: r["HostConfig"].update(ReadonlyPaths=[])),
+            ("PROJECT_MOUNT", lambda r: r["Mounts"][1].update(RW=True)),
+            ("PROJECT_MOUNT", lambda r: r["Mounts"][1].update(Source="/var/run/docker.sock")),
+            ("PROJECT_MOUNT", lambda r: r["Mounts"][1].update(Propagation="rshared")),
+            ("STATE_MOUNT", lambda r: r["Mounts"][0].update(Name="other-room-state")),
+            ("MOUNTS", lambda r: r["Mounts"].append(dict(r["Mounts"][1]))),
+        ]
+        for control, mutate in mutations:
+            resource = self.admitted_object(); mutate(resource)
+            with self.subTest(control=control), patch.object(self.backend, "_run", side_effect=self.observed_run(resource)) as run:
+                with self.assertRaises(LifecycleError) as raised:
+                    self.backend.start(self.state)
+                self.assertEqual("FIXTURE_BOUNDARY_" + control, raised.exception.code)
+                self.assertTrue(all(call.args[0][0] in {"inspect", "info"} for call in run.call_args_list))
+                self.assertIsNotNone(self.backend.inspect(self.state, "container"))
+                self.backend.remove(self.state, "container")
+                self.assertEqual(["rm", "exact-container-id"], run.call_args.args[0])
+
+    def test_missing_metadata_volume_redirection_daemon_failure_and_path_swap_fail_closed(self):
+        resource = self.admitted_object(); del resource["HostConfig"]["PidsLimit"]
+        with patch.object(self.backend, "_run", side_effect=self.observed_run(resource)):
+            with self.assertRaises(BackendUnknown): self.backend.start(self.state)
+        volume = self.volume_object(); volume["Options"] = {"type": "none", "device": "/", "o": "bind"}
+        with patch.object(self.backend, "_run", side_effect=self.observed_run(self.admitted_object(), volume)):
+            with self.assertRaises(LifecycleError) as raised: self.backend.start(self.state)
+            self.assertEqual("FIXTURE_BOUNDARY_STATE_VOLUME", raised.exception.code)
+        with patch.object(self.backend, "_run", return_value="[]") as run:
+            with self.assertRaises(LifecycleError) as raised: self.backend.start(self.state)
+            self.assertEqual("FIXTURE_BOUNDARY_DAEMON_SECCOMP", raised.exception.code)
+            self.assertEqual(1, run.call_count)
+        self.project.rmdir(); self.project.symlink_to(self.temp.name, target_is_directory=True)
+        with patch.object(self.backend, "_run") as run:
+            with self.assertRaises(LifecycleError): self.backend.start(self.state)
+            run.assert_not_called()
 
     def test_only_explicit_not_found_means_absence(self):
         name = self.backend.name(self.state, "container")

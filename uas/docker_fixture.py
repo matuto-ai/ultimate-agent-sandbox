@@ -6,7 +6,8 @@ All subprocess arguments are owned argv entries; no shell and no host pruning.
 import json
 import subprocess
 
-from .lifecycle import BackendUnknown, OwnershipConflict
+from .launch import observe_path
+from .lifecycle import BackendUnknown, LifecycleError, OwnershipConflict
 
 
 class DockerFixtureBackend:
@@ -50,14 +51,14 @@ class DockerFixtureBackend:
                 self.LABEL + ".config": state["spec"]["config_digest"],
                 self.LABEL + ".profile": state["spec"]["profile_digest"]}
 
-    def inspect(self, state, kind):
+    def _inspect_object(self, state, kind):
         name = self.name(state, kind)
         output = self._run(["inspect", "--type", kind, name], missing_ok=True)
         if output is None:
             return None
         try:
             objects = json.loads(output)
-            if len(objects) != 1:
+            if type(objects) is not list or len(objects) != 1 or type(objects[0]) is not dict:
                 raise BackendUnknown()
             resource = objects[0]
             labels = (resource["Config"].get("Labels") if kind == "container" else resource.get("Labels")) or {}
@@ -66,12 +67,100 @@ class DockerFixtureBackend:
             # A similarly labelled resource returned for another name is not ours.
             if resource["Name"].lstrip("/") != name:
                 raise OwnershipConflict()
-            if kind == "container":
-                return {"id": resource["Id"], "name": name, "running": resource["State"]["Running"],
-                        "image_id": resource["Image"], "labels": labels}
-            return {"id": name, "name": name, "labels": labels}
-        except (KeyError, TypeError, ValueError) as error:
+            return resource
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
             raise BackendUnknown() from error
+
+    def inspect(self, state, kind):
+        # Ownership observation remains available for status and safe cleanup
+        # even when execution admission fails. Never hide rejected resources.
+        resource = self._inspect_object(state, kind)
+        if resource is None:
+            return None
+        name = self.name(state, kind)
+        try:
+            if kind == "container":
+                if type(resource["State"]["Running"]) is not bool:
+                    raise BackendUnknown()
+                return {"id": resource["Id"], "name": name, "running": resource["State"]["Running"],
+                        "image_id": resource["Image"], "labels": resource["Config"].get("Labels") or {}}
+            return {"id": name, "name": name, "labels": resource.get("Labels") or {}}
+        except (KeyError, TypeError) as error:
+            raise BackendUnknown() from error
+
+    @staticmethod
+    def _require(value, control):
+        if not value:
+            raise LifecycleError("FIXTURE_BOUNDARY_" + control)
+
+    def _project_paths(self, state):
+        for path in state["spec"]["project_paths"]:
+            result = observe_path(path, control="fixture.project")
+            self._require(result["status"] == "observed", "PROJECT_PATH")
+
+    def admit(self, state):
+        """Inspect real owned resources before execution, never caller evidence.
+
+        This gates only the conservative network-none fixture. It is NOT a
+        production qualification, a mount lease, or continuous drift watchdog.
+        The Docker daemon and fixture image are trusted test infrastructure.
+        """
+        self._project_paths(state)
+        try:
+            security = json.loads(self._run(["info", "--format", "{{json .SecurityOptions}}"]))
+            self._require(type(security) is list and "name=seccomp,profile=builtin" in security,
+                          "DAEMON_SECCOMP")
+        except (TypeError, ValueError) as error:
+            raise BackendUnknown() from error
+        volume = self._inspect_object(state, "volume")
+        resource = self._inspect_object(state, "container")
+        if volume is None or resource is None:
+            raise BackendUnknown()
+        required = self._require
+        try:
+            required(volume["Driver"] == "local" and volume["Scope"] == "local"
+                     and volume.get("Options") in (None, {}), "STATE_VOLUME")
+            config, host = resource["Config"], resource["HostConfig"]
+            required(resource["Image"] == state["spec"]["image_id"], "IMAGE")
+            required(config["User"] == "65532:65532", "USER")
+            required(host["ReadonlyRootfs"] is True and host["Privileged"] is False, "ROOTFS")
+            required(host["CapDrop"] == ["ALL"] and host["CapAdd"] in (None, []), "CAPABILITIES")
+            required(host["SecurityOpt"] in (["no-new-privileges=true"], ["no-new-privileges"]), "SECURITY_OPTIONS")
+            required(host["NetworkMode"] == "none"
+                     and set(resource["NetworkSettings"]["Networks"]) == {"none"}, "NETWORK")
+            required(host["PidMode"] == "" and host["IpcMode"] == "private" and host["UTSMode"] == ""
+                     and host["UsernsMode"] == "" and host["CgroupnsMode"] == "private", "NAMESPACES")
+            required(all(host[key] in (None, []) for key in ("Devices", "DeviceRequests", "DeviceCgroupRules")), "DEVICES")
+            required(host["PublishAllPorts"] is False and host["PortBindings"] in (None, {}), "PORTS")
+            required(host["RestartPolicy"] == {"Name": "no", "MaximumRetryCount": 0}, "RESTART_POLICY")
+            required(all(type(host[key]) is int and host[key] == value for key, value in {
+                "Memory": 64 * 1024 * 1024, "MemorySwap": 64 * 1024 * 1024,
+                "NanoCpus": 500_000_000, "PidsLimit": 32}.items()), "RESOURCE_LIMITS")
+            required(host["LogConfig"] == {"Type": "local", "Config": {
+                "max-size": "1m", "max-file": "1", "compress": "false"}}, "LOG_LIMITS")
+            required({"/proc/kcore", "/proc/keys", "/proc/timer_list", "/sys/firmware"}
+                     <= set(host["MaskedPaths"]), "MASKED_PATHS")
+            required({"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}
+                     <= set(host["ReadonlyPaths"]), "READONLY_PATHS")
+            mounts = resource["Mounts"]
+            required(type(mounts) is list and len(mounts) == len(state["spec"]["project_paths"]) + 1, "MOUNTS")
+            destinations = set()
+            for mount in mounts:
+                destination = mount["Destination"]
+                required(destination not in destinations, "MOUNTS")
+                destinations.add(destination)
+                if destination == "/state":
+                    required(mount["Type"] == "volume" and mount["Name"] == self.name(state, "volume")
+                             and mount["Driver"] == "local" and mount["RW"] is True, "STATE_MOUNT")
+                else:
+                    required(destination in state["spec"]["project_paths"] and mount["Type"] == "bind"
+                             and mount["Source"] == destination and mount["RW"] is False
+                             and mount["Propagation"] == "rprivate", "PROJECT_MOUNT")
+            required(destinations == {"/state", *state["spec"]["project_paths"]}, "MOUNTS")
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            # Missing/malformed daemon data never becomes an accepted default.
+            raise BackendUnknown() from error
+        return resource
 
     def create(self, state, kind):
         # Reconcile an uncertain prior create before attempting another effect.
@@ -81,6 +170,7 @@ class DockerFixtureBackend:
         if kind == "volume":
             self._run(["volume", "create", *labels, self.name(state, kind)])
             return
+        self._project_paths(state)
         mounts = ["--mount", "type=volume,source=" + self.name(state, "volume") + ",target=/state"]
         for path in state["spec"]["project_paths"]:
             # Fixture paths use the same absolute host/container path, read-only.
@@ -90,18 +180,21 @@ class DockerFixtureBackend:
             mounts += ["--mount", f"type=bind,source={path},target={path},readonly"]
         self._run(["create", "--name", self.name(state, kind), *labels,
                    "--user", "65532:65532", "--read-only", "--network", "none",
+                   "--ipc", "private", "--cgroupns", "private",
                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges=true",
-                   "--memory", "64m", "--cpus", "0.5", "--pids-limit", "32",
+                   "--memory", "64m", "--memory-swap", "64m", "--cpus", "0.5", "--pids-limit", "32",
                    "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
                    "--log-opt", "compress=false",
                    *mounts, state["spec"]["image_id"]])
 
     def start(self, state):
-        resource = self.inspect(state, "container")
-        if resource is None:
+        # Repeat actual admission immediately before the effect. Direct backend
+        # callers cannot bypass it, and a name replacement cannot redirect start.
+        resource = self.admit(state)
+        if resource["State"]["Running"] is False:
+            self._run(["start", resource["Id"]])
+        elif resource["State"]["Running"] is not True:
             raise BackendUnknown()
-        if not resource["running"]:
-            self._run(["start", resource["id"]])
 
     def stop(self, state):
         resource = self.inspect(state, "container")
