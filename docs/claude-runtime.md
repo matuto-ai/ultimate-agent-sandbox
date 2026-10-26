@@ -205,3 +205,31 @@ Custom development channels are also ignored in print mode. SDK initialization,
 MCP connected, stdout silence, and this diagnostic's process-alive observation
 remain insufficient. The production-safe replacement for synthetic refresh is
 still unqualified; no paid no-op or automatic model polling is introduced.
+
+### Target responsiveness qualification
+
+The diagnostic suspends only the fixture-owned print process with
+`SIGSTOP`, confirms Linux `/proc/<owned-pid>/status` reports it stopped, waits
+longer than two seconds, and runs two fresh public listing commands. It then
+continues that same process without sending input. No model request, private
+Claude state file, native mode change, or readiness promotion is involved.
+The [actual stopped-target run 40349950780](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40349950780/job/121666968422)
+passed 29 tests on head `711c355b3ce0ec299eaba46a41b19873bf384a54`, tree
+`9f7fbeac8de1364d16bcf05713d26688ccc465f4`, test-merge
+`7cec72b9d2cbae07f1c9a6cdc52a4143ab9cd197`. Both fresh listing commands
+returned the **exact stopped PID/session as `idle`**, after 2.390 and 2.602
+seconds stopped. Each query completed in approximately 0.2 seconds. The same
+identity was listed idle before the stop and after continuation; all four
+queries made zero gateway requests, and the receiver remained ambiguous.
+The final regression asserts this pinned negative result explicitly.
+
+**Readiness promotion is blocked.** A query's completion time is not a fresh
+response from the target. Checking the owned process's kernel state can reject
+this specific stopped condition; exit and PID identity checks can reject other
+process-loss/replacement cases. They cannot establish responsiveness of a live
+but hung event loop. No documented freshness/target-response field was exposed
+by this listing, so listing plus process liveness does not satisfy the
+unresponsive-hold requirement. Neither synthetic bootstrap nor its two-second
+refresh policy is replaced. Unknown handoff intents remain held. Issue #71 still
+needs a qualified non-model target-response seam before production-safe receive
+can be claimed; no private protocol bridge or alternate native mode is added.
