@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 from uas.claude_runtime import ClaudeSignals, FixtureClaudeReceiver, ClaudeUnavailable
 from uas.peer import Readiness
+from uas.ledger import LedgerError
 
 
 class PermissionReceiverSourceTests(unittest.TestCase):
@@ -101,7 +102,7 @@ class PermissionReceiverSourceTests(unittest.TestCase):
         plain.attention(self.attention)
         self.assertTrue(plain.fenced)
 
-    def test_unknown_intent_blocks_observation_without_probe_or_mutation(self):
+    def test_native_idle_does_not_clear_unknown_intent_or_authorize_delivery(self):
         self.allow(); self.s.event(self.result); self.s.event(self.terminal)
         receiver = FixtureClaudeReceiver.__new__(FixtureClaudeReceiver)
         receiver.signals = self.s
@@ -114,9 +115,18 @@ class PermissionReceiverSourceTests(unittest.TestCase):
         receiver.db.execute('INSERT INTO handoffs VALUES(NULL,0)')
         self.assertIs(receiver.observe(), Readiness.AMBIGUOUS)
         receiver.timeout = 1
-        with self.assertRaisesRegex(ClaudeUnavailable, 'unconfirmed native handoff'):
-            receiver.wait_safe()
         receiver._probe.assert_not_called()
+        receiver.wait_safe()  # Native-only liveness/idle, not journal/delivery authority.
+        receiver._probe.assert_called_once()
+        self.assertIs(receiver.observe(), Readiness.AMBIGUOUS)
+        receiver.scope = {'room_id': 'alpha', 'participant_id': 'claude', 'run_id': 'run-1',
+                          'generation': 1, 'context_generation': 1}
+        receiver.incarnation_id = 'fixture-incarnation'
+        receiver._write = Mock()
+        with self.assertRaisesRegex(LedgerError, 'NATIVE_NOT_SAFE'):
+            receiver.accept({**receiver.scope, 'incarnation_id': receiver.incarnation_id})
+        receiver._write.assert_not_called()
+        receiver._probe.assert_called_once()
         self.assertEqual(receiver.db.execute('SELECT * FROM handoffs').fetchall(), [(None, 0)])
 
     def test_probe_requires_new_exact_idle_observation_after_terminal(self):

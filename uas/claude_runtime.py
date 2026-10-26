@@ -846,8 +846,6 @@ class FixtureClaudeReceiver(_ClaudeJournal):
         """Bounded test/controller wait using non-model checks, never clears intents."""
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
-            if self._unknown():
-                raise ClaudeUnavailable('unconfirmed native handoff remains held')
             if self._probe() is Readiness.SAFE:
                 return
             with self.condition:
