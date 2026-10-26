@@ -226,7 +226,13 @@ class GuestFixtureTests(unittest.TestCase):
         root = Path('/tmp/owned-vm')
         args = runner.arguments(root, root / 'guest.qcow2', root / 'seed.iso', root / 'payload.iso', root / 'quota.raw')
         self.assertEqual('none', args[args.index('-nic') + 1])
-        self.assertEqual(['virtio-blk-pci,drive=quota,serial=uas-quota'], [args[i+1] for i, arg in enumerate(args) if arg == '-device'])
+        devices = [args[i+1] for i, arg in enumerate(args) if arg == '-device']
+        self.assertEqual(['virtio-blk-pci,drive=os,bootindex=1', 'virtio-blk-pci,drive=seed',
+                          'virtio-blk-pci,drive=payload', 'virtio-blk-pci,drive=quota,serial=uas-quota',
+                          'isa-debugcon,iobase=0x402,chardev=firmware'], devices)
+        self.assertEqual('strict=on,menu=off', args[args.index('-boot') + 1])
+        self.assertTrue(all('if=none,id=' in args[i+1] for i, arg in enumerate(args) if arg == '-drive'))
+        self.assertEqual('file,id=firmware,path=/tmp/owned-vm/firmware.log', args[args.index('-chardev') + 1])
         self.assertFalse(any(value in args for value in ('-netdev', '-virtfs', '-fsdev', '-enable-kvm')))
         self.assertTrue(all(value.startswith('file=/tmp/owned-vm/') for i, value in enumerate(args) if i and args[i-1] == '-drive'))
         report = {'version': 1, 'nonce': NONCE, 'checks': {name: {'status': 'passed'} for name in runner.REQUIRED}}
@@ -237,3 +243,13 @@ class GuestFixtureTests(unittest.TestCase):
         with patch.dict('os.environ', {}, clear=True), patch.object(runner, 'build_payload') as prepare:
             with self.assertRaises(RuntimeError): runner.main()
             prepare.assert_not_called()
+
+    def test_silent_firmware_boot_fails_early_and_stops_only_owned_qemu(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            process = Mock(); process.poll.return_value = None
+            with patch.object(runner.subprocess, 'Popen', return_value=process), patch.object(runner.time, 'monotonic', side_effect=[0, 181]), patch.object(runner.feasibility, 'stop_process') as stop:
+                with self.assertRaisesRegex(RuntimeError, 'no serial boot output'):
+                    runner.boot(directory, ['unused-offline-placeholder'], NONCE)
+                stop.assert_called_once_with(process)
+            self.assertEqual(('qemu.log', 'serial.log', 'firmware.log'), runner.LOG_FILES)

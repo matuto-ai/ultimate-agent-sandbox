@@ -17,6 +17,8 @@ from prepare_payload import build_payload
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 BOOT_TIMEOUT = 1800
+SILENT_BOOT_TIMEOUT = 180
+LOG_FILES = ('qemu.log', 'serial.log', 'firmware.log')
 REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota',
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
 SOURCES = ('uas/__init__.py', 'uas/lifecycle.py', 'uas/docker_fixture.py', 'uas/guest_fixture.py',
@@ -42,9 +44,24 @@ def seed(directory, nonce, manifest_hash):
 def arguments(directory, overlay, seed_image, payload, quota):
     values = feasibility.qemu_arguments(directory, overlay, seed_image)
     values[values.index('-m') + 1] = '4096'
-    return [*values, '-drive', f'file={payload},format=raw,if=virtio,readonly=on',
-            '-drive', f'file={quota},format=raw,if=none,id=quota',
-            '-device', 'virtio-blk-pci,drive=quota,serial=uas-quota']
+    # Mixing implicit virtio disks with an explicit quota device left firmware
+    # disk order unspecified. PC BIOS may try only one hard disk. Name every
+    # device and give ONLY the verified OS overlay an explicit boot priority.
+    # bootindex must not be combined with legacy -boot order/once parameters.
+    for option in ('-drive', '-boot'):
+        while option in values:
+            index = values.index(option)
+            del values[index:index + 2]
+    values += ['-boot', 'strict=on,menu=off']
+    for name, path, format_, readonly in (('os', overlay, 'qcow2', False),
+            ('seed', seed_image, 'raw', True), ('payload', payload, 'raw', True),
+            ('quota', quota, 'raw', False)):
+        values += ['-drive', f'file={path},format={format_},if=none,id={name}' + (',readonly=on' if readonly else ''),
+                   '-device', f'virtio-blk-pci,drive={name}' + (',bootindex=1' if name == 'os' else '')
+                   + (',serial=uas-quota' if name == 'quota' else '')]
+    # File-only bounded SeaBIOS diagnostics, not a monitor/network listener.
+    return [*values, '-chardev', f'file,id=firmware,path={directory / "firmware.log"}',
+            '-device', 'isa-debugcon,iobase=0x402,chardev=firmware']
 
 
 def parse_report(serial, nonce):
@@ -65,9 +82,13 @@ def boot(directory, values, nonce):
         process = subprocess.Popen(values, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
         try:
             while process.poll() is None:
-                if time.monotonic() - started > BOOT_TIMEOUT:
+                elapsed = time.monotonic() - started
+                if elapsed > BOOT_TIMEOUT:
                     raise RuntimeError('guest install/scenario/poweroff exceeded budget')
-                for name in ('qemu.log', 'serial.log'):
+                serial = directory / 'serial.log'
+                if elapsed > SILENT_BOOT_TIMEOUT and (not serial.exists() or serial.stat().st_size == 0):
+                    raise RuntimeError('guest produced no serial boot output within 180 seconds')
+                for name in LOG_FILES:
                     path = directory / name
                     if path.exists() and path.stat().st_size > feasibility.LOG_LIMIT:
                         raise RuntimeError('guest log budget exceeded')
@@ -89,6 +110,7 @@ def main():
             try:
                 lock = json.loads((HERE / 'fedora-image.json').read_text())
                 image = feasibility.fetch_image(lock, directory)
+                print('VM boundary phase: verified image; preparing signed payload', flush=True)
                 payload = build_payload(directory, ROOT, nonce, source_paths=SOURCES)
                 manifest = payload.parent / 'payload/manifest.json'
                 digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
@@ -96,11 +118,12 @@ def main():
                 feasibility.command(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', str(image), str(overlay)])
                 with quota.open('xb') as source:
                     source.truncate(512 * 1024 * 1024)
+                print('VM boundary phase: payload ready; booting explicit OS disk', flush=True)
                 report, seconds = boot(directory, arguments(directory, overlay, seed(directory, nonce, digest), payload, quota), nonce)
                 print('VM boundary:', json.dumps({'guest': report, 'boot_install_scenario_shutdown_seconds': seconds,
                       'image_sha256': lock['sha256'], 'payload_manifest_sha256': digest, 'no_guest_external_network': True}, sort_keys=True), flush=True)
             except BaseException:
-                for name in ('qemu.log', 'serial.log'):
+                for name in LOG_FILES:
                     path = directory / name
                     if path.exists():
                         with path.open('rb') as source:

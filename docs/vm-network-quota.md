@@ -17,6 +17,11 @@ only inside this disposable guest. Nothing installs this policy on the runner or
 operator's machine. The CI/nonce markers are accidental-use guards, not security
 credentials.
 
+The verified OS overlay is the sole explicitly boot-prioritized disk; payload,
+seed and quota disks never rely on implicit BIOS ordering. Empty serial output
+fails within 180 seconds, with bounded file-only firmware diagnostics, rather
+than consuming the full guest installation budget without evidence of boot.
+
 Payload preparation uses private DNF/RPM/cache/key directories, HTTPS-only bounded
 downloads, the independently pinned Fedora 44 signing certificate, and an exact
 nonce-bound file-hash manifest. Native guest DNF installs with all repositories
