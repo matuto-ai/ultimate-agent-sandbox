@@ -80,16 +80,24 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
   multicast and reserved IPv4 ranges. Sibling bridges use denied private ranges.
   IPv6 is explicitly unavailable in this initial IPv4 fixture and additionally
   denied by policy; dual-stack public egress is not claimed.
+  Creation and admission explicitly require IPv4 gateway mode `nat` and
+  `enable_ip_masquerade=true`. Normal Docker masquerading avoids requiring an
+  operator's upstream router to learn container-subnet routes. It does not change
+  any nft destination deny, publish a port, permit direct routing or enable
+  `nat-unprotected`. A different or missing network option is drift, not a fallback.
 - The guest has only synthetic responders: one reachable public-looking IPv4
   endpoint plus live host-private, host-public, LAN, metadata and sibling decoys.
-  Real packet drops must increment nft counters. This proves actual filtering,
+  Real packet drops must increment their exact attributed rule counters. This proves actual filtering,
   **not real Internet reachability**. It never contacts a real metadata service.
   Sibling health uses Beta's actual assigned bridge-IP responder from inside Beta,
   with the exact application reply, plus its synthetic public connection and fresh
   allocation controls. A trusted host-to-Beta positive is invalid here: the
   deliberate all bridge-to-host deny also blocks its response packets. Alpha's
-  attempts to that same Beta address must time out and increment the exact owned
-  IPv4-forward drop counter; other chains/IPv6 counters cannot satisfy the check.
+  attempts to that same Beta address must time out and increment the exact
+  Docker-associated raw PREROUTING drop counter for Beta's verified IP/bridge.
+  Host destinations still independently increment our exact nft input rule;
+  LAN and metadata each independently increment our exact nft IPv4-forward rule.
+  Arbitrary counters, unrelated chains and IPv6 rules cannot satisfy these checks.
   In [run 40359315837](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40359315837),
   the invalid host-origin control produced Beta input drops of 3 packets/180 bytes,
   with both forward counters zero. The harness correction preserves that deny;
@@ -109,6 +117,33 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
   unchanged mandatory SIGKILL/reconcile/Destroy cycles run after the initial
   network/quota/Destroy checks, so an early network failure avoids their cost.
   A success receipt still requires those recovery and cleanup assertions.
+  That diagnostic [run 40368766860](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40368766860)
+  failed with owned-QEMU/temp cleanup confirmed in 532.657 seconds. Alpha's
+  public probe incremented Docker's exact raw ingress DROP to `10.89.1.2` from
+  0 to 2 packets/120 bytes; outbound bridge ACCEPT increased 0 to 1 packet/60
+  bytes. Forward and return route lookups were correct; forwarding was enabled.
+  The NAT table lacked Room masquerading. Kernel AVC query returned no entries,
+  recorded as an explicit diagnostic error, not proof of no SELinux denials.
+  This identifies the NAT-mode/raw direct-IP return-path conflict rather than
+  an owned nft deny or a missing route. Full qualification is still outstanding.
+
+  Docker [documents](https://docs.docker.com/engine/network/firewall-iptables/)
+  that direct container-IP ingress is dropped in raw PREROUTING before filter
+  chains. The earlier requirement that *our* FORWARD rule must drop sibling
+  traffic first was a harness ordering mistake, not the isolation requirement.
+  The correction keeps that rule intact and independently exercised, and
+  attributes the sibling denial to the earlier exact Docker rule instead.
+  Before and after the sibling attempt, the harness re-admits Beta's owned
+  container/network, sole attachment and reciprocal network/endpoint/IP identity.
+  The positive responder must return the exact reply. A successful, at-most-3s
+  `iptables-legacy-save -c -t raw` read must fit 65536 characters and contain
+  exactly one unconditional `PREROUTING -d BetaIP/32 ! -i BetaBridge -j DROP`
+  rule with valid counters. Missing/duplicate rules, extra conditions, alternate
+  identities/targets, malformed/oversized/incomplete output and failed reads
+  fail closed. Alpha must time out and both counters must increase on the
+  unchanged rule, with unchanged Beta identity. No reset, arbitrary-drop or
+  timeout-only fallback is allowed. This standard-NAT correction has not yet
+  passed real qualification; offline parser contracts are not kernel evidence.
   Router setup/responder children enter only the parent's held network namespace
   descriptor. They do not remount sysfs or relax SELinux mount policy.
 - Fresh XFS project-quota roots hold synthetic repository/workspace/checkouts,

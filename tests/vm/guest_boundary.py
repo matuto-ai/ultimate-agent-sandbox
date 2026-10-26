@@ -3,8 +3,10 @@
 import hashlib
 import fcntl
 import io
+import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -69,6 +71,83 @@ def denial_counter(document, chain):
     expect(len(counters) == 1 and type(counters[0].get('packets')) is int
            and counters[0]['packets'] >= 0, 'invalid denial counter')
     return counters[0]['packets']
+
+
+def verified_sibling(backend, state, container_id):
+    """Bind attribution to current admitted owned objects, not an IP guess."""
+    from uas.guest_fixture import network_names
+    resource = backend.admit(state)  # Exact ownership, confinement and no published ports.
+    network = backend._network(state)  # Exact owned labels and admitted NAT options.
+    name, bridge, _ = network_names(state)
+    expect(resource['Id'] == container_id and resource['State']['Running'] is True,
+           'sibling container replaced or stopped')
+    attachments = resource['NetworkSettings']['Networks']
+    expect(set(attachments) == {name} and network is not None, 'sibling network attachment mismatch')
+    attachment = attachments[name]
+    address = str(ipaddress.IPv4Address(attachment['IPAddress']))
+    expect(address == attachment['IPAddress'] and
+           ipaddress.IPv4Address(address) in ipaddress.IPv4Network(backend.subnet), 'sibling address invalid')
+    endpoint = network['Containers'][container_id]
+    expect(attachment['NetworkID'] == network['Id'] and
+           attachment['EndpointID'] == endpoint['EndpointID'] and bool(attachment['EndpointID']) and
+           endpoint['IPv4Address'] == address + '/24', 'sibling endpoint identity mismatch')
+    return {'container': container_id, 'network': network['Id'],
+            'endpoint': attachment['EndpointID'], 'address': address, 'bridge': bridge}
+
+
+def sibling_raw_counter(document, address, bridge):
+    """Accept one exact Docker-associated raw DROP, never an arbitrary drop.
+
+    iptables-save's counter-bearing format is deliberately strict. A new engine
+    representation needs review rather than a permissive fallback.
+    """
+    expect(isinstance(document, str) and len(document) <= 65536, 'raw evidence oversized')
+    expect(str(ipaddress.IPv4Address(address)) == address and
+           re.fullmatch(r'uas[0-9a-f]{12}', bridge), 'invalid sibling identity')
+    lines = [line for line in document.splitlines() if line and not line.startswith('#')]
+    expect(lines and lines[0] == '*raw' and lines[-1] == 'COMMIT' and
+           lines.count('*raw') == 1 and lines.count('COMMIT') == 1, 'incomplete raw evidence')
+    chains = [line.split()[0] for line in lines if line.startswith(':')]
+    expect(chains.count(':PREROUTING') == 1 and len(chains) == len(set(chains)), 'ambiguous raw chains')
+    candidates = []
+    for line in lines[1:-1]:
+        if line.startswith(':'):
+            expect(re.fullmatch(r':[A-Z0-9_-]+ (?:ACCEPT|DROP|-) \[[0-9]+:[0-9]+\]', line), 'malformed raw chain')
+            continue
+        match = re.fullmatch(r'\[([0-9]+):([0-9]+)\] (-A .+)', line)
+        expect(match is not None, 'malformed raw rule counters')
+        tokens = match[3].split()
+        # Include altered /32 spelling and extra-condition variants as candidates
+        # so they cannot hide beside an otherwise valid rule for this address.
+        if any(token.split('/')[0] == address for token in tokens):
+            candidates.append((tokens, int(match[1]), int(match[2])))
+    expect(len(candidates) == 1, 'missing or ambiguous sibling raw rule')
+    tokens, packets, byte_count = candidates[0]
+    expect(packets <= 2**64 - 1 and byte_count <= 2**64 - 1, 'raw counters out of range')
+    expect(tokens == ['-A', 'PREROUTING', '-d', address + '/32', '!', '-i', bridge, '-j', 'DROP'],
+           'sibling raw rule has wrong identity or extra conditions')
+    return {'rule': tokens, 'packets': packets, 'bytes': byte_count}
+
+
+def read_sibling_raw(identity):
+    # No counter reset, restore or rule mutation. Oversize/nonzero/timeout fails.
+    return sibling_raw_counter(run('iptables-legacy-save', '-c', '-t', 'raw', timeout=3),
+                               identity['address'], identity['bridge'])
+
+
+def require_sibling_denial(probe, backend, state, container_id):
+    identity = verified_sibling(backend, state, container_id)
+    require_sibling_listener(probe, identity['address'])
+    before = read_sibling_raw(identity)
+    expect(probe('alpha', 'connect', identity['address'] + ':5000')['error'] == 'TIMEOUT',
+           'sibling unexpectedly reachable')
+    after = read_sibling_raw(identity)
+    expect(verified_sibling(backend, state, container_id) == identity, 'sibling identity changed during probe')
+    expect(after['rule'] == before['rule'] and after['packets'] > before['packets'] and
+           after['bytes'] > before['bytes'], 'no exact sibling raw denial or counters reset')
+    evidence = {'identity': identity, 'before': before, 'after': after}
+    print('Sibling raw denial:', json.dumps(evidence), flush=True)
+    return evidence
 
 
 def network_diagnostics(phase, alpha_ip, bridge):
@@ -408,7 +487,8 @@ def scenario(nonce):
     state = json.loads((supervisors['alpha'].directory / 'lifecycle.json').read_text())
     def dropped(chain):
         return denial_counter(backends['alpha']._firewall(state), chain)
-    beta_ip = json.loads(run('docker', 'inspect', containers['beta']))[0]['NetworkSettings']['Networks'][backends['beta']._network_name(json.loads((supervisors['beta'].directory / 'lifecycle.json').read_text()))]['IPAddress']
+    beta_state = json.loads((supervisors['beta'].directory / 'lifecycle.json').read_text())
+    beta_ip = verified_sibling(backends['beta'], beta_state, containers['beta'])['address']
     require_sibling_listener(probe, beta_ip)
     alpha_ip = json.loads(run('docker', 'inspect', containers['alpha']))[0]['NetworkSettings']['Networks'][backends['alpha']._network_name(state)]['IPAddress']
     bridge = network_names(state)[1]
@@ -418,14 +498,16 @@ def scenario(nonce):
     finally:
         network_diagnostics('after-public-positive', alpha_ip, bridge)
     for address, chain in (('10.89.1.1', 'input'), ('93.184.216.35', 'input'),
-                           ('169.254.169.254', 'forward'), ('192.168.50.1', 'forward'), (beta_ip, 'forward')):
+                           ('169.254.169.254', 'forward'), ('192.168.50.1', 'forward')):
         before = dropped(chain)
         expect(probe('alpha', 'connect', address + ':5000')['error'] == 'TIMEOUT', 'blocked destination unexpectedly reachable')
         expect(dropped(chain) > before, 'no exact firewall denial observed')
+    sibling_denial = require_sibling_denial(probe, backends['beta'], beta_state, containers['beta'])
     expect(probe('alpha', 'connect', '[2606:4700:4700::1111]:5000')['error'] == 'ENETUNREACH', 'IPv6 must be unavailable in this IPv4 fixture')
     checks['network'] = {'status': 'passed', 'public_address_synthetic_only': True,
                          'denied': ['host-private', 'host-public', 'LAN', 'metadata', 'sibling'], 'ipv6': 'disabled-and-filtered',
-                         'sibling_positive_vantage': 'beta-own-bridge-address'}
+                         'sibling_positive_vantage': 'beta-own-bridge-address',
+                         'sibling_denial': sibling_denial}
 
     for kind in ('block', 'inode'):
         value = probe('alpha', 'quota-' + kind, str(STORAGE / 'alpha' / 'workspace'))

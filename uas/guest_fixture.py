@@ -367,7 +367,8 @@ class GuestBoundaryBackend(DockerFixtureBackend):
         if value["Name"] != name or any(value.get("Labels", {}).get(k) != v for k, v in labels.items()):
             raise OwnershipConflict()
         expected_options = {"com.docker.network.bridge.name": bridge,
-                            "com.docker.network.bridge.enable_ip_masquerade": "false"}
+                            "com.docker.network.bridge.enable_ip_masquerade": "true",
+                            "com.docker.network.bridge.gateway_mode_ipv4": "nat"}
         if policy and (value["Driver"] != "bridge" or value["Internal"] is not False or value["EnableIPv6"] is not False
                 or value["Options"] != expected_options
                 or value["IPAM"]["Config"] != [{"Subnet": self.subnet, "Gateway": self.gateway}]):
@@ -400,7 +401,8 @@ class GuestBoundaryBackend(DockerFixtureBackend):
             labels[self.LABEL + ".kind"] = "network"
             self._run(["network", "create", "--driver", "bridge", "--subnet", self.subnet,
                        "--gateway", self.gateway, "--opt", "com.docker.network.bridge.name=" + bridge,
-                       "--opt", "com.docker.network.bridge.enable_ip_masquerade=false",
+                       "--opt", "com.docker.network.bridge.enable_ip_masquerade=true",
+                       "--opt", "com.docker.network.bridge.gateway_mode_ipv4=nat",
                        *[item for key, value in labels.items() for item in ("--label", key + "=" + value)], name])
         if self._network(state) is None:
             raise BackendUnknown()
