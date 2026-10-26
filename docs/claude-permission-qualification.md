@@ -1,11 +1,11 @@
 # Deliberate native permission qualification (#71)
 
-**Status: bounded native attention/allow/deny/pending-close fixture qualified.**
+**Status: fixed nonce-Read attention, Hub queue holding and allow-only recovery qualified.**
 The default `FixtureClaudeReceiver` tool-less policy, permanent attention fence,
 durable journal and all automatic CI budgets remain unchanged. An explicit
-nonce-Read diagnostic integration is implemented below but is **not yet native-qualified**.
-It does not qualify production permissions, Supervisor badges, human authority,
-Hub queue retention during native permission waits, or post-permission readiness.
+nonce-Read diagnostic opt-in passed the bounded Hub integration below.
+This does not qualify production permissions, Supervisor badges, human authority
+or recovery for arbitrary tool-bearing profiles.
 
 ## Smallest supported experiment
 
@@ -179,9 +179,8 @@ proof. The historical failures above remain relevant evidence, not hidden retrie
 The qualified standalone runner cannot receive Hub envelopes and never opens or rewrites a handoff
 journal. Its second-input rejection is not proof of Hub traffic retention. The
 existing receiver's unknown intents therefore remain unchanged, not cleared by
-this new mechanism. The separate proposed receiver change below still needs review and native
-qualification: pending attention must differ from
-terminal identity/transport/journal fences; exact replay ACK remains the sole
+the standalone mechanism. The separately qualified receiver integration below
+distinguishes pending attention from terminal identity/transport/journal fences; exact replay ACK remains the sole
 receipt; tool results must not be mistaken for user replay; renewed delivery
 needs fresh liveness and exact idle identity after a qualified terminal state.
 
@@ -193,7 +192,7 @@ is added. Actor identity, Broker capabilities, Forge authority and human merge
 remain enforced at their existing independent seams.
 
 
-## Proposed Hub-connected diagnostic (not yet native-qualified)
+## Hub-connected diagnostic
 
 The explicit `FixtureClaudeReceiver(..., diagnostic_nonce_file=...)` profile uses
 its existing SDK host, RoomLedger-facing receiver and native handoff journal.
@@ -237,8 +236,8 @@ before confirming the second exact replay and clock. Deny and pending-close
 retain the queue. A separately labelled injected-journal fault checks that even
 successful permission resolution cannot erase an unknown intent. Native versions,
 process/session identity, journal receipts, Hub state and fixture provider calls
-are recorded. Their first native round failed as documented below; neither
-source passes nor the previous standalone native run qualify this integration.
+are recorded. The first native round failed; the corrected round below passed.
+Source tests and the earlier standalone run are not substitutes for this proof.
 
 No local namespace/listener/native execution is used for this change. Review the
 exact source before explicitly selecting the mandatory isolated qualification
@@ -277,5 +276,46 @@ Pre-tool missing correlation, new tool-use, duplicate continuation and mismatche
 identity still fence. Text is never used to infer identity. This frame changes
 neither receipt, pending work nor readiness: an exact terminal UUID and subsequent
 fresh non-model liveness/idle remain mandatory. The default tool-less policy is
-unchanged. Source regressions pass; this corrected continuation path has **not
-been requalified natively**, and no safe resumption claim follows from this round.
+unchanged. No safe resumption claim follows from the failed first round; the
+corrected native result is recorded separately below.
+
+
+## Qualified Hub holding and allow-only recovery
+
+[Run 40403924792](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40403924792),
+job `121856667131`, checked out exact source head
+`3274e8835449d7626832f46af39dbe8da4a22b4f`, tree
+`31beaaab063c200eacf6b55058c84220ed2d3558` (not a PR test-merge).
+Pinned SDK 0.3.310/CLI 2.1.310 passed all three standalone scenarios in 6.283
+seconds and all four Hub scenarios in 10.311 seconds, within the unchanged
+three-minute deliberate gate. Complete job-log SHA-256:
+`efd8698513048642308b4c8e8f5d0c586f8da32bba3920d28e225d0462536c96`.
+
+The allow case used the real RoomLedger/FixturePeerHub and shared handoff journal.
+During genuine attention, the second envelope stayed QUEUED without a native
+handoff intent, delivery receipt or response clock. After an explicit correlated
+fixture-controller allow, the native stream was
+`running → requires_action → running → idle → running → idle`.
+The mandatory fresh public SDK control plus exact native idle checks passed
+before resuming delivery. Those probe assertions establish liveness/idle;
+reports retain native state events and receipts, not raw probe reply frames.
+Two distinct exact native replay receipts persisted for the same session and
+receiver incarnation, and only the second receipt started the second response
+clock. Exactly three provider requests occurred: Read, its result, then the
+resumed peer envelope; readiness polling created no synthetic model turn.
+
+Deny left the second envelope held despite native idle (two provider requests).
+Pending-close stopped at requires_action, retained the queue and made only one
+provider request. The explicitly **source-injected** unknown journal row remained
+unresolved after actual native allow, and the second envelope remained held;
+this is not native crash-window fault-injection evidence. All four Hub captures
+were complete, and all seven scenarios reported held-host/native exit and host
+reap after cleanup. Stale and duplicate controller decisions were rejected.
+
+This qualifies only the fixed account-free nonce-Read profile's bounded
+holding/allow-recovery path. Default tool-less policy, irreversible fences,
+unknown-intent responsibility and Actor/Broker/human authority are unchanged.
+Deny recovery, permission replay across restoration, production permissions,
+real inference, native reset, compaction, reconnect, cross-Run admission and
+full #71/#58 acceptance remain unqualified. Earlier failures remain evidence;
+this pass does not retroactively identify the separate startup-loss cause.
