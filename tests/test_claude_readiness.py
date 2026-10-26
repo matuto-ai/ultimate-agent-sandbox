@@ -133,6 +133,7 @@ class ClaudeListingNativeTests(unittest.TestCase):
             time.sleep(.5)
             baseline = self.sample('alive-before-first-input')
             self.assertEqual(baseline['exact_identity_count'], 1)
+            self.assertEqual(len(baseline['related_rows']), 1)
             self.assertEqual(baseline['related_rows'][0]['status'], 'idle')
             self.native.process.send_signal(signal.SIGSTOP)
             stopped = True
@@ -148,6 +149,12 @@ class ClaudeListingNativeTests(unittest.TestCase):
                 sample = self.sample(phase)
                 self.assertEqual(kernel_state(), 'T', 'target must remain stopped throughout query')
                 sample.update(kernel_state='T', stopped_seconds=time.monotonic() - stopped_at)
+                # Pinned native negative evidence: this fresh query can retain
+                # idle even though the exact target cannot execute any code.
+                self.assertEqual(sample['exact_identity_count'], 1)
+                self.assertEqual(len(sample['related_rows']), 1)
+                self.assertEqual(sample['related_rows'][0]['status'], 'idle')
+                self.assertFalse(sample['authorizes_delivery'])
                 self.assertIs(self.native.observe(), Readiness.AMBIGUOUS)
             self.native.process.send_signal(signal.SIGCONT)
             stopped = False
