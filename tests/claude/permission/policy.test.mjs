@@ -1,6 +1,7 @@
 import test from 'node:test';
+import {EventEmitter} from 'node:events';
 import assert from 'node:assert/strict';
-import {PermissionSlot, exactRead, permissionProfile} from './policy.mjs';
+import {PermissionSlot, exactRead, permissionProfile, terminatePending} from './policy.mjs';
 
 function fixture() {
   let attention;
@@ -74,4 +75,91 @@ test('qualification profile asks for every Read before native auto-approval', ()
     permissionPrompts:'host', settings:{permissions:{ask:['Read']}}});
   const mutable = permissionProfile(); mutable.settings.permissions.ask.length = 0;
   assert.deepEqual(permissionProfile().settings.permissions.ask, ['Read']);
+});
+
+test('pending close kills owned child before callback settlement or SDK disposal', async () => {
+  const f = fixture(); const child = new EventEmitter(); const order = [];
+  child.exitCode = null; child.signalCode = null;
+  child.kill = signal => { order.push(signal); return true; };
+  let timeout; let settled = false;
+  f.result.then(() => { settled = true; order.push('settled'); });
+  terminatePending({slot:f.slot, child, reason:'owned-process-exited',
+    dispose:() => order.push('dispose'), fail:() => order.push('fail'),
+    schedule:fn => { timeout = fn; return 1; }, unschedule:() => {}});
+  await Promise.resolve(); assert.equal(settled, false);
+  assert.equal(f.slot.decide(f.attention.identity, 'allow'), false);
+  assert.deepEqual(order, ['SIGKILL']);
+  child.signalCode = 'SIGKILL'; child.emit('exit', null, 'SIGKILL');
+  await f.result;
+  assert.deepEqual(order, ['SIGKILL', 'dispose', 'settled']);
+  timeout(); assert(!order.includes('fail'));
+});
+test('failed pending termination times out without callback resolution or graceful close', async () => {
+  for (const throws of [false, true]) {
+    const f = fixture(); const child = new EventEmitter();
+    child.exitCode = null; child.signalCode = null;
+    child.kill = () => { if (throws) throw Error('kill failed'); return false; };
+    let timeout, failed = false, settled = false;
+    f.result.then(() => { settled = true; });
+    terminatePending({slot:f.slot, child, reason:'close',
+      dispose:() => assert.fail('must not gracefully release pending request'),
+      fail:() => { failed = true; }, schedule:fn => { timeout = fn; return 1; }, unschedule:() => {}});
+    timeout(); child.emit('exit'); await Promise.resolve();
+    assert(failed); assert.equal(settled, false); assert.equal(child.listenerCount('exit'), 0);
+    assert.equal(f.slot.decide(f.attention.identity, 'deny'), false);
+  }
+});
+
+test('already exited native child disposes once without post-exit signaling', async () => {
+  for (const status of [{exitCode:0, signalCode:null}, {exitCode:null, signalCode:'SIGTERM'}]) {
+    const f = fixture(); const child = Object.assign(new EventEmitter(), status);
+    child.kill = () => assert.fail('must never signal reaped native');
+    let disposed = 0, timeout;
+    terminatePending({slot:f.slot, child, reason:'native-exited', dispose:() => { disposed++; },
+      fail:() => assert.fail('already exited'), schedule:fn => { timeout = fn; return 1; }, unschedule:() => {}});
+    child.emit('exit'); timeout();
+    assert.equal(disposed, 1); assert.equal((await f.result).message, 'native-exited');
+    assert.equal(child.listenerCount('exit'), 0);
+  }
+});
+test('controller, signals and error shutdown use the same pending exit barrier', async () => {
+  for (const reason of ['fixture-controller-close', 'fixture-host-terminated',
+    'fixture-host-interrupted', 'fixture-output-loss', 'fixture-unhandled-error']) {
+    const f = fixture(); const child = Object.assign(new EventEmitter(), {exitCode:null, signalCode:null});
+    let disposed = 0;
+    // Mimic runner native-exit callback: recursive shutdown sees closing and
+    // returns; the helper exit listener must still run and dispose exactly once.
+    let closing = true;
+    child.on('exit', () => { if (closing) return; assert.fail('unexpected restart'); });
+    child.kill = () => { child.signalCode = 'SIGKILL'; child.emit('exit'); return true; };
+    terminatePending({slot:f.slot, child, reason, dispose:() => { disposed++; },
+      fail:() => assert.fail('termination failed'), schedule:() => 1, unschedule:() => {}});
+    assert.equal(disposed, 1); assert.equal((await f.result).message, reason);
+    assert.equal(f.slot.decide(f.attention.identity, 'allow'), false);
+  }
+});
+
+test('termination owns settlement despite original signal abort before native exit', async () => {
+  const f = fixture(); const child = Object.assign(new EventEmitter(), {exitCode:null, signalCode:null});
+  child.kill = () => true;
+  let disposed = 0, settled = false;
+  f.result.then(() => { settled = true; });
+  terminatePending({slot:f.slot, child, reason:'controller-close', dispose:() => { disposed++; },
+    fail:() => assert.fail('unexpected timeout'), schedule:() => 1, unschedule:() => {}});
+  f.abort.abort(); await Promise.resolve();
+  assert.equal(settled, false); assert.equal(disposed, 0); assert(f.slot.pending);
+  child.signalCode = 'SIGKILL'; child.emit('exit', null, 'SIGKILL');
+  assert.equal((await f.result).message, 'controller-close');
+  assert.equal(disposed, 1); child.emit('exit'); assert.equal(disposed, 1);
+});
+test('termination timeout retains unresolved callback even after late native abort', async () => {
+  const f = fixture(); const child = Object.assign(new EventEmitter(), {exitCode:null, signalCode:null});
+  child.kill = () => false;
+  let timeout, failures = 0, settled = false;
+  f.result.then(() => { settled = true; });
+  terminatePending({slot:f.slot, child, reason:'controller-close', dispose:() => assert.fail('no graceful close'),
+    fail:() => { failures++; }, schedule:fn => { timeout = fn; return 1; }, unschedule:() => {}});
+  timeout(); f.abort.abort(); child.emit('exit'); await Promise.resolve();
+  assert.equal(failures, 1); assert.equal(settled, false); assert(f.slot.pending);
+  assert.equal(f.slot.decide(f.attention.identity, 'allow'), false);
 });

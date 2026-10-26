@@ -66,3 +66,36 @@ export class PermissionSlot {
       toolUseID: pending.identity.toolUseID});
   }
 }
+
+// A pending callback must not become a deny response while the CLI can still
+// request another provider turn. Terminate only our captured child, observe its
+// exit, then settle/dispose. This is fixture lifecycle, not permission authority.
+export function terminatePending({slot, child, reason, dispose, fail,
+                                  schedule = setTimeout, unschedule = clearTimeout}) {
+  slot.closed = true; // Fence stale/controller decisions without resolving.
+  // The exit barrier now exclusively owns settlement. A concurrent SDK abort
+  // must not resolve the callback before child exit, even after timeout.
+  const pending = slot.pending;
+  if (pending) pending.signal.removeEventListener('abort', pending.abort);
+  let finished = false;
+  const timer = schedule(() => {
+    if (finished) return;
+    finished = true;
+    child.removeListener('exit', exited);
+    fail(); // Do not settle permission or gracefully close a possibly live CLI.
+  }, 2200);
+  timer.unref?.();
+  function exited() {
+    if (finished) return;
+    finished = true; unschedule(timer);
+    slot.cancel(reason);
+    dispose();
+  }
+  child.once('exit', exited);
+  if (child.exitCode !== null || child.signalCode != null) {
+    child.removeListener('exit', exited);
+    exited();
+  } else {
+    try { child.kill('SIGKILL'); } catch {} // Bound failure; never approve/deny live.
+  }
+}

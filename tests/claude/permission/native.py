@@ -64,6 +64,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
             return
         with self.server.lock:
+            if len(self.server.requests) >= 3:
+                self.send_error(409, 'fixture request capture exhausted')
+                return
             self.server.requests.append(request)
             count = len(self.server.requests)
         if count > 2:
@@ -164,9 +167,11 @@ class NativePermissionTests(unittest.TestCase):
         self.assertTrue(host_exited, 'owned host identity must exit during cleanup')
         self.assertTrue(native_exited, 'owned native identity must exit during cleanup')
         self.assertTrue(host_reaped, 'owned host must be reaped during cleanup')
+        self.assertFalse(self.errors, 'bounded native evidence must be complete')
 
     def start(self):
         self.events = deque(maxlen=256)
+        self.event_bytes = 0
         self.errors = deque(maxlen=8)
         self.condition = threading.Condition()
         self.session_id = str(uuid.uuid4())
@@ -189,6 +194,9 @@ class NativePermissionTests(unittest.TestCase):
                         raise ValueError('oversized/incomplete runner frame')
                     event = json.loads(line)
                     with self.condition:
+                        if len(self.events) >= 256 or self.event_bytes + len(line) > 2 * 1024 * 1024:
+                            raise ValueError('fixture native evidence capture exhausted')
+                        self.event_bytes += len(line)
                         self.events.append(event)
                         self.condition.notify_all()
             except Exception as error:
@@ -305,6 +313,9 @@ class NativePermissionTests(unittest.TestCase):
                           'cli_version': '2.1.310', 'provider': 'loopback-fixture-only',
                           'human_authority': False, 'hub_delivery_integration': False,
                           'observations': self.samples,
+                          'native_events': list(getattr(self, 'events', [])),
+                          'capture_errors': list(getattr(self, 'errors', [])),
+                          'gateway_requests': list(self.gateway.requests),
                           'gateway_request_count': len(self.gateway.requests)}, sort_keys=True))
 
 

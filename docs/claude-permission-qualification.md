@@ -1,6 +1,6 @@
 # Deliberate native permission qualification (#71)
 
-**Status: first native run failed; stricter ask-rule correction awaits qualification.**
+**Status: ask-rule run proved native attention/allow/deny; pending-close still failed.**
 This does not expand `FixtureClaudeReceiver`: its tool-less policy, permanent
 attention fence, durable journal and all automatic CI budgets remain unchanged.
 It does not qualify production permissions, Supervisor badges, human authority,
@@ -42,7 +42,7 @@ No raw control response, custom Transport or private Claude state is used.
 
 ## Evidence and gates
 
-The aggregate runs six fast source correlation/profile cases via
+The aggregate runs twelve fast source correlation/profile/lifecycle cases via
 `tests/test_claude_permission_policy.py`: exact Read/input limits, pending until
 an explicit matching decision, all identity-field mismatches, single consumption,
 mutable-input protection, denial, abort/close and malformed/subagent requests.
@@ -97,14 +97,55 @@ logs do not establish why: bare mode documents skipped discovery, not a reliable
 claim here about explicitly registered SDK callbacks. The correction removes
 that dependency and uses the documented `permissions.ask` evaluation step via
 public transient SDK flag settings. It does not remove bare/restricted, expand
-tools, use allow rules, or relax the mandatory native assertions. The exact
-corrected behavior still needs the deliberate native run.
+tools, use allow rules, or relax the mandatory native assertions. The next run established the narrower behavior below.
 
 Failure cleanup ran without reported cleanup exceptions and the job ended, but
 the first harness printed observations before disposal and supplied no explicit
 held-pidfd cleanup receipt. Therefore it does not establish the exit-while-waiting
 assertions. The correction prints post-disposal identity observations and requires
 host/native exit; generic GitHub runner cleanup is not substituted for this proof.
+
+## Ask-rule result and pending-close correction
+
+[Run 40383229304](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40383229304)
+checked out `1b2fb5bd84c98eb5eaa681d6fd0356db78a1285e`: two tests passed,
+one failed in 6.537 seconds. Both allow and deny passed the mandatory genuine
+callback, exact-session `requires_action`, no-early-provider-request/nonce and
+correlated result assertions. All three scenarios recorded positive held-pidfd
+host/native exit and host-reaped receipts. The pending-close test failed because
+it observed two gateway requests, not one, after close. This is not successful
+cancellation qualification. No automatic rerun was performed.
+
+That report preserved sampled attention/terminal/cleanup records, not the whole
+native event stream or gateway payloads. The passing assertions establish
+`requires_action` and allow/deny nonce behavior, but the exit-case second payload
+and whether it contained the nonce cannot be reconstructed from the report. Do
+not describe that unrecorded payload as proven denial or proven execution.
+
+Source inspection identifies a release-before-termination hazard: shutdown
+resolved the pending callback as deny/interrupt before graceful `query.close()`.
+Official `SpawnOptions.signal` documents stdin EOF and an approximately two-second
+grace period before its forwarded abort signal fires. A deny callback is not a
+no-further-provider-work barrier. This explains a supported path for the observed
+extra request, but is not a recovered trace of its exact content.
+
+The qualification-only correction fences decisions immediately and leaves the
+callback pending while sending SIGKILL to the exact captured owned child. Only
+a child exit observation permits callback settlement and SDK disposal. The barrier removes
+the original abort listener, so concurrent/late SDK abort cannot settle the frozen
+callback; ordinary abort outside termination remains unchanged. Already
+exited children are never signaled; a 2.2-second kill/exit failure deadline exits
+the fixture host without resolving permission or invoking graceful query close.
+The existing outer held-pidfd disposer remains responsible for cleanup. No PID
+lookup, process-group signal or post-reap numeric signal is introduced. Pure
+lifecycle tests cover controller/signal/error close, spontaneous exit, recursive
+exit notification and failed kill/exit. They are not native proof. The mandatory
+no-post-close-request assertion is unchanged and awaits separate qualification.
+
+Future reports capture native frames (at most 256 and 2 MiB total), up to three
+bounded gateway requests (each at most 1 MiB), capture errors and cleanup receipts.
+Evidence overflow fails rather than silently discarding earlier frames. Values
+remain fixture-only; no external provider or credentials are introduced.
 
 ## Deliberately unresolved integration
 
@@ -117,9 +158,9 @@ terminal identity/transport/journal fences; exact replay ACK remains the sole
 receipt; tool results must not be mistaken for user replay; renewed delivery
 needs fresh liveness and exact idle identity after a qualified terminal state.
 
-Native event order, Read normalization, `bare`/`restricted` compatibility, deny
-terminal details and cancellation timing are hypotheses to establish in the
-manual run, not assertions of a completed qualification. Missing or unexpected
+The ask-rule run establishes the narrow allow/deny behavior above, not a
+completed qualification or production integration. Pending-close cancellation
+and the corrected termination order remain unproven until a reviewed manual run. Missing or unexpected
 native evidence fails the gate. No permit replay across process restoration,
 `defer` continuation, production approval UI or generic permission policy engine
 is added. Actor identity, Broker capabilities, Forge authority and human merge

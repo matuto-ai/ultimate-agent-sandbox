@@ -4,7 +4,7 @@ import {createHash, randomUUID} from 'node:crypto';
 import {createReadStream, readFileSync, lstatSync, realpathSync} from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {PermissionSlot, permissionProfile} from './policy.mjs';
+import {PermissionSlot, permissionProfile, terminatePending} from './policy.mjs';
 import {validateLoopback, closeOwned} from '../../../runtime/claude/sdk-resources.mjs';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID} from '../../../runtime/claude/sdk-policy.mjs';
 
@@ -21,9 +21,14 @@ function write(value) {
 }
 function shutdown(reason, code = 0) {
   if (closing) return;
-  closing = true; process.exitCode = code; slot?.cancel(reason);
-  closeOwned({input, query, child, queries:new Set(), finish:() => process.exit(code)});
+  closing = true; process.exitCode = code;
   process.stdin.pause();
+  const dispose = () => closeOwned({input, query, child, queries:new Set(), finish:() => process.exit(code)});
+  if (slot?.pending && child) {
+    terminatePending({slot, child, reason, dispose, fail:() => process.exit(2)});
+  } else {
+    slot?.cancel(reason); dispose();
+  }
 }
 process.on('SIGTERM', () => shutdown('fixture-host-terminated'));
 process.on('SIGINT', () => shutdown('fixture-host-interrupted'));
