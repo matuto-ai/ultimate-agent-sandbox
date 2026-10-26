@@ -4,7 +4,7 @@ import {createHash, randomUUID} from 'node:crypto';
 import {createReadStream, readFileSync, lstatSync, realpathSync} from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {PermissionSlot, permissionProfile, terminatePending} from './policy.mjs';
+import {PermissionSlot, permissionProfile, terminatePending} from '../../../runtime/claude/permission-policy.mjs';
 import {validateLoopback, closeOwned} from '../../../runtime/claude/sdk-resources.mjs';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID} from '../../../runtime/claude/sdk-policy.mjs';
 

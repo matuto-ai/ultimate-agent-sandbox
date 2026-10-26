@@ -12,7 +12,8 @@ NODE = os.environ.get('UAS_CLAUDE_NODE') or shutil.which('node')
 class ClaudePermissionPolicyTests(unittest.TestCase):
     @unittest.skipUnless(NODE, 'Node required for pure permission policy tests')
     def test_source_policy(self):
-        result = subprocess.run([NODE, '--test', 'tests/claude/permission/policy.test.mjs'],
+        result = subprocess.run([NODE, '--test', 'tests/claude/permission/policy.test.mjs',
+                                 'tests/claude/permission-state.test.mjs'],
                                 cwd=ROOT, env={'PATH': '/usr/bin:/bin'}, capture_output=True,
                                 text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

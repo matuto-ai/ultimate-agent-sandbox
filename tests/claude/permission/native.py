@@ -69,7 +69,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self.server.requests.append(request)
             count = len(self.server.requests)
-        if count > 2:
+        if count > getattr(self.server, 'max_turns', 2):
             self.send_error(409, 'only one controlled tool request is permitted')
             return
         results = tool_results(request, self.server.tool_id)

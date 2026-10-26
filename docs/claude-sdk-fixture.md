@@ -112,3 +112,9 @@ Historical ask-rule and graceful-close failures remain documented. This fixed
 diagnostic neither expands the default tool-less receiver nor qualifies Hub
 delivery during permission waits, production approval authority or post-result
 fresh-idle recovery.
+
+
+An explicit nonce-Read diagnostic opt-in now connects the same receiver, host and
+journal to the permission fixture; see the [unqualified Hub integration plan](claude-permission-qualification.md#proposed-hub-connected-diagnostic-not-yet-native-qualified).
+Default tool-less behavior is unchanged. Only allow-path recovery is proposed;
+denial remains held and new native integration evidence is still required.

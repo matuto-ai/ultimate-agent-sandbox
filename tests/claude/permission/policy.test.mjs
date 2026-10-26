@@ -1,7 +1,7 @@
 import test from 'node:test';
 import {EventEmitter} from 'node:events';
 import assert from 'node:assert/strict';
-import {PermissionSlot, exactRead, permissionProfile, terminatePending} from './policy.mjs';
+import {PermissionSlot, exactRead, permissionProfile, terminatePending} from '../../../runtime/claude/permission-policy.mjs';
 
 function fixture() {
   let attention;

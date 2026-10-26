@@ -1,15 +1,20 @@
 // Account-free fixed fixture only. SDK owns Claude's stream; this is not a
 // Supervisor-owned native process or a generic launcher/protocol proxy.
 import {spawn} from 'node:child_process';
-import {createHash} from 'node:crypto';
-import {createReadStream, readFileSync} from 'node:fs';
+import {createHash, randomUUID} from 'node:crypto';
+import {createReadStream, readFileSync, lstatSync, realpathSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID, NativeState, listingState} from './sdk-policy.mjs';
 import {closeOwned, collectListing, validateLoopback} from './sdk-resources.mjs';
 
-const [sdkRoot, binary, cwd, home, gateway, key, sessionId, resume] = process.argv.slice(2);
+import {PermissionSlot, permissionProfile, terminatePending} from './permission-policy.mjs';
+import {PermissionNativeState} from './permission-state.mjs';
+
+const [sdkRoot, binary, cwd, home, gateway, key, sessionId, resume, nonceFile] = process.argv.slice(2);
 let query, child, state, input, closing = false, outputBytes = 0, commandActive = false;
+const permissionIncarnation = randomUUID();
+let slot;
 let kernelStart, listingStart = null;
 let stderrTail = '';
 const queries = new Set();
@@ -24,8 +29,11 @@ const write = value => {
 function shutdown(reason, code = 0) {
   if (closing) return;
   closing = true; process.exitCode = code; state?.hold(reason);
-  // SDK first gets its documented graceful-close window; only owned children.
-  closeOwned({input, queries, query, child, finish: () => process.exit(code)});
+  // Pending permission terminates the exact child before settling; otherwise
+  // preserve the default documented SDK graceful-close lifecycle.
+  const dispose = () => closeOwned({input, queries, query, child, finish: () => process.exit(code)});
+  if (slot?.pending && child) terminatePending({slot, child, reason, dispose, fail: () => process.exit(2)});
+  else { slot?.cancel(reason); dispose(); }
   process.stdin.pause();
 }
 process.on('SIGTERM', () => shutdown('host-terminated'));
@@ -84,8 +92,12 @@ async function sample(env) {
     liveness: 'fresh-public-mcpServerStatus', revision: state.revision};
 }
 async function main() {
-  if (process.argv.length !== 10 || !UUID.test(sessionId) || !['0', '1'].includes(resume)
+  if (![10, 11].includes(process.argv.length) || !UUID.test(sessionId) || !['0', '1'].includes(resume)
       || !key?.startsWith('fixture-only-')) throw new Error('invalid-fixed-fixture-configuration');
+  if (process.argv.length === 11 && !nonceFile) throw new Error('missing-nonce-file');
+  if (nonceFile && (resume !== '0' || realpathSync(cwd) !== cwd || path.dirname(nonceFile) !== cwd
+      || lstatSync(nonceFile).isSymbolicLink() || !lstatSync(nonceFile).isFile()
+      || lstatSync(nonceFile).size > 1024)) throw new Error('invalid-fixed-nonce-profile');
   const url = new URL(gateway);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port
       || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
@@ -102,9 +114,13 @@ async function main() {
   const env = {PATH: '/usr/bin:/bin', HOME: home, CLAUDE_CONFIG_DIR: path.join(home, 'config'),
     ANTHROPIC_BASE_URL: gateway, ANTHROPIC_API_KEY: key,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1'};
-  state = new NativeState(sessionId); input = makeInput();
+  state = nonceFile ? new PermissionNativeState(sessionId, nonceFile, permissionIncarnation) : new NativeState(sessionId); input = makeInput();
   query = createQuery({prompt: input, options: {
     pathToClaudeCodeExecutable: binary, cwd, env, tools: [], mcpServers: {}, strictMcpConfig: true,
+    ...(nonceFile ? {...permissionProfile(), canUseTool: (name, value, options) => {
+      if (!slot) throw new Error('permission-before-invocation');
+      return slot.request(name, value, options);
+    }} : {}),
     settingSources: [], disallowedTools: ['mcp__*'], permissionMode: 'default', model: 'claude-sonnet-4-6',
     ...(resume === '1' ? {resume: sessionId} : {sessionId}),
     extraArgs: {bare: null, restricted: null, 'replay-user-messages': null},
@@ -126,7 +142,8 @@ async function main() {
   if (init.claude_code_version !== CLI_VERSION) throw new Error('unsupported-initialization');
   kernelStart = kernelIdentity().start;
   write({type: 'host-ready', host_pid: process.pid, native_pid: child.pid, native_start: kernelStart, session_id: sessionId,
-    sdk_version: SDK_VERSION, cli_version: CLI_VERSION, authority: 'sdk-host-owned-fixture-only'});
+    sdk_version: SDK_VERSION, cli_version: CLI_VERSION, authority: 'sdk-host-owned-fixture-only',
+    ...(nonceFile ? {permission_incarnation: permissionIncarnation} : {})});
   let buffer = Buffer.alloc(0);
   process.stdin.on('data', data => {
     if (closing) return;
@@ -137,12 +154,20 @@ async function main() {
       const line = buffer.subarray(0, index); buffer = buffer.subarray(index + 1);
       let command;
       try { command = JSON.parse(line.toString('utf8')); } catch { return shutdown('invalid-command', 2); }
-      if (!command || typeof command.id !== 'string' || !UUID.test(command.id) || !['probe', 'send', 'close'].includes(command.op)
+      if (!command || typeof command.id !== 'string' || !UUID.test(command.id) || !['probe', 'send', 'close', ...(nonceFile ? ['decision'] : [])].includes(command.op)
           || commandActive) return shutdown('invalid-or-concurrent-command', 2);
       commandActive = true;
       (async () => {
         try {
           if (command.op === 'close') { write({type: 'reply', id: command.id, closed: true}); shutdown('closed'); return; }
+          if (command.op === 'decision') {
+            const accepted = !state.fenced && (slot?.decide(command.identity, command.behavior) ?? false);
+            if (accepted) {
+              state.decided(slot.usedIdentity, command.behavior);
+              write({type: 'decision', identity: slot.usedIdentity, behavior: command.behavior});
+            }
+            write({type: 'reply', id: command.id, accepted}); return;
+          }
           const observation = await sample(env);
           if (command.op === 'probe') write({type: 'reply', id: command.id, ...observation});
           else {
@@ -154,6 +179,10 @@ async function main() {
             }
             kernelIdentity();
             state.begin(command.uuid, command.content);
+            if (nonceFile && !slot) slot = new PermissionSlot({sessionId, incarnation: permissionIncarnation,
+              invocationId: command.uuid, file: nonceFile, notify: frame => {
+                slot.usedIdentity = frame.identity; state.permission(frame); write(frame);
+              }});
             input.push({type: 'user', uuid: command.uuid, session_id: sessionId,
               parent_tool_use_id: null, message: {role: 'user', content: command.content}});
             write({type: 'reply', id: command.id, released: true}); // NOT a receipt.

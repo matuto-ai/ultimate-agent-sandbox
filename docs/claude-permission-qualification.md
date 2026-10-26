@@ -1,8 +1,9 @@
 # Deliberate native permission qualification (#71)
 
 **Status: bounded native attention/allow/deny/pending-close fixture qualified.**
-This does not expand `FixtureClaudeReceiver`: its tool-less policy, permanent
-attention fence, durable journal and all automatic CI budgets remain unchanged.
+The default `FixtureClaudeReceiver` tool-less policy, permanent attention fence,
+durable journal and all automatic CI budgets remain unchanged. An explicit
+nonce-Read diagnostic integration is implemented below but is **not yet native-qualified**.
 It does not qualify production permissions, Supervisor badges, human authority,
 Hub queue retention during native permission waits, or post-permission readiness.
 
@@ -173,13 +174,13 @@ claimed. The exit scenario stopped at `requires_action` before owned termination
 Pure failed-kill/timeout and concurrent-abort tests are not native fault-injection
 proof. The historical failures above remain relevant evidence, not hidden retries.
 
-## Deliberately unresolved integration
+## Limits of the qualified standalone integration
 
-This fixture cannot receive Hub envelopes and never opens or rewrites a handoff
+The qualified standalone runner cannot receive Hub envelopes and never opens or rewrites a handoff
 journal. Its second-input rejection is not proof of Hub traffic retention. The
 existing receiver's unknown intents therefore remain unchanged, not cleared by
-this new mechanism. Integrating native permission attention with the real
-receiver needs a separate reviewed change: pending attention must differ from
+this new mechanism. The separate proposed receiver change below still needs review and native
+qualification: pending attention must differ from
 terminal identity/transport/journal fences; exact replay ACK remains the sole
 receipt; tool results must not be mistaken for user replay; renewed delivery
 needs fresh liveness and exact idle identity after a qualified terminal state.
@@ -190,3 +191,58 @@ evidence still fails the gate. No permit replay across process restoration,
 `defer` continuation, production approval UI or generic permission policy engine
 is added. Actor identity, Broker capabilities, Forge authority and human merge
 remain enforced at their existing independent seams.
+
+
+## Proposed Hub-connected diagnostic (not yet native-qualified)
+
+The explicit `FixtureClaudeReceiver(..., diagnostic_nonce_file=...)` profile uses
+its existing SDK host, RoomLedger-facing receiver and native handoff journal.
+It does not introduce another transport, approval engine or production profile.
+The default constructor still exposes no tools and permanently fences attention.
+Diagnostic resume is rejected: decisions never transfer across incarnations.
+The fixed file must be a bounded regular nonsymlink directly in the fixture cwd;
+Read, host prompts and the transient ask rule are unchanged from the qualified
+standalone experiment. PermissionSlot and its pending-close exit barrier are now
+shared from `runtime/claude/permission-policy.mjs` with that standalone runner.
+
+An exact current-session pending permission holds subsequent Hub traffic. The
+first envelope may already have its exact native replay receipt and response
+clock before attention; this is legitimate acceptance, not permission approval.
+`fixture_decide(identity, behavior)` represents only the test controller, never
+a human, Actor/Broker capability, Forge permission or merge authority. Stale,
+duplicate or nonmatching decisions cannot resolve the callback. Only one Read
+permission request is admitted for the diagnostic host lifetime.
+
+Allow is not readiness. The separate native tool-result user frame must match
+the decided request, tool-use ID, current invocation, exact file and observed
+native temporary-decision metadata. It can never replace or manufacture the
+original replay receipt. Recovery additionally requires the exact qualified
+successful terminal result with no denials/queued turns, followed by fresh public
+SDK liveness and exact native idle identity/state. Missing signals remain held.
+Denial deliberately remains held; this slice does not qualify deny recovery.
+Transport, identity, unknown-event and journal fences remain irreversible.
+No permission decision edits or clears unknown native handoffs.
+
+The source regressions cover the captured ordering, malformed/mismatched tool
+results, unchanged replay identity, stale decisions, irreversible fences,
+post-terminal fresh-probe requirements and unknown-intent retention. They run
+without SDK/native execution and are not runtime qualification.
+
+`tests/claude/permission/hub_native.py` adds the real RoomLedger/FixturePeerHub
+proof to the existing deliberate isolated tier (same three-minute cap). Its
+required allow path queues two envelopes, confirms the first by exact replay,
+observes genuine permission attention, proves the second has neither a native
+intent nor response clock, rejects a stale decision, then requires fresh idle
+before confirming the second exact replay and clock. Deny and pending-close
+retain the queue. A separately labelled injected-journal fault checks that even
+successful permission resolution cannot erase an unknown intent. Native versions,
+process/session identity, journal receipts, Hub state and fixture provider calls
+are recorded. These new assertions have **not run natively**; neither source
+passes nor the previous standalone native run qualify this integration.
+
+No local namespace/listener/native execution is used for this change. Review the
+exact source before explicitly selecting the mandatory isolated qualification
+tier. If post-result idle is absent or the unchanged budget is exceeded, the gate
+fails rather than accepting terminal success as readiness or extending automatic
+CI budgets. Production authority, authenticated inference, reset, compaction,
+reconnect and cross-Run admission remain outside this slice.
