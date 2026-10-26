@@ -21,6 +21,12 @@ export default async function (pi) {
     faux.setResponses([...envelopes.map(envelope => fauxAssistantMessage(
       fauxToolCall('uas_peer', envelope), { stopReason: 'toolUse' })), response]);
   } });
+  pi.registerCommand('fixture-forge-tools', { description: 'Script account-free native gh tools', handler: async args => {
+    const inputs = JSON.parse(Buffer.from(args, 'base64url').toString('utf8'));
+    if (!Array.isArray(inputs) || inputs.length > 16) throw Error('invalid scripted tools');
+    faux.setResponses([...inputs.map(input => fauxAssistantMessage(
+      fauxToolCall('gh', input), { stopReason: 'toolUse' })), response]);
+  } });
   if (process.env.UAS_PI_PEER_FD) pi.registerCommand('fixture-peer-probe', {
     description: 'Test-only inherited descriptor attack', handler: async (args, ctx) => {
       const request = JSON.parse(Buffer.from(args, 'base64url').toString('utf8'));
