@@ -142,8 +142,9 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
   identities/targets, malformed/oversized/incomplete output and failed reads
   fail closed. Alpha must time out and both counters must increase on the
   unchanged rule, with unchanged Beta identity. No reset, arbitrary-drop or
-  timeout-only fallback is allowed. This standard-NAT correction has not yet
-  passed real qualification; offline parser contracts are not kernel evidence.
+  timeout-only fallback is allowed. The later standard-NAT correction passed
+  the exact manual qualification recorded below; offline parser contracts alone
+  remain distinct from that kernel evidence.
   Router setup/responder children enter only the parent's held network namespace
   descriptor. They do not remount sysfs or relax SELinux mount policy.
 - Fresh XFS project-quota roots hold synthetic repository/workspace/checkouts,
@@ -183,6 +184,30 @@ injecting drift and proves denied resume leaves it stopped. The backend never
 silently repairs drift. Only the trusted test harness repairs its stopped
 synthetic policy for recovery evidence. Cleanup checks ownership separately from
 execution policy, including when SELinux has ceased enforcing.
+
+## Successful synthetic qualification snapshot
+
+The standard-NAT candidate `1c69be948fa9636761c27372e650eb543a098d3a`
+(tree `f61f8c0bacf01309b7501781ce4a50ea24b9f0c5`) passed the deliberate
+[run 40373279036, job 121749411081](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40373279036/job/121749411081).
+All **10 required checks** passed: `runtime`, `writable_mounts`, `network`,
+`block_quota`, `inode_quota`, `sibling_health`, `drift`, `recovery`, `destroy`,
+and `guest_cleanup`. The earlier failed-run diagnosis above is historical;
+this snapshot supersedes its outstanding-qualification status for this exact
+synthetic candidate only.
+
+The guest used Docker 29.8.2 (Fedora `moby-engine-29.8.2-2.fc44`) and
+`container-selinux-2.251.0-1.fc44`, normal NAT/masquerading, user-namespace remapping
+and enforcing Room MCS. Package closure was recorded, not reproducibly pinned.
+The network positive was an isolated **synthetic public address**, with no guest
+external network; IPv6 was disabled/filtered, not dual-stack qualified. Recovery
+covered the specified volume/mkdir/marker SIGKILL boundaries. Owned guest networks,
+synthetic disk mounts and runner temporary resources were cleaned up.
+
+This does not qualify a native Pi/Claude Workstation, external Hub/Broker socket
+transport, real Internet access, production launch, 100-cycle lifecycle or target
+host capacity. Relevant code/profile changes still require new explicit evidence;
+this documentation correction triggers no heavy test.
 
 ## Evidence and remaining work
 

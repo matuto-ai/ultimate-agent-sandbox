@@ -49,13 +49,35 @@ class FixturePiRpcReceiver:
                              scope=scope, incarnation_id=incarnation_id, timeout=timeout)
         return receiver
 
+    @classmethod
+    def attach_workstation(cls, launch, *, journal, scope, timeout=8):
+        """Attach native I/O separately from the Supervisor's held task object.
+
+        Source integration seam only: it does not qualify image, mounts or
+        SELinux. The launch gate remains released (not active) until its owner
+        verifies this receiver's fresh native state. No Popen/CLI PID adoption.
+        """
+        from .workstation_exec import ExecLaunch
+        from .kernel_origin import alive
+        if type(launch) is not ExecLaunch or launch.state != 'released':
+            raise NativeUnavailable('verified released exec required')
+        receiver = cls.__new__(cls)
+        receiver._initialize(transport=launch.transport.rpc_io(),
+            task_alive=lambda: (launch.state in {'released', 'active'}
+                                and not launch.origin.revoked and alive(launch.origin.pidfd)),
+            journal=journal, runtime_version='1.4.0', scope=scope,
+            incarnation_id=launch.incarnation, timeout=timeout)
+        return receiver
+
     def _initialize(self, *, journal, runtime_version, scope, timeout,
-                    process=None, argv=None, cwd=None, env=None, incarnation_id=None):
+                    process=None, argv=None, cwd=None, env=None, incarnation_id=None,
+                    transport=None, task_alive=None):
         self._closed = False
-        self._owns_process = process is None
+        self._owns_process = process is None and transport is None
+        self._task_alive = task_alive
         self.incarnation_id = incarnation_id
         self.db = None
-        self.process = process
+        self.process = transport if transport is not None else process
         self._reader = self._stderr = None
         self._condition = threading.Condition()
         self._write_lock = threading.Lock()
@@ -82,7 +104,7 @@ class FixturePiRpcReceiver:
                 raise NativeUnavailable('fixture scope cannot change without qualified native reset')
             self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
             self.db.commit()
-            self.process = process if process is not None else subprocess.Popen(
+            self.process = (transport if transport is not None else process) if not self._owns_process else subprocess.Popen(
                 argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, bufsize=0)
             os.set_blocking(self.process.stdin.fileno(), False)
@@ -111,6 +133,10 @@ class FixturePiRpcReceiver:
         except BaseException:
             self.close()
             raise
+
+    def _alive(self):
+        # Transport EOF is separately observed; it is not proof of task exit.
+        return self._task_alive() if self._task_alive is not None else self.process.poll() is None
 
     def _read(self):
         try:
@@ -155,7 +181,7 @@ class FixturePiRpcReceiver:
             while request_id not in values:
                 if self._transport_fenced:
                     raise NativeUnavailable('native transport fenced after incomplete write')
-                if self._ended or self.process.poll() is not None:
+                if self._ended or not self._alive():
                     raise NativeUnavailable('native process lost')
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -231,7 +257,7 @@ class FixturePiRpcReceiver:
         if self._transport_fenced:
             self.readiness = Readiness.AMBIGUOUS
             return self.readiness
-        if self.process.poll() is not None or self._ended:
+        if not self._alive() or self._ended:
             self.readiness = Readiness.LOST
             return self.readiness
         try:
@@ -353,7 +379,7 @@ class FixturePiRpcReceiver:
                 'authority': 'trusted-fixture-only', 'session_id': self._binding['session_id'],
                 'runtime_id': self._binding['runtime_id'],
                 'supervisor_incarnation': self.incarnation_id if not self._owns_process else None,
-                'process_alive': self.process.poll() is None,
+                'process_alive': self._alive(),
                 'adapter_readiness': self.readiness.value,
                 'transport_fenced': self._transport_fenced,
                 'signal_source': self.last_observation['source'],
@@ -374,7 +400,7 @@ class FixturePiRpcReceiver:
             self._condition.notify_all()
         try:
             if self.process is not None:
-                if self._owns_process and self.process.poll() is None:
+                if self._owns_process and self._alive():
                     try:
                         self.process.stdin.close()
                         self.process.wait(timeout=3)
@@ -383,7 +409,7 @@ class FixturePiRpcReceiver:
                         self.process.wait(timeout=3)
                 # An attached receiver never kills/closes controller resources.
                 # Its owner reaps on failure; started readers then observe EOF.
-                if self.process.poll() is not None:
+                if not self._alive():
                     for thread in (self._reader, self._stderr):
                         if thread is not None and thread.ident is not None:
                             thread.join(timeout=1)
