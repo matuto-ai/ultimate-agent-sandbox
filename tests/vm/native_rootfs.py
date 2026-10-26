@@ -227,7 +227,13 @@ def fingerprint(root):
                 target = os.readlink(path)
                 runtime_target = ('proc/self/mounts' if key == 'etc/mtab'
                                   and target == '../proc/self/mounts' else None)
-                resolve_inside(root, key, runtime_target=runtime_target)
+                try:
+                    resolve_inside(root, key, runtime_target=runtime_target)
+                except FileNotFoundError as error:
+                    missing = Path(error.filename).relative_to(root).as_posix()
+                    raise FileNotFoundError('unresolved rootfs link: ' + json.dumps({
+                        'link': key[:1024], 'target': target[:1024], 'missing': missing[:1024]},
+                        ensure_ascii=True)) from None
                 item.update(kind='symlink', target=target)
             else:
                 raise ValueError('special file in native image')
@@ -280,27 +286,80 @@ def guest_guard(nonce):
     print('Native rootfs guard:', json.dumps(facts, sort_keys=True), flush=True)
 
 
-def seed_usrmerge(root):
-    """Replace disabled filesystem pretrans only in a fresh owned empty root.
+USRMERGE_DIRECTORIES = ('usr', 'usr/bin', 'usr/lib', 'usr/lib64', 'usr/local', 'usr/local/bin')
+USRMERGE_LINKS = {'bin': 'usr/bin', 'sbin': 'usr/sbin', 'lib': 'usr/lib',
+                  'lib64': 'usr/lib64', 'usr/sbin': 'bin', 'usr/local/sbin': 'bin'}
+USRMERGE_GHOSTS = frozenset(('usr/sbin', 'usr/local/sbin'))
 
-    Never repair or delete an existing directory/symlink. Package libgcc may be
-    unpacked before filesystem and otherwise creates a conflicting /lib64.
-    """
+
+def seed_usrmerge(root):
+    """Seed only documented x86_64 aliases, never repair an existing root."""
     info = root.lstat()
     if (not stat.S_ISDIR(info.st_mode) or root.resolve() != root
             or info.st_uid != os.geteuid() or any(root.iterdir())):
         raise ValueError('fresh owned empty root required for usrmerge seed')
-    (root / 'usr').mkdir(mode=0o755)
-    (root / 'usr/lib64').mkdir(mode=0o755)
-    (root / 'lib64').symlink_to('usr/lib64', target_is_directory=True)
+    for name in USRMERGE_DIRECTORIES:
+        (root / name).mkdir(mode=0o755)
+    for name, target in USRMERGE_LINKS.items():
+        (root / name).symlink_to(target, target_is_directory=True)
 
 
 def require_usrmerge(root):
-    if (not stat.S_ISDIR((root / 'usr').lstat().st_mode)
-            or not stat.S_ISDIR((root / 'usr/lib64').lstat().st_mode)
-            or not stat.S_ISLNK((root / 'lib64').lstat().st_mode)
-            or os.readlink(root / 'lib64') != 'usr/lib64'):
-        raise ValueError('native usrmerge shape changed')
+    for name in USRMERGE_DIRECTORIES:
+        if not stat.S_ISDIR((root / name).lstat().st_mode):
+            raise ValueError('native usrmerge shape changed: ' + name)
+    for name, target in USRMERGE_LINKS.items():
+        if (not stat.S_ISLNK((root / name).lstat().st_mode)
+                or os.readlink(root / name) != target):
+            raise ValueError('native usrmerge shape changed: ' + name)
+
+
+def verify_filesystem_layout(root, *, run):
+    """Check installed signed package contract; ghost targets come from pretrans.
+
+    The offline transaction already enforces signature verification. These are
+    read-only RPM queries, never execution of the package's pretrans script.
+    """
+    query = '%{NAME}\t%{ARCH}\n[%{FILENAMES}\t%{FILEMODES}\t%{FILELINKTOS}\t%{FILEFLAGS}\n]'
+    metadata = run('rpm', '--root', str(root), '-q', '--qf', query, 'filesystem', timeout=30)
+    pretrans = run('rpm', '--root', str(root), '-q', '--qf', '%{PRETRANS}', 'filesystem', timeout=30)
+    if len(metadata.encode()) > 4 * 1024 * 1024 or len(pretrans.encode()) > 65536:
+        raise ValueError('filesystem metadata exceeds bound')
+    rows = metadata.splitlines()
+    if not rows or rows[0] != 'filesystem\tx86_64' or len(rows) > MAX_ROOT_FILES + 1:
+        raise ValueError('unsupported installed filesystem package')
+    seen, observed_ghosts = set(), {}
+    for row in rows[1:]:
+        fields = row.split('\t')
+        if len(fields) != 4:
+            raise ValueError('malformed filesystem file metadata')
+        path, mode, target, flags = fields
+        name = path[1:] if path.startswith('/') else ''
+        if name not in USRMERGE_LINKS:
+            continue
+        if name in seen or not mode.isdecimal() or not flags.isdecimal():
+            raise ValueError('ambiguous filesystem alias metadata')
+        seen.add(name)
+        ghost = name in USRMERGE_GHOSTS
+        if (not ghost and not stat.S_ISLNK(int(mode))) or bool(int(flags) & 64) != ghost:
+            raise ValueError('filesystem alias type/ghost mismatch: ' + name)
+        if not ghost and target != USRMERGE_LINKS[name]:
+            raise ValueError('filesystem payload alias mismatch: ' + name)
+        if ghost:
+            # Ghost files need not carry a payload link target. Require the
+            # exact documented creation in signed package pretrans instead.
+            pattern = r'posix\.symlink\(\s*"bin"\s*,\s*"/' + re.escape(name) + r'"\s*\)'
+            observed_ghosts[name] = {'mode': int(mode), 'link_target': target, 'flags': int(flags)}
+            if not re.search(pattern, pretrans):
+                raise ValueError('filesystem ghost pretrans mismatch: ' + name)
+    if seen != set(USRMERGE_LINKS):
+        raise ValueError('filesystem aliases missing from metadata')
+    require_usrmerge(root)
+    return {'architecture': 'x86_64', 'aliases': dict(USRMERGE_LINKS),
+            'ghost_target_source': 'installed-signed-package-pretrans-not-executed',
+            'observed_ghost_metadata': observed_ghosts,
+            'metadata_sha256': hashlib.sha256(metadata.encode()).hexdigest(),
+            'pretrans_sha256': hashlib.sha256(pretrans.encode()).hexdigest()}
 
 
 def build_rootfs(nonce, manifest, destination, *, run):
@@ -326,7 +385,7 @@ def build_rootfs(nonce, manifest, destination, *, run):
         '--setopt=localpkg_gpgcheck=True', '--setopt=install_weak_deps=False',
         '--setopt=tsflags=noscripts', '--setopt=plugins=False',
         'install', *ROOTS, timeout=900, native_failure_context=True)
-    require_usrmerge(root)
+    filesystem_layout = verify_filesystem_layout(root, run=run)
     extract_runtime(archive, files, root)
     source = resolve_inside(root, 'usr/bin/tini')
     ordinary(source)
@@ -346,4 +405,5 @@ def build_rootfs(nonce, manifest, destination, *, run):
     manifest_path.chmod(0o444)
     return {**result, 'rootfs_manifest': str(manifest_path), 'runtime_sha256': manifest['native_runtime']['sha256'],
             'tini_sha256': digest(target), 'rpm_roots': list(ROOTS), 'rpm_scriptlets': False,
-            'rpm_automatic_sysusers': True, 'package_tools': package_tools}
+            'rpm_automatic_sysusers': True, 'package_tools': package_tools,
+            'filesystem_layout': filesystem_layout}

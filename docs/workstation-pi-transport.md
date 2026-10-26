@@ -470,3 +470,35 @@ Main116 is also preserved: its unconditional config import requires the explicit
 `uas/gate_policy.py` staged source. The isolated smoke checks only staged files,
 not checkout import fallback. Config, Gate module and carrier changes also
 require the new image to be qualified; prior image proof is not transferred.
+
+### Complete documented usrmerge aliases after run 40414751543
+
+Run 40414751543 on `d5a3ae3e` advanced past the prior RPM conflict: the offline
+package transaction returned successfully, runtime extraction completed, and the
+whole-rootfs fingerprint then failed at missing `usr/sbin`. No rootfs manifest
+completed and Docker had not started; no native confinement or delivery check
+ran. Cleanup completed. Actual installed tools were RPM/rpm-libs 6.0.1-2.fc44
+and DNF5/libdnf5 5.4.1.0-1.fc44, distinct from the newer RPM in the payload pool.
+The original error did not identify its originating link, only the missing path.
+
+The [Fedora 44 filesystem package](https://packages.fedoraproject.org/pkgs/filesystem/filesystem/fedora-44.html)
+and its [f44 spec](https://src.fedoraproject.org/rpms/filesystem/raw/f44/f/filesystem.spec)
+define the related x86_64 aliases. `sbin -> usr/sbin` is packaged, whereas
+`usr/sbin -> bin` and `usr/local/sbin -> bin` are ghost paths established by the
+pretransaction script, which this profile deliberately does not execute.
+The fresh-root seed now covers six exact relative links: `bin -> usr/bin`,
+`sbin -> usr/sbin`, `lib -> usr/lib`, `lib64 -> usr/lib64`, `usr/sbin -> bin` and
+`usr/local/sbin -> bin`, with ordinary parents and target directories. It does
+not recreate unrelated proc/sys/debug/runtime pretransaction effects or repair
+an existing root.
+
+Before runtime extraction the guest queries the installed, signature-verified
+filesystem package header and pretrans text without executing it. Payload link
+types/targets must match. Ghost paths must carry the ghost flag; their expected
+targets come from the exact documented creation in the signed pretrans text,
+not an assumed ghost payload mode or link target. Observed ghost header fields
+are recorded separately, and actual on-disk symlink targets are always checked.
+Metadata/script hashes bind this evidence. Fingerprint failures now identify
+bounded root-relative originating link, declared target and missing path;
+containment and existence checks remain unchanged. This is reviewed source,
+not a successful image or native-container qualification.

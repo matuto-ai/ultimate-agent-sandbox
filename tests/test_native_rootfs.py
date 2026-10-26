@@ -154,12 +154,18 @@ class NativeRootfsTests(unittest.TestCase):
         destination=self.directory/'built';calls=[]
         def fake_run(*args,timeout,native_failure_context=False):
             if args[0] == 'rpm':
-                return 'rpm-0:6.0.2-1.fc44.x86_64\n'
+                if '--root' not in args:
+                    return 'rpm-0:6.0.2-1.fc44.x86_64\n'
+                if '%{PRETRANS}' in args:
+                    return '\n'.join('posix.symlink("bin", "/'+name+'")' for name in rootfs.USRMERGE_GHOSTS)
+                return 'filesystem\tx86_64\n' + ''.join(
+                    '/'+name+'\t41471\t'+target+'\t'+('64' if name in rootfs.USRMERGE_GHOSTS else '0')+'\n'
+                    for name,target in rootfs.USRMERGE_LINKS.items())
             rootfs.require_usrmerge(destination)
             self.assertTrue(native_failure_context)
             calls.append((args,timeout))
             destination.chmod(0o700)  # restrictive installer/umask must not survive import
-            (destination/'usr/bin').mkdir(parents=True)
+            (destination/'usr/bin').mkdir(parents=True, exist_ok=True)
             (destination/'usr/bin/tini').write_bytes(b'packaged tini')
             (destination/'usr/bin/tini').chmod(0o555)
         with patch.object(rootfs,'guest_guard') as guard, patch.object(rootfs,'PAYLOAD',self.payload):
