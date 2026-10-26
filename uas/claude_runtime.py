@@ -670,9 +670,12 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self.signals.hold('unresponsive-inferred')
-                    self._terminate_host()
-                    raise ClaudeUnavailable('missing SDK/native evidence; no reinjection')
+                    break
                 self.condition.wait(remaining)
+        # close owns close_lock before condition. Never acquire close_lock while
+        # holding condition, including the timeout/reader/partial-write paths.
+        self._terminate_host()
+        raise ClaudeUnavailable('missing SDK/native evidence; no reinjection')
 
     def _command(self, op, **data):
         request_id = str(uuid.uuid4())

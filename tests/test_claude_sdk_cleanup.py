@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from uas.claude_runtime import (_dispose_sdk_process, _pidfd_alive,
-                                ClaudeSignals, FixtureClaudeReceiver)
+                                ClaudeSignals, ClaudeUnavailable, FixtureClaudeReceiver)
 
 
 class ClaudeSDKCleanupTests(unittest.TestCase):
@@ -87,6 +87,45 @@ class ClaudeSDKCleanupTests(unittest.TestCase):
         for resource in (process.stdin, process.stdout, process.stderr, db, owner):
             resource.close.assert_called_once()
         self.assertIsNone(receiver.process)
+        self.assertTrue(receiver.closing)
+
+    def test_concurrent_timeout_and_close_have_no_condition_close_lock_inversion(self):
+        receiver = FixtureClaudeReceiver.__new__(FixtureClaudeReceiver)
+        receiver.close_lock = threading.RLock()
+        receiver.condition = threading.Condition()
+        receiver.signals = ClaudeSignals('session')
+        receiver.closing = receiver.ended = False
+        receiver.timeout = 0
+        receiver.process = receiver.reader = receiver.stderr = None
+        receiver.host_pidfd = receiver.native_pidfd = None
+        receiver.db = receiver.owner = None
+        receiver._host_alive = lambda: True
+        close_locked = threading.Event()
+        close_owned = receiver._close_owned
+        def closing():
+            close_locked.set()  # close_lock is held; condition is next.
+            close_owned()
+        receiver._close_owned = closing
+        closer = threading.Thread(target=receiver.close, daemon=True)
+        errors = []
+        def predicate():
+            closer.start()  # _wait owns condition before close owns close_lock.
+            if not close_locked.wait(1):
+                raise AssertionError('close never acquired lifecycle lock')
+            return False
+        def waiting():
+            try:
+                receiver._wait(predicate)
+            except BaseException as error:
+                errors.append(error)
+        waiter = threading.Thread(target=waiting, daemon=True)
+        waiter.start()
+        waiter.join(2)
+        closer.join(2)
+        self.assertFalse(waiter.is_alive(), 'timeout waited for close_lock while holding condition')
+        self.assertFalse(closer.is_alive(), 'close waited for condition while holding close_lock')
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ClaudeUnavailable)
         self.assertTrue(receiver.closing)
 
     def test_real_exited_unreaped_leader_keeps_group_owned_until_stopped_child_disposed(self):
