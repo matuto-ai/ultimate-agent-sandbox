@@ -783,7 +783,7 @@ class FixtureParticipantController:
                                 or type(message["envelope"]) is not dict):
                             raise LedgerError("INVALID_NATIVE_FRAME")
                         message = message["envelope"]
-                    if type(message) is dict and message.get('kind') == 'forge-read':
+                    if type(message) is dict and message.get('kind') in {'forge-read', 'forge-write'}:
                         if self.forge_broker is None:
                             raise LedgerError('FORGE_UNAVAILABLE')
                         forge_intent = self.forge_broker.prepare(message, origin=handle.badge.origin(),

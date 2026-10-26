@@ -92,3 +92,7 @@ The existing official Pi Participant channel now supports bounded native `gh iss
 ### Restricted Run-admission foundation
 
 An account-free [first-Run admission source slice](docs/run-admission-foundation.md) connects explicit trusted human commands, fresh bounded GitHub facts, durable canonical Run/policy binding, owned Git checkouts and real Pi Work Request delivery. Only already-correct assignment and unused native contexts are eligible. Explicit canonical pause/resume holds Hub traffic with same-generation revision fencing; it does not stop native inference. General Run management, withdrawal, terminal stop, Forge projections, production authentication and #72 acceptance remain unimplemented.
+
+The optional [audited self-assignment source slice](docs/forge-assignment.md) connects
+one bounded write and read-only uncertain-outcome reconciliation to canonical Run
+admission. Tests use controlled GitHub responses, not live credentials or writes.

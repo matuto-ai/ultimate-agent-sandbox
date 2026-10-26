@@ -20,7 +20,7 @@ class ForgeBinding:
 
 
 class ReadOnlyForgeBroker:
-    def __init__(self, ledger, binding, provider_for_actor):
+    def __init__(self, ledger, binding, provider_for_actor, *, assignments=None):
         from .github_read import GitHubProject
         if type(binding) is not ForgeBinding or binding.room_id != ledger.room_id:
             raise LedgerError('ROOM_MISMATCH')
@@ -28,6 +28,11 @@ class ReadOnlyForgeBroker:
         self.project = GitHubProject(binding.repository, binding.host)
         self.ledger, self.binding, self.provider_for_actor = ledger, binding, provider_for_actor
         self._audit_failed = False
+        if assignments is not None:
+            from .forge_assignment import AssignmentBroker
+            if type(assignments) is not AssignmentBroker or assignments.binding != binding:
+                raise LedgerError('PROJECT_MISMATCH')
+        self.assignments = assignments
 
     def denied(self, code):
         """Controller-only audit of an unauthenticated record; no caller attribution."""
@@ -35,7 +40,8 @@ class ReadOnlyForgeBroker:
                    'MISSING_ACTOR_CREDENTIAL', 'INVALID_PROCESS_RECORD',
                    'AUTHORITY_STORE_UNAVAILABLE', 'INVALID_AUTHORITY_STORE',
                    'CONTROLLER_REPLACED', 'ROOM_NOT_RUNNING', 'ROOM_REPLACED', 'FORBIDDEN',
-                   'INVALID_FORGE_ENVELOPE', 'INVALID_NATIVE_FRAME', 'PROJECT_MISMATCH'}
+                   'INVALID_FORGE_ENVELOPE', 'INVALID_NATIVE_FRAME', 'PROJECT_MISMATCH',
+                   'UNSUPPORTED_ROUTE', 'INVALID_ISSUE', 'FORGE_WRITE_UNAVAILABLE'}
         if code not in allowed:
             return
         origin = Origin('forge-audit', 'forge-audit', 'controller', 'denial-v1', ())
@@ -62,8 +68,32 @@ class ReadOnlyForgeBroker:
 
     def prepare(self, envelope, *, origin, authorize, admission=False, admission_reservation=None):
         """Under lifecycle lock: authenticate, validate, dedupe and reserve intent."""
+        if type(envelope) is dict and envelope.get('kind') == 'forge-write':
+            if self._audit_failed or (self.assignments is not None and self.assignments.failed):
+                raise LedgerError('AUDIT_UNAVAILABLE')
+            if self.assignments is None or admission:
+                raise LedgerError('FORGE_WRITE_UNAVAILABLE')
+            # The Room-wide operation namespace still rejects reuse across
+            # read/write/peer commands. This is an identity reservation, not a
+            # second mutation ledger; canonical write truth stays in ForgeAudit.
+            self.assignments._authorize(origin, authorize)
+            from .github_read import parse_assignment_route
+            parse_assignment_route(envelope.get('argv'), self.project)
+            command = Command(envelope.get('id'), 'forge-write', self.binding.project_id, None,
+                {'request_digest': hashlib.sha256(_json(envelope).encode()).hexdigest()})
+            try:
+                self.ledger.apply(command, origin, authorize=lambda *_: authorize(),
+                    decide=lambda state, _: Transition(state,
+                        (Event('forge-write-reserved', command.payload),), {'status': 'RESERVED'}))
+            except LedgerError as error:
+                if error.code in {'STORAGE_ERROR', 'CLOSED'}:
+                    self._audit_failed = True
+                    self.assignments.failed = True
+                    raise LedgerError('AUDIT_UNAVAILABLE') from error
+                raise
+            return self.assignments.prepare(envelope, origin=origin, authorize=authorize)
         from .github_read import parse_route
-        if self._audit_failed:
+        if self._audit_failed or (self.assignments is not None and self.assignments.failed):
             raise LedgerError('AUDIT_UNAVAILABLE')
         if authorize() is not True or 'forge-read' not in origin.capabilities:
             raise LedgerError('FORBIDDEN')
@@ -169,6 +199,8 @@ class ReadOnlyForgeBroker:
 
     def perform(self, intent):
         """Outside lifecycle/ledger locks: a bounded read, never a mutation."""
+        if intent.get('_assignment_broker') is self.assignments and self.assignments is not None:
+            return self.assignments.perform(intent)
         from .github_read import validate_observation, generated_help
         self._validate_intent(intent)
         if intent['existing'] is not None:
@@ -194,10 +226,12 @@ class ReadOnlyForgeBroker:
 
     def complete(self, intent, outcome, *, authorize):
         """Under lifecycle lock: late Stop/revoke/replacement defeats publication."""
+        if intent.get('_assignment_broker') is self.assignments and self.assignments is not None:
+            return self.assignments.complete(intent, outcome, authorize=authorize)
         self._validate_intent(intent)
         if authorize() is not True:
             raise LedgerError('FORBIDDEN')
-        if self._audit_failed:
+        if self._audit_failed or (self.assignments is not None and self.assignments.failed):
             raise LedgerError('AUDIT_UNAVAILABLE')
         # Reconcile a competing terminal commit before releasing reservation.
         try:
@@ -229,6 +263,9 @@ class ReadOnlyForgeBroker:
         The exact server-created intent is required, and immutable terminal
         reconciliation precedes any reservation change. No provider call occurs.
         """
+        if (type(intent) is dict and self.assignments is not None
+                and intent.get('_assignment_broker') is self.assignments):
+            return self.assignments.abandon(intent, reason)
         if (type(intent) is not dict or intent.get('_broker') is not self
                 or reason not in {'AUTHORITY_REVOKED', 'PROCESS_EXITED', 'MISSING_ACTOR_CREDENTIAL',
                                   'ROOM_NOT_RUNNING', 'ROOM_REPLACED', 'CONTROLLER_REPLACED'}):
@@ -272,6 +309,8 @@ class ReadOnlyForgeBroker:
         The controller invokes this under its lifecycle lock after reconstruction.
         """
         try:
+            if self.assignments is not None:
+                self.assignments.recover_pending(is_fenced)
             pending = self.ledger.snapshot()['state'].get('forge_pending', {})
             if type(pending) is not dict or len(pending) > 8:
                 raise LedgerError('INVALID_FORGE_INTENT')
@@ -298,5 +337,10 @@ class ReadOnlyForgeBroker:
 
     def submit(self, envelope, *, origin, authorize):
         """Trusted synchronous unit seam. Controller uses explicit lock phases."""
-        intent = self.prepare(envelope, origin=origin, authorize=authorize)
-        return self.complete(intent, self.perform(intent), authorize=authorize)
+        try:
+            intent = self.prepare(envelope, origin=origin, authorize=authorize)
+            return self.complete(intent, self.perform(intent), authorize=authorize)
+        except LedgerError as error:
+            if type(envelope) is dict and envelope.get('kind') == 'forge-write':
+                self.denied(error.code)
+            raise
