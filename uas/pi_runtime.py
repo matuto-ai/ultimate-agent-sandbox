@@ -65,8 +65,8 @@ class FixturePiRpcReceiver:
                 raise NativeUnavailable('unsupported Pi version')
             if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
                     or any(type(scope[key]) is not str or not scope[key] for key in ('room_id', 'participant_id', 'run_id'))
-                    or any(type(scope[key]) is not int or scope[key] != 1 for key in ('generation', 'context_generation'))):
-                raise NativeUnavailable('only explicitly bound fixture Run/context generation 1 is supported')
+                    or any(type(scope[key]) is not int or not 1 <= scope[key] <= 2**53 - 1 for key in ('generation', 'context_generation'))):
+                raise NativeUnavailable('explicit bounded fixture Run/context scope is required')
             self.scope = dict(scope)
             self.runtime_version = runtime_version
             self.timeout = timeout
@@ -320,6 +320,29 @@ class FixturePiRpcReceiver:
                     'context_generation': envelope['context_generation']}
         except NativeUnavailable as error:
             raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY') from error
+
+    def prove_fresh_context(self, *, preceding_session=None):
+        """Private native evidence for a controller's pending reset, not a badge.
+
+        The caller has spawned a fresh CLI without resume/parent arguments and
+        keeps its process authority pending. No priming prompt or JSONL write.
+        """
+        state = self._native('state', {})['state']
+        actual = self.rpc('get_state')['data']
+        entries = self.rpc('get_entries')['data']['entries']
+        if (state.get('readiness') != 'safe' or any(state.get(k) != v for k, v in self._binding.items())
+                or state.get('session_id') == preceding_session
+                or actual.get('sessionId') != state.get('session_id')
+                or type(actual.get('messageCount')) is not int or actual['messageCount'] != 0
+                or type(actual.get('pendingMessageCount')) is not int or actual['pendingMessageCount'] != 0
+                or actual.get('isStreaming') is not False or actual.get('isCompacting') is not False
+                or type(entries) is not list
+                or any(type(entry) is not dict or entry.get('type') not in {'model_change', 'thinking_level_change'}
+                       for entry in entries)
+                or self.db.execute('SELECT count(*) FROM handoffs').fetchone()[0]):
+            raise NativeUnavailable('fresh native context not proven')
+        return {**self._binding, 'session_file': state['session_file'],
+                'source': 'native-empty-session-and-no-pending-messages'}
 
     def event_snapshot(self):
         with self._condition:

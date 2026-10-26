@@ -8,12 +8,14 @@ credential is loaded; FixtureCredentials contains synthetic references only.
 from dataclasses import asdict, dataclass
 import array
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
 import select
 import re
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -335,6 +337,14 @@ class FixtureParticipantController:
                     child_socket.close()
 
     def launch_pi(self, seat, recipe):
+        from .pi_fixture import FixturePiRecipe
+        if type(recipe) is not FixturePiRecipe or type(seat) is not FixtureSeat:
+            raise LedgerError('INVALID_SEAT')
+        if self.hub.contexts.scope(seat.participant_id)['context_generation'] > 1:
+            return self.restore_pi(seat, recipe)
+        return self._launch_pi(seat, recipe)
+
+    def _launch_pi(self, seat, recipe, *, reset=None, restoring=None):
         """Explicit fixed Pi fixture recipe, not a generic spawn/adopt API.
 
         The controller owns the sole child/pidfd/socket. Native attachment may
@@ -375,11 +385,13 @@ class FixtureParticipantController:
                 scope = self.hub._state()["definition"]["participants"].get(seat.participant_id)
                 if not scope or scope["actor_id"] != seat.actor_id:
                     raise LedgerError("PEER_BINDING_CONFLICT")
-                run = self.hub._state()["definition"]
-                expected_scope = {"room_id": self.supervisor.room_id, "participant_id": seat.participant_id,
-                                  "run_id": run["run_id"], "generation": run["generation"], "context_generation": 1}
+                expected_scope = (self.hub.contexts.pending_scope(reset['id']) if reset is not None
+                                  else self.hub.contexts.scope(seat.participant_id))
                 if recipe.scope != expected_scope:
                     raise LedgerError("PEER_BINDING_CONFLICT")
+                if reset is None and not self.hub.contexts.permits(seat.participant_id,
+                        expected_scope['context_generation'], expected_scope['run_id'], expected_scope['generation']):
+                    raise LedgerError('CONTEXT_UNAVAILABLE')
                 incarnation = "process-" + uuid.uuid4().hex
                 epoch = previous["epoch"] + 1 if previous else 1
                 record = {"seat": definition, "epoch": epoch, "incarnation_id": incarnation,
@@ -418,6 +430,12 @@ class FixtureParticipantController:
                     or getattr(receiver, "incarnation_id", None) != badge.incarnation_id
                     or getattr(receiver, "scope", None) != expected_scope):
                 raise LedgerError("INVALID_NATIVE_RECEIVER")
+            native_proof = receiver.prove_fresh_context(preceding_session=reset['preceding_session']) if reset else None
+            if restoring is not None:
+                if restoring['fresh']:
+                    native_proof = receiver.prove_fresh_context(preceding_session=restoring['native']['session_id'])
+                elif receiver.initial_state['session_id'] != restoring['native']['session_id']:
+                    raise LedgerError('NATIVE_SESSION_MISMATCH')
             with self.supervisor._locked():
                 state = self._room()
                 self.supervisor._allowed("participant-start", state)
@@ -434,8 +452,15 @@ class FixtureParticipantController:
                     self._fence(document, seat.participant_id, "disabled", "missing-credential")
                     raise LedgerError("MISSING_ACTOR_CREDENTIAL")
                 handle.managed_receiver = receiver
+                if restoring is not None and restoring['fresh']:
+                    self._save_pi_checkpoint(seat.participant_id, recipe, restoring['reset_id'], native_proof)
+                if reset is not None:
+                    self._save_pi_checkpoint(seat.participant_id, recipe, reset['id'], native_proof)
+                    self.hub.contexts.succeed_reset(reset['id'], reset['expected_generation'],
+                        authorize=lambda: self._pending_pi_authority(handle, definition))
                 handle.connection = self.hub.connect("attach-" + uuid.uuid4().hex, seat.participant_id,
-                                                     incarnation, receiver)
+                                                     incarnation, receiver,
+                                                     context_generation=expected_scope['context_generation'])
                 current.update(status="active", reason="launched")
                 self._save(document)
                 return handle
@@ -480,6 +505,165 @@ class FixtureParticipantController:
         finally:
             if child_socket is not None:
                 child_socket.close()
+
+    def _pending_pi_authority(self, handle, definition):
+        """Pure transaction-time guard: no native RPC or nested ledger write."""
+        self._room()
+        current = self._read()['seats'].get(handle.badge.participant_id)
+        if (self.store_failed or self.handles.get(handle.badge.participant_id) is not handle
+                or handle.badge.incarnation_id in self.fenced or not current
+                or current['status'] != 'starting' or current['epoch'] != handle.badge.epoch
+                or current['incarnation_id'] != handle.badge.incarnation_id
+                or current['seat'] != definition or self.credentials.missing(definition)
+                or not self._alive(handle)):
+            raise LedgerError('AUTHORITY_REVOKED')
+        return True
+
+    def _pi_checkpoint_path(self, participant):
+        return self.path.with_name('pi-context-' + hashlib.sha256(participant.encode()).hexdigest() + '.json')
+
+    def _save_pi_checkpoint(self, participant, recipe, reset_id, proof):
+        """Private native handles never enter Hub state or process authority."""
+        session = Path(proof['session_file']).resolve()
+        if not session.is_relative_to(recipe.session_directory):
+            raise LedgerError('NATIVE_SESSION_PATH_MISMATCH')
+        path = self._pi_checkpoint_path(participant)
+        value = {'version': 1, 'room_instance': self.instance, 'participant': participant,
+                 'reset_id': reset_id, 'scope': recipe.scope, 'directory': str(recipe.directory),
+                 'native': proof}
+        encoded = _canonical(value)
+        if len(encoded.encode()) > 8192:
+            raise LedgerError('NATIVE_CHECKPOINT_CAPACITY')
+        temporary = path.with_name('.pi-context-' + uuid.uuid4().hex)
+        try:
+            descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, 'w') as output:
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+            self.supervisor._sync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def restore_pi(self, seat, recipe):
+        """Restore only this ledger-approved context, never an older generation.
+
+        A reset may succeed before Pi first creates its session file. Fresh
+        restart within that same unbound generation is safe only if the retained
+        native intent journal proves zero handoffs. Unknown intents still hold.
+        """
+        from .pi_fixture import FixturePiRecipe
+        if type(seat) is not FixtureSeat or type(recipe) is not FixturePiRecipe:
+            raise LedgerError('INVALID_SEAT')
+        with self.supervisor._locked():
+            self.supervisor._allowed('participant-restore', self._room())
+            scope = self.hub.contexts.scope(seat.participant_id)
+            path = self._pi_checkpoint_path(seat.participant_id)
+            try:
+                if path.is_symlink() or path.stat().st_size > 8192:
+                    raise ValueError()
+                saved = json.loads(path.read_text(), object_pairs_hook=_unique_object)
+                if (set(saved) != {'version', 'room_instance', 'participant', 'reset_id', 'scope', 'directory', 'native'}
+                        or type(saved['version']) is not int or saved['version'] != 1 or saved['room_instance'] != self.instance
+                        or saved['participant'] != seat.participant_id or _canonical(saved['scope']) != _canonical(scope)
+                        or recipe.scope != scope or saved['directory'] != str(recipe.directory)
+                        or self.hub.contexts.reset_status(saved['reset_id'])['status'] != 'SUCCEEDED'):
+                    raise ValueError()
+                native = saved['native']
+                if (type(native) is not dict or set(native) != {'runtime_id', 'session_id', 'session_file', 'source'}
+                        or any(type(value) is not str or not value for value in native.values())
+                        or native['source'] != 'native-empty-session-and-no-pending-messages'):
+                    raise ValueError()
+                session = Path(native['session_file']).resolve()
+                if not session.is_relative_to(recipe.session_directory):
+                    raise ValueError()
+                if recipe.session is not None and recipe.session != str(session):
+                    raise ValueError()
+                fresh = not session.exists()
+                if fresh:
+                    if self.hub.contexts._row(seat.participant_id)['bound_run'] is not None:
+                        raise ValueError()
+                    database = sqlite3.connect(recipe.journal.as_uri() + '?mode=ro', uri=True)
+                    try:
+                        binding = database.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
+                        if not binding or json.loads(binding[0]) != scope or database.execute('SELECT count(*) FROM handoffs').fetchone()[0]:
+                            raise ValueError()
+                    finally:
+                        database.close()
+            except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
+                raise LedgerError('NATIVE_CONTEXT_RESTORE_UNVERIFIED') from error
+        selected = FixturePiRecipe(recipe.install, recipe.directory, scope=scope,
+                                   session=None if fresh else str(session), timeout=recipe.timeout)
+        return self._launch_pi(seat, selected, restoring={**saved, 'fresh': fresh})
+
+    def reset_pi(self, operation_id, seat, recipe, *, expected_context_generation, target_run):
+        """Trusted fixture reset of one seat, never participant-claimed completion.
+
+        Request fencing is durable before process effects. Failed/unknown reset
+        leaves both Runs undeliverable to this seat. Exact completed retry does
+        not repeat native reset or advance the generation twice.
+        """
+        from .pi_fixture import FixturePiRecipe
+        if type(seat) is not FixtureSeat or type(recipe) is not FixturePiRecipe or recipe.session is not None:
+            raise LedgerError('INVALID_RESET_RECIPE')
+        definition = seat.document()
+        if seat.runtime != 'pi-fixture' or seat.arguments:
+            raise LedgerError('INVALID_RESET_RECIPE')
+        with self.supervisor._locked():
+            self.supervisor._allowed('participant-reset', self._room())
+            previous = self._read()['seats'].get(seat.participant_id)
+            if previous and previous['seat'] != definition:
+                raise LedgerError('SEAT_BINDING_CONFLICT')
+            self.hub.contexts.request_reset(operation_id, seat.participant_id,
+                                            expected_context_generation, target_run)
+            status = self.hub.contexts.reset_status(operation_id)
+            if status['status'] == 'SUCCEEDED':
+                current = self.handles.get(seat.participant_id)
+                if (current is not None and self._alive(current) and current.connection is not None
+                        and self.hub._current(current.connection)
+                        and current.connection.context_generation == expected_context_generation + 1):
+                    self._authority(current, (current.process.pid, os.getuid(), os.getgid()))
+                    return current
+                raise LedgerError('RESET_SUCCEEDED_RESTORE_REQUIRED')
+        try:
+            expected = self.hub.contexts.pending_scope(operation_id)
+            if recipe.scope != expected:
+                raise LedgerError('PEER_BINDING_CONFLICT')
+            with self.supervisor._locked():
+                old = self.handles.get(seat.participant_id)
+                preceding_session = (old.managed_receiver.initial_state['session_id']
+                                     if old is not None and old.managed_receiver is not None else None)
+                if old is not None:
+                    document = self._read()
+                    self._fence(document, seat.participant_id, 'revoked', 'context-reset')
+                    self._dispose(old)
+                    if self._alive(old) or old.process.poll() is None:
+                        raise LedgerError('NATIVE_STOP_UNVERIFIED')
+                # A reconstructed controller never adopts or kills an old PID.
+                # Any still-live retired process conservatively blocks reset.
+                for pid in self._read()['retired_pids']:
+                    try:
+                        descriptor = os.pidfd_open(pid, 0)
+                    except ProcessLookupError:
+                        continue
+                    try:
+                        if not select.select([descriptor], [], [], 0)[0]:
+                            raise LedgerError('RETIRED_PROCESSES_UNVERIFIED')
+                    finally:
+                        os.close(descriptor)
+            return self._launch_pi(seat, recipe, reset={'id': operation_id,
+                'expected_generation': expected_context_generation, 'preceding_session': preceding_session})
+        except BaseException:
+            # Read after an uncertain success commit BEFORE any compensating
+            # transition. A succeeded reset is never downgraded or reopened.
+            try:
+                status = self.hub.contexts.reset_status(operation_id)
+                if status['status'] != 'SUCCEEDED':
+                    self.hub.contexts.fail_reset(operation_id, expected_context_generation, 'NATIVE_RESET_FAILED')
+            except (LedgerError, OSError, sqlite3.Error):
+                pass
+            raise
 
     @staticmethod
     def _alive(handle):
