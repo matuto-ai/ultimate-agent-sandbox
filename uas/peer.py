@@ -11,6 +11,8 @@ from enum import Enum
 import hashlib
 import uuid
 
+from uas.context import (FixtureContextHub, FixtureRun, MAX_CONTEXT_GENERATION,
+                         initial_contexts, reserve_context_capacity)
 from uas.ledger import Command, Event, LedgerError, Origin, RoomLedger, Transition, MAX_SEQUENCE, _json, _token
 
 
@@ -101,11 +103,14 @@ class FixturePeerHub:
     configure/connect/observe/cancel are trusted harness actions. Client input
     enters only submit(); its identity comes from an attached connection object.
     A new Hub has no usable connections or safe-point observations. No socket,
-    real Run admission, runtime launch, reset, stop, or Forge authority is added.
+    product Run admission, runtime launch, stop, or Forge authority is added.
+    contexts exposes only bounded trusted fixture facts/reset decisions; native
+    reset and process authority remain the Supervisor's separate responsibility.
     """
     def __init__(self, ledger: RoomLedger):
         self.ledger = ledger
         self._connections = {}
+        self.contexts = FixtureContextHub(self)
 
     def _state(self):
         state = self.ledger.snapshot()["state"].get("peer_traffic")
@@ -122,10 +127,10 @@ class FixturePeerHub:
     def _transition(state, kind, payload, result):
         return Transition(state, (Event(kind, payload),), result)
 
-    def configure(self, operation_id, participants, run_id, generation=1):
+    def configure(self, operation_id, participants, run_id, generation=1, *, initial_runs=None):
         """Bind a synthetic scope, not a Forge work item or a product Run."""
         _token(run_id)
-        if type(generation) is not int or generation < 1:
+        if type(generation) is not int or not 1 <= generation <= MAX_CONTEXT_GENERATION:
             raise LedgerError("INVALID_SCOPE")
         if type(participants) is not tuple or not 2 <= len(participants) <= 32:
             raise LedgerError("INVALID_PARTICIPANTS")
@@ -139,27 +144,37 @@ class FixturePeerHub:
             if type(participant.work_slots) is not int or not 1 <= participant.work_slots <= 16:
                 raise LedgerError("INVALID_CAPACITY")
             peers[name] = {"actor_id": _token(participant.actor_id), "work_slots": participant.work_slots}
+        contexts = initial_contexts(peers, FixtureRun(run_id, generation), initial_runs)
         definition = {"participants": peers, "run_id": run_id, "generation": generation}
+        if initial_runs is not None:
+            definition["initial_runs"] = {key: value.document() for key, value in initial_runs.items()}
         def decide(state, _):
             if "peer_traffic" in state:
                 raise LedgerError("ALREADY_CONFIGURED")
             state["peer_traffic"] = {"definition": definition, "traffic": {}, "offers": {},
                                      "connections": {}, "cursors": {name: 0 for name in peers}}
+            state["fixture_context"] = deepcopy(contexts)
+            self._reserve_capacity(state)
             return self._transition(state, "peer.configured", definition, {"configured": True})
         return self._control(operation_id, "configure", definition, decide)
 
     def connect(self, operation_id, participant_id, incarnation_id, receiver, *, context_generation=1):
-        """Restore only the same synthetic Run/context, with fresh readiness."""
+        """Attach only the Hub's current context, never caller-invented scope."""
         _token(incarnation_id)
-        if type(context_generation) is not int or context_generation != 1:
-            raise LedgerError("CONTEXT_MISMATCH")
         if participant_id not in self._state()["definition"]["participants"]:
             raise LedgerError("UNKNOWN_PARTICIPANT")
+        if type(context_generation) is not int or not self._context_current(participant_id, context_generation):
+            raise LedgerError("CONTEXT_MISMATCH")
         connection = FixtureConnection(participant_id, incarnation_id, context_generation, operation_id, receiver)
         binding = {"participant_id": participant_id, "incarnation_id": incarnation_id,
                    "context_generation": context_generation, "attachment_id": operation_id}
         def decide(state, _):
+            if not self._context_current(participant_id, context_generation, state):
+                raise LedgerError("CONTEXT_MISMATCH")
             current = state["peer_traffic"]["connections"].get(participant_id)
+            if (current and current["incarnation_id"] == incarnation_id
+                    and current["context_generation"] != context_generation):
+                raise LedgerError("INCARNATION_RETIRED")
             if current and current["incarnation_id"] != incarnation_id:
                 # Incarnations are never recycled. Use immutable attachment
                 # history rather than an unbounded list in materialized state.
@@ -175,7 +190,8 @@ class FixturePeerHub:
             state["peer_traffic"]["connections"][participant_id] = {
                 **binding, "readiness": Readiness.AMBIGUOUS.value, "observation_id": None}
             return self._transition(state, "peer.attached", binding, binding)
-        self._control(operation_id, "attach", binding, decide)
+        self._control(operation_id, "attach", binding, decide,
+                      authorize=lambda: self._context_current(participant_id, context_generation))
         # Even an exact attach retry cannot revive a superseded attachment.
         if self._state()["connections"][participant_id]["attachment_id"] != operation_id:
             raise LedgerError("STALE_CONNECTION")
@@ -183,6 +199,19 @@ class FixturePeerHub:
         # Readiness never survives Hub reconstruction, even if the attach ID did.
         self.observe(connection, Readiness.AMBIGUOUS)
         return connection
+
+    def _context_current(self, participant_id, generation, state=None):
+        state = self.ledger.snapshot()["state"] if state is None else state
+        if "fixture_context" not in state:
+            return generation == 1  # Explicit legacy enablement is separately bounded.
+        return self.contexts.current(participant_id, generation, state)
+
+    def _scope_permits(self, participant_id, context_generation, run_id, generation, state=None):
+        state = self.ledger.snapshot()["state"] if state is None else state
+        if "fixture_context" not in state:
+            scope = state["peer_traffic"]["definition"]
+            return run_id == scope["run_id"] and generation == scope["generation"] and context_generation == 1
+        return self.contexts.permits(participant_id, context_generation, run_id, generation, state)
 
     def _current(self, connection, *, safe=False, observation_id=None):
         if type(connection) is not FixtureConnection or self._connections.get(connection.participant_id) is not connection:
@@ -195,7 +224,8 @@ class FixturePeerHub:
             matches = matches and current.get("readiness") == Readiness.SAFE.value
         if observation_id is not None:
             matches = matches and current.get("observation_id") == observation_id
-        return matches and current.get("readiness") != Readiness.LOST.value
+        return (matches and current.get("readiness") != Readiness.LOST.value
+                and self._context_current(connection.participant_id, connection.context_generation))
 
     def observe(self, connection, readiness):
         if type(readiness) is not Readiness:
@@ -263,8 +293,8 @@ class FixturePeerHub:
         operation = Command(traffic.id, kind, traffic.run_id, traffic.generation, payload)
         def decide(state, command):
             domain = state["peer_traffic"]
-            scope = domain["definition"]
-            if command.target != scope["run_id"] or command.generation != scope["generation"]:
+            if not self._scope_permits(connection.participant_id, connection.context_generation,
+                                       command.target, command.generation, state):
                 raise LedgerError("STALE_GENERATION")
             if command.kind == "peer.command":
                 return self._request_command(state, connection, command)
@@ -282,7 +312,8 @@ class FixturePeerHub:
         recipient = payload["recipient"]
         if parent_id is not None:
             parent = domain["traffic"].get(_token(parent_id))
-            if not parent or connection.participant_id not in parent["recipients"]:
+            if (not parent or connection.participant_id not in parent["recipients"]
+                    or parent["run_id"] != command.target or parent["generation"] != command.generation):
                 raise LedgerError("FORBIDDEN_PARENT")
             if not parent["deliveries"].get(connection.participant_id):
                 raise LedgerError("PARENT_NOT_DELIVERED")
@@ -318,13 +349,14 @@ class FixturePeerHub:
         at admission is included; its trusted owner must preserve this budget.
         """
         reserved = deepcopy(state)
+        reserve_context_capacity(reserved)
         domain = reserved["peer_traffic"]
         widest = "x" * 256  # Ledger token bound, including future incarnations.
         timestamp = "x" * 32  # UTC ISO timestamp emitted by _now().
         for participant in domain["definition"]["participants"]:
             domain["connections"][participant] = {
                 "participant_id": participant, "incarnation_id": widest,
-                "context_generation": 1, "attachment_id": widest,
+                "context_generation": MAX_CONTEXT_GENERATION, "attachment_id": widest,
                 "readiness": "compacting", "observation_id": widest}
             domain["cursors"][participant] = MAX_SEQUENCE
         for item in domain["traffic"].values():
@@ -332,11 +364,11 @@ class FixturePeerHub:
             for participant in item["recipients"]:
                 receipt = {"delivery_id": "delivery-" + "x" * 64, "digest": "x" * 64,
                            "participant_id": participant, "incarnation_id": widest,
-                           "context_generation": 1}
+                           "context_generation": MAX_CONTEXT_GENERATION}
                 item["deliveries"][participant] = {**receipt, "confirmed_at": timestamp}
                 domain["offers"][item["id"]][participant] = {
                     "delivery_id": receipt["delivery_id"], "digest": receipt["digest"],
-                    "incarnation_id": widest, "context_generation": 1,
+                    "incarnation_id": widest, "context_generation": MAX_CONTEXT_GENERATION,
                     "outcome": "UNCONFIRMED", "offer_seq": MAX_SEQUENCE,
                     "superseded_unconfirmed": {"count": MAX_SEQUENCE, "first_seq": MAX_SEQUENCE,
                                                 "last_seq": MAX_SEQUENCE}}
@@ -353,7 +385,8 @@ class FixturePeerHub:
     def _request_command(self, state, connection, command):
         domain, payload = state["peer_traffic"], command.payload
         request = domain["traffic"].get(_token(payload["request_id"]))
-        if not request or request["kind"] != "peer.work-request":
+        if (not request or request["kind"] != "peer.work-request"
+                or request["run_id"] != command.target or request["generation"] != command.generation):
             raise LedgerError("UNKNOWN_REQUEST")
         if request["recipients"] != [connection.participant_id]:
             raise LedgerError("FORBIDDEN_REQUEST")
@@ -368,7 +401,8 @@ class FixturePeerHub:
         if request["status"] not in allowed:
             raise LedgerError("INVALID_TRANSITION")
         delivery = request["deliveries"].get(connection.participant_id, {})
-        if delivery.get("incarnation_id") != connection.incarnation_id:
+        if (delivery.get("incarnation_id") != connection.incarnation_id
+                or delivery.get("context_generation") != connection.context_generation):
             raise LedgerError("DELIVERY_REQUIRED")
         if action == "accept":
             used = sum(item.get("status") == "ACCEPTED" and item["recipients"] == [connection.participant_id]
@@ -419,7 +453,8 @@ class FixturePeerHub:
         for id in ids:
             item = domain["traffic"][id]
             previous = item["deliveries"].get(participant)
-            if item.get("status") in TERMINAL:
+            if (item.get("status") in TERMINAL or not self._scope_permits(
+                    participant, connection.context_generation, item["run_id"], item["generation"], snapshot["state"])):
                 continue
             if previous and (item["kind"] == "peer.message" or previous["incarnation_id"] == connection.incarnation_id):
                 continue
@@ -451,6 +486,9 @@ class FixturePeerHub:
             envelope_digest = digest(envelope)
             def begin(state, _, envelope=envelope, envelope_digest=envelope_digest):
                 request = state["peer_traffic"]["traffic"][envelope["id"]]
+                if "fixture_context" in state:
+                    self.contexts.reserve_delivery(state, connection.participant_id, connection.context_generation,
+                                                   envelope["run_id"], envelope["generation"])
                 if request.get("status") in TERMINAL:
                     raise LedgerError("DELIVERY_FENCED")
                 offers = state["peer_traffic"]["offers"].setdefault(envelope["id"], {})
@@ -475,7 +513,9 @@ class FixturePeerHub:
             authorize = lambda: self._current(connection, safe=True, observation_id=observation)
             def offer_allowed():
                 current_item = self._state()["traffic"].get(item["id"], {})
-                return authorize() and current_item.get("status") not in TERMINAL
+                return (authorize() and current_item.get("status") not in TERMINAL
+                        and self._scope_permits(connection.participant_id, connection.context_generation,
+                                                item["run_id"], item["generation"]))
             self._control(delivery_id + ":offer", "offer", envelope, begin, offer_allowed)
             # Recheck even an exact offer retry before possible receiver contact.
             if not offer_allowed():
@@ -496,6 +536,9 @@ class FixturePeerHub:
                 if (not offer or offer["delivery_id"] != envelope["delivery_id"]
                         or offer["digest"] != receipt["digest"] or request.get("status") in TERMINAL):
                     raise LedgerError("DELIVERY_FENCED")
+                if "fixture_context" in state:
+                    self.contexts.confirm_delivery(state, connection.participant_id, connection.context_generation,
+                                                   envelope["run_id"], envelope["generation"])
                 offer["outcome"] = "CONFIRMED"
                 now = _now()
                 request["deliveries"][connection.participant_id] = {**receipt, "confirmed_at": now}
@@ -504,7 +547,9 @@ class FixturePeerHub:
                 domain["cursors"][connection.participant_id] = max(
                     domain["cursors"][connection.participant_id], request["submitted_seq"])
                 return self._transition(state, "peer.delivery.confirmed", receipt, receipt)
-            result = self._control(delivery_id + ":confirm", "confirm", receipt, confirm, authorize)
+            confirm_allowed = lambda: authorize() and self._scope_permits(
+                connection.participant_id, connection.context_generation, item["run_id"], item["generation"])
+            result = self._control(delivery_id + ":confirm", "confirm", receipt, confirm, confirm_allowed)
             delivered.append(result)
         return {"outcome": "CONFIRMED" if delivered else "HELD", "deliveries": delivered}
 

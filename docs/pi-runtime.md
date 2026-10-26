@@ -22,6 +22,11 @@ is still not production Run admission/reset generation, container image digest,
 live-provider qualification, or host/Room isolation. Native reset observations do
 not commit a cross-Run transition. #70 remains open for those obligations.
 
+The subsequent [durable cross-Run reset fixture](pi-context-reset.md) now extends
+this same owned-process seam with per-Participant generation/barrier semantics.
+The same-Run sections below describe the original baseline; its former reset gap
+is addressed only within that newly documented fixture scope.
+
 ## Run the real native gate
 
 ```sh
@@ -106,7 +111,7 @@ intent until a later explicit retry reconciles the receipt.
 
 Native `new_session` is tested to change session identity and fence the old
 receiver. It is **not** a product cross-Run reset: advancing durable context
-and Run generations remains unimplemented here. Native `new_session` also closes
+and Run generations requires the separate [durable reset barrier](pi-context-reset.md). Native `new_session` also closes
 the peer descriptor; it cannot grant the new session continued authority. The
 receiver-only suite uses trusted harness incarnation; the process-bound suite
 below uses a fresh Supervisor badge, distinct from the native runtime UUID.
@@ -190,9 +195,10 @@ queued work starts the supported native turn; the actual faux provider produces
 through direct Hub submission or require a manual priming prompt.
 
 Same-session restart creates a fresh process badge and preserves accepted work
-and native delivery deduplication. This is **not cross-Run reset**. Generations
-remain 1, uncertain first-flush recovery still holds, and no image/live-provider
-or production Workstation isolation is inferred. Passing the FD can steal replies
+and native delivery deduplication. It remains distinct from the [cross-Run reset
+barrier](pi-context-reset.md), which advances generation only after fresh native
+proof. Uncertain first-flush recovery still holds; no image/live-provider or
+production Workstation isolation is inferred. Passing the FD can steal replies
 or cause denial of service between trusted same-UID peers; it cannot make a child
 or SCM_RIGHTS recipient the original Actor. A Pi-mediated child request would be
 attributed to Pi, not an independently authorized child.
