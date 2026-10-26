@@ -1,7 +1,7 @@
 """Restricted canonical first-Run admission over existing account-free seams.
 
 Trusted human authority callback is NOT a Manager authentication implementation.
-Only already-exact GitHub assignment is eligible. No Forge mutation, projection,
+Already-exact assignment or opt-in audited self-assignment is eligible. No lifecycle projection,
 completion, automatic intake or recovery scheduler exists here. Explicit repeats
 reconcile the same durable intent and owned checkout; they never consume another
 human grant. This does not satisfy #69 or complete #72.
@@ -50,6 +50,15 @@ class RunAdmission:
                     or seat.participant_id != participant or 'forge-read' not in seat.capabilities
                     or 'peer-traffic' not in seat.capabilities):
                 raise LedgerError('ADMISSION_BINDING_MISMATCH')
+        if broker.assignments is not None:
+            # Deployment identity comes only from trusted installation config,
+            # never a Participant envelope or the Room-local binding.
+            if broker.assignments.audit.deployment_id != config['deployment']['id']:
+                raise LedgerError('ADMISSION_BINDING_MISMATCH')
+            for seat in self.seats.values():
+                if ('forge-write' in seat.capabilities and
+                        broker.assignments.actor_user_ids.get(seat.actor_id) != self.actors[seat.actor_id].get('github_user_id')):
+                    raise LedgerError('ADMISSION_BINDING_MISMATCH')
         self.broker, self.allocator = broker, allocator
         self.install, self.runtime_root = install, Path(runtime_root)
         self.authorize_human = authorize_human
@@ -223,6 +232,40 @@ class RunAdmission:
             raise
         return receipt, intent['started']
 
+    def _assign_or_reconcile(self, run, number, handle, attempt_id, human, command):
+        service = self.broker.assignments
+        def authorized():
+            return self._authority(handle) and self._human(human, command)
+        operation = 'admit-assignment-' + run
+        with self.supervisor._locked():
+            self._authority(handle)
+            record = service.audit.get(service._key(operation))
+            if record is None:
+                intent = self.broker.prepare({'id': operation, 'kind': 'forge-write',
+                    'argv': ['issue', 'edit', str(number), '--add-assignee', '@me']},
+                    origin=handle.badge.origin(), authorize=authorized)
+            else:
+                service._authorize(handle.badge.origin(), authorized)
+                if (record.get('result') or {}).get('status') == 'NOT_EXECUTED':
+                    # Original process was proven fenced before any POST. A new
+                    # explicit native write may repair assignment; never silently
+                    # turn human refresh into another mutation attempt.
+                    return
+                intent = None
+        if intent is not None:
+            outcome = self.broker.perform(intent)
+            with self.supervisor._locked():
+                receipt = self.broker.complete(intent, outcome, authorize=authorized)
+            status = receipt['assignment']['status']
+            if status not in {'ASSIGNED', 'ALREADY_ASSIGNED'}:
+                raise LedgerError('ASSIGNMENT_' + ('CONFLICT' if status == 'ASSIGNMENT_CONFLICT' else 'UNKNOWN'))
+        else:
+            receipt = service.reconcile(operation, 'admission-' + hashlib.sha256(attempt_id.encode()).hexdigest(),
+                origin=handle.badge.origin(), authorize=authorized)
+            status = receipt['assignment']['status']
+            if status != 'MATCHED':
+                raise LedgerError('ASSIGNMENT_' + ('CONFLICT' if status == 'CONFLICT' else 'UNKNOWN'))
+
     def _request_text(self, number, policy, path):
         return ('Implement exactly https://github.com/' + self.broker.binding.repository
             + '/issues/' + str(number) + '. Checkout: ' + path
@@ -349,10 +392,37 @@ class RunAdmission:
         observed = time.monotonic()
         if not fresh:
             raise LedgerError('FORGE_FACTS_EXPIRED')
+        assignment_service = self.broker.assignments
+        assignment_operation = 'admit-assignment-' + run
+        prior_assignment = (assignment_service.audit.get(assignment_service._key(assignment_operation))
+                            if assignment_service is not None else None)
+        if prior_assignment is not None:
+            self._assign_or_reconcile(run, issue_number, handle, attempt_id, human, command)
+        if (receipt['observation'].get('status') == 'OK'
+                and receipt['observation'].get('completeness') == 'complete'
+                and not receipt['observation']['issue']['assignees']
+                and self.broker.assignments is not None and prior_assignment is None):
+            # Validate all other eligibility facts before even requesting a write.
+            eligible = deepcopy(receipt['observation'])
+            eligible['issue']['assignees'] = [{'id': pending['github_user_id'], 'login': 'validation-only'}]
+            self._eligible(eligible, pending)
+            self._assign_or_reconcile(run, issue_number, handle, attempt_id, human, command)
+            # Neither response success nor reconciliation replaces fresh native
+            # dependencies, classification and assignment at activation.
+            receipt, fresh = self._fresh_read(run, issue_number, handle, 'post-assignment-' + attempt_id)
+            observed = time.monotonic()
+            if not fresh:
+                raise LedgerError('FORGE_FACTS_EXPIRED')
+        if (prior_assignment is not None and not (receipt['observation'].get('issue') or {}).get('assignees')
+                and (prior_assignment.get('result') or {}).get('status') == 'NOT_EXECUTED'):
+            raise LedgerError('ASSIGNMENT_EXPLICIT_RETRY_REQUIRED')
         delivery_class = self._eligible(receipt['observation'], pending)
         # Read-side snapshot is bounded/fresh, not an atomic GitHub lock. Git is
         # observed again after provider I/O, before the one activation transaction.
         slot = self._slot(run, participant_id)
+        assignment_audit = (assignment_service._key(assignment_operation)
+            if assignment_service is not None and assignment_service.audit.get(
+                assignment_service._key(assignment_operation)) is not None else None)
         with self.supervisor._locked():
             self._authority(handle)
             if native.observe() is not Readiness.SAFE:
@@ -387,7 +457,8 @@ class RunAdmission:
                     'context_generation': 1, 'implementation_request': request_id,
                     'forge_observation': receipt['operation_id'], 'human_operation': command.id,
                     'authorization_consumed': True, 'control_revision': 0, 'control_reason': None,
-                    'projection': 'unavailable-no-write-support'}
+                    'projection': 'unavailable-no-write-support',
+                    'assignment_audit': assignment_audit}
                 current.pop('reservation')
                 current.update(status='ACTIVE', authorization_consumed=True, attention=None)
                 state['runs'][run] = row

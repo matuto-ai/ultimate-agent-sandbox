@@ -271,13 +271,15 @@ def install_packages(nonce, manifest, *, exact_roots=None):
     require_installed_roots(exact_roots)
 
 
-def install(nonce, manifest_hash, *, exact_roots=None):
+def install(nonce, manifest_hash, *, exact_roots=None, defer_engine_start=False):
     expect(os.geteuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == nonce, 'not this disposable boot')
     expect(sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo'], 'external guest NIC present')
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux not enforcing before installation')
     PAYLOAD.mkdir()
     run('mount', '-o', 'ro,nodev,nosuid,noexec', '/dev/disk/by-label/UAS_PAYLOAD', str(PAYLOAD))
     manifest = verify_payload(nonce, manifest_hash)
+    expect(type(defer_engine_start) is bool and (not defer_engine_start
+           or manifest.get('profile') == 'native-pi-v1'), 'daemon deferral requires native profile')
     install_packages(nonce, manifest, exact_roots=exact_roots)
     shutil.copytree(PAYLOAD / 'repo', ROOT)
     shutil.copyfile(PAYLOAD / 'fixture', ROOT / 'fixture')
@@ -287,6 +289,11 @@ def install(nonce, manifest_hash, *, exact_roots=None):
     Path('/etc/subgid').write_text('uas-remap:100000:65536\n')
     Path('/etc/docker').mkdir(exist_ok=True)
     Path('/etc/docker/daemon.json').write_text(json.dumps(DOCKER_CONFIGURATION))
+    if not defer_engine_start:
+        start_engine()
+
+
+def start_engine():
     run('systemctl', 'start', 'docker', timeout=120)
     require_engine_security()
     print('Guest installed roots:', run('rpm', '-q', '--queryformat',

@@ -244,14 +244,40 @@ def fingerprint(root):
 
 
 def guest_guard(nonce):
-    if type(nonce) is not str or not re.fullmatch(r'[0-9a-f]{32}', nonce) or os.geteuid() != 0:
-        raise RuntimeError('native rootfs assembly requires this root-only no-NIC disposable boot')
+    facts = {'effective_uid': os.geteuid(), 'nonce_valid': type(nonce) is str
+             and re.fullmatch(r'[0-9a-f]{32}', nonce) is not None}
+    def denied():
+        # Individual bounded facts, never the nonce, marker contents or an
+        # unbounded system dump. Diagnostics do not change any admission check.
+        raise RuntimeError('native rootfs assembly requires this root-only no-NIC disposable boot: '
+                           + json.dumps(facts, sort_keys=True, separators=(',', ':')))
+    if facts['effective_uid'] != 0 or not facts['nonce_valid']:
+        denied()
     marker = Path('/run/uas-vm-fixture')
-    info = ordinary(marker)
+    try:
+        info = ordinary(marker)
+        facts.update(marker_ordinary=True, marker_uid=info.st_uid,
+                     marker_mode=oct(stat.S_IMODE(info.st_mode)),
+                     marker_nonce_matches=marker.read_text().strip() == nonce)
+    except (OSError, ValueError):
+        facts['marker_ordinary'] = False
+        denied()
+    names = []
+    try:
+        for path in Path('/sys/class/net').iterdir():
+            names.append(path.name)
+            if len(names) > 16:
+                break
+        facts.update(interface_names=sorted(name[:32] for name in names),
+                     interface_list_complete=len(names) <= 16,
+                     loopback_only=names == ['lo'])
+    except OSError:
+        facts['interfaces_readable'] = False
+        denied()
     if (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600
-            or marker.read_text().strip() != nonce
-            or sorted(path.name for path in Path('/sys/class/net').iterdir()) != ['lo']):
-        raise RuntimeError('native rootfs assembly requires this root-only no-NIC disposable boot')
+            or not facts['marker_nonce_matches'] or names != ['lo']):
+        denied()
+    print('Native rootfs guard:', json.dumps(facts, sort_keys=True), flush=True)
 
 
 def build_rootfs(nonce, manifest, destination, *, run):

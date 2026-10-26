@@ -34,6 +34,30 @@ class RunAdmissionRefusalTests(unittest.TestCase):
             install=None, runtime_root=self.root / 'native',
             authorize_human=lambda *_: self.authorized)
 
+    def test_assignment_audit_requires_configured_deployment_before_any_effect(self):
+        from uas.forge_assignment import AssignmentBroker
+        from uas.forge_audit import ForgeAudit
+        before = self.ledger.snapshot()
+        def no_provider(_):
+            raise AssertionError('no provider selection')
+        with ForgeAudit(self.root / 'wrong-deployment.db', 'wrong-deployment') as audit:
+            self.broker.assignments = AssignmentBroker(self.broker.binding, audit, {'alice': 41}, no_provider)
+            with patch.object(self.allocator, 'allocate', side_effect=AssertionError('no Git mutation')):
+                with patch.object(self.controller, 'launch_pi', side_effect=AssertionError('no native launch')):
+                    self.error('ADMISSION_BINDING_MISMATCH', self.construct)
+            self.assertEqual([], audit.pending('alpha'))
+        self.assertEqual(before, self.ledger.snapshot())
+        self.assertEqual([], self.calls)
+        self.assertEqual({}, self.controller.handles)
+        self.assertEqual([], self.allocator.status())
+        # Standalone broker fixtures choose their own trusted Deployment store;
+        # canonical admission additionally binds it to installation configuration.
+        with ForgeAudit(self.root / 'right-deployment.db', self.config['deployment']['id']) as audit:
+            self.broker.assignments = AssignmentBroker(self.broker.binding, audit, {'alice': 41}, no_provider)
+            self.construct()
+            self.assertEqual([], audit.pending('alpha'))
+        self.assertEqual(before, self.ledger.snapshot())
+
     def test_refused_human_authority_preserves_state_and_never_calls_git_or_pi(self):
         before = self.ledger.snapshot()
         with patch.object(self.allocator, 'allocate', side_effect=AssertionError('no Git mutation')):

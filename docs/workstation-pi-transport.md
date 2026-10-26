@@ -369,7 +369,22 @@ Missing/ambiguous candidates or post-install mismatch fail closed. It neither
 installs the union of dependency alternatives nor enables allowerasing, weak
 dependencies or signature bypass. The default synthetic #98 installer remains
 name-based and unchanged; candidate metadata alone never proves installed
-versions. This correction still requires a fresh deliberate guest qualification.
+versions. Deliberate run 40401426777 on `5c0d628e` subsequently verified both
+actual installed exact roots, clearing that specific mismatch. It then failed
+`native_rootfs.guest_guard` before rootfs construction or Hub/seat execution. The
+logged guard bundled marker owner/mode/nonce and loopback-only checks, so its
+individual failing subcondition is unknown. Docker had been explicitly started
+first; a Docker-created bridge conflicting with `['lo']` is a source-order
+hypothesis, **not an observed interface fact**. No AVC denial was observed.
+
+The next source candidate defers only the native profile's explicit Docker start
+until offline rootfs construction completes. Root identity, ordinary root-owned
+0600 marker, exact nonce and `['lo']` checks are unchanged, with bounded individual
+diagnostic facts added. Only then does the unchanged Engine startup/security
+verification run. The default #98 order is unchanged. Main112's exact Pi extension
+and related assignment sources are preserved, but no Broker capability is wired
+into this Hub. The resulting new payload still requires its own qualification;
+previous-head package or ordinary native evidence does not qualify this image.
 
 The private next candidate adds one bounded authenticated Supervisor poll and
 confirmation seam. `POLL_DELIVERY` requires the current exact admission and an

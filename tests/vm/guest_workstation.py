@@ -184,8 +184,11 @@ def scenario(nonce,manifest):
     try:
         expect(not image_root.exists() and not archive.exists(),'native image workspace already exists')
         ownership['rootfs']=True
-        engine=engine_profile(manifest)
+        # Keep exact root/marker/no-NIC guard before Docker can create its
+        # owned bridge. No interface allowlist relaxation or policy fallback.
         image_evidence=build_rootfs(nonce,manifest,image_root,run=run)
+        boundary.start_engine()
+        engine=engine_profile(manifest)
         ownership['archive']=True
         with tarfile.open(archive,'x',format=tarfile.PAX_FORMAT) as target:
             for path in sorted(image_root.iterdir()):target.add(path,arcname=path.name,recursive=True)
@@ -337,7 +340,7 @@ def scenario(nonce,manifest):
 def main():
     nonce,digest=sys.argv[1:];checks={}
     try:
-        boundary.install(nonce,digest,exact_roots=NATIVE_PACKAGE_PROFILE)
+        boundary.install(nonce,digest,exact_roots=NATIVE_PACKAGE_PROFILE,defer_engine_start=True)
         manifest=boundary.verify_payload(nonce,digest)
         expect(manifest.get('profile')=='native-pi-v1','not explicit native payload')
         checks=scenario(nonce,manifest)
