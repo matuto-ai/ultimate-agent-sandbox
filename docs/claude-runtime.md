@@ -72,7 +72,8 @@ not a substitute for that boundary. It does not launch on a normal routed host.
 | Inferred safe point | Fresh correlated successful terminal result after matching ACK, zero queued turns, no permission denials, supported version, and no tools/MCP. Stdin stays open. |
 | Expired/unknown signal | No safe point; explicit fixture control turn can renew an otherwise unfenced idle observation. No automatic model-polling loop. |
 | Needs input / unexpected activity | Conservative fenced hold; no approval, queue injection, or silent retry. |
-| Transport failure / missing ACK | Bounded writes/waits fence the process and retain the unknown durable intent. |
+| Proven zero-byte rejection | Durably retain the same logical/native message ID as retryable, not accepted. Require fresh safe evidence before another attempt. |
+| Partial/uncertain write or missing ACK | Bounded writes/waits fence the process and retain the unknown durable intent. |
 | Same-Run restore | Explicit `--resume`, same journal and native session, new random fixture incarnation, and fresh bootstrap result before any receipt reconciliation. |
 | Different Run/context | Rejected. This slice does not implement or qualify native reset. |
 
@@ -95,9 +96,19 @@ native ACK is stored durably before returning a receipt to `FixturePeerHub`; onl
 the Hub starts its response clock. ACK is not model success or Participant work
 acceptance. An ACK lost before journal commit remains unknown permanently in
 this slice: even after resume, the receiver refuses to reinject or fabricate a
-receipt. Any unresolved journal intent holds the whole receiver, so another
+receipt. Any unknown journal intent holds the whole receiver, so another
 envelope cannot route around an ambiguous head. A recorded ACK can reconcile without reinjection after fresh same-session
 readiness. A file lock prevents simultaneous owners of one fixture journal.
+
+A rejection proved to occur before any input byte was written is different from
+uncertainty: after a successful durable classification, it becomes retryable with
+the **same logical handoff and native UUID**, never a receipt. The previous safe
+observation is invalidated. An explicit fresh fixture turn can permit a retry;
+the journal is first durably re-armed as unknown before touching stdin again.
+Classification-commit failure remains unknown and holds the whole receiver.
+Every nonblocking write iteration rechecks asynchronous attention/unknown fences
+under the reader's signal lock, with bounded waits outside that lock. A partial
+frame remains unknown; no remaining bytes are sent after an observed fence.
 
 Replay ACK timing is **not immediate**: a deterministic fixture blocking all
 HTTP response bytes withheld the observable ACK beyond the receiver deadline.

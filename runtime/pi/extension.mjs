@@ -1,6 +1,7 @@
 // Pi-specific precision stays here; Hub consumes only generic readiness.
 import { createHash, randomUUID } from 'node:crypto';
 import { openSync, closeSync, fstatSync, readFileSync } from 'node:fs';
+import { seqpacketChannel } from './channel.mjs';
 
 const TYPE = 'uas-peer-v1';
 const LIMIT = 8 * 1024 * 1024;
@@ -10,6 +11,26 @@ const sha = value => createHash('sha256').update(canonical(value)).digest('hex')
 
 export default function (pi) {
   const runtimeId = randomUUID();
+  // This FD conveys no bearer identity. Supervisor checks the actual sender PID
+  // on every record against its held pidfd and current immutable seat binding.
+  const channel = process.env.UAS_PI_PEER_FD === undefined ? null
+    : seqpacketChannel(Number(process.env.UAS_PI_PEER_FD));
+  if (channel) pi.registerTool({
+    name: 'uas_peer', label: 'Fixture peer traffic',
+    description: 'Submit a typed peer message, work-request, or command to the fixture Hub. '
+      + 'Use stable operation ids when retrying. Acceptance/completion are explicit commands, '
+      + 'not inferred from receiving a message. No identity or policy fields are accepted.',
+    parameters: { type: 'object', additionalProperties: false,
+      required: ['id', 'run_id', 'generation', 'kind', 'payload'], properties: {
+        id: { type: 'string' }, run_id: { type: 'string' }, generation: { type: 'integer', minimum: 1 },
+        kind: { type: 'string', enum: ['message', 'work-request', 'command'] },
+        payload: { type: 'object' } } },
+    async execute(_toolCallId, envelope, signal) {
+      const reply = await channel.request(envelope, { signal });
+      return { content: [{ type: 'text', text: JSON.stringify(reply) }], details: reply,
+        isError: !reply.ok };
+    },
+  });
   let started = false, frozen = false, retired = false, source = 'missing-signal';
   const pending = new Set();
   function state(ctx) {
@@ -62,7 +83,7 @@ export default function (pi) {
   pi.on('session_compact_failed', () => { frozen = false; source = 'session_compact_failed'; });
   pi.on('session_before_switch', () => { frozen = true; source = 'session_before_switch'; });
   pi.on('session_before_fork', () => { frozen = true; source = 'session_before_fork'; });
-  pi.on('session_shutdown', () => { retired = true; source = 'session_shutdown'; });
+  pi.on('session_shutdown', () => { retired = true; source = 'session_shutdown'; channel?.close(); });
 
   pi.registerCommand('uas-state', { description: 'Fixture supervisor native state observation',
     handler: async (args, ctx) => {

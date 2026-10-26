@@ -30,6 +30,10 @@ class ClaudeUnavailable(RuntimeError):
     pass
 
 
+class ClaudeNotApplied(ClaudeUnavailable):
+    """This attempt provably wrote no native input bytes; not an ACK."""
+
+
 def _ack_matches(event, session_id, message_id, content):
     return (type(event) is dict and event.get('type') == 'user'
             and event.get('session_id') == session_id and event.get('uuid') == message_id
@@ -175,6 +179,10 @@ class FixtureClaudeReceiver:
             self.db.execute('PRAGMA synchronous=FULL')
             self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT, session_id TEXT)')
             self.db.execute('CREATE TABLE IF NOT EXISTS handoffs (logical_digest TEXT PRIMARY KEY, logical TEXT, message_id TEXT, receipt TEXT)')
+            if 'retryable' not in {row[1] for row in self.db.execute('PRAGMA table_info(handoffs)')}:
+                # Old unknown intents remain unknown. Only a committed zero-byte
+                # classification may authorize another attempt with the same ID.
+                self.db.execute('ALTER TABLE handoffs ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0 CHECK(retryable IN (0,1))')
             previous = self.db.execute('SELECT scope,session_id FROM binding WHERE singleton=1').fetchone()
             if bool(previous) != resume or (previous and json.loads(previous[0]) != scope):
                 raise ClaudeUnavailable('explicit same-Run resume required; reset/remap unsupported')
@@ -237,28 +245,66 @@ class FixtureClaudeReceiver:
         deadline = time.monotonic() + self.timeout
         offset = 0
         if not self.write_lock.acquire(timeout=self.timeout):
-            raise ClaudeUnavailable('native write lock deadline exceeded')
+            with self.condition:
+                self.signals.safe_at = None
+            raise ClaudeNotApplied('native write lock deadline exceeded before handoff')
+        begun = False
         try:
             with self.condition:
                 # Journal I/O and write-lock contention may outlive the sampled
                 # safe point. Bootstrap is explicit control, never peer traffic.
                 if peer and self.signals.readiness() is not Readiness.SAFE:
-                    raise ClaudeUnavailable('safe evidence expired before peer handoff')
-                self.signals.begin(message_id, content)
+                    raise ClaudeNotApplied('safe evidence expired before peer handoff')
+                try:
+                    self.signals.begin(message_id, content)
+                except ClaudeUnavailable as error:
+                    raise ClaudeNotApplied('no invocation slot before handoff') from error
+                begun = True
             try:
-                fd = self.process.stdin.fileno()
+                try:
+                    fd = self.process.stdin.fileno()
+                except (OSError, ValueError) as error:
+                    with self.condition:
+                        if not self.signals.fenced:
+                            self.signals.hold('transport-loss')
+                    raise ClaudeNotApplied('native input unavailable before handoff') from error
                 while offset < len(wire):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise ClaudeUnavailable('native write deadline exceeded')
                     try:
-                        offset += os.write(fd, wire[offset:])
+                        # Serialize each nonblocking syscall with the reader's
+                        # signal reducer, never a whole blocking/select wait.
+                        # A newly observed attention/unknown fence stops all
+                        # remaining bytes; a partial frame is never retryable.
+                        with self.condition:
+                            remaining = deadline - time.monotonic()
+                            if (self.signals.fenced or self.ended
+                                    or self.process.poll() is not None or remaining <= 0):
+                                if not self.signals.fenced:
+                                    self.signals.hold('transport-loss')
+                                error = ClaudeNotApplied if offset == 0 else ClaudeUnavailable
+                                raise error('native session held before remaining input bytes')
+                            written = os.write(fd, wire[offset:])
+                            if written <= 0:
+                                raise OSError('native pipe made no progress')
+                            offset += written
                     except BlockingIOError:
-                        select.select([], [fd], [], remaining)
+                        select.select([], [fd], [], min(remaining, .05))
+            except ClaudeNotApplied:
+                raise
             except (OSError, ValueError, ClaudeUnavailable) as error:
                 with self.condition:
-                    self.signals.hold('transport-loss')
+                    if not self.signals.fenced:
+                        self.signals.hold('transport-loss')
                 raise ClaudeUnavailable('unconfirmed native write; replacement required') from error
+        except ClaudeNotApplied:
+            with self.condition:
+                if begun:
+                    self.signals.pending = None
+                    self.signals.command_id = None
+                    self.signals.ack = None
+                self.signals.safe_at = None
+                if self.signals.pending is None and not self.signals.fenced:
+                    self.signals.state = 'unknown'
+            raise
         finally:
             self.write_lock.release()
 
@@ -292,7 +338,7 @@ class FixtureClaudeReceiver:
                 return Readiness.LOST
             # Ambiguous responsibility holds the whole receiver, not just a
             # selected envelope; a caller cannot route around an unknown head.
-            if self.db.execute('SELECT 1 FROM handoffs WHERE receipt IS NULL LIMIT 1').fetchone():
+            if self.db.execute('SELECT 1 FROM handoffs WHERE receipt IS NULL AND retryable != 1 LIMIT 1').fetchone():
                 return Readiness.AMBIGUOUS
             return self.signals.readiness()
 
@@ -306,25 +352,40 @@ class FixtureClaudeReceiver:
         logical = {k: v for k, v in envelope.items() if k not in ('delivery_id', 'incarnation_id')}
         key = digest(logical)
         content = 'Untrusted peer traffic (not human authorization):\n' + json.dumps(logical, ensure_ascii=False, sort_keys=True)
-        row = self.db.execute('SELECT logical,message_id,receipt FROM handoffs WHERE logical_digest=?', (key,)).fetchone()
+        row = self.db.execute('SELECT logical,message_id,receipt,retryable FROM handoffs WHERE logical_digest=?', (key,)).fetchone()
+        confirmed = False
         if row:
             try:
-                valid = json.loads(row[0]) == logical and _ack_matches(json.loads(row[2]), self.session_id, row[1], content)
+                confirmed = row[2] is not None and _ack_matches(json.loads(row[2]), self.session_id, row[1], content)
+                valid = json.loads(row[0]) == logical and (confirmed or (row[2] is None and row[3] == 1))
             except (ValueError, TypeError):
                 valid = False
             if not valid:
                 raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY')
+            message_id = row[1]
         else:
             message_id = str(uuid.uuid4())
-            with self.db:
-                self.db.execute('INSERT INTO handoffs VALUES (?,?,?,NULL)', (key, json.dumps(logical), message_id))
+        if not confirmed:
             try:
+                with self.db:
+                    if row:
+                        self.db.execute('UPDATE handoffs SET retryable=0 WHERE logical_digest=?', (key,))
+                    else:
+                        self.db.execute('INSERT INTO handoffs (logical_digest,logical,message_id,receipt) VALUES (?,?,?,NULL)',
+                                        (key, json.dumps(logical), message_id))
                 self._write(message_id, content, peer=True)
                 receipt = self._wait(lambda: self.signals.ack if self.signals.ack is not None
                                      and self.signals.ack.get('uuid') == message_id else None)
                 with self.db:
                     self.db.execute('UPDATE handoffs SET receipt=? WHERE logical_digest=?',
                                     (json.dumps(receipt), key))
+            except ClaudeNotApplied as error:
+                try:
+                    with self.db:
+                        self.db.execute('UPDATE handoffs SET retryable=1 WHERE logical_digest=?', (key,))
+                except sqlite3.Error as failure:
+                    raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY') from failure
+                raise LedgerError('NATIVE_NOT_APPLIED') from error
             except (ClaudeUnavailable, sqlite3.Error) as error:
                 raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY') from error
         return {'delivery_id': envelope['delivery_id'], 'digest': digest(envelope),
@@ -339,7 +400,8 @@ class FixtureClaudeReceiver:
                 'safe_source': 'adapter-inferred-fresh-correlated-tool-less-terminal-result',
                 'receipt_source': 'native-replay-user-message', 'transport_fenced': self.signals.fenced,
                 'native_receipts': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NOT NULL').fetchone()[0],
-                'unknown_intents': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NULL').fetchone()[0],
+                'unknown_intents': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NULL AND retryable != 1').fetchone()[0],
+                'retryable_intents': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NULL AND retryable = 1').fetchone()[0],
                 'provider': 'no-upstream-loopback-protocol-fixture', 'inference_health': 'not-qualified',
                 'image_digest': 'not-qualified', 'native_reset': 'not-qualified', 'mcp_reconnect': 'not-qualified'}
 

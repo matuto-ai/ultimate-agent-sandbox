@@ -16,11 +16,11 @@ long-turn hold, abort, compaction, native replacement and same-session restorati
 using the official account-free faux provider and separate process. Keep provider
 configuration, inference health, liveness and readiness distinct.
 
-The authority boundary remains an explicitly trusted fixture: #63 currently
-launches only a fixed synthetic worker. This adapter does not qualify native Pi
-badges, product Run admission/reset generation, container image digest, live
-providers, or host/Room isolation. Native reset observations do not commit a
-cross-Run transition. #70 remains open until those integration obligations pass.
+The initial receiver-only proof remains available. The same-Run integration below
+now binds actual Pi outbound tools to #63's Linux fixture process authority. This
+is still not production Run admission/reset generation, container image digest,
+live-provider qualification, or host/Room isolation. Native reset observations do
+not commit a cross-Run transition. #70 remains open for those obligations.
 
 ## Run the real native gate
 
@@ -34,13 +34,14 @@ UAS_PI_INSTALL="$PWD/tests/pi" ./validate.sh  # aggregate including native suite
 The dedicated `pi-native / official-pi-native` CI job always acquires the exact
 registry lock and runs the actual CLI in a child network namespace. Test processes
 receive a fresh HOME/agent directory, no provider keys, no ambient extensions,
-no tools, offline mode and a Node network-API denial guard. The guard is test
+no built-in tools (only the fixed `uas_peer` extension tool in the process-bound
+suite), offline mode and a Node network-API denial guard. The guard is test
 instrumentation, **not** an OS security boundary. No global installs, account
 settings, host routes, daemon configuration, or other workspaces are changed.
 
 `tests/pi/provider.mjs` registers the official `pi-ai` faux provider through the
-supported extension provider API. It controls response delay only; lifecycle,
-queue, compaction, session persistence/replacement and RPC are the real Pi
+supported extension provider API. It scripts responses/delay and real native tool
+calls; lifecycle, queue, compaction, session persistence/replacement and RPC are the real Pi
 implementation. Neither production provider compatibility nor quota is inferred.
 
 ## Delivery and recovery contract
@@ -105,9 +106,10 @@ intent until a later explicit retry reconciles the receipt.
 
 Native `new_session` is tested to change session identity and fence the old
 receiver. It is **not** a product cross-Run reset: advancing durable context
-and Run generations remains unimplemented here. Same-session restoration is a
-fixture incarnation, not a supervisor-issued process badge. #63's fixed-worker
-SCM_CREDENTIALS/pidfd proof cannot be silently generalized to this native process.
+and Run generations remains unimplemented here. Native `new_session` also closes
+the peer descriptor; it cannot grant the new session continued authority. The
+receiver-only suite uses trusted harness incarnation; the process-bound suite
+below uses a fresh Supervisor badge, distinct from the native runtime UUID.
 
 ## Version-bound evidence
 
@@ -136,3 +138,81 @@ SAFE-to-busy refusal/retry and failure to persist its not-applied classification
 native new-session fencing, missing-signal hold and process exit. Test fault
 injection only drops observations/receipts or kills the actual process; it does
 not simulate Pi lifecycle or claim end-to-end production acceptance.
+
+## Supervisor-owned Pi: same-Run fixture integration
+
+`FixtureParticipantController.launch_pi(seat, FixturePiRecipe(...))` admits only
+`runtime="pi-fixture"` with no seat startup arguments. The fixed recipe selects
+locked official Pi 1.4.0, a clean HOME, a persistent fixture workspace/session
+store, the two repository extensions and account-free faux provider. It provides
+no shell, caller argv, arbitrary extension, ambient provider credential, adopted
+PID, or runtime-selection callback. Paths and installed bytes are trusted fixture
+inputs, not protected against same-UID filesystem mutation.
+
+The controller persists starting intent, directly starts **one Node Pi process**,
+opens its pidfd and persists pending PID before any native handshake. There is no
+relay/helper PID with the Participant badge. The receiver attaches to that exact
+`Popen`; it never spawns, terminates, or adopts a process. RPC handshake runs
+outside the lifecycle lock, then instance/controller/epoch/status/credentials,
+current handle and pidfd liveness are rechecked before active publication. Stop,
+revoke, replacement or storage uncertainty wins over a late handshake. Controller
+cleanup terminates/reaps its own child before closing receiver/database/FDs; it
+never recursively removes native sessions or the stable fixture workspace.
+
+The Supervisor incarnation is authoritative for Hub envelopes. Pi runtime UUID
+and session ID remain observed adapter facts tied to that process, not a child
+identity assertion that can replace the badge. Native tools carry no actor,
+profile, epoch or PID authority. The Supervisor reads every record with recvmsg,
+checks exactly one SCM_CREDENTIALS tuple plus the held live pidfd/current badge,
+and only then parses `{request_id, envelope}` and submits with its badge Origin.
+The original fixed synthetic launch and wire format remain supported unchanged.
+
+`runtime/pi/channel.mjs` uses public Node numeric-FD `fs.writeSync/readSync` on an
+inherited **nonblocking SOCK_SEQPACKET**, not Node streams, `net.Socket`, an addon,
+or a proxy. Each bounded request is one atomic packet; a short write fences and
+never sends a remainder. EAGAIN/EINTR retries yield to the native event loop under
+a deadline. One request is in flight, at most four are admitted (including that request), and every reply
+must match a fresh 32-hex correlation ID. Timeout/abort/EOF/malformed/uncorrelated
+reply fences the channel until process replacement: late replies never match a
+new tool. Reading MAX_REPLY+1 detects oversized packets, including valid JSON
+prefixes whose excess read(2) would discard. A correlated application denial is
+not an uncertain transport failure. Lost receipts are not automatic tool retries.
+Ledger idempotency continues to bind each operation to its exact security context.
+
+The fixture harness runs `observe/deliver/receive` and active lifecycle actions
+on the ledger/journal-owning thread. Background readers only collect RPC events;
+they never touch SQLite. General cross-thread Stop after active attachment is not
+supported without marshaling that work back to the owner thread.
+It may service the outbound authority channel after native persistence confirms
+delivery, without holding a lifecycle lock while waiting for RPC. First-ever
+queued work starts the supported native turn; the actual faux provider produces
+`uas_peer` acceptance/completion calls. The tests do not fabricate tool success
+through direct Hub submission or require a manual priming prompt.
+
+Same-session restart creates a fresh process badge and preserves accepted work
+and native delivery deduplication. This is **not cross-Run reset**. Generations
+remain 1, uncertain first-flush recovery still holds, and no image/live-provider
+or production Workstation isolation is inferred. Passing the FD can steal replies
+or cause denial of service between trusted same-UID peers; it cannot make a child
+or SCM_RIGHTS recipient the original Actor. A Pi-mediated child request would be
+attributed to Pi, not an independently authorized child.
+
+### Additional evidence
+
+The required native gate includes actual Pi first-work→tool acceptance→completion,
+exact ledger Origin, same-Run restore/revocation, malformed/max+1 records,
+Node inherited-FD and SCM_RIGHTS→Node handoff attacks, lost/late replies,
+unsupported native reset fencing, late-ready Stop/revoke and actual active plus
+compensating persistence failures. Separate actual Node transport tests cover
+MAX/MAX+1 requests/replies, bounded serialization, EOF, wrong correlation and
+EAGAIN with event-loop heartbeat. Separate controller fault tests use synthetic
+children for concurrent Stop, replacement/controller replacement and cleanup;
+those are not labeled actual Pi evidence.
+
+Primary transport semantics:
+- [Node 24 numeric-FD filesystem APIs](https://nodejs.org/docs/latest-v24.x/api/fs.html)
+- [Node 24.22.1 synchronous FS implementation](https://github.com/nodejs/node/blob/v24.22.1/src/node_file.cc)
+- [Bundled libuv read/write syscall paths](https://github.com/nodejs/node/blob/v24.22.1/deps/uv/src/unix/fs.c)
+- [Linux Unix sockets: record boundaries and per-message credentials](https://man7.org/linux/man-pages/man7/unix.7.html)
+- [Linux send/write atomicity and EAGAIN](https://man7.org/linux/man-pages/man2/send.2.html)
+- [Linux read/recv truncation semantics](https://man7.org/linux/man-pages/man2/recv.2.html)

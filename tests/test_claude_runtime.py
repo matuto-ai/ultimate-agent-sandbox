@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from uas.claude_runtime import BINARY_SHA256, ClaudeSignals, ClaudeUnavailable, FixtureClaudeReceiver, VERSION, require_loopback_namespace
+from uas.claude_runtime import BINARY_SHA256, ClaudeNotApplied, ClaudeSignals, ClaudeUnavailable, FixtureClaudeReceiver, VERSION, require_loopback_namespace
 from uas.ledger import LedgerError, RoomLedger
 from uas.peer import FixtureParticipant, FixturePeerHub, Readiness, WorkRequest
 
@@ -163,6 +163,81 @@ class ClaudeConstructionTests(unittest.TestCase):
                     fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+class ClaudeWriteTests(unittest.TestCase):
+    """Synthetic boundary faults, not native permission/attention evidence."""
+    def setUp(self):
+        self.native = FixtureClaudeReceiver.__new__(FixtureClaudeReceiver)
+        self.native.session_id = 'session'
+        self.native.timeout = .1
+        self.native.signals = ClaudeSignals('session')
+        self.native.signals.safe_at = time.monotonic()
+        self.native.condition = threading.Condition()
+        self.native.write_lock = threading.Lock()
+        self.native.process = Mock()
+        self.native.process.poll.return_value = None
+        self.native.process.stdin.fileno.return_value = 42
+        self.native.ended = False
+
+    def test_expired_safe_is_provably_unwritten(self):
+        self.native.signals.safe_at -= 3
+        with patch('uas.claude_runtime.os.write') as write:
+            with self.assertRaises(ClaudeNotApplied):
+                self.native._write('message', 'text', peer=True)
+            write.assert_not_called()
+        self.assertIsNone(self.native.signals.pending)
+        self.assertFalse(self.native.signals.fenced)
+
+    def test_unavailable_slot_preserves_other_pending_turn(self):
+        self.native.signals.begin('other', 'existing text')
+        with patch('uas.claude_runtime.os.write') as write:
+            with self.assertRaises(ClaudeNotApplied):
+                self.native._write('message', 'text')
+            write.assert_not_called()
+        self.assertEqual(self.native.signals.pending, ('other', 'existing text'))
+
+    def test_write_lock_deadline_has_no_effect_and_invalidates_old_safe(self):
+        self.native.write_lock.acquire()
+        try:
+            with patch('uas.claude_runtime.os.write') as write:
+                with self.assertRaises(ClaudeNotApplied):
+                    self.native._write('message', 'text', peer=True)
+                write.assert_not_called()
+        finally:
+            self.native.write_lock.release()
+        self.assertIsNone(self.native.signals.safe_at)
+
+    def test_closed_input_descriptor_is_unwritten_but_transport_stays_fenced(self):
+        self.native.process.stdin.fileno.side_effect = ValueError('closed input')
+        with patch('uas.claude_runtime.os.write') as write:
+            with self.assertRaises(ClaudeNotApplied):
+                self.native._write('message', 'text', peer=True)
+            write.assert_not_called()
+        self.assertIsNone(self.native.signals.pending)
+        self.assertEqual(self.native.signals.state, 'transport-loss')
+        self.assertTrue(self.native.signals.fenced)
+
+    def test_new_async_fence_stops_remaining_bytes_and_preserves_partial_uncertainty(self):
+        for partial in (False, True):
+            for state in ('needs-input', 'unknown-signal'):
+                with self.subTest(partial=partial, state=state):
+                    self.setUp()
+                    def write(fd, data):
+                        self.native.signals.hold(state)
+                        if partial:
+                            return 1
+                        raise BlockingIOError()
+                    with patch('uas.claude_runtime.os.write', side_effect=write) as output, \
+                         patch('uas.claude_runtime.select.select'):
+                        with self.assertRaises(ClaudeUnavailable) as raised:
+                            self.native._write('message', 'text', peer=True)
+                        self.assertEqual(isinstance(raised.exception, ClaudeNotApplied), not partial)
+                        output.assert_called_once()
+                    self.assertEqual(self.native.signals.state, state)
+                    self.assertTrue(self.native.signals.fenced)
+                    self.assertIs(self.native.signals.readiness(), Readiness.AMBIGUOUS)
+                    self.assertEqual(self.native.signals.pending, ('message', 'text') if partial else None)
+
+
 INSTALL = os.environ.get('UAS_CLAUDE_INSTALL')
 
 
@@ -296,8 +371,45 @@ class ClaudeNativeTests(unittest.TestCase):
         self.assertEqual(len(self.gateway.requests), before)
         self.assertEqual(json.dumps(self.gateway.requests[-1]['request']['messages']).count('NATIVE-ACK-PERSISTENCE-FAILURE'), 1)
 
-    def test_safe_point_expiring_during_intent_commit_does_not_inject(self):
+    def test_safe_expiration_before_write_retries_same_id_once_after_fresh_evidence(self):
+        self.submit(text='ZERO-BYTE-RETRY-NONCE')
+        original = self.native._write
+        def expire(message_id, content, **kwargs):
+            if kwargs.get('peer'):
+                self.native.signals.safe_at -= 3
+            return original(message_id, content, **kwargs)
+        self.native._write = expire
+        before = len(self.gateway.requests)
+        with self.assertRaisesRegex(LedgerError, 'NATIVE_NOT_APPLIED'):
+            self.deliver()
+        self.native._write = original
+        self.assertEqual(len(self.gateway.requests), before)
+        self.assertIsNone(self.request()['response_started_at'])
+        self.assertEqual(self.native.evidence()['unknown_intents'], 0)
+        self.assertEqual(self.native.evidence()['retryable_intents'], 1)
+        message_id, receipt = self.native.db.execute('SELECT message_id,receipt FROM handoffs').fetchone()
+        self.assertIsNone(receipt)
+        self.assertEqual(self.deliver()['outcome'], 'HELD', 'not-applied is not fresh safe evidence')
+        self.native.refresh()  # Explicit synthetic fixture turn, not production polling.
+        self.native.wait_safe()
+        self.assertEqual(len(self.gateway.requests), before + 1)
+        self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')
+        self.native.wait_safe()
+        self.assertEqual(len(self.gateway.requests), before + 2)
+        after_id, receipt, retryable = self.native.db.execute('SELECT message_id,receipt,retryable FROM handoffs').fetchone()
+        self.assertEqual(after_id, message_id)
+        self.assertEqual(json.loads(receipt)['uuid'], message_id)
+        self.assertEqual(retryable, 0)
+        self.assertEqual(sum(event.get('type') == 'user' and event.get('uuid') == message_id
+                             for event in self.native.events), 1)
+        self.assertEqual(json.dumps(self.gateway.requests[-1]['request']['messages']).count('ZERO-BYTE-RETRY-NONCE'), 1)
+        self.assertIsNotNone(self.request()['response_started_at'])
+        self.assertEqual(self.deliver()['outcome'], 'HELD')
+        self.assertEqual(len(self.gateway.requests), before + 2)
+
+    def test_failed_zero_byte_classification_commit_stays_unknown(self):
         self.submit()
+        self.native.db.execute("CREATE TRIGGER fail_classification BEFORE UPDATE ON handoffs WHEN NEW.retryable=1 BEGIN SELECT RAISE(ABORT, 'fixture classification failure'); END")
         original = self.native._write
         def expire(message_id, content, **kwargs):
             if kwargs.get('peer'):
@@ -307,9 +419,16 @@ class ClaudeNativeTests(unittest.TestCase):
         before = len(self.gateway.requests)
         with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
             self.deliver()
+        self.native._write = original
         self.assertEqual(len(self.gateway.requests), before)
-        self.assertIsNone(self.request()['response_started_at'])
+        self.assertEqual(self.native.evidence()['retryable_intents'], 0)
         self.assertEqual(self.native.evidence()['unknown_intents'], 1)
+        self.assertIsNone(self.request()['response_started_at'])
+        self.native.db.execute('DROP TRIGGER fail_classification')
+        self.native.refresh()
+        self.native.wait_safe()
+        self.assertEqual(self.deliver()['outcome'], 'HELD')
+        self.assertEqual(len(self.gateway.requests), before + 1)
 
     def test_actual_stopped_process_missing_ack_never_reinjects_after_resume(self):
         self.submit(text='x' * 16000)
