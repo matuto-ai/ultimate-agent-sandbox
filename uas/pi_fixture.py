@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FixturePiRecipe:
-    def __init__(self, install, directory, *, scope, session=None, timeout=8):
+    def __init__(self, install, directory, *, scope, session=None, timeout=8, checkout=None):
         self.install = Path(install).resolve()
         self.directory = Path(directory).resolve()
         self.scope = dict(scope)
@@ -38,8 +38,12 @@ class FixturePiRecipe:
         self.context_directory.mkdir(parents=True, exist_ok=True)
         self.session_directory = self.context_directory / 'sessions'
         self.journal = self.context_directory / 'intent.db'
-        self.workdir = self.directory / 'workspace'
-        self.workdir.mkdir(exist_ok=True)
+        self.workdir = Path(checkout).resolve() if checkout is not None else self.directory / 'workspace'
+        if checkout is not None:
+            if not self.workdir.is_dir() or not (self.workdir / '.git').exists():
+                raise NativeUnavailable('owned existing Git checkout required')
+        else:
+            self.workdir.mkdir(exist_ok=True)
         self.home = self.context_directory / 'home'
         (self.home / 'agent').mkdir(parents=True, exist_ok=True)
         (self.home / 'agent/settings.json').write_text(json.dumps({'compaction': {
