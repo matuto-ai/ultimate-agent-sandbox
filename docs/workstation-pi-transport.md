@@ -318,7 +318,8 @@ from `puglab-reviewer`, checking out that exact event head. No push/synchronize
 can trigger this heavy scenario. Root review and fast CI precede the label.
 
 The native image is assembled from the hash-bound Node/Pi/source archive and
-signed offline RPM roots with DNF scriptlets disabled. Exact file bytes, modes,
+signed offline RPM roots with package scriptlets disabled by `tsflags=noscripts`.
+RPM automatic sysusers remains enabled; it is distinct from package scriptlets. Exact file bytes, modes,
 ownership and safe links form an external whole-rootfs manifest before import.
 The fixed connector, service and probes all use `/uas/peer/pi.sock`. Hub startup
 is fixed `/opt/uas/bin/tini -- /usr/bin/python3 -m uas.workstation_service`;
@@ -427,3 +428,45 @@ qualification. Actual inherited-FD transfer to another task must still fence
 that seat; Workstation Stop must exit both held Pi tasks while the held Hub stays
 alive, then explicit control EOF fences the Hub. Owned artifacts are cleaned up.
 No new heavy run or publication is implied by this private candidate.
+
+
+### Rootfs usrmerge correction after run 40411383492
+
+The deliberate run on `2d7468c7` preserved the first useful RPM cause:
+`filesystem-3.18-52.fc44` failed unpacking `/lib64` because that path already
+existed as a directory. The strict guard and installed Engine/policy checks
+passed. Docker had not started; native container/security/delivery checks were
+not reached. Cleanup completed. The serial report truncated the beginning of
+one diagnostic JSON record, but this cause survived in the retained output.
+
+The source starts with an empty installroot. RPM can unpack libgcc before
+filesystem, creating `/lib64`; disabling package scriptlets also disables the
+filesystem pretransaction step that normally establishes usrmerge. This matches
+the [RPM maintainer explanation](https://bugzilla.redhat.com/show_bug.cgi?id=1822951)
+and [upstream empty-root reproduction](https://github.com/rpm-software-management/rpm/issues/3186).
+The narrow correction seeds only `usr/lib64` and the relative `lib64 -> usr/lib64`
+link in a fresh, owned, empty root before the unchanged offline transaction. It
+refuses existing contents and never deletes, repairs or overwrites another
+shape. The exact shape is checked again before runtime extraction. Package
+scriptlets remain disabled; signatures, dependency checks, SELinux and default
+synthetic #98 behavior are unchanged.
+
+The same log reports a successful setup **automatic RPM sysusers helper**,
+creating users/groups inside the disposable installroot. This is not evidence
+of package scriptlets escaping `noscripts`, nor the fatal cause. The automatic
+helper remains enabled and is reported separately; no macro/config override or
+extra version pin is introduced. Actual installed `rpm`, `rpm-libs`, `dnf5` and
+`libdnf5` NEVRA are captured as diagnostic facts rather than inferred from pool
+membership. `rpm_scriptlets: false` means package scriptlets, while
+`rpm_automatic_sysusers: true` discloses this separate mechanism.
+
+Main115 is preserved. Its `uas/forge.py` change is a real staged runtime input;
+the new PR-provider import remains deferred to Broker paths unavailable in this
+Hub. The isolated selected-source configure/connect/submit/retry smoke passes
+without adding provider modules. The changed image still needs fresh exact-head
+qualification; no full-image byte identity or native delivery success is claimed.
+
+Main116 is also preserved: its unconditional config import requires the explicit
+`uas/gate_policy.py` staged source. The isolated smoke checks only staged files,
+not checkout import fallback. Config, Gate module and carrier changes also
+require the new image to be qualified; prior image proof is not transferred.

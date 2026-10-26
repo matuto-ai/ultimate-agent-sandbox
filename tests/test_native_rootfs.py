@@ -152,7 +152,10 @@ class NativeRootfsTests(unittest.TestCase):
 
     def test_build_uses_only_offline_noscript_solver_and_external_manifest(self):
         destination=self.directory/'built';calls=[]
-        def fake_run(*args,timeout,native_failure_context):
+        def fake_run(*args,timeout,native_failure_context=False):
+            if args[0] == 'rpm':
+                return 'rpm-0:6.0.2-1.fc44.x86_64\n'
+            rootfs.require_usrmerge(destination)
             self.assertTrue(native_failure_context)
             calls.append((args,timeout))
             destination.chmod(0o700)  # restrictive installer/umask must not survive import

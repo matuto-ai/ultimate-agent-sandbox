@@ -34,6 +34,39 @@ class RunAdmissionRefusalTests(unittest.TestCase):
             install=None, runtime_root=self.root / 'native',
             authorize_human=lambda *_: self.authorized)
 
+    def test_incomplete_gate_policy_refused_before_any_provider_git_or_native_effect(self):
+        from uas.config import ConfigError
+        config = deepcopy(self.config)
+        del config['rooms'][0]['policies'][0]['gates'][0]['evaluator']
+        before = self.ledger.snapshot()
+        with patch.object(self.allocator, 'allocate', side_effect=AssertionError('no Git mutation')):
+            with patch.object(self.controller, 'launch_pi', side_effect=AssertionError('no native launch')):
+                with self.assertRaises(ConfigError) as caught:
+                    self.construct(config=config)
+        self.assertTrue(caught.exception.field.endswith('.evaluator'))
+        self.assertEqual(before, self.ledger.snapshot())
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.allocator.status())
+        self.assertEqual({}, self.controller.handles)
+
+    def test_compiled_policy_snapshot_is_stable_across_exact_retry_and_config_change(self):
+        first = self.admission._prepare('policy-snapshot', 1, 'builder', self.human)
+        before = self.ledger.snapshot()
+        row = next(iter(before['state']['run_admissions'].values()))
+        gate = row['policy']['gates'][0]
+        self.assertEqual('exact-head-tree', gate['scope'])
+        self.assertEqual('dependency-changes', gate['freshness'])
+        self.assertEqual(['complete', 'submit-for-review'], gate['guarded_operations'])
+        changed = deepcopy(self.config)
+        policy = changed['rooms'][0]['policies'][0]
+        policy['version'] += 1
+        policy['gates'][0]['config']['items'][0]['path'] = 'different.txt'
+        admission = self.construct(config=changed)
+        self.assertEqual(first, admission._prepare('policy-snapshot', 1, 'builder', self.human))
+        self.assertEqual(before, self.ledger.snapshot())
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.allocator.status())
+
     def test_assignment_audit_requires_configured_deployment_before_any_effect(self):
         from uas.forge_assignment import AssignmentBroker
         from uas.forge_audit import ForgeAudit
@@ -118,7 +151,8 @@ class RunAdmissionRefusalTests(unittest.TestCase):
     def test_valid_but_oversize_policy_is_refused_before_reservation_or_git(self):
         config = deepcopy(self.config)
         policy = config['rooms'][0]['policies'][0]
-        policy['gates'] = [{'id': 'gate-' + str(i) + '-' + 'x' * 50, 'kind': 'mechanical'} for i in range(300)]
+        template = deepcopy(policy['gates'][0])
+        policy['gates'] = [dict(deepcopy(template), id='gate-' + str(i) + '-' + 'x' * 50) for i in range(300)]
         policy['protected_operations'] = {op: [gate['id'] for gate in policy['gates']]
                                            for op in ('submit-for-review', 'complete')}
         admission = self.construct(config=config)  # Config itself remains valid.

@@ -353,24 +353,11 @@ def _normalize(config, available_credentials):
             profile["tools"] = _strings(profile["tools"], pp + ".tools")
             profile["capabilities"] = _strings(profile["capabilities"], pp + ".capabilities", CAPABILITIES)
         policies = _named(room["policies"], p + ".policies")
+        from .gate_policy import compile_policy
         for policy, pp in policies.values():
-            _object(policy, pp, ("id", "version", "gates", "protected_operations", "review_return_cap", "queue_timeout_seconds", "response_timeout_seconds"))
-            _integer(policy["version"], pp + ".version")
-            gates = _named(policy["gates"], pp + ".gates")
-            for gate, gp in gates.values():
-                _object(gate, gp, ("id", "kind"))
-                if gate["kind"] not in ("mechanical", "attestation", "decision"):
-                    raise ConfigError(gp + ".kind", "unsupported Gate kind")
-            operations = _object(policy["protected_operations"], pp + ".protected_operations", ("submit-for-review", "complete"))
-            for operation, names in operations.items():
-                fp = pp + ".protected_operations." + operation
-                operations[operation] = _strings(names, fp, nonempty=True)
-                for i, name in enumerate(names):
-                    _reference(name, f"{fp}[{i}]", gates)
-            _integer(policy["review_return_cap"], pp + ".review_return_cap", maximum=5)
-            for key in ("queue_timeout_seconds", "response_timeout_seconds"):
-                _integer(policy[key], pp + "." + key)
-            policy["gates"] = [item for item, _ in sorted(gates.values(), key=lambda pair: pair[0]["id"])]
+            compiled = compile_policy(policy, pp)
+            policy.clear()
+            policy.update(compiled)
         _reference(room["default_policy"], p + ".default_policy", policies)
         seats = _named(room["seats"], p + ".seats")
         participants = set()

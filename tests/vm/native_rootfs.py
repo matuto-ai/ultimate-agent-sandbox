@@ -280,6 +280,29 @@ def guest_guard(nonce):
     print('Native rootfs guard:', json.dumps(facts, sort_keys=True), flush=True)
 
 
+def seed_usrmerge(root):
+    """Replace disabled filesystem pretrans only in a fresh owned empty root.
+
+    Never repair or delete an existing directory/symlink. Package libgcc may be
+    unpacked before filesystem and otherwise creates a conflicting /lib64.
+    """
+    info = root.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or root.resolve() != root
+            or info.st_uid != os.geteuid() or any(root.iterdir())):
+        raise ValueError('fresh owned empty root required for usrmerge seed')
+    (root / 'usr').mkdir(mode=0o755)
+    (root / 'usr/lib64').mkdir(mode=0o755)
+    (root / 'lib64').symlink_to('usr/lib64', target_is_directory=True)
+
+
+def require_usrmerge(root):
+    if (not stat.S_ISDIR((root / 'usr').lstat().st_mode)
+            or not stat.S_ISDIR((root / 'usr/lib64').lstat().st_mode)
+            or not stat.S_ISLNK((root / 'lib64').lstat().st_mode)
+            or os.readlink(root / 'lib64') != 'usr/lib64'):
+        raise ValueError('native usrmerge shape changed')
+
+
 def build_rootfs(nonce, manifest, destination, *, run):
     guest_guard(nonce)
     archive, files = verify_runtime(PAYLOAD, manifest['native_runtime'])
@@ -287,6 +310,13 @@ def build_rootfs(nonce, manifest, destination, *, run):
     if not root.is_absolute() or root.parent.resolve() != root.parent or root.exists() or root.is_symlink():
         raise ValueError('fresh canonical rootfs path required')
     root.mkdir(mode=0o755)
+    seed_usrmerge(root)
+    # Observe the tools actually executing, not versions merely in the RPM pool.
+    package_tools = run('rpm', '-q', '--qf', '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n',
+                        'rpm', 'rpm-libs', 'dnf5', 'libdnf5', timeout=30)
+    if len(package_tools.encode()) > 4096:
+        raise ValueError('oversized package tool identity')
+    print('Native package tools:', json.dumps(package_tools), flush=True)
     # Payload hashes/signatures and repodata were verified by guest install;
     # only this read-only file repository is made visible to the native solver.
     run('dnf', '-y', '--installroot=' + str(root), '--releasever=44',
@@ -296,6 +326,7 @@ def build_rootfs(nonce, manifest, destination, *, run):
         '--setopt=localpkg_gpgcheck=True', '--setopt=install_weak_deps=False',
         '--setopt=tsflags=noscripts', '--setopt=plugins=False',
         'install', *ROOTS, timeout=900, native_failure_context=True)
+    require_usrmerge(root)
     extract_runtime(archive, files, root)
     source = resolve_inside(root, 'usr/bin/tini')
     ordinary(source)
@@ -314,4 +345,5 @@ def build_rootfs(nonce, manifest, destination, *, run):
         output.flush(); os.fsync(output.fileno())
     manifest_path.chmod(0o444)
     return {**result, 'rootfs_manifest': str(manifest_path), 'runtime_sha256': manifest['native_runtime']['sha256'],
-            'tini_sha256': digest(target), 'rpm_roots': list(ROOTS), 'rpm_scriptlets': False}
+            'tini_sha256': digest(target), 'rpm_roots': list(ROOTS), 'rpm_scriptlets': False,
+            'rpm_automatic_sysusers': True, 'package_tools': package_tools}
