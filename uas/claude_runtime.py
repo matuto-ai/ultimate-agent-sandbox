@@ -129,6 +129,9 @@ def require_loopback_namespace():
             raise ClaudeUnavailable('fixture namespace has an external route')
 
 
+FIXTURE_DENIAL_MESSAGE = 'Explicit fixture-controller denial; not human authorization'
+
+
 class ClaudeSignals:
     """Bounded signal reducer. No signal, init, or connection authorizes work."""
     def __init__(self, session_id, *, safe_for=2.0, diagnostic_nonce_file=None):
@@ -199,7 +202,7 @@ class ClaudeSignals:
 
     def _tool_result(self, event):
         if (not self.pending or not self._permission or self._permission['invocationId'] != self.pending[0]
-                or self.permission_decision != 'allow' or self.permission_result
+                or self.permission_decision not in ('allow', 'deny') or self.permission_result
                 or 'isReplay' in event or event.get('parent_tool_use_id', True) is not None):
             return False
         tool_id = self._permission['toolUseID']
@@ -207,12 +210,30 @@ class ClaudeSignals:
         blocks = message.get('content') if type(message) is dict and message.get('role') == 'user' else None
         result = event.get('tool_use_result')
         file = result.get('file') if type(result) is dict and result.get('type') == 'text' else None
-        return (type(blocks) is list and len(blocks) == 1 and type(blocks[0]) is dict
+        if not (type(blocks) is list and len(blocks) == 1 and type(blocks[0]) is dict
                 and blocks[0].get('type') == 'tool_result' and blocks[0].get('tool_use_id') == tool_id
-                and type(blocks[0].get('content')) is str and blocks[0].get('is_error', False) is False
+                and type(blocks[0].get('content')) is str):
+            return False
+        if self.permission_decision == 'deny':
+            # Supplementary pinned-native observation, not a public SDK type guarantee.
+            return (blocks[0].get('is_error') is True and blocks[0]['content'] == FIXTURE_DENIAL_MESSAGE
+                    and result == 'Error: ' + FIXTURE_DENIAL_MESSAGE
+                    and event.get('tool_result_meta') == [{'id': tool_id, 'non_execution_kind': 'permission-rule',
+                         'permission_decision': {'decision': 'reject', 'source': 'user_reject'}}])
+        return (blocks[0].get('is_error', False) is False
                 and type(file) is dict and file.get('filePath') == self.diagnostic_nonce_file
                 and event.get('tool_result_meta') == [{'id': tool_id, 'permission_decision':
                      {'decision': 'accept', 'source': 'user_temporary'}}])
+
+    def _terminal_denials_match(self, event):
+        # Default and later invocations still require no denials. A controller
+        # denial can complete only its exact diagnostic invocation, not any fence.
+        if (self.diagnostic_nonce_file and self.permission_decision == 'deny' and self._permission
+                and self.pending and self.pending[0] == self._permission['invocationId']):
+            return self.permission_result and event.get('permission_denials') == [{
+                'tool_name': 'Read', 'tool_use_id': self._permission['toolUseID'],
+                'tool_input': {'file_path': self.diagnostic_nonce_file}}]
+        return event.get('permission_denials') == []
 
     def session_state(self, event):
         if self.fenced:
@@ -259,9 +280,9 @@ class ClaudeSignals:
             if (not self.initialized or not self.pending or self.ack is None
                     or event.get('user_message_uuid') != self.pending[0]
                     or event.get('subtype') != 'success' or event.get('is_error') is not False
-                    or event.get('permission_denials') != [] or event.get('queued_turn_count') != 0
+                    or not self._terminal_denials_match(event) or event.get('queued_turn_count') != 0
                     or event.get('terminal_reason') != 'completed' or event.get('stop_reason') != 'end_turn'
-                    or (self.attention_seen and (not self._permission or self.permission_decision != 'allow'
+                    or (self.attention_seen and (not self._permission or self.permission_decision not in ('allow', 'deny')
                                                 or not self.permission_result))):
                 self.hold('needs-input' if event.get('permission_denials') else 'unknown-result')
             else:
@@ -276,7 +297,7 @@ class ClaudeSignals:
                 blocks = message.get('content') if type(message) is dict and message.get('role') == 'assistant' else None
                 # SDKAssistantMessage stamps the first assistant frame only.
                 # Retain this one text continuation without advancing authority.
-                if (self.permission_decision != 'allow' or self.permission_continuation or self.ack is None
+                if (self.permission_decision not in ('allow', 'deny') or self.permission_continuation or self.ack is None
                         or ('user_message_uuid' in event and event['user_message_uuid'] != self.pending[0])
                         or ('user_message_uuids' in event and event['user_message_uuids'] != [self.pending[0]])
                         or event.get('parent_tool_use_id', True) is not None or 'error' in event

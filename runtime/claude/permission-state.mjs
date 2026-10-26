@@ -1,4 +1,5 @@
 // Explicit nonce-Read diagnostic only; default NativeState remains tool-less.
+import {DENIAL_MESSAGE} from './permission-policy.mjs';
 import {NativeState, CLI_VERSION} from './sdk-policy.mjs';
 
 export class PermissionNativeState extends NativeState {
@@ -38,23 +39,39 @@ export class PermissionNativeState extends NativeState {
     }
     if (e.type === 'user' && !Object.hasOwn(e, 'isReplay')) {
       const blocks = e.message?.content, meta = e.tool_result_meta;
+      const block = Array.isArray(blocks) && blocks.length === 1 ? blocks[0] : null;
       if (!this.pending || this.pending.uuid !== this.attention?.invocationId
-          || this.decision !== 'allow' || this.toolResult || e.parent_tool_use_id !== null
-          || e.message?.role !== 'user' || !Array.isArray(blocks) || blocks.length !== 1
-          || blocks[0].type !== 'tool_result' || blocks[0].tool_use_id !== this.attention.toolUseID
-          || typeof blocks[0].content !== 'string' || (Object.hasOwn(blocks[0], 'is_error') && blocks[0].is_error !== false)
-          || e.tool_use_result?.type !== 'text' || e.tool_use_result.file?.filePath !== this.file
-          || !Array.isArray(meta) || meta.length !== 1 || meta[0].id !== this.attention.toolUseID
-          || meta[0].permission_decision?.decision !== 'accept'
-          || meta[0].permission_decision?.source !== 'user_temporary')
+          || !['allow', 'deny'].includes(this.decision) || this.toolResult || e.parent_tool_use_id !== null
+          || e.message?.role !== 'user' || !block || block.type !== 'tool_result'
+          || block.tool_use_id !== this.attention.toolUseID || typeof block.content !== 'string')
         return this.hold('unmatched-permission-result');
+      if (this.decision === 'allow') {
+        if ((Object.hasOwn(block, 'is_error') && block.is_error !== false)
+            || e.tool_use_result?.type !== 'text' || e.tool_use_result.file?.filePath !== this.file
+            || !Array.isArray(meta) || meta.length !== 1 || meta[0].id !== this.attention.toolUseID
+            || meta[0].permission_decision?.decision !== 'accept'
+            || meta[0].permission_decision?.source !== 'user_temporary')
+          return this.hold('unmatched-permission-result');
+      } else {
+        // Supplementary pinned-native observation, not a documented SDK field.
+        if (block.is_error !== true || block.content !== DENIAL_MESSAGE
+            || e.tool_use_result !== 'Error: ' + DENIAL_MESSAGE
+            || !Array.isArray(meta) || meta.length !== 1
+            || !meta[0] || typeof meta[0] !== 'object' || Object.keys(meta[0]).sort().join(',') !== 'id,non_execution_kind,permission_decision'
+            || meta[0].id !== this.attention.toolUseID || meta[0].non_execution_kind !== 'permission-rule'
+            || !meta[0].permission_decision
+            || Object.keys(meta[0].permission_decision).sort().join(',') !== 'decision,source'
+            || meta[0].permission_decision.decision !== 'reject'
+            || meta[0].permission_decision.source !== 'user_reject')
+          return this.hold('unmatched-permission-result');
+      }
       this.toolResult = true; this.revision++; return; // Never an ACK.
     }
     if (e.type === 'assistant' && this.toolResult && this.pending?.uuid === this.attention?.invocationId) {
       const blocks = e.message?.content;
       // Public SDK stamps only the first assistant frame. This one bounded
       // text continuation carries no receipt/readiness authority of its own.
-      if (this.decision !== 'allow' || this.continuationSeen || !this.ack
+      if (!['allow', 'deny'].includes(this.decision) || this.continuationSeen || !this.ack
           || (Object.hasOwn(e, 'user_message_uuid') && e.user_message_uuid !== this.pending.uuid)
           || (Object.hasOwn(e, 'user_message_uuids')
               && JSON.stringify(e.user_message_uuids) !== JSON.stringify([this.pending.uuid]))
@@ -65,10 +82,23 @@ export class PermissionNativeState extends NativeState {
       this.continuationSeen = true; this.revision++; return;
     }
     if (e.type === 'result' && this.needsInput) {
-      if (this.decision !== 'allow' || !this.toolResult || !this.attention
+      if (!['allow', 'deny'].includes(this.decision) || !this.toolResult || !this.attention
           || this.pending?.uuid !== this.attention.invocationId)
         return this.hold('unresolved-permission-result');
-      super.event(e);
+      if (this.decision === 'deny') {
+        // Preserve the actual denial. Only this one diagnostic invocation may
+        // complete with its exact authoritative denial record; never clear a fence.
+        const denials = e.permission_denials;
+        const denial = Array.isArray(denials) && denials.length === 1 ? denials[0] : null;
+        if (!this.initialized || !this.ack || e.user_message_uuid !== this.pending.uuid
+            || e.subtype !== 'success' || e.is_error !== false || e.stop_reason !== 'end_turn'
+            || e.terminal_reason !== 'completed' || e.queued_turn_count !== 0
+            || !denial || Object.keys(denial).sort().join(',') !== 'tool_input,tool_name,tool_use_id'
+            || denial.tool_name !== 'Read' || denial.tool_use_id !== this.attention.toolUseID
+            || JSON.stringify(denial.tool_input) !== JSON.stringify({file_path:this.file}))
+          return this.hold('unresolved-permission-result');
+        this.completed = this.pending.uuid; this.pending = null; this.revision++;
+      } else super.event(e);
       if (!this.fenced && !this.pending) this.needsInput = false;
       return;
     }

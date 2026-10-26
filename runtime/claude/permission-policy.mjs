@@ -1,3 +1,4 @@
+export const DENIAL_MESSAGE = 'Explicit fixture-controller denial; not human authorization';
 // Qualification-only one-shot callback correlation. Not Hub or human authority.
 import {createHash} from 'node:crypto';
 
@@ -52,7 +53,7 @@ export class PermissionSlot {
     pending.signal.removeEventListener('abort', pending.abort);
     pending.resolve(behavior === 'allow'
       ? {behavior, updatedInput: pending.approvedInput, toolUseID: pending.identity.toolUseID}
-      : {behavior, message: 'Explicit fixture-controller denial; not human authorization',
+      : {behavior, message: DENIAL_MESSAGE,
           toolUseID: pending.identity.toolUseID});
     return true;
   }

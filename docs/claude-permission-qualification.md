@@ -218,7 +218,8 @@ native temporary-decision metadata. It can never replace or manufacture the
 original replay receipt. Recovery additionally requires the exact qualified
 successful terminal result with no denials/queued turns, followed by fresh public
 SDK liveness and exact native idle identity/state. Missing signals remain held.
-Denial deliberately remains held; this slice does not qualify deny recovery.
+Explicit matched denial recovery is implemented for this diagnostic only; native
+qualification of that extension is pending (see below). Arbitrary denial remains held.
 Transport, identity, unknown-event and journal fences remain irreversible.
 No permission decision edits or clears unknown native handoffs.
 
@@ -232,8 +233,9 @@ proof to the existing deliberate isolated tier (same three-minute cap). Its
 required allow path queues two envelopes, confirms the first by exact replay,
 observes genuine permission attention, proves the second has neither a native
 intent nor response clock, rejects a stale decision, then requires fresh idle
-before confirming the second exact replay and clock. Deny and pending-close
-retain the queue. A separately labelled injected-journal fault checks that even
+before confirming the second exact replay and clock. In the qualified round
+below, deny and pending-close retained the queue; the pending denial-recovery
+extension changes only the exact diagnostic deny gate. A separately labelled injected-journal fault checks that even
 successful permission resolution cannot erase an unknown intent. Native versions,
 process/session identity, journal receipts, Hub state and fixture provider calls
 are recorded. The first native round failed; the corrected round below passed.
@@ -319,3 +321,42 @@ Deny recovery, permission replay across restoration, production permissions,
 real inference, native reset, compaction, reconnect, cross-Run admission and
 full #71/#58 acceptance remain unqualified. Earlier failures remain evidence;
 this pass does not retroactively identify the separate startup-loss cause.
+
+
+## Exact denial recovery extension — native qualification pending
+
+The next bounded extension admits only this diagnostic's explicit fixture-controller
+`deny`, never a generic permission signal, automatic denial, cancellation or human
+approval. It preserves the denied native tool result and terminal
+`permission_denials` unchanged. Public SDK 0.3.310 `SDKPermissionDenial` identifies
+`tool_name`, `tool_use_id` and `tool_input`; its `SDKPermissionDeniedMessage`
+documentation calls the standalone `system/permission_denied` signal advisory and
+the terminal denial list authoritative. That advisory signal still fences delivery.
+
+The diagnostic requires one matching error tool result for its current exact
+request, the fixed explicit-denial message, and the captured reject/user_reject,
+permission-rule metadata. `tool_result_meta` is **observed pinned-native evidence,
+not a field guaranteed by the public SDKUserMessage type**; `tool_use_result` is
+publicly unknown-typed. These checks are supplementary strict qualification gates,
+not a generic permission API or permission override. The successful completed
+terminal must contain exactly one denial for that Read/tool-use ID/exact input,
+no queued turns, the original invocation and its already-recorded exact replay ACK.
+No denial list is erased or normalized to an allow result. Only the diagnostic
+attention condition ends; irreversible fences and unknown handoffs remain intact.
+
+Fresh non-model SDK liveness and exact native idle are still required before a
+second envelope can be delivered. The default tool-less receiver is unchanged.
+No resume, repeated permission request, arbitrary tool profile, model-authored
+approval, native reset, Supervisor authority or production permission recovery
+is qualified by this extension.
+
+The pure reducer cases cover matched deny, missing/mismatched/extra denial records,
+wrong error/metadata, cancellation-shaped output, unchanged ACK/evidence, stale
+probes, advisory signals and irreversible/unknown-intent holds. The manual Hub
+case now requires deny → fresh idle → a second actual envelope with a second exact
+native replay receipt in the same session/incarnation, unchanged first receipt
+and response clock, and no nonce exposure before or after recovery. A separate
+source-injected unknown intent must remain held after the native denial completes.
+Existing allow and pending-close coverage and the deliberate three-minute cap stay
+in place. Until a reviewed manual run passes, these are source assertions and a
+proposed native gate, not new runtime qualification evidence.
