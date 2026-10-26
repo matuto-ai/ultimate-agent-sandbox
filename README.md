@@ -66,7 +66,9 @@ The existing [23 implementation slices](docs/architecture/source-reconciliation.
 
 Release requires real Pi–Claude–GitHub integration, exact-candidate review and CI, a disposable-VM two-Room security scenario, 100 Stop/Start cycles, and measured target-host limits. Synthetic lifecycle and Manager prototypes demonstrate design coherence only.
 
-The [Pi native fixture adapter](docs/pi-runtime.md) crosses the actual official Pi 1.4.0 extension/RPC surface with the durable Hub ledger using an account-free provider. It remains harness-authorized, not a qualified native Participant badge or complete reset/recovery implementation.
+The [Pi native fixture adapter](docs/pi-runtime.md) crosses the actual official Pi 1.4.0 extension/RPC surface with the durable Hub ledger using an account-free provider. Its fixed same-Run launcher now attaches that actual Pi process to Linux per-record credentials and a held pidfd; native peer tools reach the ledger with its Supervisor badge. This remains same-UID fixture authority, not production Workstation qualification or complete reset/recovery.
+
+The [Claude native fixture adapter](docs/claude-runtime.md) crosses official Claude Code 2.1.310's documented invocation/replay-acknowledgment surface with the same durable Hub. Its long-lived tool-less process uses a loopback protocol fixture, not authenticated inference. Readiness is conservatively inferred from fresh correlated completion, and unknown handoffs never automatically reinject. Production authority, native permission handling, MCP delivery, and cross-Run reset remain unqualified.
 
 `ai-agents-sandbox` supplies frozen behavior and proof evidence, not a permanent dependency. This product does not migrate, coordinate, modify, or retire another installation. Gitea/GitLab adapters, additional native Runtimes, GitHub Projects-board automation, Library implementation, and rich artifact review are outside first delivery. [Pi Durable research](docs/research/pi-durable-continuous-agents.md) remains exploratory; it does not replace the accepted architecture.
 

@@ -24,8 +24,12 @@ than consuming the full guest installation budget without evidence of boot.
 
 Payload preparation uses private DNF/RPM/cache/key directories, HTTPS-only bounded
 downloads, the independently pinned Fedora 44 signing certificate, and an exact
-nonce-bound file-hash manifest. Native guest DNF installs with all repositories
-disabled and local-package signature checking enabled. The RPM dependency closure
+nonce-bound file-hash manifest, including generated local-repository metadata.
+Native guest DNF enables only that read-only file repository, retains package
+signature checks, and solves the eight requested roots against its installed OS.
+It does not force-install every downloaded alternative provider or permit erasing
+conflicting OS packages. All configured external repositories are excluded.
+The RPM dependency closure
 is Fedora-signed and recorded in a nonce-bound hash manifest, with versions/manifest digest logged, **not a reproducibly pinned
 closure**. The base OS image remains exactly pinned. Missing tools/packages or
 signature failure cannot select an unsigned fallback.

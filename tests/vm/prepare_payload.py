@@ -31,6 +31,9 @@ MAX_PACKAGE_TOTAL = 1024 * 1024 * 1024
 MAX_WORK_BYTES = 2 * 1024 * 1024 * 1024
 MAX_COMMAND_OUTPUT = 4 * 1024 * 1024
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
+MAX_METADATA_FILES = 16
+MAX_METADATA_FILE_BYTES = 8 * 1024 * 1024
+MAX_METADATA_TOTAL = 16 * 1024 * 1024
 BUILD_TIMEOUT = 1200
 
 
@@ -148,6 +151,30 @@ def package_metadata(filename, output):
         detail = repr(output[:512])[:2048]
         raise RuntimeError(f"unexpected RPM metadata for {filename[:200]!r}: {detail}")
     return metadata
+
+
+def repository_metadata(packages):
+    """Bind every generated local-repository file, not just repomd.xml."""
+    directory = packages / "repodata"
+    if directory.is_symlink() or directory.resolve() != directory or not directory.is_dir():
+        raise RuntimeError("local repository metadata directory is missing or unsafe")
+    files = sorted(directory.iterdir())
+    if not 1 <= len(files) <= MAX_METADATA_FILES or "repomd.xml" not in {path.name for path in files}:
+        raise RuntimeError("local repository metadata set is incomplete or exceeds its budget")
+    entries, total = [], 0
+    for path in files:
+        if (not re.fullmatch(r"[A-Za-z0-9._\-]{1,200}", path.name)
+                or path.is_symlink() or path.resolve() != path or not path.is_file()
+                or path.stat().st_nlink != 1):
+            raise RuntimeError("local repository metadata must be ordinary canonical files")
+        size = path.stat().st_size
+        total += size
+        if not 0 < size <= MAX_METADATA_FILE_BYTES or total > MAX_METADATA_TOTAL:
+            raise RuntimeError("local repository metadata byte budget exceeded")
+        with path.open("rb") as source:
+            digest = hashlib.file_digest(source, "sha256").hexdigest()
+        entries.append({"file": path.relative_to(packages).as_posix(), "bytes": size, "sha256": digest})
+    return entries
 
 
 def source_files(repository_root, paths):
@@ -269,6 +296,12 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
                                      "bytes": target.stat().st_size, "sha256": digest, "signature_verified": True})
     if not set(PACKAGES) <= {item["name"] for item in manifest["packages"]}:
         raise RuntimeError("resolved package bundle omitted a required package")
+    # DNF4 download resolves each requested root separately, so its union may
+    # contain conflicting alternatives. Offer the signed RPMs as candidates to
+    # the guest's native solver; do not force-install the entire download pool.
+    run(["createrepo_c", "--no-database", "--checksum", "sha256", "--general-compress-type", "gz",
+         "--error-exit-val", "--workers", "2", str(packages)], timeout=120)
+    manifest["repository_metadata"] = repository_metadata(packages)
     for name, source in selected:
         target = payload / "repo" / name
         target.parent.mkdir(parents=True, exist_ok=True)

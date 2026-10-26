@@ -1,5 +1,6 @@
 """Offline contracts only. Real kernel enforcement is mandatory in VM CI."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,9 @@ SPEC = importlib.util.spec_from_file_location('boundary_runner', Path(__file__).
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 sys.path.pop(0)
+GUEST_SPEC = importlib.util.spec_from_file_location('guest_boundary_script', Path(__file__).parent / 'vm/guest_boundary.py')
+guest_script = importlib.util.module_from_spec(GUEST_SPEC)
+GUEST_SPEC.loader.exec_module(guest_script)
 NONCE = 'a' * 32
 STATE = {'instance_id': 'b' * 32, 'room_id': 'alpha', 'spec': {
     'config_digest': 'sha256:' + 'c' * 64, 'profile_digest': 'sha256:' + 'd' * 64,
@@ -253,3 +257,44 @@ class GuestFixtureTests(unittest.TestCase):
                     runner.boot(directory, ['unused-offline-placeholder'], NONCE)
                 stop.assert_called_once_with(process)
             self.assertEqual(('qemu.log', 'serial.log', 'firmware.log'), runner.LOG_FILES)
+
+    def test_native_guest_solver_installs_roots_not_union_of_conflicting_providers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); marker = root / 'boot'; marker.write_text(NONCE)
+            def mapped_path(value):
+                return marker if value == '/run/uas-vm-fixture' else root / 'repositories' if value == '/run/uas-repositories' else Path(value)
+            manifest = {'packages': [{'file': 'systemd.rpm'}, {'file': 'systemd-standalone-sysusers.rpm'}]}
+            with patch.object(guest_script, 'Path', side_effect=mapped_path), patch.object(guest_script, 'PAYLOAD', root / 'payload'), patch.object(guest_script.os, 'geteuid', return_value=0), patch.object(guest_script, 'run', return_value='Enforcing') as run:
+                guest_script.install_packages(NONCE, manifest)
+            commands = [call.args for call in run.call_args_list]
+            dnf = next(args for args in commands if args[0] == 'dnf')
+            self.assertEqual(guest_script.REQUIRED_PACKAGES, dnf[dnf.index('install') + 1:])
+            self.assertIn('--disable-repo=*', dnf); self.assertIn('--enable-repo=uas-offline', dnf)
+            self.assertNotIn('--allowerasing', dnf); self.assertNotIn('--nogpgcheck', dnf)
+            self.assertTrue(any('systemd-standalone-sysusers.rpm' in argument for args in commands if args[0] == 'rpmkeys' for argument in args))
+            config = (root / 'repositories/uas.repo').read_text()
+            self.assertIn('gpgcheck=1\n', config); self.assertIn('baseurl=file://', config)
+            self.assertNotIn('http', config)
+
+    def test_package_install_requires_disposable_guest_before_effects(self):
+        with patch.object(guest_script.os, 'geteuid', return_value=1000), patch.object(guest_script, 'run') as run:
+            with self.assertRaisesRegex(AssertionError, 'not this disposable boot'):
+                guest_script.install_packages(NONCE, {'packages': []})
+            run.assert_not_called()
+
+    def test_guest_verifies_local_repository_metadata_before_package_effects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); metadata = root / 'rpms/repodata/repomd.xml'
+            metadata.parent.mkdir(parents=True); metadata.write_bytes(b'original')
+            (root / 'fixture').write_bytes(b'fixture'); (root / 'fedora-44.asc').write_bytes(b'key')
+            def entry(path):
+                return {'bytes': path.stat().st_size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+            manifest = {'version': 1, 'nonce': NONCE, 'source': [], 'packages': [],
+                        'repository_metadata': [{'file': 'repodata/repomd.xml', **entry(metadata)}],
+                        'fixture': entry(root / 'fixture'), 'key': entry(root / 'fedora-44.asc')}
+            raw = json.dumps(manifest).encode(); (root / 'manifest.json').write_bytes(raw)
+            with patch.object(guest_script, 'PAYLOAD', root):
+                self.assertEqual(manifest, guest_script.verify_payload(NONCE, hashlib.sha256(raw).hexdigest()))
+                metadata.write_bytes(b'tampered')
+                with self.assertRaisesRegex(AssertionError, 'digest mismatch'):
+                    guest_script.verify_payload(NONCE, hashlib.sha256(raw).hexdigest())

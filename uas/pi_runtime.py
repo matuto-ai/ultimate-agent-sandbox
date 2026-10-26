@@ -23,62 +23,88 @@ class NativeUnavailable(RuntimeError):
 
 
 class FixturePiRpcReceiver:
-    """Harness-owned process + durable intent; native transcript is acceptance.
+    """Harness-owned or controller-attached RPC + durable handoff intent.
+
+    Native transcript evidence, not RPC dispatch, is Runtime acceptance.
 
     Same journal and same Pi session are required for same-Run restoration. An
     intent with no native receipt never automatically injects again. Therefore
     crash-before-handoff may require explicit recovery; it cannot duplicate work.
     """
     def __init__(self, argv, *, cwd, env, journal, runtime_version, scope, timeout=8):
-        if runtime_version != '1.4.0':
-            raise NativeUnavailable('unsupported Pi version')
-        if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
-                or any(type(scope[key]) is not str or not scope[key] for key in ('room_id', 'participant_id', 'run_id'))
-                or any(type(scope[key]) is not int or scope[key] != 1 for key in ('generation', 'context_generation'))):
-            raise NativeUnavailable('only explicitly bound fixture Run/context generation 1 is supported')
-        self.scope = dict(scope)
-        self.runtime_version = runtime_version
-        self.timeout = timeout
-        self.db = sqlite3.connect(journal)
-        self.db.execute('PRAGMA journal_mode=WAL')
-        self.db.execute('PRAGMA synchronous=FULL')
-        self.db.execute('CREATE TABLE IF NOT EXISTS handoffs ('
-                        'logical_digest TEXT PRIMARY KEY, logical TEXT NOT NULL, '
-                        'session_id TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)')
-        self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL)')
-        previous = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
-        if previous and json.loads(previous[0]) != self.scope:
-            self.db.close()
-            raise NativeUnavailable('fixture scope cannot change without qualified native reset')
-        self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
-        self.db.commit()
-        try:
-            self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-        except BaseException:
-            self.db.close()
-            raise
-        os.set_blocking(self.process.stdin.fileno(), False)
-        self._transport_fenced = False
+        self._initialize(argv=argv, cwd=cwd, env=env, journal=journal,
+                         runtime_version=runtime_version, scope=scope, timeout=timeout)
+
+    @classmethod
+    def attach(cls, process, *, journal, runtime_version, scope, incarnation_id, timeout=8):
+        """Trusted controller seam, not PID adoption or a public authority API.
+
+        The controller already owns the direct child, held pidfd and kernel
+        credential channel. This object owns only RPC observation and its journal.
+        """
+        if type(incarnation_id) is not str or not incarnation_id:
+            raise NativeUnavailable('missing supervisor incarnation')
+        receiver = cls.__new__(cls)
+        receiver._initialize(process=process, journal=journal, runtime_version=runtime_version,
+                             scope=scope, incarnation_id=incarnation_id, timeout=timeout)
+        return receiver
+
+    def _initialize(self, *, journal, runtime_version, scope, timeout,
+                    process=None, argv=None, cwd=None, env=None, incarnation_id=None):
+        self._closed = False
+        self._owns_process = process is None
+        self.incarnation_id = incarnation_id
+        self.db = None
+        self.process = process
+        self._reader = self._stderr = None
         self._condition = threading.Condition()
-        self._responses = {}
-        self._notifications = {}
-        self._rpc_pending = set()
-        self._native_pending = set()
-        self.events = deque(maxlen=512)
-        self.errors = deque(maxlen=64)
-        self._ended = False
-        self._binding = None
         self._write_lock = threading.Lock()
-        self._reader = threading.Thread(target=self._read, daemon=True)
-        self._stderr = threading.Thread(target=self._read_errors, daemon=True)
-        self._reader.start()
-        self._stderr.start()
+        self._transport_fenced = False
         try:
+            if runtime_version != '1.4.0':
+                raise NativeUnavailable('unsupported Pi version')
+            if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
+                    or any(type(scope[key]) is not str or not scope[key] for key in ('room_id', 'participant_id', 'run_id'))
+                    or any(type(scope[key]) is not int or scope[key] != 1 for key in ('generation', 'context_generation'))):
+                raise NativeUnavailable('only explicitly bound fixture Run/context generation 1 is supported')
+            self.scope = dict(scope)
+            self.runtime_version = runtime_version
+            self.timeout = timeout
+            self.db = sqlite3.connect(journal)
+            self.db.execute('PRAGMA journal_mode=WAL')
+            self.db.execute('PRAGMA synchronous=FULL')
+            self.db.execute('CREATE TABLE IF NOT EXISTS handoffs ('
+                            'logical_digest TEXT PRIMARY KEY, logical TEXT NOT NULL, '
+                            'session_id TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)')
+            self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL)')
+            previous = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
+            if previous and json.loads(previous[0]) != self.scope:
+                raise NativeUnavailable('fixture scope cannot change without qualified native reset')
+            self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
+            self.db.commit()
+            self.process = process if process is not None else subprocess.Popen(
+                argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, bufsize=0)
+            os.set_blocking(self.process.stdin.fileno(), False)
+            self._transport_fenced = False
+            self._responses = {}
+            self._notifications = {}
+            self._rpc_pending = set()
+            self._native_pending = set()
+            self.events = deque(maxlen=512)
+            self.errors = deque(maxlen=64)
+            self._ended = False
+            self._binding = None
+            self._reader = threading.Thread(target=self._read, daemon=True)
+            self._stderr = threading.Thread(target=self._read_errors, daemon=True)
+            self._reader.start()
+            self._stderr.start()
             state = self._native('state', {})['state']
             if state.get('api_baseline') != runtime_version or state.get('readiness') not in {r.value for r in Readiness}:
                 raise NativeUnavailable('unsupported or absent native observation')
             self._binding = {key: state[key] for key in ('runtime_id', 'session_id')}
+            if self.incarnation_id is None:
+                self.incarnation_id = state['runtime_id']
             self.initial_state = state
             self.last_observation = state
             self.readiness = Readiness(state['readiness'])
@@ -117,8 +143,11 @@ class FixturePiRpcReceiver:
                 self._condition.notify_all()
 
     def _read_errors(self):
-        for line in iter(lambda: self.process.stderr.readline(4096), b''):
-            self.errors.append(line[:4096].decode('utf8', errors='replace'))
+        try:
+            for line in iter(lambda: self.process.stderr.readline(4096), b''):
+                self.errors.append(line[:4096].decode('utf8', errors='replace'))
+        except (OSError, ValueError):
+            pass  # Controller may close streams after reaping its owned process.
 
     def _wait(self, values, request_id, timeout=None):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
@@ -226,7 +255,7 @@ class FixturePiRpcReceiver:
     def accept(self, envelope):
         if (type(envelope) is not dict
                 or any(type(envelope.get(key)) is not type(value) or envelope.get(key) != value for key, value in self.scope.items())
-                or envelope.get('incarnation_id') != self._binding['runtime_id']):
+                or envelope.get('incarnation_id') != self.incarnation_id):
             raise LedgerError('NATIVE_SCOPE_MISMATCH')
         logical = self._logical(envelope)
         logical_digest = digest(logical)
@@ -300,6 +329,7 @@ class FixturePiRpcReceiver:
         return {'runtime': 'Pi', 'version': self.runtime_version,
                 'authority': 'trusted-fixture-only', 'session_id': self._binding['session_id'],
                 'runtime_id': self._binding['runtime_id'],
+                'supervisor_incarnation': self.incarnation_id if not self._owns_process else None,
                 'process_alive': self.process.poll() is None,
                 'adapter_readiness': self.readiness.value,
                 'transport_fenced': self._transport_fenced,
@@ -313,19 +343,35 @@ class FixturePiRpcReceiver:
                 'hang_uncertainty': 'no-native-hang-signal', 'image_digest': 'not-qualified'}
 
     def close(self):
-        if self.process.poll() is None:
-            try:
-                self.process.stdin.close()
-                self.process.wait(timeout=3)
-            except (OSError, subprocess.TimeoutExpired):
-                self.process.kill()
-                self.process.wait(timeout=3)
-        self._reader.join(timeout=1)
-        self._stderr.join(timeout=1)
-        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
-            if not stream.closed:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-        self.db.close()
+        # Every resource slot exists before initialization can fail. Retrying
+        # close may join readers after an attached owner has subsequently reaped.
+        self._closed = True
+        self._transport_fenced = True
+        with self._condition:
+            self._condition.notify_all()
+        try:
+            if self.process is not None:
+                if self._owns_process and self.process.poll() is None:
+                    try:
+                        self.process.stdin.close()
+                        self.process.wait(timeout=3)
+                    except (OSError, ValueError, subprocess.TimeoutExpired):
+                        self.process.kill()
+                        self.process.wait(timeout=3)
+                # An attached receiver never kills/closes controller resources.
+                # Its owner reaps on failure; started readers then observe EOF.
+                if self.process.poll() is not None:
+                    for thread in (self._reader, self._stderr):
+                        if thread is not None and thread.ident is not None:
+                            thread.join(timeout=1)
+                if self._owns_process:
+                    for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                        if stream is not None and not stream.closed:
+                            try:
+                                stream.close()
+                            except OSError:
+                                pass
+        finally:
+            if self.db is not None:
+                database, self.db = self.db, None
+                database.close()

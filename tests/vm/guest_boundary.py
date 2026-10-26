@@ -18,6 +18,8 @@ import traceback
 
 PAYLOAD = Path('/mnt/uas-payload')
 ROOT = Path('/opt/uas-fixture')
+REQUIRED_PACKAGES = ('moby-engine', 'docker-cli', 'container-selinux', 'nftables',
+                     'iproute', 'xfsprogs', 'policycoreutils', 'shadow-utils')
 REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota',
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
 
@@ -40,7 +42,8 @@ def verify_payload(nonce, manifest_hash):
     expect(len(raw) <= 1024 * 1024 and hashlib.sha256(raw).hexdigest() == manifest_hash, 'payload manifest mismatch')
     data = json.loads(raw)
     expect(data['version'] == 1 and data['nonce'] == nonce, 'payload nonce mismatch')
-    for prefix, entries in (('repo', data['source']), ('rpms', data['packages'])):
+    for prefix, entries in (('repo', data['source']), ('rpms', data['packages']),
+                            ('rpms', data['repository_metadata'])):
         for entry in entries:
             name = entry['file']
             expect(not name.startswith('/') and '..' not in Path(name).parts, 'unsafe payload path')
@@ -54,6 +57,27 @@ def verify_payload(nonce, manifest_hash):
     return data
 
 
+def install_packages(nonce, manifest):
+    expect(os.geteuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == nonce, 'not this disposable boot')
+    expect(run('getenforce').strip() == 'Enforcing', 'SELinux not enforcing before packages')
+    packages = [str(PAYLOAD / 'rpms' / item['file']) for item in manifest['packages']]
+    run('rpmkeys', '--import', str(PAYLOAD / 'fedora-44.asc'))
+    run('rpmkeys', '--checksig', *packages, timeout=180)
+    # DNF4's download closure may union conflicting alternative providers. Do
+    # not request every RPM as an installation root. The native guest solver
+    # selects only required roots/dependencies against its actual installed OS.
+    # Repodata bytes were hash-verified above and are on a read-only payload;
+    # every package is release-signature verified both before and during install.
+    repositories = Path('/run/uas-repositories')
+    repositories.mkdir(mode=0o700)
+    (repositories / 'uas.repo').write_text('[uas-offline]\nname=Verified disposable payload\n'
+        f'baseurl=file://{PAYLOAD}/rpms\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0\n'
+        f'gpgkey=file://{PAYLOAD}/fedora-44.asc\nskip_if_unavailable=0\n')
+    run('dnf', '-y', '--setopt=reposdir=' + str(repositories), '--disable-repo=*',
+        '--enable-repo=uas-offline', '--setopt=localpkg_gpgcheck=True',
+        '--setopt=install_weak_deps=False', 'install', *REQUIRED_PACKAGES, timeout=900)
+
+
 def install(nonce, manifest_hash):
     expect(os.geteuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == nonce, 'not this disposable boot')
     expect(sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo'], 'external guest NIC present')
@@ -61,12 +85,7 @@ def install(nonce, manifest_hash):
     PAYLOAD.mkdir()
     run('mount', '-o', 'ro,nodev,nosuid,noexec', '/dev/disk/by-label/UAS_PAYLOAD', str(PAYLOAD))
     manifest = verify_payload(nonce, manifest_hash)
-    packages = [str(PAYLOAD / 'rpms' / item['file']) for item in manifest['packages']]
-    run('rpmkeys', '--import', str(PAYLOAD / 'fedora-44.asc'))
-    run('rpmkeys', '--checksig', *packages, timeout=180)
-    # Package installation is inside the throwaway guest only, with no repo or NIC.
-    run('dnf', '-y', '--disable-repo=*', '--setopt=localpkg_gpgcheck=True',
-        '--setopt=install_weak_deps=False', 'install', *packages, timeout=900)
+    install_packages(nonce, manifest)
     shutil.copytree(PAYLOAD / 'repo', ROOT)
     shutil.copyfile(PAYLOAD / 'fixture', ROOT / 'fixture')
     (ROOT / 'fixture').chmod(0o555)
@@ -78,7 +97,8 @@ def install(nonce, manifest_hash):
                                                         'exec-opts': ['native.cgroupdriver=systemd']}))
     run('systemctl', 'start', 'docker', timeout=120)
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux changed during installation')
-    print('Guest packages:', json.dumps([f"{p['name']}-{p['version']}-{p['release']}.{p['arch']}" for p in manifest['packages']]), flush=True)
+    print('Guest installed roots:', run('rpm', '-q', '--queryformat',
+          '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n', *REQUIRED_PACKAGES), flush=True)
 
 
 def responder():

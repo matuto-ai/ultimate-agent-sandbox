@@ -1,5 +1,6 @@
 """Offline preparation contracts; no RPM download/install or VM execution."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -78,6 +79,37 @@ class VMPayloadTests(unittest.TestCase):
         self.assertNotIn("\x1b", diagnostic)
         self.assertNotIn("\n", diagnostic)
 
+    def test_repository_metadata_binds_all_files_and_rejects_unsafe_entries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); metadata = root / "repodata"; metadata.mkdir()
+            (metadata / "repomd.xml").write_bytes(b"metadata index")
+            (metadata / "fixture-primary.xml.gz").write_bytes(b"compressed package metadata")
+            entries = payload.repository_metadata(root)
+            self.assertEqual(["repodata/fixture-primary.xml.gz", "repodata/repomd.xml"],
+                             [item["file"] for item in entries])
+            for entry in entries:
+                value = (root / entry["file"]).read_bytes()
+                self.assertEqual(len(value), entry["bytes"])
+                self.assertEqual(hashlib.sha256(value).hexdigest(), entry["sha256"])
+            (metadata / "fixture-primary.xml.gz").write_bytes(b"changed")
+            self.assertNotEqual(entries, payload.repository_metadata(root))
+            foreign = metadata / "foreign"
+            foreign.symlink_to(root / "absent")
+            with self.assertRaises(RuntimeError): payload.repository_metadata(root)
+            foreign.unlink(); foreign.mkdir()
+            with self.assertRaises(RuntimeError): payload.repository_metadata(root)
+            foreign.rmdir(); os.link(metadata / "repomd.xml", foreign)
+            with self.assertRaises(RuntimeError): payload.repository_metadata(root)
+            foreign.unlink()
+            with patch.object(payload, "MAX_METADATA_FILES", 1), self.assertRaises(RuntimeError):
+                payload.repository_metadata(root)
+            with patch.object(payload, "MAX_METADATA_FILE_BYTES", 1), self.assertRaises(RuntimeError):
+                payload.repository_metadata(root)
+            with patch.object(payload, "MAX_METADATA_TOTAL", 1), self.assertRaises(RuntimeError):
+                payload.repository_metadata(root)
+            (metadata / "repomd.xml").unlink()
+            with self.assertRaises(RuntimeError): payload.repository_metadata(root)
+
     def test_source_allowlist_rejects_traversal_symlinks_hardlinks_and_size(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -146,6 +178,10 @@ class VMPayloadTests(unittest.TestCase):
                 elif program == "rpm" and "-qp" in arguments:
                     name = Path(arguments[-1]).name.removesuffix("-1-1.fc44.x86_64.rpm")
                     return name + "\t0\t1\t1.fc44\tx86_64\n"
+                elif program == "createrepo_c":
+                    metadata = Path(arguments[-1]) / "repodata"; metadata.mkdir()
+                    for name in ("repomd.xml", "primary.xml.gz", "filelists.xml.gz", "other.xml.gz"):
+                        (metadata / name).write_bytes(b"synthetic repository metadata")
                 elif program == "go":
                     Path(arguments[arguments.index("-o") + 1]).write_bytes(b"synthetic static fixture")
                 elif program == "genisoimage":
@@ -164,6 +200,16 @@ class VMPayloadTests(unittest.TestCase):
             self.assertEqual("fedora-44.asc", manifest["key"]["file"])
             self.assertEqual(set(payload.PACKAGES), {item["name"] for item in manifest["packages"]})
             self.assertFalse(manifest["dependencies_reproducibly_pinned"])
+            metadata = manifest["repository_metadata"]
+            self.assertEqual(4, len(metadata))
+            self.assertIn("repodata/repomd.xml", {item["file"] for item in metadata})
+            for item in metadata:
+                value = (build / "payload-build/payload/rpms" / item["file"]).read_bytes()
+                self.assertEqual(len(value), item["bytes"])
+                self.assertEqual(hashlib.sha256(value).hexdigest(), item["sha256"])
+            metadata_call = next(index for index, args in enumerate(calls) if args[0] == "createrepo_c")
+            self.assertEqual(len(payload.PACKAGES), sum(args[0] == "rpmkeys" and "--checksig" in args
+                                                       for args in calls[:metadata_call]))
             self.assertEqual(set(sources), {item["file"] for item in manifest["source"]})
             self.assertTrue((build / "payload-build/payload/repo/uas/__init__.py").is_file())
             for arguments in calls:
@@ -187,6 +233,9 @@ class VMPayloadTests(unittest.TestCase):
                     self.assertEqual("=https", arguments[arguments.index("--proto-redir") + 1])
                 if arguments[0] == "go":
                     self.assertEqual(str(build / "payload-build/payload/repo/tests/vm/boundary_fixture.go"), arguments[-1])
+                if arguments[0] == "createrepo_c":
+                    self.assertEqual(["createrepo_c", "--no-database", "--checksum", "sha256", "--general-compress-type", "gz",
+                                      "--error-exit-val", "--workers", "2", str(build / "payload-build/payload/rpms")], arguments)
 
 
 if __name__ == "__main__":
