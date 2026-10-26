@@ -52,7 +52,8 @@ class ReadProviderTests(unittest.TestCase):
 
     def test_route_table_startup_rejects_ambiguous_or_missing_signatures(self):
         valid = (("help", ("--help",), "gh --help"),
-                 ("issue-view", ("issue", "view"), "gh issue view NUMBER [--repo OWNER/REPO]"))
+                 ("issue-view", ("issue", "view"), "gh issue view NUMBER [--repo OWNER/REPO]"),
+                 ("issue-assign-self", ("issue", "edit"), "gh issue edit NUMBER --add-assignee @me [--repo OWNER/REPO]"))
         self.assertEqual(validate_route_table(valid), valid)
         for rows in ((), valid + (valid[0],), (valid[0],),
                      (valid[0], ("issue-view", ("--help",), "gh --help")),

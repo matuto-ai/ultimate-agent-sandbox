@@ -1,3 +1,7 @@
+> The optional [audited self-assignment extension](forge-assignment.md) adds one
+> write route. The read provider and its external `GhTransport` remain read-only;
+> this extension does not qualify the full Forge surface or production boundary.
+
 # Connected GitHub read observations
 
 This is the first bounded connected slice of [#66](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/66), not its completion. The existing official Pi 1.4.0 process can now call the `gh` tool with a native argument vector through its existing authenticated Participant channel. No new disconnected Runtime or simulated Pi is introduced. Forge requests use a bounded 45-second channel deadline; existing peer traffic retains its two-second default. The optional gh executor bounds each call to ten seconds and the provider stops starting pages after its 30-second budget.

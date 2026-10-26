@@ -32,17 +32,21 @@ export default function (pi) {
     },
   });
   if (channel) pi.registerTool({
-    name: 'gh', label: 'Read-only GitHub',
+    name: 'gh', label: 'Bounded GitHub',
     description: 'Bounded native gh argument vector through the authenticated Room Broker. '
-      + 'Use issue view NUMBER or --help; no shell, endpoint or identity selection. '
+      + 'Use issue view NUMBER, --help, or issue edit NUMBER --add-assignee @me when write-enabled. No shell, endpoint or identity selection. '
       + 'Stable operation id is required for exact retries. Observations never admit a Run.',
     parameters: { type: 'object', additionalProperties: false,
       required: ['id', 'argv'], properties: { id: { type: 'string' },
         argv: { type: 'array', items: { type: 'string' }, maxItems: 8 } } },
     async execute(_toolCallId, input, signal) {
-      const reply = await channel.request({ id: input.id, kind: 'forge-read', argv: input.argv }, { signal, timeoutMs: 45000 });
+      const args = input.argv[0] === 'gh' ? input.argv.slice(1) : input.argv;
+      const kind = args[0] === 'issue' && args[1] === 'edit' && args[3] === '--add-assignee' ? 'forge-write' : 'forge-read';
+      const reply = await channel.request({ id: input.id, kind, argv: input.argv }, { signal, timeoutMs: 45000 });
       return { content: [{ type: 'text', text: JSON.stringify(reply) }], details: reply,
-        isError: !reply.ok || reply.receipt?.observation?.completeness !== 'complete' };
+        isError: !reply.ok || (kind === 'forge-write'
+          ? !['ASSIGNED', 'ALREADY_ASSIGNED'].includes(reply.receipt?.assignment?.status)
+          : reply.receipt?.observation?.completeness !== 'complete') };
     },
   });
   let started = false, frozen = false, retired = false, source = 'missing-signal';
