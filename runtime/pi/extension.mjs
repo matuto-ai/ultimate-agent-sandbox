@@ -31,6 +31,20 @@ export default function (pi) {
         isError: !reply.ok };
     },
   });
+  if (channel) pi.registerTool({
+    name: 'gh', label: 'Read-only GitHub',
+    description: 'Bounded native gh argument vector through the authenticated Room Broker. '
+      + 'Use issue view NUMBER or --help; no shell, endpoint or identity selection. '
+      + 'Stable operation id is required for exact retries. Observations never admit a Run.',
+    parameters: { type: 'object', additionalProperties: false,
+      required: ['id', 'argv'], properties: { id: { type: 'string' },
+        argv: { type: 'array', items: { type: 'string' }, maxItems: 8 } } },
+    async execute(_toolCallId, input, signal) {
+      const reply = await channel.request({ id: input.id, kind: 'forge-read', argv: input.argv }, { signal, timeoutMs: 45000 });
+      return { content: [{ type: 'text', text: JSON.stringify(reply) }], details: reply,
+        isError: !reply.ok || reply.receipt?.observation?.completeness !== 'complete' };
+    },
+  });
   let started = false, frozen = false, retired = false, source = 'missing-signal';
   const pending = new Set();
   function state(ctx) {

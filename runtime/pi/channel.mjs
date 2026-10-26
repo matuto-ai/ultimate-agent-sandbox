@@ -63,11 +63,14 @@ export function seqpacketChannel(fd, { timeoutMs = 2000, maxQueued = 4 } = {}) {
     }
   }
   return {
-    request(envelope, { signal } = {}) {
+    request(envelope, { signal, timeoutMs: requestTimeoutMs = timeoutMs } = {}) {
+      if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 45000) {
+        return Promise.reject(Error('invalid fixture request deadline'));
+      }
       if (fenced) return Promise.reject(Error('fixture peer channel fenced; replace process'));
       if (queued >= maxQueued) return Promise.reject(Error('fixture peer queue full'));
       queued++;
-      const deadline = performance.now() + timeoutMs;
+      const deadline = performance.now() + requestTimeoutMs;
       const task = tail.then(() => exchange(envelope, deadline, signal));
       tail = task.catch(() => {});
       return task.finally(() => { queued--; });

@@ -147,6 +147,7 @@ class FixtureParticipantController:
         except (OSError, ValueError, KeyError) as error:
             raise LedgerError("PROCESS_BINDING_UNAVAILABLE") from error
         self.supervisor, self.hub, self.credentials = supervisor, hub, credentials
+        self.forge_broker = None
         self.handles = {}
         self.fenced = set()
         self.store_failed = False
@@ -728,14 +729,30 @@ class FixtureParticipantController:
         data, credentials = FixtureParticipantController._record(channel)
         return FixtureParticipantController._decode_packet(data), credentials
 
+    def bind_forge(self, broker):
+        """Supervisor-owned immutable Room/Project binding, never client input.
+
+        Same-UID fixture seam only; production external Broker isolation and
+        Deployment-wide audit remain unqualified.
+        """
+        from .forge import ReadOnlyForgeBroker
+        if (type(broker) is not ReadOnlyForgeBroker or broker.ledger is not self.hub.ledger
+                or broker.binding.room_id != self.supervisor.room_id):
+            raise LedgerError('ROOM_MISMATCH')
+        if self.forge_broker is not None:
+            raise LedgerError('FORGE_ALREADY_BOUND')
+        self.forge_broker = broker
+
     def receive(self, handle):
         """Consume one kernel-authenticated record and dispatch to #65/#60.
 
         Waiting for input is outside the lifecycle lock. Authentication and the
-        complete ledger transaction share that lock with revocation/Stop/Destroy.
+        ledger transactions share that lock with revocation/Stop/Destroy. Forge
+        provider I/O runs outside it; terminal publication rechecks authority.
         Replies can be lost; exact authorized retry retains ledger idempotency.
         """
         request_id = None
+        forge_intent = None
         try:
             data, credentials = self._record(handle.channel)
             with self.supervisor._locked():
@@ -750,8 +767,14 @@ class FixtureParticipantController:
                                 or type(message["envelope"]) is not dict):
                             raise LedgerError("INVALID_NATIVE_FRAME")
                         message = message["envelope"]
-                    receipt = self.hub.submit(handle.connection, message, origin=handle.badge.origin(),
-                                              authorize=lambda: self._authority(handle, credentials))
+                    if type(message) is dict and message.get('kind') == 'forge-read':
+                        if self.forge_broker is None:
+                            raise LedgerError('FORGE_UNAVAILABLE')
+                        forge_intent = self.forge_broker.prepare(message, origin=handle.badge.origin(),
+                            authorize=lambda: self._authority(handle, credentials))
+                    else:
+                        receipt = self.hub.submit(handle.connection, message, origin=handle.badge.origin(),
+                                                  authorize=lambda: self._authority(handle, credentials))
                 except LedgerError as error:
                     # authorize() is pure: it can detect an exit/credential
                     # race after SQLite BEGIN but cannot nest another write.
@@ -762,15 +785,35 @@ class FixtureParticipantController:
                                     "exited" if error.code == "PROCESS_EXITED" else "disabled",
                                     "process-exited" if error.code == "PROCESS_EXITED" else "missing-credential")
                     raise
+            if forge_intent is not None:
+                # Network/subprocess I/O must not hold Stop/revoke hostage.
+                outcome = self.forge_broker.perform(forge_intent)
+                with self.supervisor._locked():
+                    receipt = self.forge_broker.complete(forge_intent, outcome,
+                        authorize=lambda: self._authority(handle, credentials))
             result = {"ok": True, "receipt": receipt}
         except LedgerError as error:
-            result = {"ok": False, "error": error.code}
+            code = error.code
+            if self.forge_broker is not None:
+                try:
+                    if forge_intent is not None and code in {
+                            'AUTHORITY_REVOKED', 'PROCESS_EXITED', 'MISSING_ACTOR_CREDENTIAL',
+                            'ROOM_NOT_RUNNING', 'ROOM_REPLACED', 'CONTROLLER_REPLACED'}:
+                        with self.supervisor._locked():
+                            self.forge_broker.abandon(forge_intent, code)
+                    self.forge_broker.denied(code)
+                except LedgerError as audit_error:
+                    code = audit_error.code
+            result = {"ok": False, "error": code}
         if handle.protocol == "pi":
             result = {"request_id": request_id, **result}
         try:
             handle.channel.send(_json(result).encode())
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # Durable receipt, not delivery, is the success boundary.
+        except OSError as error:
+            if error.errno not in {errno.EPIPE, errno.ECONNRESET, errno.EBADF}:
+                raise
+            # Lifecycle may dispose the channel during a pending provider read.
+            # Durable receipt, not delivery, is the success boundary.
         return result
 
     def _fence(self, document, participant, status, reason):
