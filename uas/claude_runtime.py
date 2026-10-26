@@ -30,6 +30,13 @@ class ClaudeUnavailable(RuntimeError):
     pass
 
 
+def _ack_matches(event, session_id, message_id, content):
+    return (type(event) is dict and event.get('type') == 'user'
+            and event.get('session_id') == session_id and event.get('uuid') == message_id
+            and event.get('isReplay') is True and event.get('parent_tool_use_id') is None
+            and event.get('message') == {'role': 'user', 'content': content})
+
+
 def require_loopback_namespace():
     """Defense in depth; CI's unshare --net is the actual boundary."""
     if {name for _, name in socket.if_nameindex()} != {'lo'}:
@@ -48,6 +55,8 @@ class ClaudeSignals:
         self.session_id = session_id
         self.safe_for = safe_for
         self.pending = None
+        self.command_id = None
+        self.completed_id = None
         self.ack = None
         self.initialized = False
         self.fenced = False
@@ -58,6 +67,7 @@ class ClaudeSignals:
         if self.fenced or self.pending is not None:
             raise ClaudeUnavailable('Claude has no available invocation slot')
         self.pending = (message_id, content)
+        self.command_id = message_id
         self.ack = None
         self.safe_at = None
         self.state = 'working'
@@ -84,9 +94,7 @@ class ClaudeSignals:
         elif kind == 'control_request' or (kind == 'system' and event.get('subtype') == 'permission_denied'):
             self.hold('needs-input')  # Conservative attention inference, not auto-approval.
         elif kind == 'user':
-            if (not self.pending or event.get('uuid') != self.pending[0]
-                    or event.get('isReplay') is not True or event.get('parent_tool_use_id') is not None
-                    or event.get('message') != {'role': 'user', 'content': self.pending[1]}):
+            if not self.pending or not _ack_matches(event, self.session_id, *self.pending):
                 self.hold('unmatched-acknowledgment')
             else:
                 self.ack = event
@@ -98,11 +106,22 @@ class ClaudeSignals:
                     or event.get('terminal_reason') != 'completed' or event.get('stop_reason') != 'end_turn'):
                 self.hold('needs-input' if event.get('permission_denials') else 'unknown-result')
             else:
+                self.completed_id = self.command_id
                 self.pending = None
                 self.state = 'idle-inferred'
                 self.safe_at = time.monotonic()
-        elif kind not in ('assistant', 'command_lifecycle') and not (
-                kind == 'system' and event.get('subtype') == 'ui_invalidate'):
+        elif kind == 'assistant':
+            if (self.pending is None or event.get('user_message_uuid') != self.command_id
+                    or event.get('parent_tool_use_id') is not None):
+                self.hold('unexpected-active-turn')
+        elif kind == 'command_lifecycle':
+            state = event.get('state')
+            if state == 'completed' and event.get('command_uuid') == self.completed_id:
+                return  # The previous result can precede its trailing lifecycle event.
+            if (event.get('command_uuid') != self.command_id or state not in ('queued', 'started', 'completed')
+                    or (state != 'completed' and self.pending is None)):
+                self.hold('unexpected-active-turn')
+        elif not (kind == 'system' and event.get('subtype') == 'ui_invalidate'):
             self.hold('unknown-signal')
 
     def readiness(self):
@@ -147,9 +166,11 @@ class FixtureClaudeReceiver:
         except OSError:
             self.owner.close()
             raise ClaudeUnavailable('fixture session already owned')
-        self.db = sqlite3.connect(journal)
+        self.db = None
         self.process = None
+        self.reader = self.stderr = None
         try:
+            self.db = sqlite3.connect(journal)
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
             self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT, session_id TEXT)')
@@ -210,7 +231,7 @@ class FixtureClaudeReceiver:
         for line in iter(lambda: self.process.stderr.readline(4096), b''):
             self.errors.append(line.decode('utf8', errors='replace'))
 
-    def _write(self, message_id, content):
+    def _write(self, message_id, content, *, peer=False):
         wire = (json.dumps({'type': 'user', 'uuid': message_id, 'session_id': self.session_id,
                             'message': {'role': 'user', 'content': content}}, ensure_ascii=False) + '\n').encode()
         deadline = time.monotonic() + self.timeout
@@ -219,6 +240,10 @@ class FixtureClaudeReceiver:
             raise ClaudeUnavailable('native write lock deadline exceeded')
         try:
             with self.condition:
+                # Journal I/O and write-lock contention may outlive the sampled
+                # safe point. Bootstrap is explicit control, never peer traffic.
+                if peer and self.signals.readiness() is not Readiness.SAFE:
+                    raise ClaudeUnavailable('safe evidence expired before peer handoff')
                 self.signals.begin(message_id, content)
             try:
                 fd = self.process.stdin.fileno()
@@ -265,6 +290,10 @@ class FixtureClaudeReceiver:
         with self.condition:
             if self.process.poll() is not None or self.ended:
                 return Readiness.LOST
+            # Ambiguous responsibility holds the whole receiver, not just a
+            # selected envelope; a caller cannot route around an unknown head.
+            if self.db.execute('SELECT 1 FROM handoffs WHERE receipt IS NULL LIMIT 1').fetchone():
+                return Readiness.AMBIGUOUS
             return self.signals.readiness()
 
     def accept(self, envelope):
@@ -276,17 +305,21 @@ class FixtureClaudeReceiver:
             raise LedgerError('NATIVE_NOT_SAFE')
         logical = {k: v for k, v in envelope.items() if k not in ('delivery_id', 'incarnation_id')}
         key = digest(logical)
+        content = 'Untrusted peer traffic (not human authorization):\n' + json.dumps(logical, ensure_ascii=False, sort_keys=True)
         row = self.db.execute('SELECT logical,message_id,receipt FROM handoffs WHERE logical_digest=?', (key,)).fetchone()
         if row:
-            if json.loads(row[0]) != logical or row[2] is None:
+            try:
+                valid = json.loads(row[0]) == logical and _ack_matches(json.loads(row[2]), self.session_id, row[1], content)
+            except (ValueError, TypeError):
+                valid = False
+            if not valid:
                 raise LedgerError('UNCONFIRMED_NATIVE_DELIVERY')
         else:
             message_id = str(uuid.uuid4())
-            content = 'Untrusted peer traffic (not human authorization):\n' + json.dumps(logical, ensure_ascii=False, sort_keys=True)
             with self.db:
                 self.db.execute('INSERT INTO handoffs VALUES (?,?,?,NULL)', (key, json.dumps(logical), message_id))
             try:
-                self._write(message_id, content)
+                self._write(message_id, content, peer=True)
                 receipt = self._wait(lambda: self.signals.ack if self.signals.ack is not None
                                      and self.signals.ack.get('uuid') == message_id else None)
                 with self.db:
@@ -320,8 +353,10 @@ class FixtureClaudeReceiver:
                     self.process.kill()
                     self.process.wait(timeout=3)
             for thread in (self.reader, self.stderr):
-                thread.join(timeout=1)
+                if thread is not None and thread.ident is not None:
+                    thread.join(timeout=1)
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 stream.close()
-        self.db.close()
+        if self.db is not None:
+            self.db.close()
         self.owner.close()

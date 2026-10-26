@@ -6,10 +6,11 @@ import signal
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from uas.claude_runtime import ClaudeSignals, ClaudeUnavailable, FixtureClaudeReceiver, VERSION, require_loopback_namespace
+from uas.claude_runtime import BINARY_SHA256, ClaudeSignals, ClaudeUnavailable, FixtureClaudeReceiver, VERSION, require_loopback_namespace
 from uas.ledger import LedgerError, RoomLedger
 from uas.peer import FixtureParticipant, FixturePeerHub, Readiness, WorkRequest
 
@@ -87,6 +88,32 @@ class ClaudeSignalTests(unittest.TestCase):
             self.emit(**event)
             self.assertTrue(self.signals.fenced)
 
+    def test_unexpected_activity_invalidates_prior_safe_point(self):
+        for event in ({'type': 'command_lifecycle', 'command_uuid': 'other', 'state': 'started'},
+                      {'type': 'command_lifecycle', 'command_uuid': 'message', 'state': 'queued'},
+                      {'type': 'assistant', 'user_message_uuid': 'other'},
+                      {'type': 'assistant', 'user_message_uuid': 'message'}):
+            with self.subTest(event=event):
+                self.setUp()
+                self.signals.begin('message', 'text')
+                self.initialized()
+                self.ack()
+                self.result()
+                self.emit(type='command_lifecycle', command_uuid='message', state='completed')
+                self.assertIs(self.signals.readiness(), Readiness.SAFE)
+                self.emit(**event)
+                self.assertIs(self.signals.readiness(), Readiness.AMBIGUOUS)
+
+    def test_prior_completed_lifecycle_can_trail_next_invocation_start(self):
+        self.signals.begin('message', 'text')
+        self.initialized()
+        self.ack()
+        self.result()
+        self.signals.begin('second', 'second text')
+        self.emit(type='command_lifecycle', command_uuid='message', state='completed')
+        self.assertFalse(self.signals.fenced)
+        self.assertIs(self.signals.readiness(), Readiness.BUSY)
+
     def test_loopback_guard_rejects_extra_interface_or_ipv6_route(self):
         with patch('socket.if_nameindex', return_value=[(1, 'lo'), (2, 'eth0')]):
             with self.assertRaises(ClaudeUnavailable):
@@ -94,6 +121,46 @@ class ClaudeSignalTests(unittest.TestCase):
         with patch('socket.if_nameindex', return_value=[(1, 'lo')]), patch('pathlib.Path.read_text', side_effect=['header\n', ':: :: eth0\n']):
             with self.assertRaises(ClaudeUnavailable):
                 require_loopback_namespace()
+
+
+class ClaudeConstructionTests(unittest.TestCase):
+    def test_failed_database_spawn_or_thread_start_releases_journal_ownership(self):
+        import fcntl
+        for failure in ('database', 'spawn', 'thread'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                binary = root / 'synthetic-binary'
+                binary.write_bytes(b'not executed')
+                child = Mock()
+                child.poll.return_value = None
+                child.wait.return_value = 0
+                child.stdin.fileno.return_value = 0
+                kwargs = dict(cwd=root, home=root, gateway_url='http://127.0.0.1:1234',
+                              fixture_key='fixture-only-test', journal=root / 'intent.db',
+                              scope={'room_id': 'alpha', 'participant_id': 'claude', 'run_id': 'run-1',
+                                     'generation': 1, 'context_generation': 1})
+                target = {'database': 'uas.claude_runtime.sqlite3.connect',
+                          'spawn': 'uas.claude_runtime.subprocess.Popen',
+                          'thread': 'uas.claude_runtime.threading.Thread.start'}[failure]
+                with patch('uas.claude_runtime.require_loopback_namespace'), \
+                     patch('uas.claude_runtime.hashlib.file_digest', return_value=SimpleNamespace(hexdigest=lambda: BINARY_SHA256)), \
+                     patch('uas.claude_runtime.os.set_blocking'):
+                    if failure == 'thread':
+                        with patch('uas.claude_runtime.subprocess.Popen', return_value=child), \
+                             patch(target, side_effect=RuntimeError('fault')):
+                            with self.assertRaisesRegex(RuntimeError, 'fault'):
+                                FixtureClaudeReceiver(binary, **kwargs)
+                        child.terminate.assert_called_once()
+                        child.wait.assert_called_once()
+                        child.stdin.close.assert_called_once()
+                        child.stdout.close.assert_called_once()
+                        child.stderr.close.assert_called_once()
+                    else:
+                        with patch(target, side_effect=RuntimeError('fault')):
+                            with self.assertRaisesRegex(RuntimeError, 'fault'):
+                                FixtureClaudeReceiver(binary, **kwargs)
+                with open(str(root / 'intent.db') + '.owner', 'a+b') as owner:
+                    fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 INSTALL = os.environ.get('UAS_CLAUDE_INSTALL')
@@ -204,6 +271,38 @@ class ClaudeNativeTests(unittest.TestCase):
         self.assertEqual(self.deliver()['outcome'], 'HELD')
         self.assertIsNone(self.request()['response_started_at'])
 
+    def test_native_ack_without_durable_receipt_remains_unknown_after_restore(self):
+        self.submit(text='NATIVE-ACK-PERSISTENCE-FAILURE')
+        self.native.db.execute("CREATE TRIGGER fail_receipt BEFORE UPDATE ON handoffs BEGIN SELECT RAISE(ABORT, 'fixture crash window'); END")
+        with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
+            self.deliver()
+        self.native.wait_safe()
+        self.assertEqual(self.native.evidence()['unknown_intents'], 1)
+        self.assertIsNone(self.request()['response_started_at'])
+        self.native.db.execute('DROP TRIGGER fail_receipt')
+        self.native.close()
+        self.native = None
+        self.start(resume=True)
+        before = len(self.gateway.requests)
+        self.assertEqual(self.deliver()['outcome'], 'HELD')
+        self.assertEqual(len(self.gateway.requests), before)
+        self.assertEqual(json.dumps(self.gateway.requests[-1]['request']['messages']).count('NATIVE-ACK-PERSISTENCE-FAILURE'), 1)
+
+    def test_safe_point_expiring_during_intent_commit_does_not_inject(self):
+        self.submit()
+        original = self.native._write
+        def expire(message_id, content, **kwargs):
+            if kwargs.get('peer'):
+                self.native.signals.safe_at -= 3
+            return original(message_id, content, **kwargs)
+        self.native._write = expire
+        before = len(self.gateway.requests)
+        with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
+            self.deliver()
+        self.assertEqual(len(self.gateway.requests), before)
+        self.assertIsNone(self.request()['response_started_at'])
+        self.assertEqual(self.native.evidence()['unknown_intents'], 1)
+
     def test_actual_stopped_process_missing_ack_never_reinjects_after_resume(self):
         self.submit(text='x' * 16000)
         # Stop only this disposable owned process; bound the real pipe write.
@@ -225,8 +324,7 @@ class ClaudeNativeTests(unittest.TestCase):
         self.native = None
         self.start(resume=True)
         before = len(self.gateway.requests)
-        with self.assertRaisesRegex(LedgerError, 'UNCONFIRMED_NATIVE_DELIVERY'):
-            self.deliver()
+        self.assertEqual(self.deliver()['outcome'], 'HELD')
         self.assertEqual(len(self.gateway.requests), before)
 
     def test_unsupported_cross_run_reset_and_stale_incarnation_are_rejected(self):
