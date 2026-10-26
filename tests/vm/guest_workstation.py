@@ -161,16 +161,15 @@ def sample_resources(containers, samples, phase):
         samples[phase][name]=values
 
 
+NATIVE_PACKAGE_PROFILE = {'moby-engine': ('0','29.8.2','2.fc44','x86_64'),
+                          'container-selinux': ('4','2.251.0','1.fc44','noarch')}
+
+
 def engine_profile(manifest):
-    expected={'moby-engine':('29.8.2','2.fc44'), 'container-selinux':('2.251.0','1.fc44')}
-    packages={}
-    for name,(version,release) in expected.items():
-        selected=[item for item in manifest['packages'] if item['name']==name]
-        expect(len(selected)==1 and selected[0]['version']==version and selected[0]['release']==release,
-               'native Engine/policy candidate differs from reviewed package profile')
-        expect(run('rpm','-q','--queryformat','%{VERSION}-%{RELEASE}',name).strip()==version+'-'+release,
-               'installed native Engine/policy package differs')
-        packages[name]=selected[0]
+    boundary.exact_install_roots(manifest,NATIVE_PACKAGE_PROFILE)
+    boundary.require_installed_roots(NATIVE_PACKAGE_PROFILE)
+    packages={name:next(item for item in manifest['packages'] if item['name']==name)
+              for name in NATIVE_PACKAGE_PROFILE}
     actual=run('docker','version','--format','{{.Server.Version}}').strip()
     expect(actual=='29.8.2','actual Engine version differs')
     return {'server_version':actual,'exec_api':'1.48','packages':packages,
@@ -338,7 +337,7 @@ def scenario(nonce,manifest):
 def main():
     nonce,digest=sys.argv[1:];checks={}
     try:
-        boundary.install(nonce,digest)
+        boundary.install(nonce,digest,exact_roots=NATIVE_PACKAGE_PROFILE)
         manifest=boundary.verify_payload(nonce,digest)
         expect(manifest.get('profile')=='native-pi-v1','not explicit native payload')
         checks=scenario(nonce,manifest)

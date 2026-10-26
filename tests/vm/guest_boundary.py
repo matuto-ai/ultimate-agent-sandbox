@@ -209,9 +209,49 @@ def verify_payload(nonce, manifest_hash):
     return data
 
 
-def install_packages(nonce, manifest):
+def exact_install_roots(manifest, exact_roots=None):
+    """Native opt-in only: select reviewed NEVRA roots from verified pool.
+
+    Unversioned install can retain an older OS package. Do not install the full
+    candidate closure or relax the solver: request only these exact roots.
+    The default synthetic boundary profile keeps its existing behavior.
+    """
+    if exact_roots is None:
+        return REQUIRED_PACKAGES
+    expect(manifest.get('profile') == 'native-pi-v1' and type(exact_roots) is dict
+           and bool(exact_roots) and set(exact_roots) <= set(REQUIRED_PACKAGES),
+           'exact package roots require explicit native profile')
+    selected = {}
+    for name, expected in exact_roots.items():
+        expect(type(expected) is tuple and len(expected) == 4
+               and all(type(value) is str for value in expected), 'invalid exact package profile')
+        epoch,version,release,arch = expected
+        expect(re.fullmatch(r'[0-9]+', epoch) is not None
+               and all(re.fullmatch(r'[A-Za-z0-9._+~^\-]{1,256}', value) for value in (version,release))
+               and arch in ('x86_64','noarch'), 'invalid exact package NEVRA')
+        candidates = [item for item in manifest['packages'] if item['name'] == name]
+        expect(len(candidates) == 1 and tuple(candidates[0].get(key) for key in
+               ('epoch','version','release','arch')) == expected,
+               'missing, ambiguous or mismatched exact native root: ' + name)
+        selected[name] = f'{name}-{epoch}:{version}-{release}.{arch}'
+    return tuple(selected.get(name,name) for name in REQUIRED_PACKAGES)
+
+
+def require_installed_roots(exact_roots):
+    if exact_roots is None:
+        return
+    for name,(epoch,version,release,arch) in exact_roots.items():
+        expected = f'{epoch}:{version}-{release}.{arch}\n'
+        actual = run('rpm','-q','--queryformat','%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n',name)
+        expect(actual == expected,
+               f'installed native root mismatch {name}: expected={expected!r} observed={actual[:512]!r}')
+        print('Verified installed native root:', name + '-' + actual.strip(), flush=True)
+
+
+def install_packages(nonce, manifest, *, exact_roots=None):
     expect(os.geteuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == nonce, 'not this disposable boot')
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux not enforcing before packages')
+    roots = exact_install_roots(manifest, exact_roots)
     packages = [str(PAYLOAD / 'rpms' / item['file']) for item in manifest['packages']]
     run('rpmkeys', '--import', str(PAYLOAD / 'fedora-44.asc'))
     run('rpmkeys', '--checksig', *packages, timeout=180)
@@ -227,17 +267,18 @@ def install_packages(nonce, manifest):
         f'gpgkey=file://{PAYLOAD}/fedora-44.asc\nskip_if_unavailable=0\n')
     run('dnf', '-y', '--setopt=reposdir=' + str(repositories), '--disable-repo=*',
         '--enable-repo=uas-offline', '--setopt=localpkg_gpgcheck=True',
-        '--setopt=install_weak_deps=False', 'install', *REQUIRED_PACKAGES, timeout=900)
+        '--setopt=install_weak_deps=False', 'install', *roots, timeout=900)
+    require_installed_roots(exact_roots)
 
 
-def install(nonce, manifest_hash):
+def install(nonce, manifest_hash, *, exact_roots=None):
     expect(os.geteuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == nonce, 'not this disposable boot')
     expect(sorted(p.name for p in Path('/sys/class/net').iterdir()) == ['lo'], 'external guest NIC present')
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux not enforcing before installation')
     PAYLOAD.mkdir()
     run('mount', '-o', 'ro,nodev,nosuid,noexec', '/dev/disk/by-label/UAS_PAYLOAD', str(PAYLOAD))
     manifest = verify_payload(nonce, manifest_hash)
-    install_packages(nonce, manifest)
+    install_packages(nonce, manifest, exact_roots=exact_roots)
     shutil.copytree(PAYLOAD / 'repo', ROOT)
     shutil.copyfile(PAYLOAD / 'fixture', ROOT / 'fixture')
     (ROOT / 'fixture').chmod(0o555)

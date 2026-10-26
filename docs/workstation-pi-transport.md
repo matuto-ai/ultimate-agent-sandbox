@@ -353,6 +353,24 @@ the outside Hub ledger, without recipient native delivery. Its deliberate run
 40390271361 stopped in npm payload staging before launching a guest. It supplies
 no native-container/stock-policy evidence. Ordinary CI passed separately.
 
+The combined candidate `ab1a3d1c` (tree `65cef175`) subsequently passed all
+ordinary CI, including 80 native Pi tests. Deliberate run 40392808660 completed
+payload staging and guest boot, but stopped before native rootfs/Hub/seat tests:
+the signed candidate pool contained `container-selinux-4:2.251.0-1.fc44.noarch`,
+while the guest's actual RPM query showed `4:2.247.0-1.fc44.noarch`. The unversioned
+DNF install had retained the older OS root. Engine `29.8.2-2.fc44` did match.
+No stock-policy socket/pidfs test was reached and no AVC denial was observed.
+The ten fallback failure entries are not ten individually executed checks.
+
+The corrected native-only install requests the exact reviewed manifest-bound
+NEVRA roots (including epoch and architecture), from the already signature-checked
+offline pool, then checks actual installed equality before starting Docker.
+Missing/ambiguous candidates or post-install mismatch fail closed. It neither
+installs the union of dependency alternatives nor enables allowerasing, weak
+dependencies or signature bypass. The default synthetic #98 installer remains
+name-based and unchanged; candidate metadata alone never proves installed
+versions. This correction still requires a fresh deliberate guest qualification.
+
 The private next candidate adds one bounded authenticated Supervisor poll and
 confirmation seam. `POLL_DELIVERY` requires the current exact admission and an
 owned receiver safe-point observation. The Hub reuses its existing offer reducer
