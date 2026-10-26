@@ -1,0 +1,41 @@
+name: claude-permission-qualification
+
+# Deliberate dispatch/reviewer-label tier. No automatic push or synchronize work.
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-permission-fixture:
+    # Exact trusted reviewer action, never routine push/PR synchronization.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.label.name == 'qualify-claude-permission' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
+      - name: Acquire exact official packages without lifecycle scripts or account configuration
+        run: |
+          sh tests/claude/install-dependencies.sh
+          sh tests/claude/sdk/install-dependencies.sh
+      - name: Explicit actual-native permission qualification, never upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_user="$(id -un)"
+          node_path="$(command -v node)"
+          # Only a disposable child network namespace; no host network changes.
+          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 UAS_CLAUDE_PERMISSION_NATIVE=1 UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" python3 "$2/tests/claude/permission/native.py"' sh "$runner_user" "$PWD" "$node_path"

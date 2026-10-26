@@ -104,3 +104,11 @@ The existing automatic Claude job retains its two-minute limit and existing
 triggers. Qualification and adapter changes stay in one draft PR;
 work exceeding the normal CI budget must move to a deliberate gate, not extend
 automatic CI timeouts.
+
+A separate [manual native-permission qualification fixture](claude-permission-qualification.md)
+qualifies one explicitly decided Read request: exact-source run 40393356811
+passed native attention, correlated allow/deny and pending-close termination.
+Historical ask-rule and graceful-close failures remain documented. This fixed
+diagnostic neither expands the default tool-less receiver nor qualifies Hub
+delivery during permission waits, production approval authority or post-result
+fresh-idle recovery.
