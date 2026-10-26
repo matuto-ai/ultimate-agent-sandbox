@@ -2,6 +2,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,7 +140,58 @@ func probe(project string) {
 	}
 }
 
+// Read only a marker-prefixed, bounded fixture file under harness-selected roots.
+// This command is test-image functionality, not a production file/agent API.
+func readCheckout(root, checkout string) {
+	fail := func(reason string) {
+		json.NewEncoder(os.Stdout).Encode(map[string]string{"error": reason})
+		os.Exit(3)
+	}
+	for _, path := range []string{root, checkout} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+			fail("INVALID_FIXTURE_PATH")
+		}
+	}
+	relative, err := filepath.Rel(root, checkout)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		fail("OUTSIDE_FIXTURE_ROOT")
+	}
+	path := filepath.Join(checkout, "uas-checkout-fixture.txt")
+	for _, candidate := range []string{root, checkout, path} {
+		actual, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			fail("FIXTURE_UNAVAILABLE")
+		}
+		if actual != candidate {
+			fail("SYMLINK_FIXTURE_PATH")
+		}
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		fail("FIXTURE_UNAVAILABLE")
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		fail("INVALID_FIXTURE_FILE")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(content) > 4096 || !strings.HasPrefix(string(content), "uas-checkout-fixture-v1\n") {
+		fail("INVALID_FIXTURE_CONTENT")
+	}
+	digest := sha256.Sum256(content)
+	json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+		"path": checkout, "file": "uas-checkout-fixture.txt", "bytes": len(content),
+		"sha256": fmt.Sprintf("%x", digest), "uid": os.Geteuid(),
+	})
+}
+
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "--read-checkout" {
+		readCheckout(os.Args[2], os.Args[3])
+		return
+	}
 	if len(os.Args) != 1 {
 		if len(os.Args) != 3 || os.Args[1] != "--probe" ||
 			!filepath.IsAbs(os.Args[2]) || filepath.Clean(os.Args[2]) != os.Args[2] {

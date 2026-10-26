@@ -245,3 +245,88 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assertIsNotNone(interrupted["observed"]["volume"])
         self.assertEqual("destroyed", self.reopen().reconcile()["phase"])
         self.assertEqual("never delete Project data", self.sentinel.read_text())
+
+    def test_allocated_checkout_is_visible_at_exact_host_path_inside_workstation(self):
+        import hashlib
+        import io
+        config = json.loads(Path('tests/fixtures/two-rooms.json').read_text())
+        config['rooms'] = config['rooms'][:1]
+        config['deployment']['state_root'] = str(self.root / 'control')
+        room = config['rooms'][0]
+        room['state_root'] = str(self.root / 'control/alpha')
+        room['project']['id'] = 'fixture'
+        for role in room['project']['roots']:
+            path = self.project / role; path.mkdir()
+            room['project']['roots'][role] = str(path)
+        repo = Path(room['project']['roots']['repo'])
+        slots = Path(room['project']['roots']['checkouts'])
+        def git(path, *args):
+            result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null',
+                '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                '-C', str(path), *args], capture_output=True, text=True, timeout=10,
+                env={'PATH': '/usr/bin:/bin', 'HOME': str(self.root),
+                     'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'})
+            self.assertEqual(0, result.returncode, result.stderr)
+            return result.stdout.strip()
+        git(repo, 'init', '-b', 'main')
+        filename = 'uas-checkout-fixture.txt'
+        baseline = 'uas-checkout-fixture-v1\ncommitted baseline\n'
+        (repo / filename).write_text(baseline)
+        git(repo, 'add', '.'); git(repo, 'commit', '-m', 'synthetic checkout baseline')
+        self.spec = replace(self.spec, project_paths=tuple(room['project']['roots'].values()))
+        first = self.supervisor.start(self.spec); self.assert_running(first)
+        container = first['observed']['container']['id']; self.wait_started(container, 1)
+        # No agent/writer process is launched in this read-only fixture.
+        allocator = self.supervisor.checkouts(io.StringIO(json.dumps(config)), writer_quiescent=lambda *_: True)
+        primary = allocator.allocate('fixture-run-1', 'alice')
+        secondary = allocator.allocate('fixture-run-2', 'bob')
+        path = Path(secondary['path'])
+        self.assertEqual(str(repo), primary['path'])
+        self.assertEqual(secondary['base'], git(path, 'rev-parse', 'HEAD'))
+        actual = json.loads(self.backend._run(['inspect', '--type', 'container', container]))[0]
+        mounts = {entry['Destination']: entry for entry in actual['Mounts']}
+        for root in (repo, slots):
+            self.assertEqual(str(root), mounts[str(root)]['Source'])
+            self.assertFalse(mounts[str(root)]['RW'])
+        def read(root, checkout, expected=None, error=None):
+            result = subprocess.run(['docker', 'exec', container, '/fixture', '--read-checkout',
+                str(root), str(checkout)], capture_output=True, text=True, timeout=10)
+            observed = json.loads(result.stdout)
+            if error:
+                self.assertEqual(3, result.returncode, result.stderr)
+                self.assertEqual(error, observed['error'])
+            else:
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(str(checkout), observed['path'])
+                self.assertEqual(hashlib.sha256(expected.encode()).hexdigest(), observed['sha256'])
+                self.assertEqual(len(expected.encode()), observed['bytes'])
+                self.assertEqual(65532, observed['uid'])
+                self.assertNotIn('content', observed)
+            return observed
+        read(repo, repo, baseline); read(slots, path, baseline)
+        read(repo, path, error='OUTSIDE_FIXTURE_ROOT')
+        (path / filename).unlink(); (path / filename).symlink_to(repo / filename)
+        read(slots, path, error='SYMLINK_FIXTURE_PATH')
+        (path / filename).unlink(); os.mkfifo(path / filename, 0o644)
+        read(slots, path, error='INVALID_FIXTURE_FILE')
+        (path / filename).unlink(); (path / filename).write_text('uas-checkout-fixture-v1\n' + 'x' * 4096)
+        read(slots, path, error='INVALID_FIXTURE_CONTENT')
+        changed = 'uas-checkout-fixture-v1\nhost edited concurrent work\n'
+        (path / filename).write_text(changed)
+        read(slots, path, changed)
+        self.assertEqual('stopped', self.supervisor.stop()['phase'])
+        self.assertEqual(changed, (path / filename).read_text())
+        resumed = self.supervisor.start(self.spec); self.assert_running(resumed)
+        self.assertEqual(first['instance_id'], resumed['instance_id'])
+        self.assertEqual(container, resumed['observed']['container']['id'])
+        self.wait_started(container, 2); read(slots, path, changed)
+        allocator.release('fixture-run-2', 'bob')
+        retained = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
+        self.assertEqual('DIRTY_OR_UNTRACKED_OR_IGNORED', retained['reason'])
+        read(slots, path, changed)
+        git(path, 'restore', filename)  # Explicit fixture-human repair only.
+        removed = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
+        self.assertEqual('removed', removed['disposition'])
+        read(slots, path, error='FIXTURE_UNAVAILABLE')
+        read(repo, repo, baseline)
+        self.assertEqual('never delete Project data', self.sentinel.read_text())
