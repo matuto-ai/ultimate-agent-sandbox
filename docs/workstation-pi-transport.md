@@ -386,6 +386,23 @@ and related assignment sources are preserved, but no Broker capability is wired
 into this Hub. The resulting new payload still requires its own qualification;
 previous-head package or ordinary native evidence does not qualify this image.
 
+Run 40405157482 on `fe66d938` then explicitly passed the strict guard (EUID 0,
+root-owned ordinary 0600 matching marker and complete interface list `['lo']`),
+and reached the offline rootfs RPM transaction. DNF returned `Rpm transaction
+failed`; the helper's 2048-byte output tails lost the earlier cause. Rootfs
+completion, Engine startup and native container/security/delivery tests were not
+reached. No AVC denial was observed and runner cleanup completed. This is not
+proof that no underlying permission error occurred: the useful error was lost.
+
+The next candidate changes diagnostics only: this credential-free native DNF
+call retains up to 64 KiB per stream (bounded head/tail with explicit truncation
+and original byte counts), plus the first bounded RPM error lines even if they
+occur in the omitted middle. It does not read arbitrary host logs or environment,
+change packages, enable scriptlets, weaken signatures or alter policy. The root
+cause remains unknown until a reviewed deliberate run captures it. The exact
+main111 Claude-only overlay is preserved; its paths do not intersect the fixed
+Workstation source/payload allowlist, but the diagnostic carrier itself changed.
+
 The private next candidate adds one bounded authenticated Supervisor poll and
 confirmation seam. `POLL_DELIVERY` requires the current exact admission and an
 owned receiver safe-point observation. The Hub reuses its existing offer reducer

@@ -295,7 +295,7 @@ def build_rootfs(nonce, manifest, destination, *, run):
         '--setopt=uas-native.repo_gpgcheck=0', '--setopt=uas-native.gpgkey=file://' + str(PAYLOAD / 'fedora-44.asc'),
         '--setopt=localpkg_gpgcheck=True', '--setopt=install_weak_deps=False',
         '--setopt=tsflags=noscripts', '--setopt=plugins=False',
-        'install', *ROOTS, timeout=900)
+        'install', *ROOTS, timeout=900, native_failure_context=True)
     extract_runtime(archive, files, root)
     source = resolve_inside(root, 'usr/bin/tini')
     ordinary(source)

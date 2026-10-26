@@ -152,7 +152,8 @@ class NativeRootfsTests(unittest.TestCase):
 
     def test_build_uses_only_offline_noscript_solver_and_external_manifest(self):
         destination=self.directory/'built';calls=[]
-        def fake_run(*args,timeout):
+        def fake_run(*args,timeout,native_failure_context):
+            self.assertTrue(native_failure_context)
             calls.append((args,timeout))
             destination.chmod(0o700)  # restrictive installer/umask must not survive import
             (destination/'usr/bin').mkdir(parents=True)

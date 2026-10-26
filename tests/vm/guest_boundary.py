@@ -31,10 +31,49 @@ REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
 
 
-def run(*arguments, timeout=90, pass_fds=()):
+def failure_context(text):
+    """Bounded fixed-tool diagnostics: retain first RPM errors, not just progress.
+
+    The opt-in caller is the credential-free offline native-rootfs DNF command.
+    No environment, credential file or arbitrary host log is collected here.
+    """
+    raw = text.encode('utf-8', errors='replace')
+    limit = 65536
+    if len(raw) <= limit:
+        excerpt = raw.decode('utf-8', errors='replace')
+    else:
+        excerpt = (raw[:limit//2].decode('utf-8', errors='ignore')
+                   + '\n[... bounded output omitted ...]\n'
+                   + raw[-limit//2:].decode('utf-8', errors='ignore'))
+    first_errors = []
+    error_lines_truncated = False
+    for line in io.StringIO(text):
+        if re.search(r'\b(?:error|failed|failure|fatal)\b|cpio:', line, re.IGNORECASE):
+            encoded = line.encode('utf-8', errors='replace')
+            error_lines_truncated |= len(encoded) > 512
+            first_errors.append(encoded[:512].decode('utf-8', errors='ignore'))
+            if len(first_errors) == 8:
+                break
+    return {'bytes': len(raw), 'truncated': len(raw) > limit,
+            'first_error_lines': first_errors, 'first_error_lines_truncated': error_lines_truncated,
+            'first_error_limit_reached': len(first_errors) == 8, 'output': excerpt}
+
+
+def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False):
+    if type(native_failure_context) is not bool:
+        raise ValueError('invalid native failure diagnostic option')
+    if native_failure_context and (not arguments or arguments[0] != 'dnf'
+            or not any(type(value) is str and value.startswith('--installroot=') for value in arguments)
+            or not {'--disablerepo=*', '--enablerepo=uas-native', '--setopt=tsflags=noscripts',
+                    '--setopt=uas-native.gpgcheck=1'} <= set(arguments)):
+        raise ValueError('native diagnostics require offline noscripts rootfs command')
     result = subprocess.run(arguments, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                             timeout=timeout, check=False, pass_fds=pass_fds)
     if result.returncode:
+        if native_failure_context:
+            context = {'tool': arguments[0], 'returncode': result.returncode,
+                       'stderr': failure_context(result.stderr), 'stdout': failure_context(result.stdout)}
+            raise RuntimeError('native rootfs command failed: ' + json.dumps(context, ensure_ascii=True))
         raise RuntimeError(f'{arguments[0]} failed: {result.stderr[-2048:]} {result.stdout[-2048:]}')
     return result.stdout
 
