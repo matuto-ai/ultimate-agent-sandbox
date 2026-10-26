@@ -51,6 +51,8 @@ intent record, ownership checks, reconciliation and Destroy tombstone.
   endpoint plus live host-private, host-public, LAN, metadata and sibling decoys.
   Real packet drops must increment nft counters. This proves actual filtering,
   **not real Internet reachability**. It never contacts a real metadata service.
+  Router setup/responder children enter only the parent's held network namespace
+  descriptor. They do not remount sysfs or relax SELinux mount policy.
 - Fresh XFS project-quota roots hold synthetic repository/workspace/checkouts,
   references and instance Runtime state. Block and inode hard limits are checked
   from XFS and exercised with bounded writes that must return XFS project-quota `ENOSPC`, with abundant filesystem free space. Beta must

@@ -304,6 +304,38 @@ class GuestFixtureTests(unittest.TestCase):
         with patch.object(guest_script, 'run', return_value='Permissive'), self.assertRaises(AssertionError):
             guest_script.require_engine_security()
 
+    def test_router_enters_held_network_namespace_without_extra_mount_operations(self):
+        held = Mock(st_dev=3, st_ino=7)
+        with patch.object(guest_script.os, 'geteuid', return_value=0), patch.object(Path, 'read_text', return_value=NONCE), patch.object(guest_script.os, 'fstat', return_value=held), patch.object(Path, 'stat', side_effect=[Mock(st_dev=3, st_ino=1), held]), patch.object(guest_script.os, 'setns', create=True) as setns, patch.object(guest_script.os, 'close') as close:
+            guest_script.enter_public_namespace(NONCE, '9')
+            setns.assert_called_once_with(9, 0x40000000)
+            close.assert_called_once_with(9)
+        with patch.object(guest_script, 'enter_public_namespace') as enter, patch.object(guest_script, 'run') as run:
+            guest_script.configure_public_namespace(NONCE, '9')
+            enter.assert_called_once_with(NONCE, '9')
+            commands = [call.args for call in run.call_args_list]
+            self.assertEqual(7, len(commands))
+            self.assertTrue(all(args[0] == 'ip' and args[1] in ('addr', 'link', 'route') for args in commands))
+            self.assertFalse(any(value in ('-n', 'netns', 'mount', 'unshare') for args in commands for value in args))
+
+    def test_router_namespace_identity_mismatch_or_selinux_denial_fails_closed(self):
+        initial = Mock(st_dev=3, st_ino=1)
+        with patch.object(guest_script.os, 'geteuid', return_value=0), patch.object(Path, 'read_text', return_value=NONCE), patch.object(guest_script.os, 'fstat', return_value=initial), patch.object(Path, 'stat', return_value=initial), patch.object(guest_script.os, 'setns', create=True) as setns, patch.object(guest_script.os, 'close') as close:
+            with self.assertRaisesRegex(AssertionError, 'must differ from parent'):
+                guest_script.enter_public_namespace(NONCE, '9')
+            setns.assert_not_called(); close.assert_called_once_with(9)
+        with patch.object(guest_script.os, 'geteuid', return_value=0), patch.object(Path, 'read_text', return_value=NONCE), patch.object(guest_script.os, 'fstat', return_value=Mock(st_dev=3, st_ino=7)), patch.object(Path, 'stat', side_effect=[Mock(st_dev=3, st_ino=1), Mock(st_dev=3, st_ino=8)]), patch.object(guest_script.os, 'setns', create=True), patch.object(guest_script.os, 'close') as close:
+            with self.assertRaisesRegex(AssertionError, 'wrong held network namespace'):
+                guest_script.enter_public_namespace(NONCE, '9')
+            close.assert_called_once_with(9)
+        with patch.object(guest_script.os, 'geteuid', return_value=0), patch.object(Path, 'read_text', return_value=NONCE), patch.object(guest_script.os, 'fstat', return_value=Mock(st_dev=3, st_ino=7)), patch.object(Path, 'stat', return_value=Mock(st_dev=3, st_ino=1)), patch.object(guest_script.os, 'setns', create=True, side_effect=PermissionError), patch.object(guest_script.os, 'close') as close:
+            with self.assertRaises(PermissionError): guest_script.enter_public_namespace(NONCE, '9')
+            close.assert_called_once_with(9)
+        with patch.object(guest_script.os, 'geteuid', return_value=1000), patch.object(guest_script.os, 'setns', create=True) as setns:
+            with self.assertRaisesRegex(AssertionError, 'not this disposable boot'):
+                guest_script.enter_public_namespace(NONCE, '9')
+            setns.assert_not_called()
+
     def test_guest_verifies_local_repository_metadata_before_package_effects(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); metadata = root / 'rpms/repodata/repomd.xml'

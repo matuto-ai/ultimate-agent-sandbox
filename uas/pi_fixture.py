@@ -1,7 +1,7 @@
 """Fixed account-free Pi recipe for the Linux same-UID authority fixture.
 
 This is not arbitrary executable admission, production image qualification,
-credential provisioning, or cross-Run reset. Paths are trusted harness inputs;
+credential provisioning. Paths are trusted harness inputs;
 the fixture does not isolate same-UID filesystem mutation or ptrace.
 """
 import json
@@ -29,14 +29,23 @@ class FixturePiRecipe:
                                 for path in (self.package, ai)):
             raise NativeUnavailable('locked official Pi 1.4.0 and Node required')
         self.directory.mkdir(parents=True, exist_ok=True)
+        generation = self.scope.get('context_generation')
+        if type(generation) is not int or not 1 <= generation <= 2**53 - 1:
+            raise NativeUnavailable('invalid context generation')
+        # Generation 1 retains the existing fixture layout. Later contexts get
+        # distinct native HOME/session/journal stores, but never a new workspace.
+        self.context_directory = self.directory if generation == 1 else self.directory / 'contexts' / str(generation)
+        self.context_directory.mkdir(parents=True, exist_ok=True)
+        self.session_directory = self.context_directory / 'sessions'
+        self.journal = self.context_directory / 'intent.db'
         self.workdir = self.directory / 'workspace'
         self.workdir.mkdir(exist_ok=True)
-        self.home = self.directory / 'home'
+        self.home = self.context_directory / 'home'
         (self.home / 'agent').mkdir(parents=True, exist_ok=True)
         (self.home / 'agent/settings.json').write_text(json.dumps({'compaction': {
             'enabled': False, 'keepRecentTokens': 128, 'reserveTokens': 1024}, 'retry': {'enabled': False}}))
         # Explicit same-Run restore only; no implicit latest-session selection.
-        if self.session is not None and not Path(self.session).is_relative_to(self.directory / 'sessions'):
+        if self.session is not None and not Path(self.session).is_relative_to(self.session_directory):
             raise NativeUnavailable('restore session must belong to this fixture directory')
 
     def spawn(self, child_socket, runtime_directory):
@@ -49,7 +58,7 @@ class FixturePiRecipe:
         argv = [self.node, str(self.package / 'dist/cli.js'), '--mode', 'rpc', '--no-builtin-tools',
                 '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes',
                 '-e', str(ROOT / 'runtime/pi/extension.mjs'), '-e', str(ROOT / 'tests/pi/provider.mjs'),
-                '--provider', 'faux', '--model', 'faux-1', '--session-dir', str(self.directory / 'sessions')]
+                '--provider', 'faux', '--model', 'faux-1', '--session-dir', str(self.session_directory)]
         if self.session is not None:
             argv += ['--session', self.session]
         return subprocess.Popen(argv, cwd=self.workdir, env=env,
@@ -60,6 +69,6 @@ class FixturePiRecipe:
         if (self.scope.get('room_id') != badge.room_id
                 or self.scope.get('participant_id') != badge.participant_id):
             raise NativeUnavailable('recipe does not match Supervisor badge')
-        return FixturePiRpcReceiver.attach(process, journal=self.directory / 'intent.db',
+        return FixturePiRpcReceiver.attach(process, journal=self.journal,
             runtime_version='1.4.0', scope=self.scope, incarnation_id=badge.incarnation_id,
             timeout=self.timeout)

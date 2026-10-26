@@ -29,9 +29,9 @@ REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
 
 
-def run(*arguments, timeout=90):
+def run(*arguments, timeout=90, pass_fds=()):
     result = subprocess.run(arguments, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                            timeout=timeout, check=False)
+                            timeout=timeout, check=False, pass_fds=pass_fds)
     if result.returncode:
         raise RuntimeError(f'{arguments[0]} failed: {result.stderr[-2048:]} {result.stdout[-2048:]}')
     return result.stdout
@@ -120,6 +120,36 @@ def responder():
         connection, _ = listener.accept()
         with connection:
             connection.sendall(b'uas-boundary-ok\n')
+
+
+def enter_public_namespace(nonce, descriptor):
+    """Enter only the parent's held owned network namespace, without mounts.
+
+    ip -n/netns exec also attempts a new mount namespace and sysfs remount. The
+    fixture needs neither; leave SELinux's denial of those mounts unchanged.
+    """
+    expect(os.geteuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == nonce,
+           'not this disposable boot')
+    descriptor = int(descriptor)
+    try:
+        held = os.fstat(descriptor)
+        initial = Path('/proc/self/ns/net').stat()
+        expect((initial.st_dev, initial.st_ino) != (held.st_dev, held.st_ino), 'router namespace must differ from parent')
+        os.setns(descriptor, 0x40000000)  # Linux CLONE_NEWNET, no CLONE_NEWNS.
+        actual = Path('/proc/self/ns/net').stat()
+        expect((actual.st_dev, actual.st_ino) == (held.st_dev, held.st_ino), 'wrong held network namespace')
+    finally:
+        os.close(descriptor)
+
+
+def configure_public_namespace(nonce, descriptor):
+    enter_public_namespace(nonce, descriptor)
+    run('ip', 'addr', 'add', '10.254.0.2/30', 'dev', 'uas-peer')
+    run('ip', 'link', 'set', 'uas-peer', 'up')
+    run('ip', 'link', 'set', 'lo', 'up')
+    for address in ('93.184.216.34', '169.254.169.254', '192.168.50.1'):
+        run('ip', 'addr', 'add', address + '/32', 'dev', 'lo')
+    run('ip', 'route', 'add', 'default', 'via', '10.254.0.1')
 
 
 def connect(address):
@@ -232,16 +262,19 @@ def scenario(nonce):
     run('ip', 'link', 'set', 'uas-peer', 'netns', 'uas-public')
     run('ip', 'addr', 'add', '10.254.0.1/30', 'dev', 'uas-public')
     run('ip', 'link', 'set', 'uas-public', 'up')
-    run('ip', '-n', 'uas-public', 'addr', 'add', '10.254.0.2/30', 'dev', 'uas-peer')
-    run('ip', '-n', 'uas-public', 'link', 'set', 'uas-peer', 'up')
-    run('ip', '-n', 'uas-public', 'link', 'set', 'lo', 'up')
     for address in ('93.184.216.34', '169.254.169.254', '192.168.50.1'):
-        run('ip', '-n', 'uas-public', 'addr', 'add', address + '/32', 'dev', 'lo')
         run('ip', 'route', 'add', address + '/32', 'via', '10.254.0.2')
-    run('ip', '-n', 'uas-public', 'route', 'add', 'default', 'via', '10.254.0.1')
     run('ip', 'addr', 'add', '93.184.216.35/32', 'dev', 'lo')  # Public host address must also be blocked.
     run('sysctl', '-w', 'net.ipv4.ip_forward=1')
-    responder_process = subprocess.Popen(['ip', 'netns', 'exec', 'uas-public', 'python3', __file__, '--responder'])
+    # The namespace was freshly created above (never adopted). Hold its exact
+    # kernel object across child launch rather than reopening its name there.
+    namespace = os.open('/run/netns/uas-public', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        run('python3', __file__, '--configure-public', nonce, str(namespace), pass_fds=(namespace,))
+        responder_process = subprocess.Popen(['python3', __file__, '--responder', nonce, str(namespace)],
+                                             pass_fds=(namespace,))
+    finally:
+        os.close(namespace)
     threading.Thread(target=responder, daemon=True).start()
     for _ in range(100):
         try:
@@ -403,7 +436,10 @@ def scenario(nonce):
 
 
 def main():
-    if sys.argv[1:] == ['--responder']:
+    if len(sys.argv) == 4 and sys.argv[1] == '--configure-public':
+        configure_public_namespace(*sys.argv[2:]); return
+    if len(sys.argv) == 4 and sys.argv[1] == '--responder':
+        enter_public_namespace(*sys.argv[2:])
         responder(); return
     if len(sys.argv) == 5 and sys.argv[1] == '--crash-start':
         crash_start(*sys.argv[2:]); return
