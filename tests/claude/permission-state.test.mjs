@@ -43,3 +43,32 @@ test('permission never clears irreversible fence or authorizes second permission
   const s=waiting();s.hold('transport');s.decided(identity,'allow');s.event(tool());s.event(terminal);assert.equal(s.fenced,'transport');
   const d=waiting();d.permission({identity,toolName:'Read',input:{file_path:'/fixture/nonce'}});assert.ok(d.fenced);
 });
+
+import {hostDiagnostic, writeHostDiagnostic} from '../../runtime/claude/sdk-diagnostics.mjs';
+test('host diagnostic contains only fixed codes, never arbitrary error or secret text',()=>{
+  const hostile='Authorization: Bearer fixture-only-secret\n\x1b[31m token=secret /private/file';
+  assert.deepEqual(hostDiagnostic(hostile,hostile,hostile),{
+    type:'fixture-host-diagnostic',reason:'unavailable',fence:'unavailable',exit_code:null});
+  assert.deepEqual(hostDiagnostic('native-initialize-timeout',2,'sdk-stream-failed'),{
+    type:'fixture-host-diagnostic',reason:'native-initialize-timeout',fence:'sdk-stream-failed',exit_code:2});
+});
+
+import {Writable} from 'node:stream';
+test('synchronous and asynchronous diagnostic output failures cannot interrupt cleanup', async()=>{
+  for (const asynchronous of [false, true]) {
+    let cleanupStarted=false, cleanupFinished=false;
+    const stream = new Writable({write(chunk, encoding, callback) {
+      if (asynchronous) queueMicrotask(()=>callback(new Error('EPIPE')));
+      else throw new Error('synchronous closed stderr');
+    }});
+    writeHostDiagnostic(stream,'startup-failed',2,null);
+    cleanupStarted=true;
+    // Let a real Writable emit its asynchronous error while cleanup is pending.
+    await new Promise(resolve=>setImmediate(resolve));
+    cleanupFinished=true;
+    assert.equal(cleanupStarted && cleanupFinished,true);
+    // The listener must survive more than the first error (not once()).
+    assert.doesNotThrow(()=>stream.emit('error',new Error('late EPIPE')));
+    stream.destroy();
+  }
+});

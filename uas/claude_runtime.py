@@ -598,6 +598,35 @@ class DirectClaudeDiagnosticReceiver(_ClaudeJournal):
         self._close_journal()
 
 
+def _sdk_startup_diagnostic(lines):
+    """Parse fixed bounded host codes only; arbitrary stderr is never reported."""
+    reasons = {'output-limit', 'host-terminated', 'host-interrupted', 'output-loss',
+               'unexpected-host-error', 'native-control-timeout', 'native-initialize-timeout',
+               'sdk-stream-ended', 'input-limit', 'invalid-command', 'invalid-or-concurrent-command',
+               'closed', 'host-command-failed', 'input-closed', 'startup-failed'}
+    fences = {'sdk-stream-failed', 'native-process-lost', 'native-control-timeout',
+              'native-initialize-timeout', 'native-identity', 'unsupported-profile', 'unknown-state',
+              'needs-input', 'unmatched-ack', 'unexpected-active-turn', 'unknown-or-attention-result',
+              'unknown-native-event'}
+    unavailable = {'reason': 'unavailable', 'fence': 'unavailable', 'exit_code': None}
+    records = []
+    for line in lines:
+        if type(line) is not str or len(line) > 320:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if (type(record) is not dict or set(record) != {'type', 'reason', 'fence', 'exit_code'}
+                or record['type'] != 'fixture-host-diagnostic'):
+            continue
+        records.append({
+            'reason': record['reason'] if type(record['reason']) is str and record['reason'] in reasons else 'unavailable',
+            'fence': record['fence'] if type(record['fence']) is str and record['fence'] in fences else 'unavailable',
+            'exit_code': record['exit_code'] if type(record['exit_code']) is int and 0 <= record['exit_code'] <= 255 else None})
+    return records[0] if len(records) == 1 else unavailable
+
+
 class FixtureClaudeReceiver(_ClaudeJournal):
     """Qualified tool-less SDK fixture, not a Supervisor-owned native badge.
 
@@ -648,10 +677,28 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             self._wait(lambda: self.ready)
             # Initialization is not readiness and makes no model request.
         except BaseException as error:
+            process = self.process
+            signals = getattr(self, 'signals', None)
+            facts = {'initialized': bool(signals and signals.initialized),
+                     'ready': self.ready, 'ended_before_cleanup': self.ended,
+                     'fenced_before_cleanup': bool(signals and signals.fenced)}
+            cleanup_succeeded = False
             try:
                 self.close()
-            except BaseException as cleanup_error:
-                error.add_note(f'SDK cleanup also failed: {cleanup_error!r}')
+                cleanup_succeeded = True
+            except BaseException:
+                # Existing cleanup attempts all resources before raising. Report
+                # its outcome without leaking arbitrary exception/stderr text.
+                pass
+            facts.update(cleanup_succeeded=cleanup_succeeded,
+                         host_returncode=process.returncode if process is not None and type(process.returncode) is int else None,
+                         host_reaped=process is not None and type(process.returncode) is int,
+                         resources_released=self.process is None and self.host_pidfd is None
+                         and self.native_pidfd is None and self.db is None and self.owner is None,
+                         host=_sdk_startup_diagnostic(list(self.errors)))
+            # Original exception/type/traceback/cause survive. All new fields are
+            # fixed codes or scalars; no error text, key, argv or session content.
+            error.add_note('SDK startup diagnostic: ' + json.dumps(facts, ensure_ascii=True, sort_keys=True))
             raise
 
     def _host_alive(self):

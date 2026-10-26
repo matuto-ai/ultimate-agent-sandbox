@@ -10,6 +10,7 @@ import {closeOwned, collectListing, validateLoopback} from './sdk-resources.mjs'
 
 import {PermissionSlot, permissionProfile, terminatePending} from './permission-policy.mjs';
 import {PermissionNativeState} from './permission-state.mjs';
+import {writeHostDiagnostic} from './sdk-diagnostics.mjs';
 
 const [sdkRoot, binary, cwd, home, gateway, key, sessionId, resume, nonceFile] = process.argv.slice(2);
 let query, child, state, input, closing = false, outputBytes = 0, commandActive = false;
@@ -28,7 +29,10 @@ const write = value => {
 };
 function shutdown(reason, code = 0) {
   if (closing) return;
-  closing = true; process.exitCode = code; state?.hold(reason);
+  closing = true; process.exitCode = code;
+  // Exactly one small typed record, even for early asynchronous shutdown.
+  writeHostDiagnostic(process.stderr, reason, code, state?.fenced);
+  state?.hold(reason);
   // Pending permission terminates the exact child before settling; otherwise
   // preserve the default documented SDK graceful-close lifecycle.
   const dispose = () => closeOwned({input, queries, query, child, finish: () => process.exit(code)});
