@@ -2,8 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
-import {closeOwned, collectListing} from '../../runtime/claude/sdk-resources.mjs';
+import {closeOwned, collectListing, validateLoopback} from '../../runtime/claude/sdk-resources.mjs';
 import {MAX_FRAME} from '../../runtime/claude/sdk-policy.mjs';
+
+test('namespace interface guard rejects extra interfaces including down or IPv6-only ones', () => {
+  const devices = 'Inter-| Receive | Transmit\n face | bytes | bytes\n lo: 0 0\n';
+  assert.doesNotThrow(() => validateLoopback(devices, 'Iface Destination\n', ':: :: lo\n'));
+  for (const extra of ['eth0', 'down0', 'ipv6only0'])
+    assert.throws(() => validateLoopback(devices + ` ${extra}: 0 0\n`, 'Iface Destination\n', ''), /namespace-required/);
+  assert.throws(() => validateLoopback(devices, 'Iface Destination\neth0 0\n', ''), /external-route/);
+  assert.throws(() => validateLoopback(devices, 'Iface Destination\n', ':: :: eth0\n'), /external-route/);
+  assert.throws(() => validateLoopback('lo', '', ''), /network-schema/);
+  assert.throws(() => validateLoopback('x'.repeat(MAX_FRAME + 1), '', ''), /network-schema/);
+});
 
 test('synchronous SDK/input/query-child close failures cannot bypass final native disposition', () => {
   const events = []; let final;

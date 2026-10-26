@@ -2,11 +2,11 @@
 // Supervisor-owned native process or a generic launcher/protocol proxy.
 import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {createReadStream, readFileSync, readdirSync} from 'node:fs';
+import {createReadStream, readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID, NativeState, listingState} from './sdk-policy.mjs';
-import {closeOwned, collectListing} from './sdk-resources.mjs';
+import {closeOwned, collectListing, validateLoopback} from './sdk-resources.mjs';
 
 const [sdkRoot, binary, cwd, home, gateway, key, sessionId, resume] = process.argv.slice(2);
 let query, child, state, input, closing = false, outputBytes = 0, commandActive = false;
@@ -90,11 +90,8 @@ async function main() {
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port
       || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
     throw new Error('fixture-loopback-only');
-  if (readdirSync('/sys/class/net').sort().join(',') !== 'lo') throw new Error('fixture-network-namespace-required');
-  for (const [file, field, skip] of [['/proc/net/route', 0, 1], ['/proc/net/ipv6_route', -1, 0]]) {
-    const lines = readFileSync(file, 'utf8').trim().split('\n').slice(skip).filter(Boolean);
-    if (lines.some(line => line.trim().split(/\s+/).at(field) !== 'lo')) throw new Error('external-route');
-  }
+  validateLoopback(...['/proc/net/dev', '/proc/net/route', '/proc/net/ipv6_route']
+    .map(file => readFileSync(file, 'utf8')));
   const packageRoot = path.join(sdkRoot, 'node_modules/@anthropic-ai/claude-agent-sdk');
   const pkg = JSON.parse(readFileSync(path.join(packageRoot, 'package.json')));
   if (pkg.version !== SDK_VERSION || pkg.claudeCodeVersion !== CLI_VERSION) throw new Error('unqualified-sdk');

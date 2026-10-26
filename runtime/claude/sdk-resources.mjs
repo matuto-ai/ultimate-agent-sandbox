@@ -1,6 +1,23 @@
 // Resource guards for the fixed SDK fixture host, independently fault-testable.
 import {MAX_FRAME} from './sdk-policy.mjs';
 
+export function validateLoopback(devices, ipv4, ipv6) {
+  // /proc/net follows this process's network namespace. /sys/class/net can
+  // still reflect a sysfs mount created before unshare --net.
+  if ([devices, ipv4, ipv6].some(value => typeof value !== 'string' || value.length > MAX_FRAME))
+    throw new Error('fixture-network-schema');
+  const lines = devices.trim().split('\n');
+  if (lines.length < 3 || !lines[0].includes('Inter-') || !lines[1].includes('face'))
+    throw new Error('fixture-network-schema');
+  const names = lines.slice(2).map(line => line.trim().split(':')[0]);
+  if (names.length !== 1 || names[0] !== 'lo' || !lines[2].includes(':'))
+    throw new Error('fixture-network-namespace-required');
+  for (const [routes, field, skip] of [[ipv4, 0, 1], [ipv6, -1, 0]]) {
+    if (routes.trim().split('\n').slice(skip).filter(Boolean)
+      .some(line => line.trim().split(/\s+/).at(field) !== 'lo')) throw new Error('external-route');
+  }
+}
+
 export function closeOwned({input, queries, query, child, finish, schedule = setTimeout}) {
   // Install the final disposition BEFORE any third-party/library cleanup.
   const timer = schedule(() => {
