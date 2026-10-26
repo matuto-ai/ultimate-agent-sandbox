@@ -118,7 +118,7 @@ async function main() {
     }
   }});
   (async () => {
-    try { for await (const event of query) { state.event(event); write({type: 'native', event}); } }
+    try { for await (const event of query) { state.event(event); write({type: 'native', event, fence: state.fenced}); } }
     catch { state.hold('sdk-stream-failed'); }
     finally { if (!closing) shutdown('sdk-stream-ended', 2); }
   })();

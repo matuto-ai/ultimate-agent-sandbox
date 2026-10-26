@@ -1,8 +1,10 @@
-# Supported TypeScript seam qualification (#71)
+# Supported TypeScript fixture receiver (#71)
 
-This is a controlled native prototype on main `d38aa9f6527d4d124f1f645ce0a946a6b61334ec`,
-not a production adapter promotion. The direct-CLI fixture, durable handoff journal,
-Hub semantics and unknown-intent holds are unchanged during this first stage.
+This is the fixed account-free default `uas.claude_runtime.FixtureClaudeReceiver`,
+not a production authority or provider qualification. It uses the supported SDK
+seam proved below; the old `DirectClaudeDiagnosticReceiver` remains explicit
+historical test code, never an automatic fallback. Main's Run-admission and
+Forge work are preserved; Claude cross-Run reset/admission is still unqualified.
 
 ## Fixed public surfaces
 
@@ -28,15 +30,17 @@ Hub semantics and unknown-intent holds are unchanged during this first stage.
 
 `runtime/claude/sdk-host.mjs` is an SDK-owned **fixture** child, not a
 Supervisor-owned native Participant badge. Host PID and native PID are separate.
-The eventual Python journal boundary must not promote a wrapper PID to native
-authority or clear an unknown intent because a replacement host reports idle.
+The Python boundary verifies the owned host/native parent and start identities.
+It never promotes the wrapper PID to native authority or clears an unknown
+intent because a replacement host reports idle.
 
 The local fixture protocol admits only correlated `probe`, `send` and `close`
 commands; it cannot execute an arbitrary command or change native options.
 Frames, output buffering and the input slot are bounded. Native control and
 listing deadlines fail closed and close the owned query/child. Native replay
-frames are forwarded as public SDK messages; no private control frames are
-exposed through this protocol. A send's `released` response is not a receipt.
+frames are forwarded as public SDK messages together with the host policy's
+explicit fence; Python applies that fence before considering any ACK. No private
+control frames are exposed through this protocol. A send's `released` response is not a receipt.
 
 Fresh HOME/environment, empty tools/MCP, dummy fixture key and no-upstream
 loopback gateway remain mandatory. CI's disposable loopback-only network
@@ -44,19 +48,49 @@ namespace is the real network boundary; source interface/route guards are
 defense in depth. No paid bootstrap, invisible no-op, permission bypass, native
 mode fallback, credentials or user-host changes are allowed.
 
-## First native proof and limits
+## Actual supported native proof
 
-The pending native gate must prove no-input readiness and another safe sample
-after two seconds without **any** gateway request; busy traffic retention;
-exact native replay ACK; actual same-session restored history; and a SIGSTOPped
-idle target whose new control request times out/fences without contacting the
-gateway. Source policy tests separately cover attention, malformed/duplicate/
-missing identities and unknown signals; they are not actual permission-path
-evidence. Tool-bearing permission profiles and production authority remain
-unqualified. Durable Hub integration and unknown-intent regressions are required
-before this prototype can replace synthetic bootstrap/refresh.
+[CI job 121712886783](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40362928254/job/121712886783)
+passed all 32 Claude cases in 32.6 seconds on head
+`43d68725e59238f6de027cbdbc031933d95a1ae1` (SDK-host qualification stage).
+An empty input stream and another sample after 2.2 seconds were safe with **zero
+HTTP requests of any method to the gateway**. Held work was busy; a second input
+was rejected before release. Exact UUID/content/session replay ACKs passed
+through the public SDK; native same-session/new-PID resume retained the prior
+nonce exactly once in the next genuine turn. SIGSTOP of the exact owned native
+PID made a new public control round trip time out and fence, without any gateway
+request. A newly spawned listing process alone is still not responsiveness.
+
+## Durable integration and limits
+
+The default receiver has no `refresh()` API and sends no constructor user turn.
+`observe()` and the fixed host's send gate obtain new non-model evidence, rather
+than extending a two-second result lease. Missing/duplicate identity, waiting,
+background work, attention, unknown events, a stopped/stale target or lost
+control response hold. Initial SDK initialization alone is never readiness.
+
+The narrow shared SQLite journal commits immutable intent before the local host
+handoff. Only an exact native replay ACK can be persisted and returned to the Hub
+for its response clock. A released host input, model request or terminal result
+is not a receipt. ACK need not precede the model response/completion: blocking
+all provider response bytes can also delay replay ACK.
+
+Only provable pre-effect rejection may be durably classified retryable with the
+same logical/native message ID. Before retry, new non-model evidence is required
+and intent is re-armed as unknown. Partial local frames, missing ACK, receipt
+commit failure or classification failure stay unknown; resume and an otherwise
+idle native process cannot clear them or route other traffic around them.
+Nonblocking writes recheck asynchronous fences before each remaining chunk.
+
+The same mandatory native gate includes Hub receipt/clock gating, real busy
+retention, loss-of-return reconciliation, actual history resume, stale scope,
+receipt/classification crash windows, owned-host partial-pipe uncertainty and
+native SIGSTOP. Source fault/parser tests are labeled separately. In particular,
+requires_action/missing-identity coverage is **not** actual permission-path proof.
+Tool-bearing profiles, production Supervisor authority, real authenticated
+inference, native reset, compaction and MCP reconnect remain unqualified.
 
 The existing automatic Claude job retains its two-minute limit and existing
-triggers. Qualification and any eventual adapter changes stay in one draft PR;
+triggers. Qualification and adapter changes stay in one draft PR;
 work exceeding the normal CI budget must move to a deliberate gate, not extend
 automatic CI timeouts.

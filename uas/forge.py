@@ -60,7 +60,7 @@ class ReadOnlyForgeBroker:
     def _receipt(self, key, origin, authorize):
         return self.ledger.operation_receipt('forge-terminal-' + key, origin, authorize=authorize)
 
-    def prepare(self, envelope, *, origin, authorize):
+    def prepare(self, envelope, *, origin, authorize, admission=False, admission_reservation=None):
         """Under lifecycle lock: authenticate, validate, dedupe and reserve intent."""
         from .github_read import parse_route
         if self._audit_failed:
@@ -71,7 +71,15 @@ class ReadOnlyForgeBroker:
                 or envelope['kind'] != 'forge-read'):
             raise LedgerError('INVALID_FORGE_ENVELOPE')
         operation = _token(envelope['id'])
-        digest = hashlib.sha256(_json(envelope).encode()).hexdigest()
+        if type(admission) is not bool:
+            raise LedgerError('INVALID_FORGE_INTENT')
+        if admission_reservation is not None:
+            _token(admission_reservation)
+            if not admission:
+                raise LedgerError('INVALID_FORGE_INTENT')
+        digest = hashlib.sha256(_json({'envelope': envelope, 'admission': True,
+                                      'admission_reservation': admission_reservation}
+            if admission else envelope).encode()).hexdigest()
         code = None
         try:
             route = parse_route(envelope['argv'], self.project)
@@ -91,6 +99,23 @@ class ReadOnlyForgeBroker:
             # Terminal receipts live in immutable operations/history, not state.
             pending[key] = {'reserved': 'x' * 65536, 'command': command.canonical(),
                             'origin': origin.canonical()}
+            if admission_reservation is not None:
+                admission_row = state.get('run_admissions', {}).get(admission_reservation)
+                if (not admission_row or admission_row['status'] != 'PREPARING'
+                        or admission_row['participant_id'] != origin.participant_id
+                        or admission_row['actor_id'] != origin.actor_id
+                        or type(admission_row.get('reservation')) is not str):
+                    raise LedgerError('INVALID_ADMISSION_RESERVATION')
+                # Transfer, do not double-charge, the pending read's complete
+                # bounded footprint. A padded count and separator allowance make
+                # the charge conservative even when adding to a nonempty map.
+                funding = {'run_id': admission_reservation, 'released_bytes': 9999999}
+                pending[key]['admission_funding'] = funding
+                charge = len(_json({key: pending[key]}).encode()) + 256
+                if charge > 131072 or len(admission_row['reservation']) < charge:
+                    raise LedgerError('ADMISSION_READ_CAPACITY')
+                funding['released_bytes'] = charge
+                admission_row['reservation'] = admission_row['reservation'][:-charge]
             self._capacity(state)
             started = True
             return Transition(state, (Event('forge-read-started', payload),), {'status': 'pending'})
@@ -106,7 +131,27 @@ class ReadOnlyForgeBroker:
             raise
         return {'key': key, 'operation': operation, 'origin': origin, 'route': route,
                 'code': code, 'started': started, 'existing': existing,
-                '_broker': self, 'command': command}
+                '_broker': self, 'command': command, 'admission': admission}
+
+    @staticmethod
+    def _release_pending(state, key):
+        row = state['forge_pending'][key]
+        funding = row.get('admission_funding')
+        if funding is not None:
+            if (type(funding) is not dict or set(funding) != {'run_id', 'released_bytes'}
+                    or type(funding['released_bytes']) is not int
+                    or not 65536 <= funding['released_bytes'] <= 131072):
+                raise LedgerError('INVALID_ADMISSION_RESERVATION')
+            admission = state.get('run_admissions', {}).get(funding['run_id'])
+            if not admission or admission['status'] not in {'PREPARING', 'ACTIVE'}:
+                raise LedgerError('INVALID_ADMISSION_RESERVATION')
+            if admission['status'] == 'PREPARING':
+                if type(admission.get('reservation')) is not str:
+                    raise LedgerError('INVALID_ADMISSION_RESERVATION')
+                admission['reservation'] += 'x' * funding['released_bytes']
+            # An already activated Run no longer has future admission work to
+            # fund. Retire the transfer, never resurrect its removed reservation.
+        del state['forge_pending'][key]
 
     def _validate_intent(self, intent):
         if type(intent) is not dict or intent.get('_broker') is not self:
@@ -139,7 +184,8 @@ class ReadOnlyForgeBroker:
             if provider.project != self.project:
                 raise LedgerError('PROVIDER_BINDING_MISMATCH')
             number = intent['route'].issue_number
-            outcome = validate_observation(provider.read_issue(number))
+            outcome = validate_observation(provider.read_issue(number, admission=True)
+                if intent['admission'] else provider.read_issue(number))
             if outcome['issue'] is not None and outcome['issue']['number'] != number:
                 raise LedgerError('PROVIDER_BINDING_MISMATCH')
             return outcome
@@ -164,7 +210,7 @@ class ReadOnlyForgeBroker:
                 receipt = {'operation_id': intent['operation'], **terminal}
                 if intent['key'] not in state.get('forge_pending', {}):
                     raise LedgerError('INVALID_FORGE_INTENT')
-                del state['forge_pending'][intent['key']]
+                self._release_pending(state, intent['key'])
                 self._capacity(state)
                 return Transition(state, (Event('forge-read-observed', terminal),), receipt)
             receipt = self.ledger.apply(Command('forge-terminal-' + intent['key'], 'forge-read-result',
@@ -205,7 +251,7 @@ class ReadOnlyForgeBroker:
             def release(state, command):
                 if key not in state.get('forge_pending', {}):
                     raise LedgerError('INVALID_FORGE_INTENT')
-                del state['forge_pending'][key]
+                self._release_pending(state, key)
                 self._capacity(state)
                 return Transition(state, (Event('forge-read-abandoned', terminal),),
                                   {'operation_id': intent['operation'], **terminal})
@@ -230,7 +276,9 @@ class ReadOnlyForgeBroker:
             if type(pending) is not dict or len(pending) > 8:
                 raise LedgerError('INVALID_FORGE_INTENT')
             for key, row in pending.items():
-                if type(row) is not dict or set(row) != {'reserved', 'command', 'origin'}:
+                if type(row) is not dict or set(row) not in (
+                        {'reserved', 'command', 'origin'},
+                        {'reserved', 'command', 'origin', 'admission_funding'}):
                     raise LedgerError('INVALID_FORGE_INTENT')
                 command = Command(**row['command'])
                 origin = Origin(**{**row['origin'], 'capabilities': tuple(row['origin']['capabilities'])})
