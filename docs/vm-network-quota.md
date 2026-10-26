@@ -5,6 +5,21 @@ installation command, or completed Room security boundary. It uses the same
 `uas.lifecycle.Supervisor` for two Rooms and the accepted Docker/Moby engine.
 The existing network-none/read-only Docker fixture keeps its original defaults.
 
+This expensive tier is manual: use Actions **Run workflow**, or the review account
+`puglab-reviewer` deliberately adds `qualify-vm-boundary` to a same-repository PR.
+Only that exact `labeled` event or dispatch launches it; pushes, opening a PR and
+retaining the label across later commits do not. Checkout is bound to the event's
+head SHA. Later relevant changes invalidate that evidence and require a new
+explicit qualification decision. Ordinary offline tests remain automatic.
+
+The manual job is capped at 30 minutes (runner-tool setup 10, payload build 15,
+guest installation/scenario/shutdown 15, all also within the overall ceiling).
+Timestamped phases, verified-package counts and 30-second guest-output progress
+make slow stages visible. A guest with no serial boot output fails at 180 seconds;
+after boot, 300 seconds without any new serial bytes fails and cleans up owned QEMU.
+Progress output is liveness diagnostics, never a replacement for passing security
+assertions. No mutable guest state is reused or cached.
+
 ## What runs
 
 `vm-boundary` boots the pinned, signature-verified Fedora Cloud image under

@@ -10,9 +10,39 @@ from unittest.mock import Mock, patch
 SPEC = importlib.util.spec_from_file_location("vm_runner", Path(__file__).parent / "vm/run.py")
 vm = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(vm)
+PROBE_SPEC = importlib.util.spec_from_file_location("vm_probe", Path(__file__).parent / "vm/guest_probe.py")
+probe = importlib.util.module_from_spec(PROBE_SPEC)
+PROBE_SPEC.loader.exec_module(probe)
 
 
 class VMFeasibilityTests(unittest.TestCase):
+    def test_producer_frames_normal_and_oversize_reports_after_console_prompt(self):
+        nonce = "a" * 32
+        prompt = "\x1b]3008;comm=(agetty)\x1b\\\x1bP+q6E616D65\x1b\\"
+        for oversized in (False, True):
+            report = {"version": 1, "nonce": nonce, "checks": {
+                name: {"status": "passed", "observation": "fixture"}
+                for name in probe.REQUIRED_CHECKS}}
+            if oversized:
+                report["checks"][probe.REQUIRED_CHECKS[0]]["observation"] = "x" * probe.MAX_REPORT_BYTES
+            written = []
+            def capture(descriptor, data):
+                self.assertEqual(9, descriptor)
+                written.append(bytes(data))
+                return len(data)
+            with patch.object(probe, "read_bounded", return_value=nonce), patch.object(probe, "build_report", return_value=report), patch.object(probe.os, "open", return_value=9), patch.object(probe.os, "write", side_effect=capture), patch.object(probe.os, "close"):
+                self.assertEqual(1 if oversized else 0, probe.main([nonce]))
+            wire = b"".join(written).decode("ascii")
+            self.assertTrue(wire.startswith("\nUAS_VM_REPORT:"))
+            self.assertLessEqual(len(wire), probe.MAX_REPORT_BYTES)
+            if not oversized:
+                self.assertEqual(report, vm.parse_report(prompt + wire, nonce))
+                with self.assertRaises(RuntimeError):
+                    vm.parse_report(prompt + wire.lstrip("\n"), nonce)
+            else:
+                self.assertIn("REPORT_TOO_LARGE", wire)
+                with self.assertRaises(RuntimeError): vm.parse_report(prompt + wire, nonce)
+
     def test_report_requires_this_boot_and_all_observed_prerequisites(self):
         nonce = "a" * 32
         report = {"version": 1, "nonce": nonce, "checks": {

@@ -42,6 +42,13 @@ def expect(value, message):
         raise AssertionError(message)
 
 
+def require_process_label(observed, level):
+    # procfs may include the kernel context's single terminal NUL. Accept no
+    # other suffix/prefix, type, or MCS difference; do not use suffix matching.
+    expected = 'system_u:system_r:container_t:' + level
+    expect(observed in (expected, expected + '\0'), 'actual SELinux label')
+
+
 def require_engine_security():
     expect(run('getenforce').strip() == 'Enforcing', 'SELinux changed during installation')
     options = json.loads(run('docker', 'info', '--format', '{{json .SecurityOptions}}'))
@@ -304,6 +311,7 @@ def scenario(nonce):
         paths = tuple(str(STORAGE / room / name) for name in ('repository', 'workspace', 'checkouts', 'references'))
         specs[room] = FixtureSpec(room, room + '-project', paths, image, 'sha256:' + 'b' * 64, 'sha256:' + 'c' * 64)
     for point in ('volume', 'mkdir', 'marker'):
+        print('Guest boundary phase: controller crash/recovery at', point, flush=True)
         result = subprocess.run(['python3', __file__, '--crash-start', nonce, image, point], timeout=180)
         expect(result.returncode == -9, 'real controller crash boundary not reached: ' + point)
         interrupted = supervisors['alpha'].status()
@@ -313,6 +321,7 @@ def scenario(nonce):
         instance = interrupted['instance_id']
         expect(not (STORAGE / 'alpha/runtime' / instance).exists(), 'runtime directory leftover after ' + point)
         expect(not list(CONTROL.glob(instance + '.*')), 'runtime marker/intent leftover after ' + point)
+        print('Guest boundary phase: recovered and destroyed crash instance at', point, flush=True)
     backends['alpha'].lose_network_response = True
     first = supervisors['alpha'].start(specs['alpha'])
     expect(first['phase'] == 'start_failed' and first['observed']['container'] is None, 'uncertain partial create not retained')
@@ -323,6 +332,7 @@ def scenario(nonce):
         expect(result['phase'] == 'running', str(result))
         containers[room] = result['observed']['container']['id']
     checks['recovery'] = {'status': 'passed', 'lost_network_response_reconciled': True, 'sigkill_boundaries': ['volume', 'mkdir', 'marker']}
+    print('Guest boundary phase: both Rooms running; probing actual enforcement', flush=True)
 
     def probe(room, *args):
         value = json.loads(run('docker', 'exec', containers[room], '/fixture', *args))
@@ -334,7 +344,7 @@ def scenario(nonce):
         files = value['files']; process = files['/proc/self/status']
         for key, expected in (('CapEff', '0000000000000000'), ('CapBnd', '0000000000000000'), ('NoNewPrivs', '1'), ('Seccomp', '2')):
             expect(any(line.split(':', 1)[0] == key and line.split(':', 1)[1].strip() == expected for line in process.splitlines()), 'kernel ' + key)
-        expect(files['/proc/self/attr/current'].endswith(ROOMS[room][3]), 'actual SELinux label')
+        require_process_label(files['/proc/self/attr/current'], ROOMS[room][3])
         expect(files['/proc/self/uid_map'].split() == ['0', '100000', '65536']
                and files['/proc/self/gid_map'].split() == ['0', '100000', '65536'], 'actual user namespace mapping')
         attrs = probe(room, 'attributes', str(STORAGE / room / 'workspace'))
@@ -446,7 +456,9 @@ def main():
     nonce, manifest_hash = sys.argv[1:]
     checks = {}
     try:
+        print('Guest boundary phase: verifying offline payload and installing signed packages', flush=True)
         install(nonce, manifest_hash)
+        print('Guest boundary phase: signed Docker ready; starting synthetic scenario', flush=True)
         checks = scenario(nonce)
         expect(set(checks) == REQUIRED, 'incomplete scenario')
     except Exception:
@@ -459,7 +471,8 @@ def main():
                 pass
         checks = {name: {'status': 'failed', 'error': 'SCENARIO_FAILED'} for name in REQUIRED}
     report = {'version': 1, 'nonce': nonce, 'checks': checks}
-    line = 'UAS_BOUNDARY_REPORT:' + nonce + ':' + json.dumps(report, sort_keys=True) + '\n'
+    # Keep the strict record parser independent of an unterminated login prompt.
+    line = '\nUAS_BOUNDARY_REPORT:' + nonce + ':' + json.dumps(report, sort_keys=True) + '\n'
     with open('/dev/ttyS0', 'w') as serial:
         serial.write(line); serial.flush()
 

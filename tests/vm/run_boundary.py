@@ -16,8 +16,9 @@ from prepare_payload import build_payload
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-BOOT_TIMEOUT = 1800
+BOOT_TIMEOUT = 900
 SILENT_BOOT_TIMEOUT = 180
+IDLE_SERIAL_TIMEOUT = 300
 LOG_FILES = ('qemu.log', 'serial.log', 'firmware.log')
 REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota',
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
@@ -78,16 +79,28 @@ def parse_report(serial, nonce):
 
 def boot(directory, values, nonce):
     started = time.monotonic()
+    last_activity, last_progress = started, started
+    serial = directory / 'serial.log'
+    previous_bytes = serial.stat().st_size if serial.exists() else 0
     with (directory / 'qemu.log').open('w') as output:
         process = subprocess.Popen(values, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
         try:
             while process.poll() is None:
-                elapsed = time.monotonic() - started
+                now = time.monotonic()
+                elapsed = now - started
                 if elapsed > BOOT_TIMEOUT:
                     raise RuntimeError('guest install/scenario/poweroff exceeded budget')
-                serial = directory / 'serial.log'
-                if elapsed > SILENT_BOOT_TIMEOUT and (not serial.exists() or serial.stat().st_size == 0):
+                serial_bytes = serial.stat().st_size if serial.exists() else 0
+                if elapsed > SILENT_BOOT_TIMEOUT and serial_bytes == 0:
                     raise RuntimeError('guest produced no serial boot output within 180 seconds')
+                if serial_bytes != previous_bytes:
+                    last_activity, previous_bytes = now, serial_bytes
+                if now - last_activity > IDLE_SERIAL_TIMEOUT:
+                    raise RuntimeError('guest serial output stalled for 300 seconds')
+                if now - last_progress >= 30:
+                    print('VM guest progress:', json.dumps({'elapsed_seconds': round(elapsed),
+                          'serial_bytes': serial_bytes, 'serial_idle_seconds': round(now - last_activity)}), flush=True)
+                    last_progress = now
                 for name in LOG_FILES:
                     path = directory / name
                     if path.exists() and path.stat().st_size > feasibility.LOG_LIMIT:
@@ -109,8 +122,9 @@ def main():
             directory = Path(temporary); nonce = uuid.uuid4().hex
             try:
                 lock = json.loads((HERE / 'fedora-image.json').read_text())
+                print('VM boundary phase: downloading/verifying pinned image', flush=True)
                 image = feasibility.fetch_image(lock, directory)
-                print('VM boundary phase: verified image; preparing signed payload', flush=True)
+                print('VM boundary phase: verified image; preparing signed payload; elapsed_seconds=', round(time.monotonic() - started, 3), flush=True)
                 payload = build_payload(directory, ROOT, nonce, source_paths=SOURCES)
                 manifest = payload.parent / 'payload/manifest.json'
                 digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
@@ -118,7 +132,7 @@ def main():
                 feasibility.command(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', str(image), str(overlay)])
                 with quota.open('xb') as source:
                     source.truncate(512 * 1024 * 1024)
-                print('VM boundary phase: payload ready; booting explicit OS disk', flush=True)
+                print('VM boundary phase: payload ready; booting explicit OS disk; elapsed_seconds=', round(time.monotonic() - started, 3), flush=True)
                 report, seconds = boot(directory, arguments(directory, overlay, seed(directory, nonce, digest), payload, quota), nonce)
                 print('VM boundary:', json.dumps({'guest': report, 'boot_install_scenario_shutdown_seconds': seconds,
                       'image_sha256': lock['sha256'], 'payload_manifest_sha256': digest, 'no_guest_external_network': True}, sort_keys=True), flush=True)

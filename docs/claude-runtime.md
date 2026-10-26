@@ -153,3 +153,83 @@ injection, not a native documented hung-state signal. **Issue #71 remains open.*
 
 The installed version's observed behavior, not this living documentation alone,
 must qualify each load-bearing signal.
+
+## Non-model readiness applicability investigation
+
+The supported [`claude agents --json --all` query](https://code.claude.com/docs/en/agent-view#read-session-state-from-a-script)
+reports live `pid`, `sessionId`, `status` (`busy`, `waiting`, `idle`) and
+`waitingFor` for interactive/background sessions. Background `state: working`
+also covers autonomous waits, so an instantaneously idle process alone would
+not establish a safe point. Pinned 2.1.310 exposes this command, but its
+applicability to this adapter's print-mode process is a separate question.
+
+`tests/test_claude_readiness.py` adds a diagnostic only: it suppresses the
+fixture constructor's bootstrap within the test, then runs the exact original
+CLI mode and arguments. In the mandatory loopback-only CI namespace it samples
+the public state query before any input, during a real held fixture request,
+after correlated completion, more than two seconds later, after process exit,
+and after actual same-session resume. Queries have five-second and 256-KiB
+combined-output bounds and must not add gateway requests. The probe records
+exact PID/session matches or explicit absence; **neither outcome changes
+readiness or authorizes delivery**.
+
+The first [actual applicability run 40347538244](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40347538244/job/121658370282)
+passed all 28 cases (19 source, 9 native) on head
+`2f397ddb758d59a3397c89289c1199c109156583`, based on main
+`b196fb51a199d6cf7fe1ec05db17fababc72dd09` (test-merge
+`6039958a053e75f1dfe883625381312803b641a1`). The print process **was listed as
+`kind: interactive`**, with exact PID and session UUID. Its nine samples were:
+
+| Sample | Public listing | Existing receiver |
+| --- | --- | --- |
+| Before first input, no gateway requests | Exact live identity, `idle` | Ambiguous |
+| Held fixture request | Exact live identity, `busy` | Busy |
+| Correlated completion | Exact live identity, `idle` | Inferred safe |
+| Completion older than two seconds | Exact live identity, `idle` | Ambiguous |
+| Process exited | Empty listing | Lost |
+| Same-session resume | New PID, same UUID; the four live stages above repeated | Same holds |
+
+All nine queries added **zero gateway requests**. Only the two deliberate fixture
+turns contacted the protocol provider, and the resumed request contained the old
+history nonce exactly once. This establishes non-model query applicability to
+the pinned print-mode process, not a complete safe-admission contract: actual
+permission/Needs input behavior, stale or unresponsive observations, the
+sample-to-write race, and Supervisor process authority still need qualification
+before replacing bootstrap or refresh. No absence, init event, or stdout silence
+was interpreted as readiness.
+
+This is not a move to background sessions or a channel implementation.
+[Structured/piped resume cannot inject into a live background session](https://code.claude.com/docs/en/sessions#resume-a-running-background-session),
+and [channel notification writes have no acknowledgment](https://code.claude.com/docs/en/channels-reference#notification-format).
+Custom development channels are also ignored in print mode. SDK initialization,
+MCP connected, stdout silence, and this diagnostic's process-alive observation
+remain insufficient. The production-safe replacement for synthetic refresh is
+still unqualified; no paid no-op or automatic model polling is introduced.
+
+### Target responsiveness qualification
+
+The diagnostic suspends only the fixture-owned print process with
+`SIGSTOP`, confirms Linux `/proc/<owned-pid>/status` reports it stopped, waits
+longer than two seconds, and runs two fresh public listing commands. It then
+continues that same process without sending input. No model request, private
+Claude state file, native mode change, or readiness promotion is involved.
+The [actual stopped-target run 40349950780](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40349950780/job/121666968422)
+passed 29 tests on head `711c355b3ce0ec299eaba46a41b19873bf384a54`, tree
+`9f7fbeac8de1364d16bcf05713d26688ccc465f4`, test-merge
+`7cec72b9d2cbae07f1c9a6cdc52a4143ab9cd197`. Both fresh listing commands
+returned the **exact stopped PID/session as `idle`**, after 2.390 and 2.602
+seconds stopped. Each query completed in approximately 0.2 seconds. The same
+identity was listed idle before the stop and after continuation; all four
+queries made zero gateway requests, and the receiver remained ambiguous.
+The final regression asserts this pinned negative result explicitly.
+
+**Readiness promotion is blocked.** A query's completion time is not a fresh
+response from the target. Checking the owned process's kernel state can reject
+this specific stopped condition; exit and PID identity checks can reject other
+process-loss/replacement cases. They cannot establish responsiveness of a live
+but hung event loop. No documented freshness/target-response field was exposed
+by this listing, so listing plus process liveness does not satisfy the
+unresponsive-hold requirement. Neither synthetic bootstrap nor its two-second
+refresh policy is replaced. Unknown handoff intents remain held. Issue #71 still
+needs a qualified non-model target-response seam before production-safe receive
+can be claimed; no private protocol bridge or alternate native mode is added.

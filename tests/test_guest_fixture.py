@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, mock_open, patch
 
 from uas import guest_fixture as guest
 from uas.docker_fixture import DockerFixtureBackend
@@ -29,6 +29,38 @@ STATE = {'instance_id': 'b' * 32, 'room_id': 'alpha', 'spec': {
 
 
 class GuestFixtureTests(unittest.TestCase):
+    def test_kernel_process_label_is_exact_with_only_one_optional_terminal_nul(self):
+        level = 's0:c101,c102'
+        expected = 'system_u:system_r:container_t:' + level
+        for valid in (expected, expected + '\0'):
+            guest_script.require_process_label(valid, level)
+        for invalid in (level, expected.replace('container_t', 'unconfined_t'),
+                        expected.replace('c102', 'c103'), 'prefix:' + expected,
+                        expected + '\0\0', expected + '\0suffix', expected + '\n',
+                        expected.replace(':s0:', ':s0:\0')):
+            with self.subTest(value=invalid), self.assertRaisesRegex(AssertionError, 'actual SELinux label'):
+                guest_script.require_process_label(invalid, level)
+
+    def test_heavy_boundary_is_only_a_deliberate_manual_qualification(self):
+        workflow = (Path(__file__).parents[1] / '.github/workflows/vm-boundary.yml').read_text()
+        triggers = workflow.split('\non:\n', 1)[1].split('\npermissions:', 1)[0]
+        self.assertEqual('  workflow_dispatch:\n  pull_request:\n    types: [labeled]', triggers.strip('\n'))
+        self.assertIn("github.event_name == 'workflow_dispatch' || (github.event.label.name == 'qualify-vm-boundary' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository)", workflow)
+        self.assertIn('ref: ${{ github.event.pull_request.head.sha || github.sha }}', workflow)
+        self.assertIn('persist-credentials: false', workflow)
+        self.assertNotIn('pull_request_target', workflow)
+
+    def test_producer_starts_record_after_unterminated_console_prompt(self):
+        checks = {name: {'status': 'passed'} for name in runner.REQUIRED}
+        serial = mock_open()
+        with patch.object(sys, 'argv', ['guest_boundary.py', NONCE, 'c' * 64]), patch.object(guest_script, 'install'), patch.object(guest_script, 'scenario', return_value=checks), patch('builtins.open', serial):
+            guest_script.main()
+        wire = serial().write.call_args.args[0]
+        self.assertTrue(wire.startswith('\nUAS_BOUNDARY_REPORT:'))
+        prompt = '\x1b]3008;comm=(agetty)\x1b\\\x1bP+q6E616D65\x1b\\'
+        self.assertEqual(checks, runner.parse_report(prompt + wire, NONCE)['checks'])
+        with self.assertRaises(RuntimeError): runner.parse_report(prompt + wire.lstrip('\n'), NONCE)
+
     def test_no_accidental_host_execution_or_selinux_relaxation(self):
         with patch.object(guest.os, 'geteuid', return_value=1000), patch.object(guest, 'command') as command:
             with self.assertRaises(LifecycleError) as caught:
@@ -267,6 +299,28 @@ class GuestFixtureTests(unittest.TestCase):
                     runner.boot(directory, ['unused-offline-placeholder'], NONCE)
                 stop.assert_called_once_with(process)
             self.assertEqual(('qemu.log', 'serial.log', 'firmware.log'), runner.LOG_FILES)
+
+    def test_stalled_serial_or_total_guest_budget_stops_only_owned_qemu(self):
+        for seconds, reason in ((301, 'serial output stalled'), (901, 'exceeded budget')):
+            with self.subTest(seconds=seconds), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); (directory / 'serial.log').write_text('booted but no further output\n')
+                process = Mock(); process.poll.return_value = None
+                with patch.object(runner.subprocess, 'Popen', return_value=process), patch.object(runner.time, 'monotonic', side_effect=[0, seconds]), patch.object(runner.feasibility, 'stop_process') as stop:
+                    with self.assertRaisesRegex(RuntimeError, reason):
+                        runner.boot(directory, ['unused-offline-placeholder'], NONCE)
+                    stop.assert_called_once_with(process)
+
+    def test_new_guest_output_resets_idle_budget_but_not_total_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); serial = directory / 'serial.log'
+            report = {'version': 1, 'nonce': NONCE, 'checks': {name: {'status': 'passed'} for name in runner.REQUIRED}}
+            serial.write_text('UAS_BOUNDARY_REPORT:' + NONCE + ':' + json.dumps(report) + '\n')
+            process = Mock(); process.poll.side_effect = [None, None, 0]; process.returncode = 0
+            def progress(_):
+                with serial.open('a') as output: output.write('new guest progress\n')
+            with patch.object(runner.subprocess, 'Popen', return_value=process), patch.object(runner.time, 'monotonic', side_effect=[0, 299, 598, 599]), patch.object(runner.time, 'sleep', side_effect=progress), patch.object(runner.feasibility, 'stop_process') as stop:
+                self.assertEqual((report, 599), runner.boot(directory, ['unused-offline-placeholder'], NONCE))
+                stop.assert_called_once_with(process)
 
     def test_native_guest_solver_installs_roots_not_union_of_conflicting_providers(self):
         with tempfile.TemporaryDirectory() as temporary:

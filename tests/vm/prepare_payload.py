@@ -34,7 +34,7 @@ MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_METADATA_FILES = 16
 MAX_METADATA_FILE_BYTES = 8 * 1024 * 1024
 MAX_METADATA_TOTAL = 16 * 1024 * 1024
-BUILD_TIMEOUT = 1200
+BUILD_TIMEOUT = 900
 
 
 def _stop(process):
@@ -62,6 +62,7 @@ def command(arguments, *, directory, timeout=300, environment=None):
     if environment:
         env.update(environment)
     started = time.monotonic()
+    last_progress = started
     executable = shutil.which(arguments[0])
     if executable is None:
         raise RuntimeError("required payload tool unavailable: " + str(arguments[0]))
@@ -70,8 +71,14 @@ def command(arguments, *, directory, timeout=300, environment=None):
                                    stderr=errors, env=env, cwd=directory)
         try:
             while process.poll() is None:
-                if time.monotonic() - started > timeout:
+                now = time.monotonic()
+                if now - started > timeout:
                     raise RuntimeError("payload command timed out: " + str(arguments[0]))
+                if now - last_progress >= 30:
+                    print("VM payload command progress:", json.dumps({"tool": arguments[0],
+                          "elapsed_seconds": round(now - started),
+                          "output_bytes": stdout.stat().st_size + stderr.stat().st_size}), flush=True)
+                    last_progress = now
                 if max(stdout.stat().st_size, stderr.stat().st_size) > MAX_COMMAND_OUTPUT:
                     raise RuntimeError("payload command output budget exceeded")
                 if _bytes(directory) > MAX_WORK_BYTES:
@@ -276,6 +283,7 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
     # filter: DNF4 otherwise selects all compatible arches, including i686.
     urls = package_urls(run([*dnf, "download", "--arch=x86_64,noarch", "--resolve", "--alldeps", "--url", "--urlprotocol=https",
                              *PACKAGES], timeout=600))
+    print("VM payload phase: downloading and verifying RPM candidates:", len(urls), flush=True)
     manifest = {"version": 1, "nonce": nonce, "release": "44", "signing_fingerprint": fingerprint,
                 "key": {"file": key.name, "sha256": hashlib.sha256(key.read_bytes()).hexdigest(), "bytes": key.stat().st_size},
                 "packages": [], "source": [], "dependencies_reproducibly_pinned": False}
@@ -294,11 +302,16 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
         manifest["packages"].append({"file": name, "name": metadata[0], "epoch": metadata[1],
                                      "version": metadata[2], "release": metadata[3], "arch": metadata[4],
                                      "bytes": target.stat().st_size, "sha256": digest, "signature_verified": True})
+        if len(manifest["packages"]) % 32 == 0 or len(manifest["packages"]) == len(urls):
+            print("VM payload progress:", json.dumps({"verified_packages": len(manifest["packages"]),
+                  "packages_total": len(urls), "package_bytes": total,
+                  "elapsed_seconds": round(time.monotonic() - started)}), flush=True)
     if not set(PACKAGES) <= {item["name"] for item in manifest["packages"]}:
         raise RuntimeError("resolved package bundle omitted a required package")
     # DNF4 download resolves each requested root separately, so its union may
     # contain conflicting alternatives. Offer the signed RPMs as candidates to
     # the guest's native solver; do not force-install the entire download pool.
+    print("VM payload phase: verified RPM pool; generating hash-bound metadata and static fixture", flush=True)
     run(["createrepo_c", "--no-database", "--checksum", "sha256", "--general-compress-type", "gz",
          "--error-exit-val", "--workers", "2", str(packages)], timeout=120)
     manifest["repository_metadata"] = repository_metadata(packages)

@@ -170,13 +170,15 @@ def main(arguments=None):
         return 2
     report = build_report(nonce)
     payload = json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    line = ("UAS_VM_REPORT:" + nonce + ":" + payload + "\n").encode("ascii")
+    # The login console can leave an unterminated ANSI prompt on this UART.
+    # Start our nonce-bound record on its own line; the parser stays strict.
+    line = ("\nUAS_VM_REPORT:" + nonce + ":" + payload + "\n").encode("ascii")
     if len(line) > MAX_REPORT_BYTES:
         # Preserve a valid complete failure report rather than truncate JSON.
         report["checks"] = {name: {"status": "failed", "observation": {"error": "REPORT_TOO_LARGE"}}
                             for name in REQUIRED_CHECKS}
         payload = json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        line = ("UAS_VM_REPORT:" + nonce + ":" + payload + "\n").encode("ascii")
+        line = ("\nUAS_VM_REPORT:" + nonce + ":" + payload + "\n").encode("ascii")
     try:
         descriptor = os.open("/dev/ttyS0", os.O_WRONLY | os.O_NOCTTY | os.O_CLOEXEC)
         try:
