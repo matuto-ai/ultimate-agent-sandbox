@@ -50,10 +50,24 @@ class ReadProviderTests(unittest.TestCase):
                 parse_route(args, self.project)
         self.assertEqual(self.calls, [])
 
+    def test_pr_route_uses_exact_number_and_pinned_repository_only(self):
+        self.assertIn("gh pr view NUMBER", generated_help())
+        route = parse_route(["gh", "pr", "view", "42", "--repo", "owner/project"], self.project)
+        self.assertEqual((route.kind, route.pull_number, route.issue_number), ("pr-view", 42, None))
+        for argv in (["pr", "view", "https://github.com/owner/project/pull/42"],
+                     ["pr", "view", "42", "--repo", "other/project"],
+                     ["pr", "view", "42", "--json", "body"], ["pr", "view", "42", "--comments"],
+                     ["pr", "merge", "42"], ["pr", "review", "42", "--approve"],
+                     ["pr", "view", "42", "--hostname", "evil.invalid"]):
+            with self.subTest(argv=argv), self.assertRaises(LedgerError):
+                parse_route(argv, self.project)
+        self.assertEqual([], self.calls)
+
     def test_route_table_startup_rejects_ambiguous_or_missing_signatures(self):
         valid = (("help", ("--help",), "gh --help"),
                  ("issue-view", ("issue", "view"), "gh issue view NUMBER [--repo OWNER/REPO]"),
-                 ("issue-assign-self", ("issue", "edit"), "gh issue edit NUMBER --add-assignee @me [--repo OWNER/REPO]"))
+                 ("issue-assign-self", ("issue", "edit"), "gh issue edit NUMBER --add-assignee @me [--repo OWNER/REPO]"),
+                 ("pr-view", ("pr", "view"), "gh pr view NUMBER [--repo OWNER/REPO]"))
         self.assertEqual(validate_route_table(valid), valid)
         for rows in ((), valid + (valid[0],), (valid[0],),
                      (valid[0], ("issue-view", ("--help",), "gh --help")),
@@ -253,6 +267,13 @@ print('HTTP/2.0 200 OK\\nContent-Type: application/json\\n\\n[]')
             labels = GhTransport(executable, digest, "actor-one", credentials)(
                 "repos/owner/project/issues/42/labels?per_page=100&page=1")
             self.assertEqual(labels.status, 200)
+            for path in ("repos/owner/project/pulls/42",
+                         "repos/owner/project/pulls/42/reviews?per_page=100&page=1"):
+                self.assertEqual(200, GhTransport(executable, digest, "actor-one", credentials)(path).status)
+            for path in ("repos/owner/project/pulls/42/merge", "repos/owner/project/pulls/42/reviews",
+                         "repos/owner/project/pulls/42/reviews?per_page=100&page=1&host=evil"):
+                with self.assertRaises(ProviderFailure):
+                    GhTransport(executable, digest, "actor-one", credentials)(path)
 
     def test_timeout_output_and_invalid_route_fail_closed(self):
         with tempfile.TemporaryDirectory() as root:

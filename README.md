@@ -96,3 +96,7 @@ An account-free [first-Run admission source slice](docs/run-admission-foundation
 The optional [audited self-assignment source slice](docs/forge-assignment.md) connects
 one bounded write and read-only uncertain-outcome reconciliation to canonical Run
 admission. Tests use controlled GitHub responses, not live credentials or writes.
+
+The [PR/review observation prerequisite](docs/forge-pull-observations.md) adds
+bounded exact-revision Forge reads through the existing Broker, without Gate or
+review-routing authority.

@@ -73,6 +73,30 @@ class PiForgeTests(unittest.TestCase):
         self.idle()
         return result
 
+    def test_actual_pi_pr_and_submitted_review_observation_is_not_a_verdict(self):
+        # Defined for ordinary CI only where the existing native opt-in is set.
+        # The local restricted development gate does not execute this test.
+        from test_github_pr import pull, review, response
+        def transport(path):
+            self.calls.append(path)
+            return response([review(number=66, repository='owner/repo')]
+                            if '/reviews?' in path else pull(number=66, repository='owner/repo'))
+        self.provider = GitHubReadProvider(GitHubProject('owner/repo'), transport)
+        self.start()
+        first = self.invoke('pr-66', ['pr', 'view', '66'])
+        self.assertTrue(first['ok'])
+        result = first['receipt']
+        self.assertEqual('OK', result['observation']['status'])
+        self.assertEqual('not-evaluated', result['admission'])
+        self.assertEqual('APPROVED', result['observation']['reviews'][0]['state'])
+        self.assertNotIn('verdict', result['observation'])
+        self.assertNotIn('runs', self.ledger.snapshot()['state'])
+        self.assertEqual(result, self.invoke('pr-66', ['pr', 'view', '66'])['receipt'])
+        self.assertEqual(3, len(self.calls))
+        self.assertNotIn('SECRET', json.dumps(self.ledger.replay(0)))
+        tool = [e for e in self.native.event_snapshot() if e.get('type') == 'tool_execution_end'][-1]
+        self.assertFalse(tool['isError'])
+
     def test_actual_pi_read_observation_is_sanitized_durable_and_retry_stable(self):
         handle = self.start()
         first = self.invoke()
