@@ -230,7 +230,13 @@ class FixturePeerHub:
             return RequestCommand(**common, **payload)
         raise LedgerError("INVALID_PAYLOAD")
 
-    def submit(self, connection, traffic):
+    def submit(self, connection, traffic, *, origin=None, authorize=None):
+        """Trusted fixture seam; optional Origin is NEVER client input.
+
+        The process fixture supplies a supervisor-derived Origin and a fresh
+        authority check under the ledger transaction. Existing in-process
+        callers retain synthetic fixture authority, not process authentication.
+        """
         if type(traffic) is dict:
             traffic = self.parse(traffic)
         if type(traffic) not in (Message, WorkRequest, RequestCommand):
@@ -238,8 +244,14 @@ class FixturePeerHub:
         if not self._current(connection):
             raise LedgerError("STALE_CONNECTION")
         peer = self._state()["definition"]["participants"][connection.participant_id]
-        origin = Origin(peer["actor_id"], connection.participant_id, connection.incarnation_id,
-                        "fixture-v1", ("peer-traffic",))
+        if origin is None:
+            origin = Origin(peer["actor_id"], connection.participant_id, connection.incarnation_id,
+                            "fixture-v1", ("peer-traffic",))
+        elif (type(origin) is not Origin or origin.actor_id != peer["actor_id"]
+              or origin.participant_id != connection.participant_id
+              or origin.incarnation_id != connection.incarnation_id
+              or "peer-traffic" not in origin.capabilities or authorize is None):
+            raise LedgerError("FORBIDDEN")
         if type(traffic) is RequestCommand:
             payload = {"request_id": traffic.request_id, "action": traffic.action, "reason": traffic.reason}
             kind = "peer.command"
@@ -257,7 +269,9 @@ class FixturePeerHub:
             if command.kind == "peer.command":
                 return self._request_command(state, connection, command)
             return self._admit(state, connection, origin, command)
-        return self.ledger.apply(operation, origin, authorize=lambda *_: self._current(connection), decide=decide)
+        return self.ledger.apply(operation, origin,
+                                 authorize=lambda *_: self._current(connection)
+                                 and (authorize is None or authorize() is True), decide=decide)
 
     def _admit(self, state, connection, origin, command):
         domain, payload = state["peer_traffic"], command.payload
