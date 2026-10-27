@@ -167,6 +167,36 @@ def receive_setup_listener(channel,child,diagnostic):
                 'errno_types_truncated':len(errnos)>8})
 
 
+def setup_listener_child(left,right,path,group):
+    """Exact fork child for VM and Linux smoke; never returns to the parent.
+
+    Caller owns reaping and has enabled SO_PASSCRED before fork. MAC labels
+    remain exclusively in labeled_listener; this shared child never sets policy.
+    """
+    phase='alarm'
+    try:
+        signal.signal(signal.SIGALRM,signal.SIG_DFL);signal.alarm(10)
+        phase='close-parent';left.close();right.settimeout(1)
+        phase='drop-groups-gid';os.setgroups([group]);os.setgid(165533)
+        phase='drop-uid';os.setuid(165533)
+        phase='socket'
+        with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as listener:
+            phase='bind';listener.bind(str(path))
+            phase='listen';listener.listen(4)
+            phase='group';os.chown(path,-1,group)
+            phase='mode';os.chmod(path,0o620)
+            phase='send'
+            sent=right.sendmsg([b'LISTENER'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[listener.fileno()]))])
+            if sent!=8:raise OSError(errno.EIO,'incomplete fixed listener transfer')
+        os._exit(0)
+    except BaseException as failure:
+        number=getattr(failure,'errno',None)
+        if type(number) is not int or not 1<=number<=4095:number=0
+        try:right.send(SETUP_FAILURE.pack(b'LSF1',SETUP_CHILD_PHASES.index(phase)+1,number))
+        except BaseException:pass
+        os._exit(125)
+
+
 def labeled_listener(path,group,level):
     """Root fixture child listens as165533, transfers exact FD, then exits.
 
@@ -192,29 +222,7 @@ def labeled_listener(path,group,level):
         left.setsockopt(socket.SOL_SOCKET,socket.SO_PASSCRED,1)
         expect(left.getsockopt(socket.SOL_SOCKET,socket.SO_PASSCRED)==1,'setup credentials unavailable')
         diagnostic['phase']='fork';child=os.fork()
-        if child==0:
-            phase='alarm'
-            try:
-                signal.signal(signal.SIGALRM,signal.SIG_DFL);signal.alarm(10)
-                phase='close-parent';left.close();right.settimeout(1)
-                phase='drop-groups-gid';os.setgroups([group]);os.setgid(165533)
-                phase='drop-uid';os.setuid(165533)
-                phase='socket'
-                with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as listener:
-                    phase='bind';listener.bind(str(path))
-                    phase='listen';listener.listen(4)
-                    phase='group';os.chown(path,-1,group)
-                    phase='mode';os.chmod(path,0o620)
-                    phase='send'
-                    sent=right.sendmsg([b'LISTENER'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[listener.fileno()]))])
-                    if sent!=8:raise OSError(errno.EIO,'incomplete fixed listener transfer')
-                os._exit(0)
-            except BaseException as failure:
-                number=getattr(failure,'errno',None)
-                if type(number) is not int or not 1<=number<=4095:number=0
-                try:right.send(SETUP_FAILURE.pack(b'LSF1',SETUP_CHILD_PHASES.index(phase)+1,number))
-                except BaseException:pass
-                os._exit(125)
+        if child==0:setup_listener_child(left,right,path,group)
         right.close();right=None;left.settimeout(5)
         diagnostic['phase']='receive'
         result=receive_setup_listener(left,child,diagnostic)

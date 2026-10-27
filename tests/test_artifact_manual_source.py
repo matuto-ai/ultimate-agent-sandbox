@@ -182,7 +182,8 @@ class ArtifactManualSourceTests(unittest.TestCase):
 
     def test_real_listener_uid_is_set_before_listen_not_inferred_from_chown(self):
         source=(VM/'guest_artifacts.py').read_text()
-        child=source[source.index('        if child==0:'):source.index('        right.close();right=None')]
+        child=source[source.index('def setup_listener_child('):source.index('def labeled_listener(')]
+        self.assertIn('if child==0:setup_listener_child(left,right,path,group)',source)
         self.assertLess(child.index('os.setuid(165533)'),child.index('listener.listen(4)'))
         self.assertIn('os.setgroups([group]);os.setgid(165533)',child)
         self.assertNotIn('seccomp=unconfined',source)

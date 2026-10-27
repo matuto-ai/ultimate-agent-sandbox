@@ -157,6 +157,35 @@ binary check correctly refused real copied-store execution. Materialization
 unit tests use explicitly synthetic verified raw-object readers; this is **not**
 a real Git/materializer or native boundary qualification.
 
+Ordinary GitHub CI additionally runs `tests/linux/artifact_smoke.py` on a disposable
+Ubuntu runner: the exact generated two-Room raw config is relocated under one
+exclusive `/tmp` tree. A root fixture provisions only that tree; numeric nonroot
+Supervisor/helper/control processes exercise real root-owned 0711 search-only
+ancestry, unreadable-leaf and no-follow refusals, the shared VM listener child and
+SCM_RIGHTS/SCM_CREDENTIALS parser, inherited listener descriptors, endpoint identity
+replacement fencing, and real Supervisor/allocator/resolver/target/launch-journal
+constructors. The fixed trusted Git/prlimit reader materializes actual packed
+committed bytes despite dirty files and poisoned source hooks/config, then removes
+only its owned target. No Engine or native admission is called. Account creation,
+mounts, host policy changes, dependency installation and permissive fallbacks are
+absent. A fixed bounded allowlist is staged into the root-owned fixture, without
+changing checkout/home permissions. Missing prerequisites fail rather than skip.
+On any failure, the private fixture is retained on the disposable runner and
+cleanup is not claimed; uncertain/reaped process-group identities are not signaled.
+Numeric children have their own bounded expiry (27 seconds maximum for the
+Supervisor, 5 for a connector), independent of the parent wait and additionally
+capped by the original parent deadline plus at most 3 seconds for cleanup/rounding.
+
+This narrow smoke has a 40-second internal deadline, a 43-second command timeout plus a 2-second hard-kill grace (45 seconds maximum) and
+a 1-minute job bound, running alongside the existing 2-minute Docker fixture after
+the 1-minute aggregate: the automatic critical-path budget remains 3 minutes, not
+another VM build. Its report records per-Room and total elapsed seconds; actual
+GitHub job timestamps establish observed CI duration (runner queue time is not
+controlled by these execution bounds). Passing it is Linux DAC/FD/config/Git
+evidence only—not SELinux/MCS, Landlock, seccomp, XFS quota, mount/namespace,
+kernel-bound helper, full-VM or production admission evidence. Development
+executors with native restrictions run only its pure source-contract tests.
+
 A separate deliberate disposable-VM artifacts profile must exercise the real
 trusted Git reader, poison-source negatives, static binaries, UID/outer profile,
 actual target-only filesystem access, syscall/network/FD constraints, exact

@@ -345,8 +345,10 @@ class ListenerSourceTests(unittest.TestCase):
         self.assertLess(function.index('require_setup_reaping()'),function.index('ctypes.CDLL('))
         self.assertLess(function.index('require_setup_reaping()'),function.index('socket.socketpair('))
         self.assertLess(function.index('socket.SO_PASSCRED,1'),function.index('child=os.fork()'))
-        self.assertLess(function.index('os.setuid(165533)'),function.index('with socket.socket('))
-        self.assertLess(function.index('os.setuid(165533)'),function.index('listener.listen(4)'))
+        child=source[source.index('def setup_listener_child('):source.index('def labeled_listener(')]
+        self.assertIn('if child==0:setup_listener_child(left,right,path,group)',function)
+        self.assertLess(child.index('os.setuid(165533)'),child.index('with socket.socket('))
+        self.assertLess(child.index('os.setuid(165533)'),child.index('listener.listen(4)'))
         self.assertIn('os.waitpid(child,os.WNOHANG)',source)
         self.assertNotIn('os.waitpid(child,0)',function)
     def test_quota_checkpoint_follows_independent_echo_and_postcheck_before_listener(self):
