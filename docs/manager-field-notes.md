@@ -85,8 +85,9 @@ arguments or credential references. Its binding digest identifies configuration
 metadata, **not** a live source version.
 
 `render()` embeds a fresh bounded, escaped JSON capture into the existing HTML.
-The page has no network client or command transport. An authorized containing
-host may supply another capture through `installDocument()` or reload a freshly
+The page has no built-in network client and is read-only without an explicit
+authenticated action attachment (see [Manager actions](manager-actions.md)).
+An authorized containing host may supply another capture through `installDocument()` or reload a freshly
 rendered document; this closes old drawers/dialogs before showing new facts.
 The page independently ages its accepted snapshot deadline and warns on clock
 skew. No page refresh extends a source observation's lifetime. Rendering this
@@ -142,3 +143,32 @@ focus/Escape, navigation/Back, disconnected/reconnected state and mobile overflo
 Five bounded screenshots and a JSON receipt are retained for independent pixel
 inspection. Source/harness review must precede hosted execution. At this source
 checkpoint the real-browser mode and pixel inspection have **not run**.
+
+
+## Optional typed human controls
+
+A trusted containing host can call `installActionHost(projectKey, binding)` for
+one already-authorized Room. The binding exposes `view(runId)`, `lifecycle()`,
+`replacement(participantId)`, `execute(packet)`, and `inspect(originalPacket)` through its existing
+transport to `FieldNotesActionHost`. No browser JSON supplies a HumanSession,
+login, credential, endpoint, owner or Room authority. Missing bindings retain
+read-only controls. Opening Human controls obtains fresh owner eligibility;
+projection status does not enable an action.
+
+The panel preserves the owner's exact scope, version, object and generation.
+One in-flight packet blocks duplicate clicks. An unknown response keeps the
+original operation identity without offering a replacement mutation or automatic
+retry; the user can refresh owner state and use a separately eligible explicit
+reconciliation action. Receipt, selected-not-launched, denied, partial and unknown
+outcomes remain literal. Snapshot replacement or disconnection closes controls.
+Open in GitHub remains a source link, not a merge action.
+
+The browser action fixture uses a controlled injected adapter to verify actual
+clicks, modal focus, packet construction and uncertainty presentation. Separate
+Python host integration tests exercise those envelopes against actual Hub owners
+with controlled backend resources. Neither is a deployed login or account proof.
+
+The unresolved-action panel also offers explicit read-only inspection of the
+unchanged original packet. It clears uncertainty only when the owner confirms a
+matching durable receipt. Failed navigation or inspection cannot overwrite that
+original uncertain mutation, and neither operation repeats the mutation.

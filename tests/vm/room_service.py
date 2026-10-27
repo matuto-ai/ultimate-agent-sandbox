@@ -302,17 +302,18 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run):
             try: endpoint_.require()
             except ExecUnavailable: pass
             else: raise RuntimeError('replacement socket passed original endpoint lease')
-            with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as observer:
-                observer.settimeout(2); observer.connect(str(path))
-                # Client-side SO_PEERSEC observes the listening socket SID,
-                # not the root listener owner's process context.
-                foreign_label = observer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERSEC, 1024).decode().rstrip('\0')
-                require_process_label(foreign_label, ROOMS['beta'][3])
-                accepted, _ = foreign.accept(); accepted.close()
+            # SO_PEERSEC reports the accepted connection's SID, whose MLS
+            # range SELinux copies from the connecting client. It does NOT
+            # measure this listener's original MCS. Query the retained socket
+            # descriptor's sockfs inode instead, not its relabeled pathname.
+            foreign_label = os.getxattr(foreign.fileno(), 'security.selinux').decode()
+            require_process_label(foreign_label, ROOMS['beta'][3])
+            foreign_label = foreign_label.removesuffix('\0')
             denied = probe('alpha', 'endpoint')
             require(denied == {'connected': False, 'error': 'EACCES'},
                     'foreign socket SID with same-Room pathname was not denied')
-            result = {'socket_peer_label': foreign_label, 'pathname_label': file_label,
+            result = {'socket_object_label': foreign_label, 'pathname_label': file_label,
+                      'socket_label_source': 'held-listener-fd-security.selinux',
                       'denied': denied, 'replacement_lease_denied': True,
                       'original_lease': list(original)}
         finally:

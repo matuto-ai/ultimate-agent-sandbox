@@ -294,7 +294,9 @@ class RoomProfileTests(unittest.TestCase):
         text=ast.unparse(negative)
         self.assertIn("level=ROOMS['beta'][3]",text)
         self.assertIn("run('chcon', '-t', 'container_file_t', '-l', ROOMS['alpha'][3], str(path))",text)
-        self.assertIn('observer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERSEC, 1024)',text)
+        self.assertIn("os.getxattr(foreign.fileno(), 'security.selinux')",text)
+        self.assertNotIn('SO_PEERSEC', ast.unparse(negative))
+        self.assertNotIn('foreign.accept()', text)
         self.assertIn('except ExecUnavailable:',text)
         self.assertIn("'original_lease': list(original)",text)
         cleanup=next(node.finalbody for node in ast.walk(negative)
@@ -316,7 +318,7 @@ class RoomProfileTests(unittest.TestCase):
     def test_foreign_socket_sid_restores_exact_lease_on_success_and_probe_or_close_failure(self):
         from contextlib import nullcontext
         from uas.workstation_exec import ExecUnavailable
-        for fault in (None,'probe','close','helper'):
+        for fault in (None,'probe','close','helper','wrong-mcs','wrong-type','extra-nul','fd-read'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as temporary:
                 directory=Path(temporary)/'alpha/git';directory.mkdir(parents=True)
                 path=directory/'request.sock';path.write_bytes(b'original inert file')
@@ -327,25 +329,44 @@ class RoomProfileTests(unittest.TestCase):
                     now=path.stat()
                     if (now.st_dev,now.st_ino)!=original[2:]:raise ExecUnavailable('inert lease replaced')
                 endpoint=SimpleNamespace(room='alpha',leases=(lease,),parent=directory,require=Mock(side_effect=recheck))
-                foreign=Mock();foreign.accept.return_value=(Mock(),None)
+                foreign=Mock();foreign.fileno.return_value=123
                 if fault=='close':foreign.close.side_effect=RuntimeError('inert close failure')
                 def create(target,group,*,level):
                     self.assertEqual(165532,group);self.assertEqual(native_guest.SIBLING_LEVEL,level)
                     target.write_bytes(b'inert replacement')
                     if fault=='helper':raise RuntimeError('inert uncertain helper failure')
                     return foreign
-                observer=Mock();observer.__enter__=Mock(return_value=observer);observer.__exit__=Mock(return_value=False)
-                observer.getsockopt.return_value=('system_u:system_r:container_t:'+native_guest.SIBLING_LEVEL).encode()
+                def label(target, attribute, **options):
+                    self.assertEqual('security.selinux', attribute)
+                    if target == 123:
+                        self.assertEqual({}, options)
+                        if fault == 'fd-read': raise OSError('inert fd label unavailable')
+                        value = 'system_u:system_r:container_t:' + native_guest.SIBLING_LEVEL
+                        if fault == 'wrong-mcs': value = 'system_u:system_r:container_t:' + native_guest.LEVEL
+                        if fault == 'wrong-type': value = 'system_u:object_r:container_file_t:' + native_guest.SIBLING_LEVEL
+                        if fault == 'extra-nul': value += '\0\0'
+                        return value.encode()
+                    self.assertEqual(path, target)
+                    self.assertEqual({'follow_symlinks':False}, options)
+                    return ('system_u:object_r:container_file_t:'+native_guest.LEVEL).encode()
                 probe=Mock(return_value={'connected':True} if fault=='probe' else {'connected':False,'error':'EACCES'})
                 with patch.object(native_guest,'labeled_listener',side_effect=create), \
-                     patch.object(room_service.socket,'socket',return_value=observer), \
-                     patch.object(room_service.os,'getxattr',return_value=('system_u:object_r:container_file_t:'+native_guest.LEVEL).encode()):
+                     patch.object(room_service.socket,'socket',side_effect=AssertionError('observer connection forbidden')), \
+                     patch.object(room_service.os,'getxattr',side_effect=label):
                     action=lambda:room_service.prove_foreign_socket_sid(SimpleNamespace(_locked=nullcontext),endpoint,probe,run=Mock())
-                    if fault:
+                    if fault in ('wrong-mcs','wrong-type','extra-nul'):
+                        with self.assertRaisesRegex(AssertionError,'actual SELinux label'):action()
+                        probe.assert_not_called()
+                    elif fault == 'fd-read':
+                        with self.assertRaisesRegex(OSError,'fd label unavailable'):action()
+                        probe.assert_not_called()
+                    elif fault:
                         with self.assertRaisesRegex(RuntimeError,'cleanup failed' if fault in ('close','helper') else 'not denied'):action()
                     else:
                         result=action();self.assertTrue(result['original_lease_restored'])
                         self.assertEqual(list(original),result['original_lease'])
+                        self.assertEqual('system_u:system_r:container_t:'+native_guest.SIBLING_LEVEL,result['socket_object_label'])
+                        self.assertEqual('held-listener-fd-security.selinux',result['socket_label_source'])
                 if fault=='helper':
                     self.assertEqual(b'original inert file',(directory.parent/'git-sid-negative/request.sock').read_bytes())
                     self.assertEqual(b'inert replacement',path.read_bytes())

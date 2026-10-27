@@ -140,10 +140,17 @@ class Supervisor:
             document = json.loads(self._manifest.read_text(), object_pairs_hook=_unique_object)
             required = {"version", "room_id", "instance_id", "spec", "phase", "desired",
                         "created_at", "pending_spec", "authority"}
-            optional = {"leftovers", "destroy_requested_at", "destroyed_at", "remote_start", "control_plane_required"} | REVISION_FIELDS
+            optional = {"leftovers", "destroy_requested_at", "destroyed_at", "remote_start", "control_plane_required", "manager_action"} | REVISION_FIELDS
             if type(document) is not dict or not required <= document.keys() or document.keys() - required - optional:
                 raise ValueError("manifest fields")
             validate_revision(document)
+            if "manager_action" in document:
+                marker = document["manager_action"]
+                if (type(marker) is not dict or set(marker) != {"operation_id", "request_digest"}
+                        or type(marker["operation_id"]) is not str
+                        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", marker["operation_id"])
+                        or type(marker["request_digest"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", marker["request_digest"])):
+                    raise ValueError("Manager action marker")
             if "control_plane_required" in document and document["control_plane_required"] is not True:
                 raise ValueError("control plane requirement")
             if "remote_start" in document:
@@ -405,6 +412,14 @@ class Supervisor:
             state["desired"], state["phase"] = "stopped", "stopping"
             self._save(state)
             return self._converge_stopped(state)
+
+    def manager_action(self, value, *, session, deployment_id, ledger):
+        from .manager_lifecycle import execute
+        return execute(self, value, session=session, deployment_id=deployment_id, ledger=ledger)
+
+    def manager_view(self, *, session, deployment_id):
+        from .manager_lifecycle import view
+        return view(self, session=session, deployment_id=deployment_id)
 
     def _revoked(self, state, scope):
         try:
