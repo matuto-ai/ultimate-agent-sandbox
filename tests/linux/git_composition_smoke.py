@@ -384,6 +384,35 @@ def connected_checks(root, jail, worktree, digest):
         if failures: raise AssertionError('composition fixture cleanup uncertain') from failures[0]
 
 
+def owned_supervisor(root, jail, worktree, digest):
+    """PID1 owns/reaps one Supervisor child; it is not the Supervisor itself.
+
+    The unmodified kernel probe requires a known live parent. Keep namespace
+    init alive for that proof, retaining the outer absolute deadline and
+    kill-child namespace cleanup rather than weakening production admission.
+    """
+    require(os.getpid() == 1, 'fixture namespace init must own Supervisor')
+    pid = os.fork()
+    if pid == 0:
+        try:
+            require(os.getpid() != 1 and os.getppid() == 1,
+                    'Supervisor requires its live owned namespace parent')
+            connected_checks(root, jail, worktree, digest)
+            sys.stdout.flush(); sys.stderr.flush()
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            os._exit(125)
+        os._exit(0)
+    child = OwnedChild(pid)
+    try:
+        while child.observation() is None:
+            time.sleep(.01)  # PID1's absolute SIGALRM deadline remains active.
+        child.finish(success=True)
+    finally:
+        child.finish()  # Only this unreaped child; never adopt a numeric PID.
+
+
 def namespace(root):
     smoke = helpers(); smoke.gate()
     require(signal.SIGALRM not in signal.pthread_sigmask(signal.SIG_BLOCK, ()),
@@ -399,7 +428,7 @@ def namespace(root):
     worktree, _home = smoke.provision(root)
     jail = private_root(root, smoke)
     digest = smoke.sealed_backend()
-    try: connected_checks(root, jail, worktree, digest)
+    try: owned_supervisor(root, jail, worktree, digest)
     finally: os.close(19)
 
 

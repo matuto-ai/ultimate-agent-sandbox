@@ -141,6 +141,16 @@ def provision(root):
     (binaries / 'git-ssh-shim').chmod(0o555)
     entries = json.loads((ROOT / 'runtime/git/public-entries.json').read_text())
     launcher = (ROOT / 'runtime/git/launcher.py').read_bytes()
+    # The runner checkout's ancestors need not be traversable by fixture UIDs.
+    # Stage reviewed source bytes while privileged; never chmod runner paths or
+    # read/re-exec that checkout after dropping identity. /opt becomes readonly.
+    sources = package / 'fixture-sources'
+    sources.mkdir(mode=0o755)
+    for source, name in ((ROOT / 'runtime/git/launcher.py', 'launcher.py'),
+                         (ROOT / 'runtime/git/public-entries.json', 'public-entries.json'),
+                         (ROOT / 'tests/linux/git_stream_smoke.py', 'git_stream_smoke.py')):
+        shutil.copyfile(source, sources / name)
+        (sources / name).chmod(0o444)
     require(type(entries) is list and len(entries) == len(set(entries))
             and all(type(name) is str and name in {'git', 'scalar'} or
                     type(name) is str and name.startswith('git-') and name[4:].replace('-', '').isalpha()
@@ -301,8 +311,15 @@ def native_checks(worktree, home, digest):
     # Real public entry processes reject before socket creation; there is no
     # request endpoint in this Runtime-only fixture and native Git is never a
     # fallback for a public helper spelling or command/config escape.
-    launcher_digest = hashlib.sha256((ROOT / 'runtime/git/launcher.py').read_bytes()).hexdigest()
-    for name in json.loads((ROOT / 'runtime/git/public-entries.json').read_text()):
+    sources = Path('/opt/uas/fixture-sources')
+    for name in ('launcher.py', 'public-entries.json'):
+        source = sources / name
+        require(not source.is_symlink() and source.stat().st_uid == 0
+                and stat.S_IMODE(source.stat().st_mode) == 0o444
+                and os.statvfs(source).f_flag & os.ST_RDONLY,
+                'reviewed fixture source projection differs')
+    launcher_digest = hashlib.sha256((sources / 'launcher.py').read_bytes()).hexdigest()
+    for name in json.loads((sources / 'public-entries.json').read_text()):
         entry = Path('/opt/uas/bin') / name
         require(not entry.is_symlink() and entry.stat().st_uid == 0
                 and stat.S_IMODE(entry.stat().st_mode) == 0o555

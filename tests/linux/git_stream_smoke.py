@@ -330,7 +330,7 @@ def namespace(root):
                 os.setgid(BROKER_GID)
                 os.setuid(BROKER_UID)
                 broker_child.set_inheritable(True)
-                os.execve(sys.executable, [sys.executable, str(Path(__file__).resolve()), '--broker',
+                os.execve(sys.executable, [sys.executable, '/opt/uas/fixture-sources/git_stream_smoke.py', '--broker',
                     str(broker_child.fileno()), str(private), transport_digest, str(supervisor_gid)],
                     {'PATH': '/usr/bin:/bin', 'PYTHONPATH': '/opt/uas', 'PYTHONDONTWRITEBYTECODE': '1',
                      'GITHUB_ACTIONS': 'true', 'RUNNER_OS': 'Linux'})
