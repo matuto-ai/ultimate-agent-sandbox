@@ -888,8 +888,14 @@ class ArtifactTargets:
         with self._lock:
             return self._prepare(scope, source)
 
-    def _prepare(self, scope, source):
+    def _prepare(self, scope, source, *, revision=None):
+        # Only trusted Supervisor-owned pair preparation uses revision. The
+        # artifacts entry point above never accepts a revision override.
         validate_scope(scope); validate_source(source)
+        if revision is None:
+            revision = source['head_sha']
+        if type(revision) is not str or not _OID.fullmatch(revision):
+            _fail('INVALID_ARTIFACT_REVISION')
         if any(scope[k] != source[k] for k in ('room_instance', 'project_id', 'repository', 'run_id', 'participant_id')):
             _fail('ARTIFACT_SCOPE_SOURCE_MISMATCH')
         evaluation = scope['evaluation_id']
@@ -948,7 +954,7 @@ class ArtifactTargets:
             try:
                 reader = CopiedObjectReader(store, deadline)
                 try:
-                    observed = materialize(reader, source['head_sha'], lease.path / 'tree', deadline)
+                    observed = materialize(reader, revision, lease.path / 'tree', deadline)
                 finally:
                     reader.close()
             except ArtifactError as error:
@@ -967,7 +973,7 @@ class ArtifactTargets:
                     allocated += os.lstat(Path(directory) / name).st_blocks * 512
             if allocated > RESERVATION_BYTES - (1 << 20):
                 _fail('ARTIFACT_ALLOCATION_LIMIT')
-            lease.target = {'target_id': target_id, 'head_sha': source['head_sha'],
+            lease.target = {'target_id': target_id, 'head_sha': revision,
                 'source_digest': source['source_digest'], **observed}
             validate_target(lease.target)
             lease.phase = 'prepared'; self._save(lease)

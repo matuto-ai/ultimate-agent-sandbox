@@ -15,7 +15,7 @@ from .ledger import LedgerError
 
 # Only internally constructed REST paths for the declared read table. Query
 # names and values are fixed/reduced by the provider, never raw Participant argv.
-_PATH = re.compile(r'repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:/(?:issues(?:/[1-9][0-9]*(?:/(?:comments|labels|dependencies/(?:blocked_by|blocking)))?)?|pulls(?:/comments/[1-9][0-9]*|/[1-9][0-9]*(?:/(?:comments|reviews|files|commits))?)?|labels|contents/[^?#]+|commits/[A-Za-z0-9._%/-]+(?:/(?:check-runs|statuses|status))?|actions/(?:workflows(?:/[1-9][0-9]*)?|runs(?:/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?(?:/jobs)?)?|jobs/[1-9][0-9]*)))?(?:\?[A-Za-z0-9_%.=,&+-]+)?\Z')
+_PATH = re.compile(r'repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:/(?:issues(?:/[1-9][0-9]*(?:/(?:comments|labels|dependencies/(?:blocked_by|blocking)))?)?|pulls(?:/comments/[1-9][0-9]*|/[1-9][0-9]*(?:/(?:comments|reviews|files|commits))?)?|labels|branches/[A-Za-z0-9._%~-]+(?:/protection)?|rules/branches/[A-Za-z0-9._%~-]+|compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|contents/[^?#]+|commits/[A-Za-z0-9._%/-]+(?:/(?:check-runs|statuses|status))?|actions/(?:workflows(?:/[1-9][0-9]*)?|runs(?:/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?(?:/jobs)?)?|jobs/[1-9][0-9]*)))?(?:\?[A-Za-z0-9_%.=,&+-]+)?\Z')
 _ALLOWED_QUERY = {'per_page', 'page', 'state', 'ref', 'filter', 'status', 'branch', 'head_sha', 'assignee', 'creator', 'mentioned'}
 _ACCEPT = {'application/vnd.github+json', 'application/vnd.github.diff', 'application/vnd.github.raw+json'}
 

@@ -18,9 +18,14 @@ REQUEST = re.compile(r'[0-9a-f]{32}\Z')
 
 
 class AdmittedPeerDispatcher:
-    def __init__(self, admissions, hub):
+    def __init__(self, admissions, hub, *, contributions=None):
         if type(admissions) is not HubAdmission or type(hub) is not FixturePeerHub:
             raise OriginDenied('trusted admission and existing Hub required')
+        if contributions is not None:
+            from .gate_identity import ContributionOwner
+            if type(contributions) is not ContributionOwner or contributions.ledger is not hub.ledger:
+                raise OriginDenied('canonical contribution owner required')
+        self.contributions = contributions
         self.admissions, self.hub = admissions, hub
         self._connections = {}
         self._delivery_offers = {}
@@ -136,6 +141,49 @@ class AdmittedPeerDispatcher:
         return Origin(binding.seat.actor_id, binding.seat.participant_id,
                       binding.incarnation, authority, binding.seat.capabilities)
 
+    def actor_authority(self, actor_id, authority_version=None):
+        """Read current admitted Actor while caller retains admission fence.
+
+        Match the exact authenticated submission epoch rather than borrowing
+        a sibling seat's profile. A reset invalidates old authority but never
+        rewrites contribution history.
+        """
+        if not getattr(self.admissions._authorization, 'depth', 0):
+            raise OriginDenied('authority fence required before Gate transaction')
+        if actor_id not in {seat.actor_id for seat in self.admissions.seats.values()}:
+            raise LedgerError('GATE_IDENTITY_UNAVAILABLE')
+        origins = []
+        for operation, connection in tuple(self._connections.items()):
+            active = self.admissions._active.get(operation)
+            if active is None or active[1].seat.actor_id != actor_id:
+                continue
+            _, binding = self.admissions._check_current(operation)
+            if not self.hub._current(connection):
+                continue
+            origins.append(self._origin(binding))
+        if authority_version is not None:
+            origins = [origin for origin in origins if origin.authority_version == authority_version]
+        if len(origins) > 1:
+            raise LedgerError('GATE_IDENTITY_AMBIGUOUS')
+        if not origins:
+            return {'actor_id': actor_id, 'kind': 'participant', 'active': False,
+                    'authority_epoch': authority_version or 'inactive', 'capabilities': []}
+        origin = origins[0]
+        return {'actor_id': actor_id, 'kind': 'participant', 'active': True,
+                'authority_epoch': origin.authority_version, 'capabilities': sorted(origin.capabilities)}
+
+    def _submit(self, operation, record, binding, envelope):
+        connection = self._connections.get(operation)
+        if connection is None or not self.hub._current(connection):
+            raise LedgerError('STALE_CONNECTION')
+        authorize = lambda: (self.admissions.recheck(operation, record)
+                             and self.hub._current(connection))
+        origin = self._origin(binding)
+        if envelope.get('kind') == 'contribution':
+            if self.contributions is None: raise LedgerError('CONTRIBUTION_UNAVAILABLE')
+            return self.contributions.submit(envelope, origin=origin, authorize=authorize)
+        return self.hub.submit(connection, envelope, origin=origin, authorize=authorize)
+
     def receive(self, operation):
         channel = self.admissions.peer_channel(operation)
         request_id = None
@@ -147,12 +195,7 @@ class AdmittedPeerDispatcher:
                     request_id = frame['request_id']
                     if frame['envelope'].get('kind') == 'forge-read':
                         raise LedgerError('FORGE_UNAVAILABLE')
-                    connection = self._connections.get(operation)
-                    if connection is None:
-                        raise LedgerError('STALE_CONNECTION')
-                    receipt = self.hub.submit(connection, frame['envelope'],
-                        origin=self._origin(binding),
-                        authorize=lambda: self.admissions.recheck(operation, record))
+                    receipt = self._submit(operation, record, binding, frame['envelope'])
             result = {'request_id': request_id, 'ok': True, 'receipt': receipt}
         except LedgerError as error:
             result = {'request_id': request_id, 'ok': False, 'error': error.code}

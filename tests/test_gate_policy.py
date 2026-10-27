@@ -56,13 +56,13 @@ class GatePolicyTests(unittest.TestCase):
                 self.gate[missing] = original
 
     def test_unimplemented_kinds_never_degrade_to_artifact_checks(self):
-        for kind in ('attestation', 'decision', 'unknown'):
+        for kind in ('unknown',):
             with self.subTest(kind=kind):
                 self.gate['kind'] = kind
                 self.refuses('.kind')
 
     def test_unimplemented_or_superseded_evaluators_are_refused(self):
-        for evaluator in ('command', 'diff-claims', 'forge-state', 'findings-clear', 'plugin'):
+        for evaluator in ('findings-clear', 'plugin'):
             with self.subTest(evaluator=evaluator):
                 self.gate['evaluator'] = evaluator
                 self.refuses('.evaluator')

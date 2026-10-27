@@ -7,7 +7,7 @@ import unittest
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 1, 1, 2, 1], 'claude-native.yml': [2],
+        budgets = {'validate.yml': [1, 1, 1, 1, 2, 1, 1, 2, 1], 'claude-native.yml': [2],
                    'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
@@ -20,7 +20,7 @@ class VMCITriggerTests(unittest.TestCase):
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
-                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams'}
+                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams', 'gate-linux-smoke', 'gate-command-native', 'gate-artifact-native'}
                     roots = {'validate', 'unit-slow'}
                     self.assertEqual(set(jobs), roots | integrations)
                     for root in roots:
@@ -49,6 +49,20 @@ class VMCITriggerTests(unittest.TestCase):
                                    '--preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/' + script + '\n')
                         self.assertEqual(text.count(command), 1)
                         self.assertIn(command, forge)
+                    gates = jobs['gate-linux-smoke']
+                    self.assertEqual(re.findall(r'^        if: (.+)$', gates, re.MULTILINE), [])
+                    self.assertIn('40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run & diff=$!', gates)
+                    self.assertIn('15s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/gate_forge_smoke.py & broker=$!', gates)
+                    self.assertIn('for child in "$diff" "$broker"; do', gates)
+                    self.assertIn('wait "$child" || status=1', gates)
+                    self.assertIn('exit "$status"', gates)
+                    for job, script, seconds in (
+                            ('gate-command-native', 'command_smoke.py', 65),
+                            ('gate-artifact-native', 'artifact_native_smoke.py', 43)):
+                        self.assertEqual(re.findall(r'^        if: (.+)$', jobs[job], re.MULTILINE), [])
+                        self.assertIn('persist-credentials: false', jobs[job])
+                        self.assertIn(f'{seconds}s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/{script} --run', jobs[job])
+                        self.assertNotIn('tests/vm/', jobs[job])
                     self.assertLessEqual(max(actual[:2]) + max(actual[2:]), 3)
                 else:
                     self.assertLessEqual(sum(actual), 3)

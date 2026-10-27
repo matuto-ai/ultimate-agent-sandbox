@@ -477,7 +477,7 @@ def reset_boot_marker(descriptor):
 def scenario(nonce,manifest,checks):
     sys.path[:0]=[str(ROOT),str(ROOT/'tests/vm')]
     from artifact_diagnostics import (captured, require_file_result, decoded_json,
-        FixtureCommandFailure, file_facts)
+        FixtureCommandFailure, file_facts, partial_hub_results)
     from native_rootfs import build_rootfs
     from guest_workstation import import_image,engine_profile,NATIVE_PACKAGE_PROFILE
     owned=[];listeners=[];image=None;ownership={};children=[];marker_descriptor=None
@@ -569,6 +569,26 @@ def scenario(nonce,manifest,checks):
                         raise FixtureCommandFailure('supervisor-'+room,outcome,
                             stdout=file_facts(output),stderr=file_facts(errors))
                     time.sleep(.2)
+            if child.returncode!=0:
+                # Preserve already authenticated Hub outcomes before the later
+                # confinement assertion aborts this qualification. This never
+                # converts a failing Supervisor or incomplete VM into a pass.
+                checkpoint=file_facts(output,supervisor=True).get('progress_observation',{}).get('hub')
+                if checkpoint is not None:
+                    descriptor=-1
+                    try:
+                        descriptor=os.open(Path(paths['hub'])/'report.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+                        node=os.fstat(descriptor)
+                        expect(stat.S_ISREG(node.st_mode) and node.st_uid==165531 and node.st_nlink==1
+                            and stat.S_IMODE(node.st_mode)==0o600 and 0<node.st_size<=1<<20,'bounded owned partial Hub report')
+                        raw=os.read(descriptor,(1<<20)+1)
+                        partial=partial_hub_results(raw,checkpoint)
+                        print('UAS_ARTIFACT_PARTIAL_HUB:'+json.dumps(partial,sort_keys=True),flush=True)
+                    except Exception:
+                        print('UAS_ARTIFACT_PARTIAL_HUB:'+json.dumps({'room':room,'status':'unavailable',
+                            'qualification_complete':False},sort_keys=True),flush=True)
+                    finally:
+                        if descriptor>=0:os.close(descriptor)
             require_file_result('supervisor-'+room,child.returncode,output,errors,output_limit=1<<20)
             lines=[line.split(':',1)[1] for line in output.read_text().splitlines() if line.startswith('UAS_ARTIFACT_SUPERVISOR:')]
             expect(len(lines)==1,'exact Supervisor result required');result=json.loads(lines[0]);supervisors[room]=result
