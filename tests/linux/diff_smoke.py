@@ -34,6 +34,7 @@ EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 
 # Fixed transitive Python/native closure; no runtime repository discovery.
 SOURCES = (
+    'uas/manager_actions.py', 'uas/manager_lifecycle.py',
     'tests/linux/mapped_namespace.py',
     'uas/__init__.py',
     'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/manager_journey.py',

@@ -13,7 +13,7 @@ def source_list(name, variable='SOURCES'):
     return set(ast.literal_eval(node.value))
 
 
-def local_imports(name):
+def local_imports(name, include_lazy=False):
     path = ROOT / name
     pending = list(ast.parse(path.read_bytes()).body)
     found = set()
@@ -29,7 +29,7 @@ def local_imports(name):
         node = pending.pop()
         # These imports do not run on import. Optional branches are not silently
         # staged; called lazy seams must be included explicitly by their fixture.
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)): continue
+        if not include_lazy and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)): continue
         pending.extend(ast.iter_child_nodes(node))
         if isinstance(node, ast.Import):
             for alias in node.names: resolve(alias.name, path.parent)
@@ -42,17 +42,24 @@ def local_imports(name):
     return found
 
 
-def missing_imports(paths):
+def missing_imports(paths, include_lazy=False):
     pending = [name for name in paths if name.endswith('.py')]
     seen = set(paths)
     while pending:
-        for dependency in local_imports(pending.pop()):
+        for dependency in local_imports(pending.pop(), include_lazy):
             if dependency not in seen:
                 seen.add(dependency); pending.append(dependency)
     return sorted(seen - set(paths))
 
 
 class StagedSourceClosureTests(unittest.TestCase):
+    def test_diff_stage_closes_lazy_owner_imports_too(self):
+        # Diff promises full UAS import closure. Other finite native profiles
+        # do not call the opt-in Manager action routes and retain eager closure.
+        sources = source_list('tests/linux/diff_smoke.py')
+        self.assertEqual([], missing_imports(sources, include_lazy=True))
+        self.assertLessEqual(len(sources), 128)
+
     def test_fixed_source_manifests_have_eager_import_closure(self):
         for fixture in ('tests/linux/artifact_smoke.py', 'tests/linux/diff_smoke.py',
                         'tests/linux/review_forge_smoke.py',

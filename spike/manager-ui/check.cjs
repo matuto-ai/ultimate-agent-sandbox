@@ -171,14 +171,30 @@ async function actionContract(){
   console.log('Manager actions: typed scope, owner denial, duplicate click, unknown preservation and late response contracts passed');
 }
 
+// Only the first read-only startup probe receives the cold-start allowance.
+// Injected timers keep this contract testable without a browser or real waits.
+function commandTimer({first,method,reject,onTimeout,set=setTimeout,clear=clearTimeout}){
+  const milliseconds=first&&method==='Browser.getVersion'?10000:5000;
+  const timer=set(()=>{onTimeout();reject(Error('CDP timeout: '+method));},milliseconds);
+  return {milliseconds,cancel:()=>clear(timer)};
+}
+function timerContract(){
+  for(const [first,method,expected] of [[true,'Browser.getVersion',10000],[false,'Browser.getVersion',5000],[true,'Target.createTarget',5000],[false,'Runtime.evaluate',5000]]){
+    let callback,delay,cleared=false,timedOut=false,error;
+    const timer=commandTimer({first,method,reject:value=>{error=value;},onTimeout:()=>{timedOut=true;},set:(fn,ms)=>{callback=fn;delay=ms;return 7;},clear:id=>{assert.equal(id,7);cleared=true;}});
+    assert.equal(delay,expected);assert.equal(timer.milliseconds,expected);callback();assert(timedOut&&error.message==='CDP timeout: '+method);timer.cancel();assert(cleared);
+  }
+}
+
 async function browserCheck(){
   if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Linux'||process.env.UAS_MANAGER_BROWSER_TEST!=='1')throw Error('Explicit hosted Linux browser guard required');
   const os=require('node:os'),{spawn}=require('node:child_process');
   const chrome=['/usr/bin/google-chrome','/usr/bin/chromium'].find(file=>fs.existsSync(file));
   if(!chrome)throw Error('Preinstalled Chrome unavailable; download and sandbox bypass forbidden');
   const output=path.join(root,'browser-proof'),pending=new Map();
+  const started=Date.now();let phase='spawn',failurePhase=null,failureElapsed=null;
   let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='',graceful=null,failure=null;
-  const rejectPending=error=>{for(const item of pending.values()){clearTimeout(item.timer);item.reject(error);}pending.clear();};
+  const rejectPending=error=>{for(const item of pending.values()){item.timer.cancel();item.reject(error);}pending.clear();};
   try{
     fs.mkdirSync(output);
     profile=fs.mkdtempSync(path.join(os.tmpdir(),'uas-manager-chrome-'));
@@ -192,10 +208,11 @@ async function browserCheck(){
   child.stdio[4].on('data',chunk=>{
     buffer+=chunk.toString();if(buffer.length>16*1024*1024){child.kill('SIGKILL');return;}
     let boundary;while((boundary=buffer.indexOf('\0'))>=0){const raw=buffer.slice(0,boundary);buffer=buffer.slice(boundary+1);if(!raw)continue;
-      const message=JSON.parse(raw),item=pending.get(message.id);if(item){pending.delete(message.id);clearTimeout(item.timer);message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}}
+      const message=JSON.parse(raw),item=pending.get(message.id);if(item){pending.delete(message.id);item.timer.cancel();message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}}
   });
   const command=(method,params={},sessionId)=>new Promise((resolve,reject)=>{
-    if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const id=++serial,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method));},5000);
+    if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const first=serial===0,id=++serial;phase=method;
+    const timer=commandTimer({first,method,reject,onTimeout:()=>pending.delete(id)});
     pending.set(id,{resolve,reject,timer});child.stdio[3].write(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0');
   });
     graceful=()=>command('Browser.close');
@@ -246,7 +263,7 @@ async function browserCheck(){
     await evaluate(`installActionHost(${JSON.stringify(project)},null)`);
     proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
-    failure=error;
+    failure=error;failurePhase=phase;failureElapsed=Math.max(0,Date.now()-started);
   }finally{
     clearTimeout(deadline);
     try { await closeOwnedBrowser(child,lifetime,graceful,profile); }
@@ -255,14 +272,15 @@ async function browserCheck(){
       else failure=cleanupError;
     }
     rejectPending(Error('Browser session closed'));
-    for(const item of pending.values())clearTimeout(item.timer);
+    for(const item of pending.values())item.timer.cancel();
   }
   if(failure){
-    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',error:failure.message,stderr:errors},null,2));
+    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',phase:failurePhase||'cleanup',elapsed_ms:failureElapsed===null?Math.max(0,Date.now()-started):failureElapsed,error:failure.message.slice(0,4096),stderr:errors},null,2));
     throw failure;
   }
   // Never publish a success receipt before actual child termination/cleanup.
   fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed'},null,2));
   console.log(`manager real-browser proof: ${proof.routes.length} routes; ${proof.browser.product}; ${output}/receipt.json`);
 }
+timerContract();
 ownershipContract().then(actionContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
