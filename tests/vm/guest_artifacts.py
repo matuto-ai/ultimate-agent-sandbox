@@ -8,6 +8,7 @@ import array
 import ctypes
 import errno
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -266,43 +267,78 @@ def labeled_listener(path,group,level):
     return result
 
 
-def storage(nonce,ownership):
-    device=Path('/dev/disk/by-id/virtio-uas-quota').resolve()
-    expect(device.is_block_device() and int(run('blockdev','--getsize64',str(device)))==2*1024**3,'exact disposable quota disk')
-    run('mkfs.xfs','-f',str(device));STORAGE.mkdir();ownership['mounted']=True
-    run('mount','-o','prjquota,nodev,nosuid',str(device),str(STORAGE))
-    scratch=Path('/run/uas-artifacts-'+nonce);scratch.mkdir(mode=0o711);ownership['scratch']=scratch
-    state=scratch/'lifecycle';state.mkdir(mode=0o700);os.chown(state,165533,165533)
+def fixture_layout(nonce,template):
+    """Pure complete fixed layout/config; no directories, mounts or Git effects.
+
+    Runtime and tests consume this same raw configuration. The normalized
+    config.load result is validation only, never serialized back as raw input.
+    """
+    expect(type(nonce) is str and re.fullmatch(r'[0-9a-f]{32}',nonce),
+        'fixed disposable nonce required')
+    config=json.loads(json.dumps(template))
+    expect(type(config) is dict and type(config.get('rooms')) is list
+        and len(config['rooms'])==2 and {item.get('id') for item in config['rooms']}=={'alpha','beta'},
+        'exact two-Room fixture template required')
+    scratch=Path('/var/lib/uas-artifacts-'+nonce)
+    state=scratch/'lifecycle';configuration=scratch/'configuration.json'
     rooms={}
     for index,room in enumerate(('alpha','beta')):
-        level=LEVELS[room];base=STORAGE/room;base.mkdir(mode=0o755);os.chown(base,165533,165533)
-        project=301+index*2
-        run('xfs_quota','-x','-c',f'project -s -p {base} {project}',str(STORAGE))
-        run('xfs_quota','-x','-c',f'limit -p bhard=262144k ihard=8192 {project}',str(STORAGE))
-        paths={'room':room,'room_root':str(base),'room_instance':hashlib.sha256((nonce+room).encode()).hexdigest()[:32],
-            'level':level,'state':str(state),'project':project}
-        for name,mode,uid,gid in [('repo',0o755,165533,165533),('checkouts',0o755,165533,165533),
-                ('workspace',0o755,165532,165532),('reference',0o755,165533,165533),('scratch',0o711,165533,165533)]:
-            path=base/name;path.mkdir(mode=mode);path.chmod(mode);os.chown(path,uid,gid);paths[name]=str(path)
-        hub=STORAGE/(room+'-hub');hub.mkdir(mode=0o700);os.chown(hub,165531,165531)
-        run('xfs_quota','-x','-c',f'project -s -p {hub} {project+1}',str(STORAGE))
-        run('xfs_quota','-x','-c',f'limit -p bhard=65536k ihard=2048 {project+1}',str(STORAGE));paths['hub']=str(hub)
-        for name,group,mode in [('gate',165530,0o710),('control',165531,0o710),('journal',165533,0o700)]:
-            path=base/'.supervisor' if name=='journal' else scratch/(room+'-'+name)
-            path.mkdir(mode=mode);path.chmod(mode);os.chown(path,165533,group);paths[name]=str(path)
-            if name!='journal':run('chcon','-t','container_file_t','-l',level,str(path))
-        run('chcon','-R','-t','container_file_t','-l',level,str(base),str(hub));rooms[room]=paths
-    sentinel=Path(rooms['alpha']['scratch'])/'cross-room-sentinel'
-    sentinel.write_bytes(b'fixed-no-secret-marker\n');sentinel.chmod(0o444);os.chown(sentinel,165533,165530)
-    run('chcon','-t','container_file_t','-l',LEVELS['alpha'],str(sentinel))
-    config=json.loads((ROOT/'tests/fixtures/two-rooms.json').read_text())
+        base=STORAGE/room
+        paths={'room':room,'room_root':str(base),
+            'room_instance':hashlib.sha256((nonce+room).encode()).hexdigest()[:32],
+            'level':LEVELS[room],'state':str(state),'project':301+index*2,
+            'hub':str(STORAGE/(room+'-hub')),'gate':str(scratch/(room+'-gate')),
+            'control':str(scratch/(room+'-control')),'journal':str(base/'.supervisor'),
+            'configuration':str(configuration)}
+        for name in ('repo','checkouts','workspace','reference','scratch'):paths[name]=str(base/name)
+        rooms[room]=paths
     config['deployment']['state_root']=str(state)
     for item in config['rooms']:
         paths=rooms[item['id']]
         item['state_root']=str(state/item['id'])
         for name in item['project']['roots']:item['project']['roots'][name]=paths[name]
-    path=scratch/'configuration.json';path.write_text(json.dumps(config));path.chmod(0o444)
-    for paths in rooms.values():paths['configuration']=str(path)
+        # Match the Workstation + Project source/target profile, not aggregate
+        # whole-Room usage including its outside Hub. Hub retains its separate
+        # 128MiB/.25CPU/32pids and64MiB project quota below. Never widen quotas.
+        # Preserve template log_bytes: a1MiB capture/report bound is NOT an
+        # aggregate Room-log enforcement claim.
+        item['resources'].update(cpu=0.5,memory_bytes=256<<20,disk_bytes=256<<20,pids=64)
+    return {'scratch_root':str(scratch),'state_root':str(state),
+        'configuration_path':str(configuration),'rooms':rooms,'configuration':config}
+
+
+def storage(nonce,ownership):
+    from uas.config import load
+    plan=fixture_layout(nonce,json.loads((ROOT/'tests/fixtures/two-rooms.json').read_text()))
+    configuration=json.dumps(plan['configuration'])
+    load(io.StringIO(configuration))  # Entire real schema/path admission BEFORE effects.
+    device=Path('/dev/disk/by-id/virtio-uas-quota').resolve()
+    expect(device.is_block_device() and int(run('blockdev','--getsize64',str(device)))==2*1024**3,'exact disposable quota disk')
+    run('mkfs.xfs','-f',str(device));STORAGE.mkdir();ownership['mounted']=True
+    run('mount','-o','prjquota,nodev,nosuid',str(device),str(STORAGE))
+    scratch=Path(plan['scratch_root']);scratch.mkdir(mode=0o711);ownership['scratch']=scratch
+    state=Path(plan['state_root']);state.mkdir(mode=0o700);os.chown(state,165533,165533)
+    rooms=plan['rooms']
+    for room,paths in rooms.items():
+        level=paths['level'];base=Path(paths['room_root'])
+        base.mkdir(mode=0o755);os.chown(base,165533,165533)
+        project=paths['project']
+        run('xfs_quota','-x','-c',f'project -s -p {base} {project}',str(STORAGE))
+        run('xfs_quota','-x','-c',f'limit -p bhard=262144k ihard=8192 {project}',str(STORAGE))
+        for name,mode,uid,gid in [('repo',0o755,165533,165533),('checkouts',0o755,165533,165533),
+                ('workspace',0o755,165532,165532),('reference',0o755,165533,165533),('scratch',0o711,165533,165533)]:
+            path=Path(paths[name]);path.mkdir(mode=mode);path.chmod(mode);os.chown(path,uid,gid)
+        hub=Path(paths['hub']);hub.mkdir(mode=0o700);os.chown(hub,165531,165531)
+        run('xfs_quota','-x','-c',f'project -s -p {hub} {project+1}',str(STORAGE))
+        run('xfs_quota','-x','-c',f'limit -p bhard=65536k ihard=2048 {project+1}',str(STORAGE))
+        for name,group,mode in [('gate',165530,0o710),('control',165531,0o710),('journal',165533,0o700)]:
+            path=Path(paths[name]);path.mkdir(mode=mode);path.chmod(mode);os.chown(path,165533,group)
+            if name!='journal':run('chcon','-t','container_file_t','-l',level,str(path))
+        run('chcon','-R','-t','container_file_t','-l',level,str(base),str(hub))
+    sentinel=Path(rooms['alpha']['scratch'])/'cross-room-sentinel'
+    sentinel.write_bytes(b'fixed-no-secret-marker\n');sentinel.chmod(0o444);os.chown(sentinel,165533,165530)
+    run('chcon','-t','container_file_t','-l',LEVELS['alpha'],str(sentinel))
+    path=Path(plan['configuration_path']);path.write_text(configuration);path.chmod(0o444)
     return rooms
 
 
