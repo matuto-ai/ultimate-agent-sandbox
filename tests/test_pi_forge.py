@@ -126,8 +126,17 @@ class PiForgeTests(unittest.TestCase):
 
     def test_actual_pi_unsupported_write_path_endpoint_and_cross_target_never_contact_provider(self):
         self.start()
+        # Mutation routing now identifies edits as writes, even when their
+        # arguments are incomplete. A read-only binding rejects the write;
+        # it must not relabel that attempt as a successful read observation.
+        denied_write = self.invoke('denied-write', ['issue', 'edit', '66'])
+        self.assertFalse(denied_write['ok'])
+        self.assertEqual('FORGE_WRITE_UNAVAILABLE', denied_write['error'])
+        self.assertNotIn('receipt', denied_write)
+        self.assertEqual([], self.calls)
+        self.assertEqual([], self.actors)
         attempts = [
-            ['issue', 'edit', '66'], ['api', 'repos/owner/repo/issues/66'],
+            ['api', 'repos/owner/repo/issues/66'],
             ['issue', 'view', '../66'], ['issue', 'view', '66', '--repo', 'other/repo'],
             ['issue', 'view', '66', '--hostname', 'attacker.invalid'],
             ['auth', 'token'], ['run', 'watch', '66'],

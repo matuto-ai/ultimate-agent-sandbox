@@ -731,7 +731,11 @@ class FixtureParticipantController:
         return message
 
     def _forge_packet(self, handle, data, credentials):
-        """Bounded write-body assembly; authenticate every kernel record."""
+        """Pi-only write-body assembly; authenticate every kernel record."""
+        # Ordinary protocols keep their original single admission check under
+        # the dispatch lock; they never enter the Pi chunk decoder.
+        if handle.protocol != 'pi':
+            return data, credentials
         import base64
         import time
         with self.supervisor._locked():
@@ -739,7 +743,6 @@ class FixtureParticipantController:
             first = self._decode_packet(data)
         if not (type(first) is dict and set(first)=={'request_id','index','count','sha256','data'}):
             return data,credentials
-        if handle.protocol != 'pi': raise LedgerError('INVALID_NATIVE_FRAME')
         raw=bytearray();scope=None;deadline=time.monotonic()+5
         for index in range(28):
             if index:
@@ -843,41 +846,30 @@ class FixtureParticipantController:
             data, credentials = self._record(handle.channel)
             data, credentials = self._forge_packet(handle,data,credentials)
             with self.supervisor._locked():
-                try:
-                    self._authority(handle, credentials)
-                    message = self._decode_packet(data)
-                    if handle.protocol == "pi":
-                        if (type(message) is dict and type(message.get("request_id")) is str
-                                and re.fullmatch(r"[0-9a-f]{32}", message["request_id"])):
-                            request_id = message["request_id"]
-                        if (request_id is None or set(message) != {"request_id", "envelope"}
-                                or type(message["envelope"]) is not dict):
-                            raise LedgerError("INVALID_NATIVE_FRAME")
-                        message = message["envelope"]
-                    if self._external_forge(message):
-                        from .forge_read_service import reserve_forge_operation
-                        reserve_forge_operation(self.hub.ledger,self.read_service.binding,message,
-                            handle.badge.origin(),lambda:self._authority(handle,credentials))
-                        read_intent = self.read_service.prepare(message, handle.badge.origin(),
-                            authorize=lambda: self._authority(handle, credentials))
-                    elif type(message) is dict and message.get('kind') in {'forge-read', 'forge-write'}:
-                        if self.forge_broker is None:
-                            raise LedgerError('FORGE_UNAVAILABLE')
-                        forge_intent = self.forge_broker.prepare(message, origin=handle.badge.origin(),
-                            authorize=lambda: self._authority(handle, credentials))
-                    else:
-                        receipt = self.hub.submit(handle.connection, message, origin=handle.badge.origin(),
-                                                  authorize=lambda: self._authority(handle, credentials))
-                except LedgerError as error:
-                    # authorize() is pure: it can detect an exit/credential
-                    # race after SQLite BEGIN but cannot nest another write.
-                    # apply() has rolled back before this lifecycle mutation.
-                    if error.code in {"PROCESS_EXITED", "MISSING_ACTOR_CREDENTIAL"}:
-                        document = self._read()
-                        self._fence(document, handle.badge.participant_id,
-                                    "exited" if error.code == "PROCESS_EXITED" else "disabled",
-                                    "process-exited" if error.code == "PROCESS_EXITED" else "missing-credential")
-                    raise
+                self._authority(handle, credentials)
+                message = self._decode_packet(data)
+                if handle.protocol == "pi":
+                    if (type(message) is dict and type(message.get("request_id")) is str
+                            and re.fullmatch(r"[0-9a-f]{32}", message["request_id"])):
+                        request_id = message["request_id"]
+                    if (request_id is None or set(message) != {"request_id", "envelope"}
+                            or type(message["envelope"]) is not dict):
+                        raise LedgerError("INVALID_NATIVE_FRAME")
+                    message = message["envelope"]
+                if self._external_forge(message):
+                    from .forge_read_service import reserve_forge_operation
+                    reserve_forge_operation(self.hub.ledger,self.read_service.binding,message,
+                        handle.badge.origin(),lambda:self._authority(handle,credentials))
+                    read_intent = self.read_service.prepare(message, handle.badge.origin(),
+                        authorize=lambda: self._authority(handle, credentials))
+                elif type(message) is dict and message.get('kind') in {'forge-read', 'forge-write'}:
+                    if self.forge_broker is None:
+                        raise LedgerError('FORGE_UNAVAILABLE')
+                    forge_intent = self.forge_broker.prepare(message, origin=handle.badge.origin(),
+                        authorize=lambda: self._authority(handle, credentials))
+                else:
+                    receipt = self.hub.submit(handle.connection, message, origin=handle.badge.origin(),
+                                              authorize=lambda: self._authority(handle, credentials))
             if read_intent is not None:
                 receipt = self.read_service.perform(read_intent)
                 with self.supervisor._locked():
@@ -891,6 +883,22 @@ class FixtureParticipantController:
             result = {"ok": True, "receipt": receipt}
         except LedgerError as error:
             code = error.code
+            # authorize() remains pure, including checks after SQLite BEGIN.
+            # Every transaction and dispatch lock has unwound before fencing;
+            # this also covers first/mid-chunk and late provider authority loss.
+            if code in {"PROCESS_EXITED", "MISSING_ACTOR_CREDENTIAL"}:
+                with self.supervisor._locked():
+                    document = self._read()
+                    record = document['seats'].get(handle.badge.participant_id)
+                    # A replacement may have won the lock after the failing
+                    # check; never overwrite a replacement or a stronger
+                    # close/revoke decision for the same incarnation.
+                    if (record is not None and self.handles.get(handle.badge.participant_id) is handle
+                            and record['incarnation_id'] == handle.badge.incarnation_id
+                            and record['status'] == 'active' and record['epoch'] == handle.badge.epoch):
+                        self._fence(document, handle.badge.participant_id,
+                                    "exited" if code == "PROCESS_EXITED" else "disabled",
+                                    "process-exited" if code == "PROCESS_EXITED" else "missing-credential")
             if self.read_service is not None:
                 try:
                     self.read_service.denied(code)
