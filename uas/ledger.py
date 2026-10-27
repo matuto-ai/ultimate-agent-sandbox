@@ -179,6 +179,41 @@ class RoomLedger:
             self._db.close()
             self._db = None
 
+    @classmethod
+    def open_reader(cls, path: str | Path, room_id: str):
+        """Open an existing exact Room store for a passive host exporter.
+
+        Construct on the exporter thread, separately from the Hub writer. No
+        schema creation, journal-mode change or write transaction is performed.
+        SQLite mode=ro also prevents the normal mutation methods from writing.
+        """
+        reader = cls.__new__(cls)
+        reader.room_id, reader._db = _token(room_id), None
+        try:
+            path = Path(path)
+            if str(path) == ':memory:':
+                raise LedgerError('INVALID_STORE')
+            reader._db = sqlite3.connect(path.absolute().as_uri() + '?mode=ro',
+                                         uri=True, timeout=5, isolation_level=None)
+            reader._db.row_factory = sqlite3.Row
+            reader._db.execute('PRAGMA query_only=ON')
+            tables = {row[0] for row in reader._db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            if tables != {'room', 'operations', 'events'}:
+                raise LedgerError('INVALID_STORE')
+            row = reader._db.execute('SELECT version, room_id FROM room WHERE singleton=1').fetchone()
+            if row is None or row['version'] != 1:
+                raise LedgerError('UNSUPPORTED_STORE_VERSION')
+            if row['room_id'] != reader.room_id:
+                raise LedgerError('ROOM_MISMATCH')
+            return reader
+        except (sqlite3.Error, OSError) as error:
+            reader.close()
+            raise LedgerError('STORAGE_ERROR') from error
+        except BaseException:
+            reader.close()
+            raise
+
     def __enter__(self):
         return self
 

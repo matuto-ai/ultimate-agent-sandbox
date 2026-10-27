@@ -21,6 +21,7 @@ REQUIRED={'payload','confinement','committed_source','hub_adjudication','native_
           'held_identity','mutation_loss','resource_limits','two_rooms','owned_cleanup','guest_cleanup'}
 SOURCES = (
     'uas/__init__.py',
+    'uas/manager_owner.py', 'uas/manager_projection.py',
     'uas/config.py',
     'uas/gate_policy.py',
     'uas/context.py',

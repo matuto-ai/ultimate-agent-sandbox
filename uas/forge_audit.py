@@ -442,6 +442,81 @@ class ForgeAudit:
             self._db.close()
             self._db = None
 
+    def manager_observations(self, room_id):
+        """Bounded passive diagnostic export from this Broker-owned audit cut.
+
+        No receipt payload, Project content, provider call, retry, reconciliation,
+        or workflow judgment. The revision counts immutable committed rows for
+        this Room only; schema version and capture wall-clock are not revisions.
+        """
+        from .manager_projection import SourceObservation
+        _token(room_id)
+        db = self._connection()
+        # All these rows are append-only and tied to the Room's canonical start.
+        sources = (
+            ('read_starts', 'id', 'read_starts', 'id', 's.room_id=?'),
+            ('read_terminals', 'id', 'read_starts', 'id', 's.room_id=?'),
+            ('mutation_starts', 'id', 'mutation_starts', 'id', 's.room_id=?'),
+            ('mutation_prepared', 'id', 'mutation_starts', 'id', 's.room_id=?'),
+            ('mutation_confirmed', 'id', 'mutation_starts', 'id', 's.room_id=?'),
+            ('mutation_rejected', 'id', 'mutation_starts', 'id', 's.room_id=?'),
+            ('mutation_terminals', 'id', 'mutation_starts', 'id', 's.room_id=?'),
+            ('mutation_reconciliation_starts', 'id', 'mutation_starts', 'id', 's.room_id=?'),
+            ('starts', 'id', 'starts', 'id', "json_extract(s.metadata,'$.room_id')=?"),
+            ('prepared', 'id', 'starts', 'id', "json_extract(s.metadata,'$.room_id')=?"),
+            ('terminals', 'id', 'starts', 'id', "json_extract(s.metadata,'$.room_id')=?"),
+            ('reconciliation_starts', 'id', 'starts', 'id', "json_extract(s.metadata,'$.room_id')=?"),
+            ('observations', 'id', 'starts', 'id', "json_extract(s.metadata,'$.room_id')=?"),
+        )
+        try:
+            db.execute('BEGIN')
+            version, latest = 0, None
+            for table, key, parent, parent_key, condition in sources:
+                row = db.execute(f'SELECT count(*) AS n,max(t.timestamp) AS stamp FROM {table} t '
+                    f'JOIN {parent} s ON t.{key}=s.{parent_key} WHERE {condition}', (room_id,)).fetchone()
+                version += row['n']
+                if row['stamp'] is not None:
+                    latest = max(latest or row['stamp'], row['stamp'])
+            # Mutation reconciliation observations refer through their start.
+            row = db.execute('SELECT count(*) AS n,max(o.timestamp) AS stamp FROM mutation_observations o '
+                'JOIN mutation_reconciliation_starts r ON o.reconciliation_id=r.reconciliation_id '
+                'JOIN mutation_starts s ON r.id=s.id WHERE s.room_id=?', (room_id,)).fetchone()
+            version += row['n']
+            if row['stamp'] is not None:
+                latest = max(latest or row['stamp'], row['stamp'])
+            inventory = db.execute("SELECT 'read' AS kind,id,timestamp FROM read_starts WHERE room_id=? "
+                "UNION ALL SELECT 'mutation',id,timestamp FROM mutation_starts WHERE room_id=? "
+                "UNION ALL SELECT 'assignment',id,timestamp FROM starts WHERE json_extract(metadata,'$.room_id')=? "
+                'ORDER BY timestamp,id LIMIT 257', (room_id, room_id, room_id)).fetchall()
+            if len(inventory) > 256:
+                observation = SourceObservation('forge_diagnostics', 'forge-broker', version, None, None,
+                    status='unknown', reason='DIAGNOSTIC_INVENTORY_LIMIT', source_committed_at=latest)
+            else:
+                rows = {}
+                for item in inventory:
+                    record = (self._read_get(db, item['id']) if item['kind'] == 'read' else
+                              self._mutation_get(db, item['id']) if item['kind'] == 'mutation' else
+                              self._get(db, item['id']))
+                    result = record['result']
+                    rows[item['kind'] + ':' + item['id']] = {
+                        'operation_id': item['id'], 'audit_reference': item['id'],
+                        'state': 'in-flight-or-interrupted' if result is None else result['status'],
+                        'contact': 'unknown' if result is None else result.get('contact', 'unknown'),
+                        'completeness': 'unknown' if result is None else result.get('completeness', 'unknown'),
+                        'error_code': None if result is None else result.get('error_code')}
+                observation = SourceObservation('forge_diagnostics', 'forge-broker', version, None, rows,
+                    source_committed_at=latest)
+            # Validate bounded metadata while the same read cut is pinned.
+            observation.document()
+            db.rollback()
+            return (observation,)
+        except sqlite3.Error as error:
+            db.rollback()
+            raise LedgerError('AUDIT_UNAVAILABLE') from error
+        except BaseException:
+            db.rollback()
+            raise
+
     def __enter__(self):
         return self
 

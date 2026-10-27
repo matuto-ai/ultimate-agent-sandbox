@@ -26,6 +26,7 @@ from .ledger import LedgerError, Origin, _json, _token
 from .forge_wire import request_json, MAX_REQUEST
 from .lifecycle import _canonical, _unique_object
 from .peer import Readiness
+from .manager_owner import REVISION_FIELDS, advance_revision, participant_observations, validate_revision
 
 MAX_PACKET = 65_536
 MAX_SEATS = 32
@@ -198,11 +199,13 @@ class FixtureParticipantController:
             if self.path.is_symlink() or self.path.stat().st_size > 1_048_576:
                 raise ValueError()
             document = json.loads(self.path.read_text(), object_pairs_hook=_unique_object)
-            if (set(document) != {"version", "room_id", "instance_id", "controller_id", "seats", "retired_pids"}
+            required = {"version", "room_id", "instance_id", "controller_id", "seats", "retired_pids"}
+            if (type(document) is not dict or not required <= document.keys() or set(document) - required - REVISION_FIELDS
                     or type(document["version"]) is not int or document["version"] != 1
                     or document["room_id"] != self.supervisor.room_id or document["instance_id"] != self.instance
                     or type(document["seats"]) is not dict or len(document["seats"]) > MAX_SEATS):
                 raise ValueError()
+            validate_revision(document)
             _token(document["controller_id"])
             if (type(document["retired_pids"]) is not list or len(document["retired_pids"]) > 2 * MAX_SEATS
                     or any(type(pid) is not int or pid < 1 for pid in document["retired_pids"])):
@@ -234,6 +237,10 @@ class FixtureParticipantController:
         return document
 
     def _save(self, document):
+        try:
+            advance_revision(document)
+        except ValueError as error:
+            raise LedgerError('INVALID_AUTHORITY_STORE') from error
         encoded = _canonical(document)
         if len(encoded.encode()) > 1_048_576:
             raise LedgerError("AUTHORITY_CAPACITY")
@@ -1251,6 +1258,12 @@ class FixtureParticipantController:
         with self.supervisor._locked():
             self._room(running=False)
             return self._read()
+
+    def manager_observations(self):
+        """Recorded seat/authority state only; never call _alive or a Runtime."""
+        with self.supervisor._locked():
+            self._room(running=False)
+            return participant_observations(self._read())
 
     def close(self):
         """Fixture harness cleanup. Never adopt/kill arbitrary persisted PIDs."""

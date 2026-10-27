@@ -36,6 +36,9 @@ EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 SOURCES = (
     'tests/linux/mapped_namespace.py',
     'uas/__init__.py',
+    'uas/manager_owner.py', 'uas/manager_projection.py',
+    'uas/run_review.py', 'uas/gate_hub.py',
+    'uas/gate_command_hub.py',
     'uas/artifact_helper.py',
     'uas/artifact_paths.py',
     'uas/artifact_protocol.py',

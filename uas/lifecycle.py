@@ -14,6 +14,8 @@ import re
 import shutil
 import uuid
 
+from .manager_owner import REVISION_FIELDS, advance_revision, lifecycle_observations, validate_revision
+
 
 class LifecycleError(Exception):
     def __init__(self, code):
@@ -137,9 +139,10 @@ class Supervisor:
             document = json.loads(self._manifest.read_text(), object_pairs_hook=_unique_object)
             required = {"version", "room_id", "instance_id", "spec", "phase", "desired",
                         "created_at", "pending_spec", "authority"}
-            optional = {"leftovers", "destroy_requested_at", "destroyed_at"}
+            optional = {"leftovers", "destroy_requested_at", "destroyed_at"} | REVISION_FIELDS
             if type(document) is not dict or not required <= document.keys() or document.keys() - required - optional:
                 raise ValueError("manifest fields")
+            validate_revision(document)
             if type(document["version"]) is not int or document["version"] != 1 or document["room_id"] != self.room_id:
                 raise ValueError("manifest version/room")
             if type(document["instance_id"]) is not str or not re.fullmatch(r"[0-9a-f]{32}", document["instance_id"]):
@@ -204,6 +207,10 @@ class Supervisor:
             os.close(descriptor)
 
     def _save(self, state):
+        try:
+            advance_revision(state)
+        except ValueError as error:
+            raise LifecycleError('INVALID_STORE') from error
         temporary = self.directory / (".lifecycle-" + uuid.uuid4().hex)
         descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
@@ -295,6 +302,11 @@ class Supervisor:
         with self._locked():
             state = self._read()
             return self._result(state) if state else {"room_id": self.room_id, "phase": "absent", "fixture_only": True}
+
+    def manager_observations(self):
+        """Passive persisted facts; never inspect Docker or infer process health."""
+        with self._locked():
+            return lifecycle_observations(self._read())
 
     def participants(self, hub, credentials):
         """Launch the synthetic process fixture, never a production Runtime.
