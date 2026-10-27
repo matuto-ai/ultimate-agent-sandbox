@@ -170,6 +170,88 @@ def import_image(archive):
         if facts is not None:import_diagnostic('daemon-close',facts.close)
 
 
+SUPERVISOR_PHASES={'hub-start':'hub_startup','two-seat-start':'native_two_seats',
+    'idle':'native_two_seats','native-turns':'native_two_seats','wrong-process':'wrong_process',
+    'stop-workstation':'control_loss','control-loss':'control_loss'}
+
+
+def emit_check(checks,name):
+    def emit():
+        record=checks[name]
+        if name=='native_two_seats':
+            record=dict(record)
+            deliveries=record.pop('deliveries',[])
+            record['delivery_count']=len(deliveries)
+            record['delivery_evidence_sha256']=hashlib.sha256(json.dumps(
+                deliveries,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        emit_evidence('check-'+name,record)
+    import_diagnostic('check-'+name,emit)
+
+
+def record_hub_checks(checks,result,actual,expected_status):
+    observation=result['hub_observation']
+    expect(observation['pid_namespace']!=actual['pid_namespace']
+        and observation['mount_namespace']!=actual['mount_namespace']
+        and observation['uid_map']==actual['uid_map'] and observation['gid_map']==actual['gid_map']
+        and observation['overflow_uid']==65534 and observation['overflow_gid']==65534,
+        'outside Hub namespace/mapping distinction')
+    expect(observation['kernel_status']==expected_status,'actual Hub capabilities/NNP/seccomp differ')
+    boundary.require_process_label(observation['label'],LEVEL)
+    checks['confinement']['hub_actual']=observation
+    checks['confinement']['status']='passed'
+    checks['confinement']['completed_scope']='container-configuration-and-workstation-and-hub-kernel-observations'
+    checks['confinement'].pop('pending_scope',None)
+    emit_check(checks,'confinement')
+    checks['hub_startup']={'status':'passed','identity':result['hub_identity'],
+        'controller':result['controller'],'supervisor_label':result['supervisor_label'],
+        'supervisor_uid':result['supervisor_uid']}
+    emit_check(checks,'hub_startup')
+
+
+def supervisor_phase(progress,phase):
+    if phase in SUPERVISOR_PHASES:
+        progress.update(check=SUPERVISOR_PHASES[phase],stage='supervisor:'+phase)
+
+
+def retain_supervisor_records(path,checks,progress,actual,expected_status):
+    """Fixed owned output only; no event/command echo or authority inference."""
+    with path.open('rb') as source:raw=source.read(1024*1024+1)
+    expect(len(raw)<=1024*1024,'native Supervisor evidence exceeds bound')
+    records=[];phases=[];unavailable=[]
+    allowed={'hub-startup','seat-released','seat-admitted','pi-startup-failure'}
+    for line in raw.decode('utf-8',errors='replace').splitlines():
+        if line.startswith('UAS_NATIVE_PHASE:'):
+            phase=line.split(':',1)[1]
+            if phase in SUPERVISOR_PHASES:phases.append(phase)
+        elif line.startswith('UAS_NATIVE_CHECKPOINT:'):
+            expect(len(line)<=16416,'native checkpoint exceeds bound')
+            record=json.loads(line.split(':',1)[1])
+            expect(set(record)=={'kind','value'} and record['kind'] in allowed
+                   and type(record['value']) is dict,'invalid native checkpoint')
+            records.append(record)
+        elif line.startswith('UAS_NATIVE_DIAGNOSTIC_UNAVAILABLE:'):
+            kind=line.split(':',1)[1]
+            if kind in allowed:unavailable.append(kind)
+    expect(len(records)<=8 and len(phases)<=16 and len(unavailable)<=8,'excessive native checkpoint count')
+    emit_evidence('supervisor-output-summary',{'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),
+        'checkpoint_count':len(records),'phases':phases,'unavailable':unavailable,'arbitrary_output_echoed':False})
+    if phases:supervisor_phase(progress,phases[-1])
+    for record in records:
+        emit_evidence('supervisor-'+record['kind'],record['value'])
+        if record['kind']=='hub-startup':
+            import_diagnostic('hub-checkpoint-validation',lambda:record_hub_checks(
+                checks,record['value'],actual,expected_status))
+
+
+def failed_checks(checks,progress):
+    failed=progress.get('check','payload')
+    if failed in REQUIRED:
+        checks.setdefault(failed,{})
+        checks[failed].update(status='failed',error='NATIVE_SCENARIO_FAILED',stage=progress['stage'])
+    for name in REQUIRED:
+        checks.setdefault(name,{'status':'not_run','reason':'NOT RUN: required check was not completed'})
+
+
 def labeled_listener(path,group):
     """Trusted root setup selects only the same-Room socket-object context.
 
@@ -314,10 +396,14 @@ def engine_profile(manifest):
             'dockerd_sha256':hashlib.sha256(Path('/usr/bin/dockerd').read_bytes()).hexdigest()}
 
 
-def scenario(nonce,manifest):
+def scenario(nonce,manifest,*,checks=None,progress=None):
     sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'tests/vm'))
     from native_rootfs import build_rootfs
-    checks={};owned=[];listeners=[];child=None;image=None;ownership={}
+    if checks is None:checks={}
+    if progress is None:progress={}
+    progress.update(check='payload',stage='payload')
+    owned=[];listeners=[];child=None;image=None;ownership={}
+    output=None;retained=False;actual=None;expected_status=None
     image_root=Path('/var/lib/uas-native-rootfs');archive=Path('/var/lib/uas-native-rootfs.tar')
     try:
         expect(not image_root.exists() and not archive.exists(),'native image workspace already exists')
@@ -340,7 +426,10 @@ def scenario(nonce,manifest):
         print('Native image phase: archive complete',flush=True)
         image=import_image(archive)
         expect(image.startswith('sha256:') and len(image)==71,'native immutable image ID')
+        import_diagnostic('confirmed-image',lambda:emit_evidence('imported-image',{'image':image}))
         checks['payload']={'status':'passed','image':image,'engine':engine,**image_evidence}
+        emit_check(checks,'payload')
+        progress.update(check='confinement',stage='container-confinement')
         paths=storage(nonce,ownership)
         for name,group in [('peer',165532),('control',165531)]:
             listeners.append(labeled_listener(paths[name]/('pi.sock' if name=='peer' else 'hub.sock'),group))
@@ -358,7 +447,11 @@ def scenario(nonce,manifest):
         expect(' '.join(actual['uid_map'].split())==expected_map and ' '.join(actual['gid_map'].split())==expected_map,'actual native remap')
         expect(actual['overflow_uid']==65534 and actual['overflow_gid']==65534,'unsupported overflow identity mapping')
         mapping_digest=hashlib.sha256(json.dumps({key:actual[key] for key in ('uid_map','gid_map','overflow_uid','overflow_gid')},sort_keys=True).encode()).hexdigest()
-        checks['confinement']={'status':'passed','containers':confinement,'runtime':actual}
+        checks['confinement']={'status':'partial','containers':confinement,'runtime':actual,
+            'completed_scope':'container-configuration-and-workstation-kernel-observations',
+            'pending_scope':'actual-Hub-namespace-mapping-kernel-observations'}
+        emit_check(checks,'confinement')
+        progress.update(check='socket_policy',stage='socket-policy')
         expect(probe(containers['workstation'],'peer')=={'connected':True},'same-Room stock socket connection denied')
         positive,_=listeners[0].accept()
         with positive:
@@ -371,6 +464,8 @@ def scenario(nonce,manifest):
         expect(private['ledger']==errno.ENOENT and private['control']==errno.ENOENT and private['unlink'] in (errno.EROFS,errno.EACCES,errno.EPERM),'endpoint/private Hub boundary failed')
         checks['socket_policy']={'status':'passed','same_room_label':peer_label,'sibling':negative,'private':private,
                                 'socket_creation_context':'system_u:system_r:container_t:'+LEVEL}
+        emit_check(checks,'socket_policy')
+        progress.update(check='hub_startup',stage='supervisor:hub-start')
         config={'nonce':nonce,'hub_id':containers['hub'],'workstation_id':containers['workstation'],
             'mapping_digest':mapping_digest,'profile_digest':image_evidence['rootfs_manifest_sha256'],
             'supervisor_directory':str(paths['supervisor']), 'peer_path':str(paths['peer']/'pi.sock'),
@@ -391,28 +486,24 @@ def scenario(nonce,manifest):
                 expect(time.monotonic()<deadline,'native Supervisor exceeded bounded scenario')
                 expect(max(output.stat().st_size,errors.stat().st_size)<=1024*1024,'native output budget exceeded')
                 phases=[line.split(':',1)[1] for line in output.read_text().splitlines() if line.startswith('UAS_NATIVE_PHASE:')]
+                if phases:supervisor_phase(progress,phases[-1])
                 if phases and phases[-1]=='stop-workstation' and not workstation_stopped:
                     run('docker','stop','--time','3',containers['workstation'],timeout=8)
                     workstation_stopped=True
                 sample_resources(containers,samples,phases[-1] if phases else 'startup')
                 time.sleep(.2)
+        import_diagnostic('supervisor-records',lambda:retain_supervisor_records(
+            output,checks,progress,actual,expected_status));retained=True
         expect(child.returncode==0,'native Supervisor failed: '+errors.read_text()[-8192:])
         lines=[line.split(':',1)[1] for line in output.read_text().splitlines() if line.startswith('UAS_NATIVE_SUPERVISOR:')]
         expect(len(lines)==1,'missing exact native Supervisor report');result=json.loads(lines[0])
-        hub_observation=result['hub_observation']
-        expect(hub_observation['pid_namespace']!=actual['pid_namespace']
-            and hub_observation['mount_namespace']!=actual['mount_namespace']
-            and hub_observation['uid_map']==actual['uid_map']
-            and hub_observation['gid_map']==actual['gid_map']
-            and hub_observation['overflow_uid']==65534 and hub_observation['overflow_gid']==65534,'outside Hub namespace/mapping distinction')
-        expect(hub_observation['kernel_status']==expected_status,'actual Hub capabilities/NNP/seccomp differ')
-        boundary.require_process_label(hub_observation['label'],LEVEL)
-        checks['confinement']['hub_actual']=hub_observation
-        checks['hub_startup']={'status':'passed','identity':result['hub_identity'],'controller':result['controller'],
-            'supervisor_label':result['supervisor_label'],'supervisor_uid':result['supervisor_uid']}
+        progress.update(check='hub_startup',stage='hub-final-observation')
+        record_hub_checks(checks,result,actual,expected_status)
         checks['native_two_seats']={'status':'passed','seats':result['seats'],'tool_ends':result['native_tool_ends'],
             'scope':'two native ingress paths plus recipient native history confirmation',
             'recipient_native_delivery_verified':True,'deliveries':result['native_deliveries']}
+        emit_check(checks,'native_two_seats')
+        progress.update(check='actor_attribution',stage='actor-attribution')
         state=json.loads((paths['hub']/'report.json').read_text())
         traffic=state['state']['peer_traffic']['traffic']
         expect(set(traffic)=={'native-0','native-1'},'native retries/forged/wrong-process mutated ledger')
@@ -429,13 +520,19 @@ def scenario(nonce,manifest):
             expect(delivery['native_receipt']['source']=='native-active-branch-and-session-file',
                    'native acceptance must cite active branch and session file')
         checks['actor_attribution']={'status':'passed','room_seq':state['room_seq'],'traffic':{key:value['actor_id'] for key,value in traffic.items()}}
+        emit_check(checks,'actor_attribution')
+        progress.update(check='wrong_process',stage='wrong-process-result')
         expect(result['wrong_process_fenced'],'real inherited descriptor wrong-process negative failed')
         checks['wrong_process']={'status':'passed','actual_pi_scm_rights_to_other_node_task':True}
+        emit_check(checks,'wrong_process')
+        progress.update(check='control_loss',stage='control-loss-result')
         expect(result['hub_exited_after_control_eof'],'Hub control-loss monitor did not stop')
         with sqlite3.connect('file:'+str(paths['hub']/'admissions.db')+'?mode=ro',uri=True) as database:
             states=database.execute('SELECT state FROM admissions').fetchall()
         expect(states and all(row[0]=='revoked' for row in states),'control loss retained authority projection')
         checks['control_loss']={'status':'passed','all_admissions_revoked':True,'hub_survived_workstation_stop':result['hub_alive_after_workstation_stop']}
+        emit_check(checks,'control_loss')
+        progress.update(check='resources',stage='resources-and-stop-results')
         expect('native-turns' in samples and set(samples['native-turns'])=={'hub','workstation'},'missing measured native resource phase')
         quota_state=run('xfs_quota','-x','-c','state -p',str(STORAGE))
         expect('Accounting: ON' in quota_state and 'Enforcement: ON' in quota_state,'native project quotas not enforced')
@@ -451,54 +548,74 @@ def scenario(nonce,manifest):
             'reset_resource_profile_measured':False,'quota_exhaustion_qualified':False,'production_capacity_qualified':False}
         expect(workstation_stopped and result['hub_alive_after_workstation_stop'],'outside Hub did not survive normal Workstation stop')
         expect((paths['hub']/'room.db').is_file(),'Workstation stop removed Hub ledger')
+        emit_check(checks,'resources')
         return checks
     finally:
-        if child is not None and child.poll() is None:
-            child.terminate()
-            try:child.wait(timeout=5)
-            except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
-        for listener in listeners:listener.close()
-        cleanup=True
+        original=sys.exc_info()[1]
+        if original is None:progress.update(check='guest_cleanup',stage='guest-cleanup')
+        cleanup_errors=[]
+        def cleanup_action(kind,action):
+            try:action()
+            except Exception as error:cleanup_errors.append({'resource':kind,'error':type(error).__name__})
+        def stop_child():
+            if child is not None and child.poll() is None:
+                child.terminate()
+                try:child.wait(timeout=5)
+                except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
+        cleanup_action('supervisor',stop_child)
+        if output is not None and not retained:
+            import_diagnostic('supervisor-records',lambda:retain_supervisor_records(
+                output,checks,progress,actual,expected_status))
+        for listener in listeners:cleanup_action('listener',listener.close)
         for container in reversed(owned):
-            try:
+            def remove_container():
                 info=inspect(container)
                 expect(info['Config']['Labels'].get('uas.native-owner')==nonce,'cleanup ownership changed')
                 run('docker','rm','--force',container)
-            except Exception:cleanup=False
+            cleanup_action('container',remove_container)
         if ownership.get('mount_attempted'):
-            try:
+            def unmount():
                 if STORAGE.is_mount():run('umount',str(STORAGE))
-            except Exception:cleanup=False
+            cleanup_action('quota-mount',unmount)
         if image is not None:
-            try:run('docker','image','rm',image)
-            except Exception:cleanup=False
-        try:
+            cleanup_action('image',lambda:run('docker','image','rm',image))
+        def remove_scratch():
             if ownership.get('archive'):archive.unlink(missing_ok=True)
             if ownership.get('rootfs'):
                 if image_root.exists():shutil.rmtree(image_root)
                 image_root.with_name(image_root.name+'.manifest.json').unlink(missing_ok=True)
             if ownership.get('scratch'):shutil.rmtree(ownership['scratch'])
-        except Exception:cleanup=False
-        expect(cleanup,'owned native cleanup incomplete')
-        checks['guest_cleanup']={'status':'passed','owned_containers_removed':True,'quota_disk_unmounted':True,'owned_image_and_build_scratch_removed':True}
+        cleanup_action('build-scratch',remove_scratch)
+        cleanup=not cleanup_errors
+        checks['guest_cleanup']={'status':'passed' if cleanup else 'failed','cleanup_errors':cleanup_errors,
+            'owned_containers_removed':cleanup,'quota_disk_unmounted':cleanup,
+            'owned_image_and_build_scratch_removed':cleanup}
+        emit_check(checks,'guest_cleanup')
+        if not cleanup:
+            if original is None:raise RuntimeError('owned native cleanup incomplete')
+            try:original.add_note('Native cleanup failures: '+json.dumps(cleanup_errors))
+            except Exception:pass
 
 
 def main():
-    nonce,digest=sys.argv[1:];checks={}
+    nonce,digest=sys.argv[1:];checks={};progress={'check':'payload','stage':'install'};failure=None
     try:
         boundary.install(nonce,digest,exact_roots=NATIVE_PACKAGE_PROFILE,defer_engine_start=True)
         manifest=boundary.verify_payload(nonce,digest)
         expect(manifest.get('profile')=='native-pi-v1','not explicit native payload')
-        checks=scenario(nonce,manifest)
+        checks=scenario(nonce,manifest,checks=checks,progress=progress)
+        progress.update(check=None,stage='report-validation')
         expect(set(checks)==REQUIRED,'incomplete native scenario')
-    except Exception:
+    except Exception as error:
         print(traceback.format_exc()[-16384:],flush=True)
         for command in (['journalctl','-k','-b','--no-pager','-n','40','--grep=avc:.*denied'],
                         ['journalctl','-u','docker','--no-pager','-n','30']):
             try:print('Native diagnostic:',command,run(*command)[-8192:],flush=True)
             except Exception:pass
-        checks={name:{'status':'failed','error':'NATIVE_SCENARIO_FAILED'} for name in REQUIRED}
+        failed_checks(checks,progress)
+        failure={'stage':progress['stage'],'error_type':type(error).__name__}
     report={'version':1,'nonce':nonce,'checks':checks}
+    if failure is not None:report['failure']=failure
     with open('/dev/ttyS0','w') as serial:
         serial.write('\nUAS_WORKSTATION_REPORT:'+nonce+':'+json.dumps(report,sort_keys=True)+'\n');serial.flush()
 

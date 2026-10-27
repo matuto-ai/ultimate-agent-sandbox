@@ -810,3 +810,59 @@ best-effort diagnostic preservation are unchanged. Engine startup remains
 change, retry, VM resource increase or confinement/policy relaxation is added.
 The larger build allowance does not guarantee successful import or leave the
 remaining native scenario exempt from the existing outer cap.
+
+### Imported image, unqualified Pi initialization: run 40444255807
+
+The [run on `661bfac8`](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40444255807/job/121991615179)
+completed import within the fixed 240-second budget: its start/end observations
+span 220.605 seconds, with 72 stdout bytes, no stderr, return code 0, no group kill
+and no client cleanup errors. The strict rootfs had 24,885 entries / 374,542,385
+bytes and manifest SHA-256
+`2e11c9cee69208b6f6ea1832b1fde55b0c3c214f53142f820100db95cf78ce98`.
+The 411,617,280-byte archive SHA-256 was
+`080f40fbc055af99c84d57bf7a54da292e684270600e37c65c501cb86852a7a8`.
+The literal returned image ID was held in local checks, not emitted before the
+later failure, so that exact ID cannot be recovered from this retained log.
+
+The scenario reached a released seat's native receiver initialization, then its
+existing eight-second `rpc('prompt')` response wait failed while requesting the
+initial extension state. The subsequent native-notification wait was not reached.
+The shared loop traceback does not identify Alice versus Bob. Native stderr,
+held-task snapshot and exact-exec exit/readiness/transport observations were not
+retained; the internal cause remains unknown. There was no state reinjection or
+automatic retry. Source control flow implies earlier container/socket and Hub
+startup assertions returned, but missing detailed values are not reconstructed
+or claimed as retained qualification evidence. Both seats and bidirectional
+delivery remain unqualified.
+
+The complete retained 249,884-byte job log SHA-256 is
+`c62cff04a3ffd675695ff9c59503c333ad6a04fbc38009b4c8d5324e87093bbf`.
+Runner scratch cleanup completed in 1,362.666 seconds. The blanket failure report
+discarded partial checks and cannot be read as separately executed failures for
+all later gates.
+
+The next candidate is telemetry only. An optional trusted-owner startup observer
+captures typed facts before receiver close and launch revocation: stage, elapsed
+time/budget, held-task callback liveness, reader/transport state and counts, never
+event/command bodies. Default/general Pi receivers remain silent and retain no
+additional stderr capture. Hook-enabled capture is bounded; only this explicit
+account-free VM observer requests raw stderr, at most 2,048 UTF-8 bytes, alongside
+observed bytes, observed-stream SHA-256 and truncation/decoding flags. The owner performs
+one existing bounded exact-exec GET and reports held identity/liveness separately;
+these observations never grant authority or replace kernel binding. Observer
+failures cannot replace the original initialization exception.
+
+The guest emits the confirmed image ID and each completed check independently,
+retains only bounded fixed Supervisor phase/seat/startup records, and validates
+Hub checkpoint observations with the existing namespace/mapping/kernel checks.
+The first confinement record is explicitly partial, covering only container
+configuration and Workstation kernel checks; it becomes passed only after the
+actual Hub namespace/mapping/kernel observations are verified. These partial and
+completed records survive later failure; the failing stage is explicit,
+unreached checks are `not_run` / NOT RUN, and cleanup has its own outcome. Cleanup
+failure is retained without replacing an existing scenario exception. The runner
+rejects any explicit failure even if earlier check flags passed. New native-turn
+checkpoint telemetry records delivery counts/hashes rather than message bodies.
+No RPC retry, initialization allowance, liveness deadline, image-import cap,
+overall cap, policy or confinement change is introduced; a causal fix awaits
+actual initialization evidence, not a guessed cold-start explanation.

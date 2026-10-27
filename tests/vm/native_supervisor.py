@@ -27,6 +27,45 @@ def expect(value,message):
 def encoded(value):return base64.urlsafe_b64encode(_canonical(value)).decode()
 
 
+def diagnostic_record(kind,value):
+    """Only this account-free VM fixture emits bounded diagnostic text."""
+    try:
+        text=json.dumps({'kind':kind,'value':value},sort_keys=True,ensure_ascii=True)
+        if len(text)>16384:raise ValueError('diagnostic record exceeds bound')
+        print('UAS_NATIVE_CHECKPOINT:'+text,flush=True)
+    except Exception:
+        try:print('UAS_NATIVE_DIAGNOSTIC_UNAVAILABLE:'+kind,flush=True)
+        except Exception:pass
+
+
+def startup_observer(launch,participant):
+    def observe(receiver,error):
+        # Invoked before receiver close and launch revocation. Never retries an
+        # RPC, adopts a task, changes authority or interprets a live stream as Pi.
+        value={'participant':participant,'slot':launch.seat.slot,
+               'launch_state':launch.state,'exec_id':launch.exec_id}
+        try:value['receiver']=receiver.startup_diagnostic(include_stderr=True)
+        except Exception as problem:value['receiver_unavailable']=type(problem).__name__
+        origin=launch.origin
+        value['held_identity']=list(origin.identity)
+        try:value['held_alive_before']=alive(origin.pidfd)
+        except Exception as problem:value['held_before_unavailable']=type(problem).__name__
+        try:
+            observed=launch.engine.inspect(launch.exec_id)  # One bounded GET only.
+            fields={key:observed.get(key) for key in ('Running','ExitCode','Pid')}
+            if (observed.get('ID')!=launch.exec_id or observed.get('ContainerID')!=launch.seat.container_id
+                    or type(fields['Running']) is not bool or type(fields['ExitCode']) is not int
+                    or type(fields['Pid']) is not int or fields['Pid']<0):
+                raise ValueError('invalid exact-exec diagnostic')
+            value['exec']=fields
+            value['exec_pid_matches_held_credentials']=fields['Pid']==origin.credentials[0]
+        except Exception as problem:value['exec_unavailable']=type(problem).__name__
+        try:value['held_alive_after']=alive(origin.pidfd)
+        except Exception as problem:value['held_after_unavailable']=type(problem).__name__
+        diagnostic_record('pi-startup-failure',value)
+    return observe
+
+
 def settled(native, tools):
     deadline=time.monotonic()+12
     while time.monotonic()<deadline:
@@ -82,6 +121,8 @@ def scenario(config, peer_fd, control_fd):
         result['hub_observation']=ready['observation']
         expect(ready['observation']['uid']==65531 and ready['observation']['gid']==65531
                and ready['observation']['parent']>0,'actual Hub namespace/init identity')
+        diagnostic_record('hub-startup',{key:result[key] for key in
+            ('hub_identity','controller','hub_observation','supervisor_label','supervisor_uid')})
         receiver=ReceiverIdentity(65532,65532,'hub-'+config['nonce'],config['mapping_digest'])
         clients=[];launches=[];control_lock=threading.Lock()
         print('UAS_NATIVE_PHASE:two-seat-start',flush=True)
@@ -91,15 +132,19 @@ def scenario(config, peer_fd, control_fd):
                 peer_lease,journal/(participant+'-launch.json'))
             stack.callback(launch.close)
             launch.launch(peer)
+            diagnostic_record('seat-released',{'participant':participant,'slot':launch.seat.slot,
+                'exec_id':launch.exec_id,'held_identity':list(launch.origin.identity),'state':launch.state})
             native=launch.attach_native(journal=journal/(participant+'-native.db'),
                 scope={'room_id':'alpha','participant_id':participant,'run_id':'native-run',
-                       'generation':1,'context_generation':1},profile_digest=config['profile_digest'])
+                       'generation':1,'context_generation':1},profile_digest=config['profile_digest'],
+                startup_observer=startup_observer(launch,participant))
             seat=AdmissionSeat('alpha',config['nonce'],participant,actor,'native-pi-v1',('peer-traffic',),receiver)
             client=SupervisorAdmission(launch,seat,control,hub_origin=hub_origin,controller=ready['controller'],control_lock=control_lock)
             client.admit(str(index+1)*32,1)
             result['seats'].append({'participant':participant,'actor':actor,'exec_id':launch.exec_id,
                 'origin_identity':list(launch.origin.identity),'host_pid_diagnostic':launch.origin.credentials[0],
                 'readiness':launch.native_readiness})
+            diagnostic_record('seat-admitted',result['seats'][-1])
             clients.append(client);launches.append(launch)
         expect(launches[0].origin.identity!=launches[1].origin.identity,'two distinct kernel tasks required')
         print('UAS_NATIVE_PHASE:idle',flush=True)

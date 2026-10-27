@@ -5,6 +5,7 @@ neither mints process badges nor launches a qualified Workstation Participant.
 """
 import base64
 from collections import deque
+import hashlib
 import json
 import os
 import select
@@ -50,7 +51,7 @@ class FixturePiRpcReceiver:
         return receiver
 
     @classmethod
-    def attach_workstation(cls, launch, *, journal, scope, timeout=8):
+    def attach_workstation(cls, launch, *, journal, scope, timeout=8, startup_observer=None):
         """Attach native I/O separately from the Supervisor's held task object.
 
         Source integration seam only: it does not qualify image, mounts or
@@ -61,17 +62,19 @@ class FixturePiRpcReceiver:
         from .kernel_origin import alive
         if type(launch) is not ExecLaunch or launch.state != 'released':
             raise NativeUnavailable('verified released exec required')
+        if startup_observer is not None and not callable(startup_observer):
+            raise NativeUnavailable('trusted startup observer must be callable')
         receiver = cls.__new__(cls)
         receiver._initialize(transport=launch.transport.rpc_io(),
             task_alive=lambda: (launch.state in {'released', 'active'}
                                 and not launch.origin.revoked and alive(launch.origin.pidfd)),
             journal=journal, runtime_version='1.4.0', scope=scope,
-            incarnation_id=launch.incarnation, timeout=timeout)
+            incarnation_id=launch.incarnation, timeout=timeout, startup_observer=startup_observer)
         return receiver
 
     def _initialize(self, *, journal, runtime_version, scope, timeout,
                     process=None, argv=None, cwd=None, env=None, incarnation_id=None,
-                    transport=None, task_alive=None):
+                    transport=None, task_alive=None, startup_observer=None):
         self._closed = False
         self._owns_process = process is None and transport is None
         self._task_alive = task_alive
@@ -82,7 +85,17 @@ class FixturePiRpcReceiver:
         self._condition = threading.Condition()
         self._write_lock = threading.Lock()
         self._transport_fenced = False
+        # Only an explicit trusted owner opts in. No general receiver output,
+        # event/command content capture or liveness/authority decision is added.
+        self._startup_lock = threading.Lock()
+        self._startup_capture = None
+        if callable(startup_observer):
+            self._startup_capture = {'active': True, 'stage': 'setup',
+                'started': time.monotonic(), 'finished': None, 'bytes': 0,
+                'hash': hashlib.sha256(), 'head': bytearray(), 'tail': bytearray()}
         try:
+            if startup_observer is not None and not callable(startup_observer):
+                raise NativeUnavailable('trusted startup observer must be callable')
             if runtime_version != '1.4.0':
                 raise NativeUnavailable('unsupported Pi version')
             if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
@@ -116,12 +129,15 @@ class FixturePiRpcReceiver:
             self.events = deque(maxlen=512)
             self.errors = deque(maxlen=64)
             self._ended = False
+            self._reader_error_type = None
             self._binding = None
             self._reader = threading.Thread(target=self._read, daemon=True)
             self._stderr = threading.Thread(target=self._read_errors, daemon=True)
             self._reader.start()
             self._stderr.start()
+            self._startup_stage('state-rpc')
             state = self._native('state', {})['state']
+            self._startup_stage('validation')
             if state.get('api_baseline') != runtime_version or state.get('readiness') not in {r.value for r in Readiness}:
                 raise NativeUnavailable('unsupported or absent native observation')
             self._binding = {key: state[key] for key in ('runtime_id', 'session_id')}
@@ -130,9 +146,109 @@ class FixturePiRpcReceiver:
             self.initial_state = state
             self.last_observation = state
             self.readiness = Readiness(state['readiness'])
-        except BaseException:
+            self._startup_stage('complete')
+            try:
+                self._finish_startup_capture()
+            except BaseException:
+                pass
+        except BaseException as error:
+            try:
+                self._finish_startup_capture()
+                if callable(startup_observer):
+                    # Observe before close/fencing, while the owner still holds
+                    # the unrevised task identity and exact exec operation.
+                    startup_observer(self, error)
+            except BaseException:
+                pass  # A diagnostic hook cannot replace the original error.
             self.close()
             raise
+
+    def _startup_stage(self, stage):
+        if self._startup_capture is None:
+            return
+        with self._startup_lock:
+            if self._startup_capture is not None and self._startup_capture['active']:
+                self._startup_capture['stage'] = stage
+
+    def _finish_startup_capture(self):
+        if self._startup_capture is None:
+            return
+        with self._startup_lock:
+            if self._startup_capture is not None and self._startup_capture['active']:
+                self._startup_capture['active'] = False
+                self._startup_capture['finished'] = time.monotonic()
+
+    def _capture_startup_stderr(self, raw):
+        if self._startup_capture is None:
+            return
+        with self._startup_lock:
+            value = self._startup_capture
+            if value is not None and value['active']:
+                value['bytes'] += len(raw)
+                value['hash'].update(raw)
+                value['head'].extend(raw[:max(0, 512 - len(value['head']))])
+                value['tail'].extend(raw)
+                del value['tail'][:-1536]
+
+    def startup_diagnostic(self, *, include_stderr=False):
+        """Owner-only observation; raw stderr requires an explicit fixture opt-in.
+
+        The optional observer is the sole consumer. No event, command, response,
+        scope or exception contents are included. Snapshot values grant nothing.
+        """
+        if type(include_stderr) is not bool:
+            raise ValueError('stderr diagnostic option must be boolean')
+        with self._startup_lock:
+            value = self._startup_capture
+            if value is None:
+                return {'version': 1, 'enabled': False}
+            count = value['bytes']
+            head = bytes(value['head'])
+            remaining = count - len(head)
+            tail = bytes(value['tail'][-remaining:]) if 0 < remaining <= 1536 else (
+                bytes(value['tail']) if remaining > 1536 else b'')
+            stderr = {'bytes': count, 'sha256': value['hash'].hexdigest(),
+                      'retained_bytes': len(head) + len(tail),
+                      'truncated': count > len(head) + len(tail)}
+            if include_stderr:
+                # UTF-8 replacement itself can expand invalid bytes. Bound the
+                # emitted UTF-8 text separately, not just its source buffers.
+                head_text = head.decode('utf-8', errors='replace').encode('utf-8')
+                tail_text = tail.decode('utf-8', errors='replace').encode('utf-8')
+                stderr.update(head=head_text[:512].decode('utf-8', errors='ignore'),
+                              tail=tail_text[:1536].decode('utf-8', errors='ignore'),
+                              text_encoding='utf-8-replacement',
+                              text_decode_truncated=len(head_text) > 512 or len(tail_text) > 1536)
+            now = value['finished'] if value['finished'] is not None else time.monotonic()
+            result = {'version': 1, 'enabled': True, 'authority': 'observation-only',
+                      'stage': value['stage'], 'elapsed_seconds': round(max(0, now - value['started']), 6),
+                      'capture_active': value['active'], 'stderr': stderr}
+        timeout = getattr(self, 'timeout', None)
+        result['budget_seconds'] = timeout if type(timeout) in (int, float) and 0 < timeout <= 3600 else None
+        try:
+            result['held_task_alive'] = bool(self._alive())
+        except Exception as error:
+            result['held_task_alive'] = None
+            result['liveness_error_type'] = type(error).__name__[:64]
+        with self._condition:
+            result.update(reader_ended=getattr(self, '_ended', None),
+                reader_error_type=getattr(self, '_reader_error_type', None),
+                transport_fenced=self._transport_fenced,
+                retained_event_count=len(getattr(self, 'events', ())),
+                retained_error_count=len(getattr(self, 'errors', ())),
+                buffered_response_count=len(getattr(self, '_responses', ())),
+                buffered_notification_count=len(getattr(self, '_notifications', ())),
+                pending_rpc_count=len(getattr(self, '_rpc_pending', ())),
+                pending_native_count=len(getattr(self, '_native_pending', ())))
+        result['reader_alive'] = self._reader.is_alive() if self._reader is not None else None
+        result['stderr_reader_alive'] = self._stderr.is_alive() if self._stderr is not None else None
+        result['io_error_present'] = getattr(self.process, 'error', None) is not None
+        stop = getattr(self.process, '_stop', None)
+        result['io_stopped'] = stop.is_set() if stop is not None else None
+        result['streams_closed'] = {name: closed if type(closed) is bool else None
+            for name in ('stdin', 'stdout', 'stderr')
+            for closed in (getattr(getattr(self.process, name, None), 'closed', None),)}
+        return result
 
     def _alive(self):
         # Transport EOF is separately observed; it is not proof of task exit.
@@ -162,6 +278,7 @@ class FixturePiRpcReceiver:
                             pass
                     self._condition.notify_all()
         except (ValueError, OSError) as error:
+            self._reader_error_type = type(error).__name__
             self.errors.append(str(error))
         finally:
             with self._condition:
@@ -171,6 +288,7 @@ class FixturePiRpcReceiver:
     def _read_errors(self):
         try:
             for line in iter(lambda: self.process.stderr.readline(4096), b''):
+                self._capture_startup_stderr(line)
                 self.errors.append(line[:4096].decode('utf8', errors='replace'))
         except (OSError, ValueError):
             pass  # Controller may close streams after reaping its owned process.
@@ -247,6 +365,8 @@ class FixturePiRpcReceiver:
         try:
             # "handled" only means extension dispatch completed, NEVER delivery.
             self.rpc('prompt', message=f'/uas-{command} {message}')
+            if command == 'state':
+                self._startup_stage('state-notification')
             return self._wait(self._notifications, request_id)
         finally:
             with self._condition:

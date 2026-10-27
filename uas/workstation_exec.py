@@ -255,7 +255,7 @@ class ExecLaunch:
         """Defensive immutable-by-ownership metadata; never a live authority."""
         return None if self._native_readiness is None else json.loads(json.dumps(self._native_readiness))
 
-    def attach_native(self, *, journal, scope, profile_digest, timeout=8):
+    def attach_native(self, *, journal, scope, profile_digest, timeout=8, startup_observer=None):
         """Supervisor-only concrete fresh-native proof over exact Engine RPC.
 
         profile_digest identifies trusted immutable payload admission; this
@@ -279,7 +279,7 @@ class ExecLaunch:
                 raise ExecUnavailable('trusted native scope/profile required')
             scope = dict(scope)
             receiver = FixturePiRpcReceiver.attach_workstation(self, journal=journal,
-                                                               scope=scope, timeout=timeout)
+                scope=scope, timeout=timeout, startup_observer=startup_observer)
             self.native_receiver = receiver
             if (receiver.incarnation_id != self.incarnation or receiver.scope != scope
                     or receiver.runtime_version != '1.4.0'):

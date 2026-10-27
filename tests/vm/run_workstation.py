@@ -70,7 +70,8 @@ def parse_report(serial, nonce):
     if len(lines) != 1 or len(lines[0]) > 32768:
         raise RuntimeError('expected one bounded report from this boot')
     report = json.loads(lines[0])
-    if (report.get('version') != 1 or report.get('nonce') != nonce or set(report.get('checks', {})) != REQUIRED
+    if (report.get('version') != 1 or report.get('nonce') != nonce or 'failure' in report
+            or set(report.get('checks', {})) != REQUIRED
             or any(item.get('status') != 'passed' for item in report['checks'].values())):
         raise RuntimeError('guest native scenario failed: ' + json.dumps(report))
     return report

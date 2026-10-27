@@ -26,7 +26,7 @@ class NativeBootOrderTests(unittest.TestCase):
             root = Path(directory)
             stack.enter_context(patch.object(guest, 'Path', side_effect=lambda value: root / Path(value).name))
             stack.enter_context(patch.object(native_rootfs, 'build_rootfs', side_effect=lambda *a, **k: events.append('rootfs')))
-            stack.enter_context(patch.object(guest, 'emit_evidence', side_effect=lambda *a: events.append('evidence')))
+            stack.enter_context(patch.object(guest, 'emit_evidence', side_effect=lambda kind,*a: events.append('evidence:'+kind)))
             stack.enter_context(patch.object(boundary, 'start_engine', side_effect=lambda: events.append('start')))
             def profile(*args):
                 events.append('profile')
@@ -35,7 +35,8 @@ class NativeBootOrderTests(unittest.TestCase):
             commands = stack.enter_context(patch.object(guest, 'run'))
             with self.assertRaises(StopAtProfile):
                 guest.scenario(NONCE, {'profile': 'native-pi-v1'})
-            self.assertEqual(events, ['rootfs', 'evidence', 'start', 'profile'])
+            self.assertEqual(events, ['rootfs', 'evidence:completed-rootfs', 'start', 'profile',
+                                      'evidence:check-guest_cleanup'])
             commands.assert_not_called()
 
     def test_failed_rootfs_preflight_never_starts_engine(self):
