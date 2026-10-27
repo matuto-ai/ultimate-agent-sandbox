@@ -22,7 +22,7 @@ BUILD_TIMEOUT = 1200
 # provider implementation, launcher script, package lock, Node/npm or Pi asset.
 ROOM_MODULES = (
     '__init__', 'config', 'gate_policy', 'forge', 'ledger',
-    'lifecycle', 'manager_owner', 'manager_projection', 'launch', 'docker_fixture', 'guest_fixture', 'room_fixture',
+    'lifecycle', 'manager_owner', 'manager_projection', 'manager_journey', 'launch', 'docker_fixture', 'guest_fixture', 'room_fixture',
     'room_probe', 'docker_exec_api', 'kernel_origin', 'workstation_exec',
     'workstation_probe', 'forge_audit', 'git_audit', 'git_controller',
     'git_endpoint', 'git_launcher', 'git_policy', 'git_process', 'git_provenance',

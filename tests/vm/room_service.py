@@ -38,6 +38,38 @@ def require(value, message):
     if not value: raise RuntimeError(message)
 
 
+class ObservedAuthority:
+    """Fixture-only delegation: retain first denial without changing admission."""
+    def __init__(self, delegate, checks):
+        self.delegate, self.checks = delegate, checks
+
+    @property
+    def origin(self): return self.delegate.origin
+
+    def _call(self, method, *args):
+        try: return getattr(self.delegate, method)(*args)
+        except Exception as error:
+            self.checks.setdefault('authority_failure', {
+                'operation': method, 'error_type': type(error).__name__,
+                'message': str(error)[:256]})
+            raise
+
+    def bind(self, record):
+        return ObservedAuthority(self._call('bind', record), self.checks)
+
+    def current(self): return self._call('current')
+    def require(self, record): return self._call('require', record)
+    def close(self): return self.delegate.close()
+
+
+def require_help_reply(reply, checks, index):
+    """Do not wait for a second request after first help already failed."""
+    checks.setdefault('help_replies', []).append(
+        None if reply is None else {'code': reply['code'], 'status': reply['status']})
+    require((reply is not None and reply['code'] == 0) if index == 0 else reply is None,
+            'mounted help refused' if index == 0 else 'non-help unexpectedly admitted')
+
+
 def fixed_executable(path):
     path = Path(path)
     require(path.as_posix() in ('/usr/bin/git', '/usr/bin/ssh') and path.resolve() == path,
@@ -310,7 +342,7 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run):
         return result
 
 
-def prove_service(supervisor, backend, endpoint_, container, *, run):
+def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None):
     """Preflight service/lineage, then recheck actual boundary before release."""
     from uas.docker_exec_api import DockerExecAPI
     from uas.forge import ForgeBinding
@@ -329,7 +361,9 @@ def prove_service(supervisor, backend, endpoint_, container, *, run):
     instance = state['instance_id']
     binding = ForgeBinding('alpha', 'alpha', 'owner/repo')
     private = supervisor.directory / ('service-' + instance); private.mkdir(mode=0o700)
-    checks, active, effects = {}, True, {'worker': 0}
+    checks = {} if checks is None else checks
+    checks.update(status='in_progress', stage='bootstrap_launch')
+    active, effects = True, {'worker': 0}
     listener = endpoint_.listeners[0]
     broker = launch = authority = provenance = None
     backend_fd = -1
@@ -409,6 +443,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run):
         finally: view.close()
         origin = Origin('fixture-actor', 'fixture-participant', launch.incarnation, 'fixture-epoch', ('git-read',))
         authority = GitChildAuthority((GitSeat(origin, launch.origin, current, namespace, depth),))
+        authority = ObservedAuthority(authority, checks)
         provenance = GitProvenance(private / 'provenance.db', 'alpha', 'alpha')
         metadata = private / 'metadata'; metadata.mkdir(mode=0o700)
         for name in ('objects', 'refs', 'helpers'): (metadata / name).mkdir(mode=0o700)
@@ -424,17 +459,35 @@ def prove_service(supervisor, backend, endpoint_, container, *, run):
             current(); backend.admit(state)
             send(launch.channel, {'kind': 'PROVE_HELP_ONLY'})
         replies = []
-        for _ in range(2):
+        for index in range(2):
+            checks['stage'] = 'help_accept' if index == 0 else 'nonhelp_accept'
+            ready, _, _ = select.select([listener, launch.channel], [], [], 5)
+            if launch.channel in ready:
+                with receive(launch.channel) as record:
+                    launch.origin.require(record)
+                    value = decode(record.data)
+                if (type(value) is dict and set(value) == {'kind', 'stage', 'error_type'}
+                        and value['kind'] == 'BOOTSTRAP_FAILED'
+                        and type(value['stage']) is str and len(value['stage']) <= 64
+                        and type(value['error_type']) is str and len(value['error_type']) <= 64):
+                    checks['bootstrap_failure'] = value
+                    send(launch.channel, {'kind': 'BOOTSTRAP_FAILURE_RECORDED'})
+                raise RuntimeError('bootstrap ended before expected help request')
+            require(listener in ready, 'mounted help request not received at ' + checks['stage'])
             listener.settimeout(5)
             channel, _ = listener.accept()
             with channel:
                 require_process_label(channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERSEC, 1024).decode(), ROOMS['alpha'][3])
+                checks['stage'] = 'help_serve' if index == 0 else 'nonhelp_serve'
                 replies.append(serve_one(channel, service, authority, lifecycle_lock=supervisor._locked))
+                require_help_reply(replies[-1], checks, index)
+        checks['stage'] = 'help_confirmation'
         control({'kind': 'HELP_ONLY_PROVED'})
         require(replies[0] is not None and replies[0]['code'] == 0 and replies[1] is None
                 and effects['worker'] == 0, 'help-only real service proof differs')
         # An unrelated Engine exec has the same numeric UID and mount but no
         # ancestry to the held bootstrap. The real service must reject it.
+        checks['stage'] = 'unrelated_task_refusal'
         unrelated = subprocess.Popen(['docker', 'exec', container, '/usr/bin/python3', '-I',
             '/opt/uas/uas/room_probe.py', 'denied-help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -465,7 +518,11 @@ def prove_service(supervisor, backend, endpoint_, container, *, run):
         require(bool(exited.poll(5000)) and not alive(launch.origin.pidfd),
                 'held bootstrap exit was not observed before service teardown')
         checks['held_bootstrap_exit_observed'] = True
+        checks['stage'] = 'complete'
         return checks
+    except BaseException as error:
+        checks.update(status='failed', error_type=type(error).__name__)
+        raise
     finally:
         active = False
         errors = []

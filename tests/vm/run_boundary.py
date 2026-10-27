@@ -22,7 +22,7 @@ IDLE_SERIAL_TIMEOUT = 300
 LOG_FILES = ('qemu.log', 'serial.log', 'firmware.log')
 REQUIRED = {'runtime', 'network', 'writable_mounts', 'block_quota', 'inode_quota',
             'recovery', 'drift', 'destroy', 'sibling_health', 'guest_cleanup'}
-SOURCES = ('uas/__init__.py', 'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/lifecycle.py', 'uas/docker_fixture.py', 'uas/guest_fixture.py',
+SOURCES = ('uas/__init__.py', 'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/manager_journey.py', 'uas/lifecycle.py', 'uas/docker_fixture.py', 'uas/guest_fixture.py',
            'uas/launch.py', 'uas/config.py', 'tests/vm/fedora-image.json',
            'tests/vm/boundary_fixture.go', 'tests/vm/guest_boundary.py')
 

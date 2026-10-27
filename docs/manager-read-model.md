@@ -1,5 +1,11 @@
 # Manager live read model — issue #75
 
+The [Field Notes consumer](manager-field-notes.md) (#76) extends the projection
+to schema v2 with one bounded, source-owned journey window. Existing v1 data is
+readable with history explicitly unavailable; upgrade the consumer first. The
+original replay event shape, Room identity, source watermarks and mutation-free
+transport vocabulary remain unchanged.
+
 This is the read-only source/transport integration for [#75](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/75),
 not the Manager UI (#76), actions (#77), or completed real-product acceptance.
 It has no Run, Gate, review, Forge, Supervisor, shell, filesystem, or container

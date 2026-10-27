@@ -1,74 +1,200 @@
-const fs = require("node:fs");
-const vm = require("node:vm");
+// Existing Field Notes check: VM/DOM contracts, plus opt-in hosted Chrome proof.
+// Node built-ins only. No downloads, browser framework, server, or live accounts.
+const fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+const assert = require('node:assert/strict'), {pathToFileURL} = require('node:url');
+const args = process.argv.slice(2);
+if (!args.includes('--fixtures') || !args[args.indexOf('--fixtures')+1]) throw Error('--fixtures DIRECTORY is required');
+const root = path.resolve(args[args.indexOf('--fixtures')+1]);
+const documents = Object.fromEntries(['connected','disconnected','catching-up','reconnected'].map(name=>[name,fs.readFileSync(path.join(root,name+'.html'),'utf8')]));
+const dataFor = html=>JSON.parse(html.match(/<script type="application\/json" id="manager-data">([\s\S]*?)<\/script>/)[1]);
+const data = dataFor(documents.connected), project = 'deployment/alpha/stream-alpha', run = 'run-alpha';
+const routes = ['projects','inbox','health','project','room','run'];
 
-const html = fs.readFileSync(new URL("manager-ui-prototype.html", `file://${__dirname}/`), "utf8");
-const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
-if (!source) throw new Error("prototype script not found");
-
-function boot(variant, page, scenario = "attention", project = "", run = "") {
-  const elements = new Map();
-  const make = id => ({
-    id, innerHTML: "", textContent: "", hidden: id === "drawer", open: false,
-    value: "", checked: false, disabled: false, className: "",
-    classList: { add() {}, remove() {} }, addEventListener() {}, focus() {},
-    showModal() { this.open = true; }, close() { this.open = false; },
-  });
-  const get = id => {
-    if (!elements.has(id)) elements.set(id, make(id));
-    return elements.get(id);
-  };
-  const query = new URLSearchParams({ variant, page, scenario });
-  if (project) query.set("project", project);
-  if (run) query.set("run", run);
-  const location = { href: `http://localhost/manager-ui-prototype.html?${query}`, search: `?${query}` };
-  const document = {
-    body: { className: "", classList: { add() {}, remove() {} } }, title: "", activeElement: null,
-    getElementById: get, addEventListener() {}, querySelector() { return null; },
-  };
-  const context = {
-    URL, URLSearchParams, location, document,
-    history: { pushState() {}, replaceState() {} }, window: { addEventListener() {} },
-    requestAnimationFrame(fn) { fn(); }, setTimeout(fn) { fn(); return 1; }, clearTimeout() {}, Math, Date,
-  };
+function boot(theme,page,name='connected',replacement=null) {
+  const elements=new Map(), listeners=new Map();
+  const get=id=>{if(!elements.has(id))elements.set(id,{id,innerHTML:'',textContent:'',hidden:id==='drawer',open:false,isConnected:true,
+    focus(){document.activeElement=this;},showModal(){this.open=true;},close(){this.open=false;},addEventListener(type,fn){listeners.set(id+':'+type,fn);}});return elements.get(id);};
+  get('manager-data').textContent=JSON.stringify(replacement||dataFor(documents[name]));
+  let url=new URL('file:///manager.html?'+new URLSearchParams({variant:theme,page,project,run}));
+  const location={get href(){return url.href;},get search(){return url.search;}};
+  const document={body:{className:''},title:'',activeElement:null,getElementById:get,querySelector(){return get('h1');},addEventListener(type,fn){listeners.set(type,fn);}};
+  class FixedDate extends Date {static now(){return Date.parse(data.generated_at);}}
+  const context={URL,URLSearchParams,location,document,Date:FixedDate,history:{pushState(_,__,value){url=new URL(value,url);},replaceState(_,__,value){url=new URL(value,url);}},window:{addEventListener(type,fn){listeners.set(type,fn);}},requestAnimationFrame(fn){fn();},setInterval(){return 1;}};
   vm.createContext(context);
-  vm.runInContext(source, context, { filename: "manager-ui-prototype.html" });
-  return { context, get, markup: get("app").innerHTML, document };
+  vm.runInContext(documents[name].match(/<script>([\s\S]*?)<\/script>/)[1],context,{filename:'manager-ui-prototype.html',timeout:1000});
+  return {context,get,document,listeners};
+}
+let count=0;
+for(const theme of ['C','D'])for(const route of routes){
+  const result=boot(theme,route), html=result.get('app').innerHTML;
+  assert(html.includes('<h1')&&html.includes('Project and Run hierarchy')&&!html.includes('undefined'));
+  assert.equal(result.document.body.className,'v-'+theme);
+  if(route==='run'){
+    assert(html.includes('Run journey')&&html.includes('CHANGES REQUESTED')&&html.includes('Gate ledger'));
+    assert.equal((html.match(/journey-step feedback/g)||[]).length,1,'human control must not invent a new review return');
+    assert(html.includes('Open in GitHub')&&html.includes('disabled aria-describedby'));
+    assert(!html.includes('data-status="pass"'),'historical pass must not become current pass');
+  }count++;
+}
+for(const name of ['disconnected','catching-up']){
+  const html=boot('C','run',name).get('app').innerHTML;
+  assert(html.includes('data-status="stale"')&&html.includes(`data-status="${name==='catching-up'?'catching-up':'disconnected'}"`));
+  assert(!html.includes('class="status good" data-status="disconnected"'));
+}
+const interaction=boot('C','run');
+interaction.context.projectDetail(project);assert(interaction.get('drawer-body').innerHTML.includes('Configured Project binding'));
+interaction.context.personDetail('alice',project);assert(interaction.get('drawer-body').innerHTML.includes('remaining')&&interaction.get('drawer-body').innerHTML.includes('capabilities'));
+interaction.context.healthProject(project);assert(interaction.get('drawer-body').innerHTML.includes('PARTIAL_MUTATION')&&interaction.get('drawer-body').innerHTML.includes('/srv/project/alpha'));
+interaction.context.gateDetail(0,project,run);assert(interaction.get('drawer-body').innerHTML.includes('independent check'));
+interaction.context.openAttention(project+':'+run);assert(interaction.get('item-dialog').open&&interaction.get('item-body').innerHTML.includes('disabled aria-describedby'));
+interaction.context.installDocument(dataFor(documents.disconnected));assert(!interaction.get('item-dialog').open&&interaction.get('drawer').hidden);
+interaction.context.installDocument(dataFor(documents.reconnected));assert(interaction.get('app').innerHTML.includes('run.resumed'));
+const hostile=structuredClone(data);hostile.rooms[0].metadata.project_id='<img src=x onerror="globalThis.pwned=true">';
+assert(boot('C','projects','connected',hostile).get('app').innerHTML.includes('&lt;img'));
+for(const freshness of ['unknown','stale','current']){
+  const fallback=structuredClone(data),sections=fallback.rooms[0].view.projection.sections;
+  sections.attention.value={};sections.review.freshness=freshness;
+  sections.review.value[run].state='READY_FOR_HUMAN';
+  const html=boot('C','inbox','connected',fallback).get('app').innerHTML;
+  if(freshness!=='current')assert(!html.includes('folio-case-code">CURRENT'),'review freshness must not inherit snapshot freshness');
+  assert(html.includes(`folio-case-code">${freshness.toUpperCase()}`));
+}
+for(const html of Object.values(documents))assert(!/Approve candidate|Request confirmed|Math\.random|fetch\(|XMLHttpRequest/.test(html));
+console.log(`manager Field Notes: ${count} light/dark routes and live interaction contracts passed (VM/DOM, not browser proof)`);
+
+// Pure ownership bookkeeping: an error without a PID is a terminal failed
+// spawn; an error from an existing child never pretends the child has exited.
+function trackChild(child,onFailure){
+  let ended=false,closed=false,resolveStop,resolveClose;
+  const stopped=new Promise(resolve=>{resolveStop=resolve;});
+  const closedPromise=new Promise(resolve=>{resolveClose=resolve;});
+  const terminal=()=>{if(!ended){ended=true;resolveStop();}};
+  const close=()=>{terminal();if(!closed){closed=true;resolveClose();}};
+  child.once('exit',(code,signal)=>{terminal();onFailure(Error(`Chrome exited ${code}/${signal}`));});
+  child.once('close',close);
+  child.on('error',error=>{if(!child.pid)close();onFailure(error);});
+  return {get ended(){return ended;},get closed(){return closed;},stopped,closedPromise};
+}
+// CDP's key string/code alone is not a complete native keyboard gesture.
+// Supply Escape's virtual key and release it, including across successive dialogs.
+async function pressEscape(send){
+  const key={key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27,modifiers:0};
+  try { await send('Input.dispatchKeyEvent',{...key,type:'keyDown'}); }
+  finally { await send('Input.dispatchKeyEvent',{...key,type:'keyUp'}); }
+}
+function boundedWait(promise,milliseconds){
+  let timer;
+  return Promise.race([promise,new Promise(resolve=>{timer=setTimeout(resolve,milliseconds);})]).finally(()=>clearTimeout(timer));
+}
+async function closeOwnedBrowser(child,lifetime,graceful,profile,{wait=boundedWait,remove=path=>fs.rmSync(path,{recursive:true,force:true,maxRetries:3,retryDelay:100})}={}){
+  if(child&&lifetime&&!lifetime.closed){
+    // Browser.close lets Chrome own its descendant shutdown and profile flush.
+    // A closed pipe during the request is expected; termination is checked next.
+    if(graceful&&!lifetime.ended){try{await wait(graceful().catch(()=>{}),500);}catch(_){}}
+    await wait(lifetime.closedPromise,1000);
+    if(!lifetime.ended){child.kill('SIGTERM');await wait(lifetime.closedPromise,500);}
+    if(!lifetime.ended){child.kill('SIGKILL');await wait(lifetime.closedPromise,500);}
+    if(!lifetime.closed)throw Error('Owned Chrome close unconfirmed; profile retained');
+  }
+  if(profile)remove(profile);
+}
+async function ownershipContract(){
+  function fake(pid){const listeners=new Map();return {pid,on(name,fn){listeners.set(name,fn);},once(name,fn){listeners.set(name,fn);},emit(name,...args){listeners.get(name)(...args);}};}
+  const failed=fake(undefined),failures=[];
+  const missing=trackChild(failed,error=>failures.push(error.message));failed.emit('error',Error('EACCES'));await missing.stopped;
+  assert(missing.ended&&failures.includes('EACCES'));
+  const running=fake(17),owned=trackChild(running,()=>{});running.emit('error',Error('temporary error'));assert(!owned.ended);running.emit('exit',0,null);await owned.stopped;assert(owned.ended);
+  assert(!owned.closed,'exit alone does not close inherited pipes');running.emit('close');await owned.closedPromise;assert(owned.closed);
+  const events=[];await pressEscape(async(method,value)=>events.push([method,value]));
+  assert.deepEqual(events.map(item=>item[1].type),['keyDown','keyUp']);assert(events.every(item=>item[1].windowsVirtualKeyCode===27&&item[1].nativeVirtualKeyCode===27));
+  const failedKeys=[];await assert.rejects(pressEscape(async(_,value)=>{failedKeys.push(value.type);if(value.type==='keyDown')throw Error('input failed');}),/input failed/);assert.deepEqual(failedKeys,['keyDown','keyUp']);
+  const trace=[],browser=fake(21),state=trackChild(browser,()=>{});browser.kill=signal=>{trace.push(signal);browser.emit('close');};
+  await closeOwnedBrowser(browser,state,async()=>{trace.push('Browser.close');browser.emit('exit',0,null);browser.emit('close');},'/owned',{wait:async promise=>promise,remove:path=>trace.push('remove '+path)});
+  assert.deepEqual(trace,['Browser.close','remove /owned']);
+  const stuck=fake(22),stuckState=trackChild(stuck,()=>{}),signals=[];stuck.kill=signal=>signals.push(signal);
+  await assert.rejects(closeOwnedBrowser(stuck,stuckState,async()=>{throw Error('broken pipe');},'/owned',{wait:async()=>{},remove:()=>{throw Error('must not remove live profile');}}),/close unconfirmed/);assert.deepEqual(signals,['SIGTERM','SIGKILL']);
+  await assert.rejects(closeOwnedBrowser(null,null,null,'/owned',{remove:()=>{throw Error('ENOTEMPTY');}}),/ENOTEMPTY/);
+
 }
 
-let routes = 0;
-for (const variant of ["C", "D"]) {
-  for (const page of ["projects", "inbox", "health", "project", "run"]) {
-    const contextual = page === "project" || page === "run";
-    const result = boot(variant, page, "attention", contextual ? "uas" : "", page === "run" ? "run-01J8ZT7G" : "");
-    if (!result.markup.includes("<h1") || result.markup.includes("undefined")) throw new Error(`${variant}/${page}: invalid render`);
-    if (!result.markup.includes("Project and Run hierarchy")) throw new Error(`${variant}/${page}: Project index missing`);
-    if (result.document.body.className !== `v-${variant}`) throw new Error(`${variant}/${page}: theme missing`);
-    if (page === "run") {
-      if (!result.markup.includes("Run journey") || !result.markup.includes("CHANGES REQUESTED")) throw new Error(`${variant}: journey missing`);
-      if ((result.markup.match(/gate-ledger-row/g) || []).length !== 5) throw new Error(`${variant}: gate ledger incomplete`);
+async function browserCheck(){
+  if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Linux'||process.env.UAS_MANAGER_BROWSER_TEST!=='1')throw Error('Explicit hosted Linux browser guard required');
+  const os=require('node:os'),{spawn}=require('node:child_process');
+  const chrome=['/usr/bin/google-chrome','/usr/bin/chromium'].find(file=>fs.existsSync(file));
+  if(!chrome)throw Error('Preinstalled Chrome unavailable; download and sandbox bypass forbidden');
+  const output=path.join(root,'browser-proof'),pending=new Map();
+  let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='',graceful=null,failure=null;
+  const rejectPending=error=>{for(const item of pending.values()){clearTimeout(item.timer);item.reject(error);}pending.clear();};
+  try{
+    fs.mkdirSync(output);
+    profile=fs.mkdtempSync(path.join(os.tmpdir(),'uas-manager-chrome-'));
+    child=spawn(chrome,['--headless=new','--remote-debugging-pipe','--disable-background-networking','--disable-component-update','--disable-default-apps','--disable-sync','--no-first-run','--no-default-browser-check','--metrics-recording-only','--password-store=basic','--use-mock-keychain',`--user-data-dir=${profile}`,'about:blank'],{stdio:['ignore','ignore','pipe','pipe','pipe'],shell:false});
+    lifetime=trackChild(child,rejectPending);
+    if(!child.pid){await lifetime.stopped;throw Error('Chrome spawn failed before acquiring a process');}
+    deadline=setTimeout(()=>{if(!lifetime.ended)child.kill('SIGKILL');},35000);
+  child.stderr.on('data',chunk=>{errors=(errors+chunk).slice(-8192);});
+  child.stdio[3].on('error',rejectPending);
+  child.stdio[4].on('error',rejectPending);
+  child.stdio[4].on('data',chunk=>{
+    buffer+=chunk.toString();if(buffer.length>16*1024*1024){child.kill('SIGKILL');return;}
+    let boundary;while((boundary=buffer.indexOf('\0'))>=0){const raw=buffer.slice(0,boundary);buffer=buffer.slice(boundary+1);if(!raw)continue;
+      const message=JSON.parse(raw),item=pending.get(message.id);if(item){pending.delete(message.id);clearTimeout(item.timer);message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}}
+  });
+  const command=(method,params={},sessionId)=>new Promise((resolve,reject)=>{
+    if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const id=++serial,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method));},5000);
+    pending.set(id,{resolve,reject,timer});child.stdio[3].write(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0');
+  });
+    graceful=()=>command('Browser.close');
+    const version=await command('Browser.getVersion'),target=await command('Target.createTarget',{url:'about:blank'});
+    const {sessionId}=await command('Target.attachToTarget',{targetId:target.targetId,flatten:true});
+    const send=(method,params)=>command(method,params,sessionId);
+    const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value;};
+    await send('Page.enable');await send('Runtime.enable');await send('Network.enable');
+    await send('Network.setBlockedURLs',{urls:['http://*','https://*','ws://*','wss://*']});
+    await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+    const receipts=[],screenshots=[];
+    for(const theme of ['C','D'])for(const route of routes){
+      const url=pathToFileURL(path.join(root,'connected.html'));url.search=new URLSearchParams({variant:theme,page:route,project,run}).toString();
+      const navigation=await send('Page.navigate',{url:url.href});assert(!navigation.errorText);
+      await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+2500;function check(){if(location.href===${JSON.stringify(url.href)}&&document.readyState==='complete'&&document.querySelector('main h1'))resolve(true);else if(Date.now()>end)reject(new Error('missing render'));else setTimeout(check,15)}check()})`);
+      const measured=await evaluate(`({theme:document.body.className,heading:document.querySelector('main h1').textContent,width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,nav:!!document.querySelector('nav[aria-label="Project and Run hierarchy"]'),controls:[...document.querySelectorAll('button')].filter(button=>/Request changes|Pause Run/.test(button.textContent)).every(button=>button.disabled)})`);
+      assert.equal(measured.theme,'v-'+theme);assert(measured.heading&&measured.nav&&measured.controls);assert(measured.scroll<=measured.width+1,theme+'/'+route+': overflow');
+      const accessibility=await send('Accessibility.getFullAXTree');
+      assert(accessibility.nodes.some(node=>node.role?.value==='heading'&&node.name?.value===measured.heading));
+      assert(accessibility.nodes.some(node=>node.role?.value==='navigation'&&node.name?.value==='Project and Run hierarchy'));
+      if(route==='projects'||route==='run'){const name=`${theme}-${route}.png`,shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);}
+      receipts.push({theme,route,...measured,accessibility:'heading-and-navigation-present'});
     }
-    routes++;
+    await evaluate(`document.querySelector('[data-gate-index]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);
+    assert(await evaluate(`!document.getElementById('drawer').hidden&&document.activeElement.id==='drawer-title'`));
+    await pressEscape(send);await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+500;function check(){if(document.getElementById('drawer').hidden)resolve(true);else if(Date.now()>end)reject(Error('Escape did not close drawer'));else requestAnimationFrame(check)}check()})`);assert(await evaluate(`document.getElementById('drawer').hidden`));
+    await evaluate(`document.querySelector('[data-attention]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);assert(await evaluate(`document.getElementById('item-dialog').open&&document.activeElement.id==='item-title'`));
+    await pressEscape(send);await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+500;function check(){if(!document.getElementById('item-dialog').open)resolve(true);else if(Date.now()>end)reject(Error('Escape did not close dialog'));else requestAnimationFrame(check)}check()})`);assert(await evaluate(`!document.getElementById('item-dialog').open`));
+    await evaluate(`document.querySelector('a[data-nav][href*="page=health"]').click()`);assert.equal(await evaluate(`new URLSearchParams(location.search).get('page')`),'health');
+    await evaluate(`history.back();new Promise(resolve=>setTimeout(resolve,80))`);assert.equal(await evaluate(`new URLSearchParams(location.search).get('page')`),'run');
+    await evaluate(`installDocument(${JSON.stringify(dataFor(documents.disconnected))})`);assert(await evaluate(`!!document.querySelector('[data-status="disconnected"]')`));
+    await evaluate(`installDocument(${JSON.stringify(dataFor(documents.reconnected))})`);assert(await evaluate(`document.querySelector('.run-journey').textContent.includes('run.resumed')`));
+    await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'mobile Run overflow');
+    const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-run-mobile.png'),Buffer.from(shot.data,'base64'));screenshots.push('D-run-mobile.png');
+    proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout'],screenshots,pixel_review:'pending independent inspection'};
+  }catch(error){
+    failure=error;
+  }finally{
+    clearTimeout(deadline);
+    try { await closeOwnedBrowser(child,lifetime,graceful,profile); }
+    catch(cleanupError){
+      if(failure)failure=new Error(failure.message+'; cleanup: '+cleanupError.message,{cause:failure});
+      else failure=cleanupError;
+    }
+    rejectPending(Error('Browser session closed'));
+    for(const item of pending.values())clearTimeout(item.timer);
   }
-  for (const scenario of ["active", "offline"]) {
-    const result = boot(variant, "run", scenario, "uas", "run-01J8ZT7G");
-    if (!result.markup.includes("<h1") || result.markup.includes("undefined")) throw new Error(`${variant}/${scenario}: invalid render`);
-    routes++;
+  if(failure){
+    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',error:failure.message,stderr:errors},null,2));
+    throw failure;
   }
+  // Never publish a success receipt before actual child termination/cleanup.
+  fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed'},null,2));
+  console.log(`manager real-browser proof: ${proof.routes.length} routes; ${proof.browser.product}; ${output}/receipt.json`);
 }
-
-const interaction = boot("C", "run", "attention", "uas", "run-01J8ZT7G");
-interaction.context.projectDetail("uas");
-if (interaction.get("drawer").hidden || !interaction.get("drawer-body").innerHTML.includes("Open Project")) throw new Error("Project drawer failed");
-interaction.context.closeDrawer();
-interaction.context.gateDetail(3, "uas", "run-01J8ZT7G");
-if (!interaction.get("drawer-body").innerHTML.includes("independent check")) throw new Error("gate drawer failed");
-interaction.context.closeDrawer();
-interaction.context.openAttention("review-cap");
-if (!interaction.get("item-dialog").open || !interaction.get("item-actions").innerHTML.includes("Add review rounds")) throw new Error("attention dialog failed");
-interaction.context.closeItem();
-interaction.context.openAction("extend", "", "uas", "run-01J8ZT7G");
-interaction.get("action-reason").value = "One more review cycle is justified";
-interaction.context.submitAction({ preventDefault() {} });
-if (!interaction.get("action-receipt").innerHTML.includes("Request confirmed")) throw new Error("typed-action receipt failed");
-
-console.log(`manager UI prototype: ${routes} routes and core interactions passed`);
+ownershipContract().then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});

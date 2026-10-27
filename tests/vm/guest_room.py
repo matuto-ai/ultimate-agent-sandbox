@@ -161,7 +161,9 @@ def scenario(nonce, manifest, boot_network, checks):
             'actual_mounts': {room: backends[room].admit(states[room])['Mounts'] for room in ROOMS}}
         # The bootstrap receives no workload release until the actual mounted
         # service and same live Broker have both passed their checks.
-        checks['endpoint_service'] = prove_service(supervisors['alpha'], backends['alpha'], endpoints['alpha'], containers['alpha'], run=run)
+        checks['endpoint_service'] = {}
+        prove_service(supervisors['alpha'], backends['alpha'], endpoints['alpha'], containers['alpha'],
+                      run=run, checks=checks['endpoint_service'])
         require(checks['endpoint_service']['held_bootstrap_exit_observed'] is True,
                 'held workload must exit before destructive endpoint negatives')
         checks['endpoint_service']['foreign_socket_sid'] = prove_foreign_socket_sid(

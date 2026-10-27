@@ -132,9 +132,29 @@ def bootstrap():
                 require(decode(record.data) == {'kind': 'PROVE_HELP_ONLY'}, 'preflight not authorized')
             # No actor input: the actual public service derives our held task.
             # We deliberately call only its safe help route in this fixture.
-            from uas.git_launcher import main as git
-            require(git(['--help'], invoked_as='git') == 0, 'real mounted Git help failed')
-            require(git(['status'], invoked_as='git') == 128, 'non-help must be disabled')
+            stage = 'launcher_import'
+            try:
+                from uas.git_launcher import main as git
+                stage = 'help'
+                require(git(['--help'], invoked_as='git') == 0, 'real mounted Git help failed')
+                stage = 'nonhelp'
+                require(git(['status'], invoked_as='git') == 128, 'non-help must be disabled')
+            except Exception as error:
+                # Authenticated fixed control channel; never sends traceback,
+                # arbitrary exception text, secrets or authority claims.
+                try:
+                    send(channel, {'kind': 'BOOTSTRAP_FAILED', 'stage': stage,
+                                   'error_type': type(error).__name__[:64]})
+                    # The receiver authenticates a live held task. Keep this
+                    # task alive until its exact peer acknowledges recording.
+                    channel.settimeout(5)
+                    with receive(channel) as record:
+                        peer.require(record)
+                        require(decode(record.data) == {'kind': 'BOOTSTRAP_FAILURE_RECORDED'},
+                                'unexpected bootstrap diagnostic acknowledgement')
+                except Exception:
+                    pass  # Preserve the first error if the diagnostic send fails.
+                raise
             send(channel, {'kind': 'HELP_ONLY_PROVED'})
             with receive(channel) as record:
                 peer.require(record)

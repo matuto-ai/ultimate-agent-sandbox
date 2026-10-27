@@ -24,7 +24,7 @@ REQUIRED = {'payload', 'confinement', 'socket_policy', 'hub_startup', 'native_tw
             'actor_attribution', 'wrong_process', 'control_loss', 'resources', 'guest_cleanup'}
 SOURCES = (
     'uas/__init__.py',
-    'uas/manager_owner.py', 'uas/manager_projection.py',
+    'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/manager_journey.py',
     'uas/config.py',
     'uas/gate_policy.py',
     'uas/context.py',

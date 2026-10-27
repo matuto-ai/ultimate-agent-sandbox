@@ -63,8 +63,9 @@ _STORE_SCHEMA = {
 def validate_projection(value, room_id):
     if (type(value) is not dict or set(value) != {'schema_version', 'room_id', 'room_seq',
             'captured_at', 'sections'} or type(value['schema_version']) is not int
-            or value['schema_version'] != SCHEMA_VERSION or value['room_id'] != room_id
-            or type(value['sections']) is not dict or set(value['sections']) != SECTION_NAMES):
+            or value['schema_version'] not in {1, SCHEMA_VERSION} or value['room_id'] != room_id
+            or type(value['sections']) is not dict
+            or set(value['sections']) != SECTION_NAMES | ({'journey'} if value['schema_version'] == 2 else set())):
         raise StreamError('INVALID_PROJECTION')
     sequence(value['room_seq']); timestamp(value['captured_at'])
     for section, fact in value['sections'].items():
@@ -90,6 +91,16 @@ def validate_projection(value, room_id):
             validate_section_value(section, fact['value'])
         elif fact['value'] is not None:
             raise StreamError('UNKNOWN_FACT_HAS_VALUE')
+    journey = value['sections'].get('journey')
+    if journey is not None and journey['status'] == 'known':
+        runs = value['sections']['runs']['value']
+        if (journey['observed_version'] != value['room_seq']
+                or journey['value']['through_seq'] != value['room_seq']
+                or any(type(runs) is not dict or row['run_id'] not in runs
+                       or type(runs[row['run_id']].get('generation')) is not int
+                       or row['generation'] > runs[row['run_id']]['generation']
+                       for row in journey['value']['events'].values())):
+            raise StreamError('JOURNEY_CUT_MISMATCH')
     # Canonical size/depth bounds are checked before persistence and transport.
     canonical(value)
     return deepcopy(value)
@@ -105,11 +116,15 @@ def public_event(event, room_id):
 
 class RoomStream:
     """One fixed Room source. Capture is detached before any outbound I/O."""
-    def __init__(self, ledger, identity, *, supervisor=None, participants=None, checkouts=None, audit=None, forge=None):
+    def __init__(self, ledger, identity, *, supervisor=None, participants=None, checkouts=None, audit=None, forge=None,
+                 schema_version=SCHEMA_VERSION):
         _identity(identity)
         if type(ledger) is not RoomLedger or ledger.room_id != identity.room_id:
             raise StreamError('SOURCE_ROOM_MISMATCH')
         self.ledger, self.identity = ledger, identity
+        if type(schema_version) is not int or schema_version not in {1, SCHEMA_VERSION}:
+            raise StreamError('UNSUPPORTED_PROJECTION_SCHEMA')
+        self.schema_version = schema_version
         # Finite trusted owner integrations, never a callable registry supplied
         # by a frame. Imports avoid making the passive projection depend on OS
         # control modules during ledger-only use.
@@ -169,7 +184,13 @@ class RoomStream:
                     None, None, status='unavailable', reason='OWNER_EXPORT_UNAVAILABLE'))
         if after_seq is not None and after_seq > snapshot['room_seq']:
             raise StreamError('SOURCE_CURSOR_REGRESSION')
-        projection = project_hub(snapshot, captured_at=captured_at, observations=owner_observations)
+        journey_events = None
+        if self.schema_version == 2:
+            from .manager_journey import JOURNEY_WINDOW
+            journey_events = self.ledger.replay(max(0, snapshot['room_seq'] - JOURNEY_WINDOW),
+                                               through_seq=snapshot['room_seq'], limit=JOURNEY_WINDOW)
+        projection = project_hub(snapshot, captured_at=captured_at, observations=owner_observations,
+                                 journey_events=journey_events, schema_version=self.schema_version)
         return SnapshotTransfer(self.ledger, self.identity, after_seq, projection)
 
 
@@ -183,7 +204,7 @@ class SnapshotTransfer:
             'after_seq': after_seq, 'projection': projection}).encode()).hexdigest()
 
     def begin(self):
-        return {'schema_version': SCHEMA_VERSION, 'transfer_id': self.transfer_id,
+        return {'schema_version': json.loads(self._projection)['schema_version'], 'transfer_id': self.transfer_id,
                 'identity': self.identity.document(), 'after_seq': self.after_seq,
                 'projection': json.loads(self._projection)}
 
@@ -282,9 +303,11 @@ class ManagerReadModel:
         self._session(identity, session)
         if (type(frame) is not dict or set(frame) != {'schema_version', 'transfer_id', 'identity',
                 'after_seq', 'projection'} or type(frame['schema_version']) is not int
-                or frame['schema_version'] != SCHEMA_VERSION or frame['identity'] != identity.document()):
+                or frame['schema_version'] not in {1, SCHEMA_VERSION} or frame['identity'] != identity.document()):
             raise StreamError('INVALID_BEGIN')
         projection = validate_projection(frame['projection'], identity.room_id)
+        if projection['schema_version'] != frame['schema_version']:
+            raise StreamError('PROJECTION_SCHEMA_MISMATCH')
         encoded = canonical(projection)
         expected_id = hashlib.sha256(canonical({'identity': identity.document(),
             'after_seq': frame['after_seq'], 'projection': projection}).encode()).hexdigest()
@@ -300,8 +323,12 @@ class ManagerReadModel:
             raise StreamError('CURSOR_CONFLICT')
         if row is not None and row['projection'] is not None:
             previous = json.loads(row['projection'])
+            if previous['schema_version'] > projection['schema_version']:
+                raise StreamError('PROJECTION_SCHEMA_REGRESSION')
             if cut == row['cursor'] and any(previous['sections'][name] != projection['sections'][name]
                     for name in HUB_SECTIONS - EXTERNAL_FIELDS.keys()):
+                raise StreamError('HUB_SNAPSHOT_CONFLICT')
+            if cut == row['cursor'] and previous['schema_version'] == 2 and previous['sections']['journey'] != projection['sections']['journey']:
                 raise StreamError('HUB_SNAPSHOT_CONFLICT')
         key = (identity.deployment_id, identity.room_id)
         for section in EXTERNAL_FIELDS:
@@ -382,6 +409,8 @@ class ManagerReadModel:
                 if any(previous['sections'][name] != projection['sections'][name]
                        for name in HUB_SECTIONS - EXTERNAL_FIELDS.keys()):
                     raise StreamError('HUB_SNAPSHOT_CONFLICT')
+                if previous['schema_version'] == 2 and previous['sections']['journey'] != projection['sections'].get('journey'):
+                    raise StreamError('HUB_SNAPSHOT_CONFLICT')
             for section in EXTERNAL_FIELDS:
                 fact = projection['sections'][section]
                 version = fact['observed_version']
@@ -426,3 +455,32 @@ class ManagerReadModel:
             identity = RoomIdentity(row['deployment'], row['room'], row['stream'])
             result.setdefault(identity.deployment_id, []).append(self.view(identity))
         return result
+
+    def events(self, identity, *, after_seq=0, limit=100):
+        """Bounded original metadata through the installed cut, never pending data.
+
+        This passive accessor does not recover pre-bootstrap events or claim Run
+        attribution absent from the original public contract. The caller chooses
+        an already-authorized identity; it is not a browser authorization API.
+        """
+        row = self._room(identity)
+        sequence(after_seq)
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise StreamError('INVALID_EVENT_LIMIT')
+        cut = None if row is None else row['cursor']
+        if cut is None:
+            return {'events': [], 'through_seq': None, 'next_after_seq': after_seq,
+                    'has_more': False, 'complete': False, 'history_start_seq': None}
+        if after_seq > cut:
+            raise StreamError('INVALID_EVENT_CURSOR')
+        identity_key = (identity.deployment_id, identity.room_id, identity.stream_id)
+        selected = self._db.execute('SELECT seq,event FROM manager_events WHERE deployment=? '
+            'AND room=? AND stream=? AND seq>? AND seq<=? ORDER BY seq LIMIT ?',
+            (*identity_key, after_seq, cut, limit + 1)).fetchall()
+        first = self._db.execute('SELECT MIN(seq) FROM manager_events WHERE deployment=? '
+            'AND room=? AND stream=? AND seq<=?', (*identity_key, cut)).fetchone()[0]
+        page, has_more = selected[:limit], len(selected) > limit
+        return {'events': [json.loads(item['event']) for item in page],
+                'through_seq': cut, 'next_after_seq': page[-1]['seq'] if page else after_seq,
+                'has_more': has_more, 'history_start_seq': first,
+                'complete': cut == 0 or first == 1 and after_seq == 0 and not has_more}

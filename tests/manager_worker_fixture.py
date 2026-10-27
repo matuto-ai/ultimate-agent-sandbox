@@ -66,11 +66,7 @@ def hosted_manager_worker(supervisor, ledger_path, identity, configuration, cert
         return worker
 
     def read_projection():
-        model = ManagerReadModel(case.root / 'manager.sqlite3')
-        try:
-            return model.view(identity, now=datetime.now(timezone.utc).isoformat())['projection']
-        finally:
-            model.close()
+        return observer.view(identity, now=datetime.now(timezone.utc).isoformat())['projection']
 
     def wait_projection(predicate, timeout=5):
         if not 0 < timeout <= 5:
@@ -103,18 +99,26 @@ def hosted_manager_worker(supervisor, ledger_path, identity, configuration, cert
                 pass
         return before
 
+    observer = None
     with patch('uas.manager_transport.socket.create_connection', side_effect=loopback):
         try:
+            # setUp has acknowledged durable receiver initialization. This owned
+            # observer stays on the caller thread; polling is now reads only.
+            observer = ManagerReadModel(case.root / 'manager.sqlite3')
             yield SimpleNamespace(worker=new_worker(), new_worker=new_worker,
                                   read_projection=read_projection, wait_projection=wait_projection,
                                   disconnect_receiver=disconnect_receiver, connection_count=connection_count)
         finally:
-            for worker in workers:
-                worker.request_stop()
-            for worker in workers:
-                if not worker.join(3):
-                    case.shutdown()  # Close only this owned receiver before a last bounded wait.
+            try:
+                if observer is not None:
+                    observer.close()
+            finally:
+                for worker in workers:
+                    worker.request_stop()
+                for worker in workers:
                     if not worker.join(3):
-                        raise AssertionError('fixture exporter still owned/live; resources retained')
-            if not case.doCleanups():
-                raise AssertionError('Manager receiver cleanup failed')
+                        case.shutdown()  # Close only this owned receiver before a last bounded wait.
+                        if not worker.join(3):
+                            raise AssertionError('fixture exporter still owned/live; resources retained')
+                if not case.doCleanups():
+                    raise AssertionError('Manager receiver cleanup failed')

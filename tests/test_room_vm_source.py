@@ -55,6 +55,18 @@ class RoomVMSourceTests(unittest.TestCase):
             (source / (name + '.py')).write_text('# inert ' + name + '\n')
         return payload, source
 
+    def test_room_staging_closes_eager_and_exercised_journey_imports(self):
+        from test_staged_source_closure import missing_imports
+        paths = set(runner.SOURCES)
+        self.assertEqual([], missing_imports(paths))
+        # Lifecycle writes Manager projection v2 even with no journey events;
+        # that path imports this passive module before returning unavailable.
+        self.assertIn('manager_journey', stage.ROOM_MODULES)
+        self.assertIn('uas/manager_journey.py', paths)
+        self.assertEqual(len(runner.SOURCES), len(paths))
+        self.assertLessEqual(len(paths), 64)
+        self.assertLessEqual(sum((VM.parent.parent/name).stat().st_size for name in paths), 4*1024*1024)
+
     def test_network_is_fixed_from_boot_with_no_forwarding_or_shared_host_paths(self):
         root = Path('/owned-fixture')
         args = runner.arguments(root, root/'guest.qcow2', root/'seed.iso', root/'payload.iso', root/'quota.raw')
