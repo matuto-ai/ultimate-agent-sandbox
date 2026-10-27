@@ -292,6 +292,104 @@ def sealed_backend():
     return hashlib.sha256(raw).hexdigest()
 
 
+def install_receipt_diagnostics():
+    """Hosted-fixture-only tracing; original receipt methods still decide/rethrow.
+
+    No nonce, environment, arbitrary exception text or repository body is
+    emitted. Only fixed stages, source locations, numeric kernel observations
+    and the receipt parser's bounded ref/OID tuples are eligible diagnostics.
+    This never changes the installed reporter or the production collector.
+    """
+    import uas.git_transaction as receipt
+    parse = receipt.parse_updates
+    budget = {'ordinary': 128, 'failure': 8}
+
+    def report(stage, state, *, error=None, record=None, phase=None, raw=None, proof=None, native_pid=None):
+        slot = 'failure' if error is not None else 'ordinary'
+        if budget[slot] <= 0:
+            return
+        budget[slot] -= 1
+        value = {'fixture_receipt_stage': stage, 'state': state}
+        if type(native_pid) is int:
+            value['native_pid'] = native_pid
+        if phase in {'preparing', 'prepared', 'committed', 'aborted'}:
+            value['phase'] = phase
+        if type(raw) is bytes:
+            value['updates_size'] = len(raw)
+            value['updates_sha256'] = hashlib.sha256(raw).hexdigest()
+            try:
+                value['updates'] = parse(raw)
+            except Exception:
+                value['updates'] = 'REDACTED_INVALID'
+        if record is not None:
+            value['credentials'] = record.credentials
+            try:
+                node = os.fstat(record.pidfd)
+                value['pidfd_inode'] = [node.st_dev, node.st_ino]
+                value['session'] = os.getsid(record.credentials[0])
+                value['group'] = os.getpgid(record.credentials[0])
+            except OSError:
+                value['kernel_observation'] = 'UNAVAILABLE'
+        if proof is not None:
+            value.update(expected_old=proof.expected_old, expected_ref=proof.expected_ref,
+                         kind=proof.kind, count=proof.count, target_count=proof.target_count,
+                         pending=proof.pending is not None, preparing=proof.preparing is not None,
+                         created=proof.created, failed=proof.failed)
+        if error is not None:
+            value['error_type'] = type(error).__name__
+            value['errno'] = error.errno if isinstance(error, OSError) else None
+            frames, trace = [], error.__traceback__
+            while trace is not None:
+                frames.append([Path(trace.tb_frame.f_code.co_filename).name,
+                               trace.tb_frame.f_code.co_name, trace.tb_lineno])
+                trace = trace.tb_next
+            value['frames'] = frames[-8:]
+        print(json.dumps(value, sort_keys=True), file=sys.stderr, flush=True)
+
+    def emit(*args, **kwargs):
+        try:
+            report(*args, **kwargs)
+        except Exception:
+            pass  # A diagnostic failure cannot replace the original decision.
+
+    def wrap(owner, name, details):
+        original = getattr(owner, name)
+        def observed(*args, **kwargs):
+            try:
+                info = details(args, kwargs)
+            except Exception:
+                info = {}  # Diagnostics must also tolerate keyword-form calls.
+            if name != 'receive':
+                emit(name, 'enter', **info)
+            try:
+                result = original(*args, **kwargs)
+            except socket.timeout:
+                raise  # Ordinary collector polling, not a protocol failure.
+            except Exception as error:
+                emit(name, 'failure', error=error, **info)
+                raise  # Preserve the original type, traceback and fail-closed path.
+            try:
+                if name == 'receive':
+                    info = {'record': result}
+                elif name == '_decode':
+                    info = {'phase': result.get('phase')}
+            except Exception:
+                info = {}
+            emit(name, 'return', **info)
+            return result
+        setattr(owner, name, observed)
+
+    wrap(receipt, 'receive', lambda _a, _k: {})
+    wrap(receipt, '_decode', lambda _a, _k: {})
+    wrap(receipt.ReferenceTransaction, '_authenticate',
+         lambda a, _k: {'record': a[1], 'native_pid': getattr(a[0], 'native_pid', None)})
+    wrap(receipt.ReferenceTransaction, '_record',
+         lambda a, _k: {'record': a[1], 'native_pid': getattr(a[0], 'native_pid', None)})
+    wrap(receipt.TransactionSequence, '_classify', lambda a, _k: {'proof': a[0]})
+    wrap(receipt.TransactionSequence, 'accept',
+         lambda a, _k: {'proof': a[0], 'phase': a[1], 'raw': a[2]})
+
+
 def native_checks(worktree, home, digest):
     # Re-import from the immutable image projection, not a writable checkout.
     sys.path.insert(0, '/opt/uas')
@@ -303,6 +401,7 @@ def native_checks(worktree, home, digest):
     from uas.git_provenance import parse_commit
     from uas.git_runtime import GitRuntime, GitRuntimeError, RuntimeView, SealedGit
     from uas.git_transaction import ReferenceTransaction
+    install_receipt_diagnostics()
     binding = ForgeBinding('fixture-room', 'fixture-project', 'owner/repo')
     actor = GitIdentity('actor-a', 'Actor A', 'actor-a@example.invalid')
     other = GitIdentity('actor-b', 'Actor B', 'actor-b@example.invalid')
