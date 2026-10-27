@@ -34,6 +34,7 @@ class GitStreamReceipt:
     output_sha256: str
     exit_code: int | None
     status: str
+    input_eof: bool = False
 
     def document(self):
         return asdict(self)
@@ -161,7 +162,7 @@ class GitStreamState:
 
     def receipt(self, *, exit_code=None, status='INTERRUPTED'):
         return GitStreamReceipt(self.input_bytes, self.output_bytes, self.stderr_bytes,
-                                self._input.hexdigest(), self._output.hexdigest(), exit_code, status)
+                                self._input.hexdigest(), self._output.hexdigest(), exit_code, status, self.eof)
 
 
 def proxy_ssh(channel, owned_session, require_record, current, *, timeout=MAX_SECONDS,

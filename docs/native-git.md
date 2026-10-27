@@ -120,6 +120,13 @@ stdout/stderr exposed to the caller are bounded to 1 MiB total; remote SSH stder
 is drained but never disclosed. Up to 1,024 authenticated advertised OIDs fit in
 one bounded control terminal; this evidence limit does not enlarge byte limits.
 
+The external Broker channel has one serialized Supervisor writer. If a successful
+owned SSH process exits before the pump consumes client EOF, the trusted receipt
+permits exactly one trailing bare EOF on that same FIFO channel. The allowance
+ends before the next open, does not change the completed audit, and still requires
+the live bound Supervisor. Data, cancellation, duplicate EOF and other unexpected
+boundary frames fence the channel rather than becoming a stale next-request reply.
+
 Git start/terminal records extend the **same Deployment ForgeAudit** (schema v5,
 after #69's v4); there is no second Deployment audit owner. A durable start
 precedes contact. Exact retry never reexecutes a byte stream, even after success.

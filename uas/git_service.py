@@ -144,6 +144,11 @@ class ExternalGitBroker:
         send(channel, {'kind': 'exit', 'code': 0 if status == 'OK' else 128,
             'status': status, 'repository': target.repository,
             'advertised': list(source.result(transport_succeeded=status == 'OK')[:1024])})
+        # An upload-pack may exit before the client closes its input. The
+        # trusted pump records whether it actually consumed that EOF. On the
+        # serialized Supervisor socket, one already-sent EOF may still follow
+        # this terminal; it is not a new request or a reusable authority grant.
+        return status == 'OK' and receipt is not None and receipt.input_eof is False
 
 
 def serve(channel, broker, *, supervisor_uid, supervisor_gid):
@@ -162,12 +167,23 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
         supervisor = HeldOrigin(record)
     try:
         send(channel, {'kind': 'GIT_READY', 'nonce': hello['nonce'], 'binding': broker.scope()})
+        late_eof = False
         while not broker.failed:
             with receive(channel) as record:
                 supervisor.require(record)
                 request = decode(record.data)
+            if late_eof and request == {'kind': 'eof'}:
+                late_eof = False
+                continue
+            # The sole Supervisor serializes streams on this FIFO channel.
+            # Any next request ends the preceding stream's one-EOF allowance;
+            # data, cancel, duplicate EOF and arbitrary frames are never drained
+            # or answered with an uncorrelated refusal for the next operation.
+            late_eof = False
+            if request.get('kind') != 'GIT_OPEN':
+                raise OriginDenied('unexpected Git Broker request boundary')
             try:
-                broker.run(channel, supervisor, request)
+                late_eof = broker.run(channel, supervisor, request) is True
             except (LedgerError, GitPolicyError) as error:
                 if broker.audit.failed or broker.transport.failed:
                     broker.failed = True
