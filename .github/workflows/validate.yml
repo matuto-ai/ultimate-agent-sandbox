@@ -232,8 +232,9 @@ jobs:
           set +e
           timeout --signal=TERM --kill-after=2s 40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run & diff=$!
           timeout --signal=TERM --kill-after=2s 15s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/gate_forge_smoke.py & broker=$!
+          timeout --signal=TERM --kill-after=2s 30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!
           status=0
-          for child in "$diff" "$broker"; do
+          for child in "$diff" "$broker" "$review"; do
             wait "$child" || status=1
           done
           exit "$status"

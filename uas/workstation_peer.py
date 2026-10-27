@@ -26,10 +26,19 @@ class AdmittedPeerDispatcher:
             if type(contributions) is not ContributionOwner or contributions.ledger is not hub.ledger:
                 raise OriginDenied('canonical contribution owner required')
         self.contributions = contributions
+        self.reviews = None
         self.admissions, self.hub = admissions, hub
         self._connections = {}
         self._delivery_offers = {}
         self._delivery_confirmed = set()
+
+    def attach_reviews(self, owner):
+        """Trusted host composition after constructing the admitted identity."""
+        from .run_review import RunReview
+        if (type(owner) is not RunReview or owner.ledger is not self.hub.ledger
+                or owner.identity.dispatcher is not self or self.reviews is not None):
+            raise OriginDenied('canonical review owner required')
+        self.reviews = owner
 
     def attach_current(self, operation, *, context_generation):
         """Trusted Hub-local ADMIT hook; no native receiver/Engine crosses here.
@@ -141,6 +150,22 @@ class AdmittedPeerDispatcher:
         return Origin(binding.seat.actor_id, binding.seat.participant_id,
                       binding.incarnation, authority, binding.seat.capabilities)
 
+    def reviewer_authority(self, participant_id, run_id, generation):
+        """Exact active seat authority, never borrow a sibling Actor seat."""
+        if not getattr(self.admissions._authorization, 'depth', 0):
+            raise OriginDenied('authority fence required before review selection')
+        matches = []
+        for operation, connection in tuple(self._connections.items()):
+            active = self.admissions._active.get(operation)
+            if active is None or active[1].seat.participant_id != participant_id:
+                continue
+            _, binding = self.admissions._check_current(operation)
+            if (self.hub._current(connection) and self.hub._scope_permits(
+                    participant_id, connection.context_generation, run_id, generation)):
+                matches.append(self._origin(binding))
+        if len(matches) != 1: raise LedgerError('REVIEW_PARTICIPANT_UNAVAILABLE')
+        return matches[0]
+
     def actor_authority(self, actor_id, authority_version=None):
         """Read current admitted Actor while caller retains admission fence.
 
@@ -179,6 +204,9 @@ class AdmittedPeerDispatcher:
         authorize = lambda: (self.admissions.recheck(operation, record)
                              and self.hub._current(connection))
         origin = self._origin(binding)
+        if envelope.get('kind') in {'submit-for-review', 'review-result'}:
+            if self.reviews is None: raise LedgerError('REVIEW_UNAVAILABLE')
+            return self.reviews.submit(envelope, origin=origin, authorize=authorize, admission_operation=operation)
         if envelope.get('kind') == 'contribution':
             if self.contributions is None: raise LedgerError('CONTRIBUTION_UNAVAILABLE')
             return self.contributions.submit(envelope, origin=origin, authorize=authorize)
