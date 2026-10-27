@@ -61,15 +61,35 @@ def _parts(path):
 
 
 def _open_dir(path):
-    """Hold each component before proceeding; no path.resolve/check-use proof."""
-    fd = os.open('/', _DIR)
+    """Search held ancestors without requiring permission to list them.
+
+    Linux O_PATH descriptors support relative open/fstat but not directory
+    reads. Every returned leaf therefore retains _DIR (O_RDONLY), including
+    its no-follow/directory/CLOEXEC constraints. No consumer receives O_PATH.
+    Root itself is not an admitted leaf; reject every root anchor before open.
+    """
+    parts = _parts(path)
+    if not parts:  # POSIX double-slash anchors also have no directory leaf.
+        _fail('UNSAFE_ARTIFACT_PATH')
+    search = getattr(os, 'O_PATH', None)
+    if type(search) is not int or search <= 0:
+        _fail('ARTIFACT_PATH_TRAVERSAL_UNAVAILABLE')
+    search |= os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    fd = None
     try:
-        for part in _parts(path):
-            child = os.open(part, _DIR, dir_fd=fd)
-            os.close(fd); fd = child
-        return fd
-    except BaseException:
-        os.close(fd); raise
+        fd = os.open('/', search)
+        for index, part in enumerate(parts):
+            child = os.open(part, _DIR if index == len(parts) - 1 else search, dir_fd=fd)
+            previous, fd = fd, child
+            # Transfer ownership first so a failed close still releases child.
+            # Never retry close(previous): on Linux a failed close may have
+            # already released its number for reuse by another thread.
+            os.close(previous)
+        result, fd = fd, None
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _names(directory, limit):
@@ -375,9 +395,11 @@ def copy_objects(common_path, destination, deadline):
             _fail('ARTIFACT_SOURCE_CHANGED')
         return {'bytes': total, 'files': files}
     finally:
-        if objects is not None:
-            os.close(objects)
-        os.close(common)
+        try:
+            if objects is not None:
+                os.close(objects)
+        finally:
+            os.close(common)
 
 
 def _trusted_executable(path):
@@ -595,7 +617,6 @@ def observe_target(path, deadline):
     count = expanded = 0
     manifest = hashlib.sha256()
     root = _open_dir(path)
-    root_info = os.fstat(root)
     def walk(directory, relative, depth):
         nonlocal count, expanded
         before = os.fstat(directory)
@@ -646,6 +667,7 @@ def observe_target(path, deadline):
             _fail('ARTIFACT_TARGET_CHANGED')
         return hashlib.sha1(b'tree ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
     try:
+        root_info = os.fstat(root)
         tree = walk(root, '', 0)
         again = _open_dir(path)
         try:
@@ -682,17 +704,23 @@ class ArtifactTargetLease:
 
     def _parent(self):
         root = _open_dir(self.owner.root)
+        fd = None
         try:
-            if _identity(os.fstat(root)) != self.owner.root_identity:
-                _fail('ARTIFACT_SCRATCH_REPLACED')
-            fd = os.open(self.target_id, _DIR, dir_fd=root)
+            try:
+                if _identity(os.fstat(root)) != self.owner.root_identity:
+                    _fail('ARTIFACT_SCRATCH_REPLACED')
+                fd = os.open(self.target_id, _DIR, dir_fd=root)
+            finally:
+                os.close(root)
+            info = os.fstat(fd)
+            if (_identity(info) != self.parent_identity or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) not in (0o700, 0o710)):
+                _fail('ARTIFACT_TARGET_OWNERSHIP_LOST')
+            result, fd = fd, None
+            return result
         finally:
-            os.close(root)
-        info = os.fstat(fd)
-        if (_identity(info) != self.parent_identity or info.st_uid != os.getuid()
-                or stat.S_IMODE(info.st_mode) not in (0o700, 0o710)):
-            os.close(fd); _fail('ARTIFACT_TARGET_OWNERSHIP_LOST')
-        return fd
+            if fd is not None:
+                os.close(fd)
 
     def recheck(self):
         self.owner.resolver.recheck(self.source)

@@ -31,7 +31,7 @@ from uas.docker_exec_api import DockerExecAPI
 from uas.kernel_origin import HeldOrigin, OriginDenied, _identity, alive, enable, probe, receive
 from uas.lifecycle import Supervisor, FixtureSpec
 from artifact_hub import RELEASE, DONE_ACK
-from artifact_diagnostics import captured, decoded_json
+from artifact_diagnostics import captured, decoded_json, supervisor_failure, SUPERVISOR_PREFIX
 
 UID=165533
 HELPER=165530
@@ -40,6 +40,19 @@ MAX_LOG=1<<20
 
 def expect(value,message):
     if not value:raise RuntimeError(message)
+
+
+@contextmanager
+def diagnostic_boundary(phase):
+    """Fixture-only typed failures; preserve the original operational exception."""
+    try:yield
+    except BaseException as error:
+        try:
+            value=supervisor_failure(phase,error,ArtifactError)
+            print(SUPERVISOR_PREFIX.decode()+json.dumps(value,sort_keys=True,separators=(',',':')),flush=True)
+        except BaseException:
+            pass  # A broken diagnostic stream cannot replace the actual failure.
+        raise
 
 
 def command(*arguments,timeout=15):
@@ -165,7 +178,8 @@ def setup_source(config):
     (repo/'.git/hooks/post-checkout').write_text('#!/bin/sh\ntouch '+str(marker)+'\n')
     (repo/'.git/hooks/post-checkout').chmod(0o755)
     resolver=ArtifactSourceResolver(supervisor,allocator)
-    source=resolver.resolve('artifact-run','builder',config['room_instance'])
+    with diagnostic_boundary('source-resolve'):
+        source=resolver.resolve('artifact-run','builder',config['room_instance'])
     expect(source['head_sha']==slot['observed_head'],'exact committed slot head')
     return supervisor,allocator,resolver,source,marker
 
@@ -309,7 +323,9 @@ def probe_task(engine,config,listener,target,kind,journal):
 def scenario(config,gate_fd,control_fd):
     expect((os.getuid(),os.getgid())==(UID,UID) and HELPER in os.getgroups(),'fixed mapped Supervisor and helper group grant')
     expect('container_t' not in Path('/proc/self/attr/current').read_text(),'Supervisor must remain outside Workstation')
-    probe();engine=DockerExecAPI('/run/docker.sock');supervisor,allocator,resolver,source,marker=setup_source(config)
+    probe();engine=DockerExecAPI('/run/docker.sock')
+    with diagnostic_boundary('source-setup'):
+        supervisor,allocator,resolver,source,marker=setup_source(config)
     room_root=Path(config['room_root']);journal=Path(config['journal']);reservations={}
     for name in ('targets','launches','probes'):(journal/name).mkdir(mode=0o700)
     def capacity(scope,size):
@@ -321,7 +337,8 @@ def scenario(config,gate_fd,control_fd):
         reserved=sum(reservations.values())
         if used+reserved+size>256<<20 or nodes+(len(reservations)+1)*1536>8192:return False
         reservations[scope['evaluation_id']]=size;return True
-    targets=ArtifactTargets(config['scratch'],journal/'targets',resolver,reserve_capacity=capacity)
+    with diagnostic_boundary('target-setup'):
+        targets=ArtifactTargets(config['scratch'],journal/'targets',resolver,reserve_capacity=capacity)
     workstation=GateWorkstation(config['room'],config['room_instance'],config['workstation_id'],
         config['image_digest'],config['profile_digest'],config['helper_sha256']['artifact-bootstrap'],
         config['helper_sha256']['artifact-evaluator'],config['mapping_digest'],'artifact-hub-'+config['room_instance'])
@@ -349,7 +366,7 @@ def scenario(config,gate_fd,control_fd):
             launch.finish=finish;launches.append(launch);return launch
         service=GateSupervisorService(resolver,targets,launch_factory=factory,listener=listener)
         original_handle=service.handle
-        def handle(command_,payload):
+        def invoke(command_,payload):
             if command_=='prepare':
                 with target_labels(config['level']):
                     if payload['scope']['gate_id']=='artifact-alternates':
@@ -363,6 +380,14 @@ def scenario(config,gate_fd,control_fd):
             if command_ in ('finish','abort','reconcile') and isinstance(result,dict) and result.get('cleanup') is True:
                 reservations.pop(payload['evaluation_id'],None)
             return result
+        def handle(command_,payload):
+            # Exceptions reaching this fixture boundary retain typed causes.
+            # Internally quarantined finish/abort/reconcile results are not
+            # exceptions here; do not infer errno or rewrite those results.
+            phase={'resolve':'control-resolve','current':'control-current','prepare':'control-prepare',
+                'start':'control-start','finish':'control-finish','abort':'control-abort',
+                'reconcile':'control-reconcile'}.get(command_,'control-unsupported')
+            with diagnostic_boundary(phase):return invoke(command_,payload)
         service.handle=handle
         self_pidfd=os.pidfd_open(os.getpid());stack.callback(os.close,self_pidfd)
         metadata={'version':1,'challenge':secrets.token_hex(32),'supervisor_identity':list(_identity(self_pidfd)),
@@ -393,7 +418,8 @@ def scenario(config,gate_fd,control_fd):
             dispatch_gate_control(control,hub,service,controller=controller)
         expect(terminal is not None,'bounded concrete Hub scenario incomplete')
         if config['room']=='alpha':
-            native_probes=confinement_probes(engine,config,listener,journal/'probes',capacity,reservations)
+            with diagnostic_boundary('confinement-probes'):
+                native_probes=confinement_probes(engine,config,listener,journal/'probes',capacity,reservations)
         expect(not marker.exists(),'poisoned source configuration executed')
         return {'version':1,'room':config['room'],'source':source,'actual_hub':ready['observation'],
             'terminal':terminal,'native_probes':native_probes,'injected_faults':injected,
@@ -410,4 +436,5 @@ def main():
     expect(len(data)<MAX_LOG,'bounded Supervisor report');print('UAS_ARTIFACT_SUPERVISOR:'+data.decode(),flush=True)
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    with diagnostic_boundary('supervisor-main'):main()

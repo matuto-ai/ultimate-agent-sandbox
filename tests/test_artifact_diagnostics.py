@@ -18,6 +18,7 @@ sys.path.insert(0,str(VM))
 try:
     import artifact_diagnostics as diagnostics
     import guest_artifacts as guest
+    import artifact_supervisor as supervisor
 finally:sys.path.remove(str(VM))
 
 
@@ -115,6 +116,159 @@ class DiagnosticTests(unittest.TestCase):
         codes=set(re.findall(r"'([A-Z][A-Z_]+)'",source))
         phases=set(re.findall(r"(?:\['phase'\] = |'phase': )'([a-z-]+)'",source))
         self.assertEqual(codes,diagnostics.QUOTA_CODES);self.assertEqual(phases,diagnostics.QUOTA_PHASES)
+
+
+class SupervisorDiagnosticTests(unittest.TestCase):
+    def record(self,error=None,phase='source-resolve'):
+        if error is None:
+            error=supervisor.ArtifactError('ARTIFACT_SOURCE_UNVERIFIABLE')
+            error.__cause__=OSError(13,'secret path or contents')
+        return diagnostics.supervisor_failure(phase,error,supervisor.ArtifactError)
+
+    def wire(self,value):
+        return diagnostics.SUPERVISOR_PREFIX+json.dumps(value,separators=(',',':')).encode()+b'\n'
+
+    def test_actual_causal_errno_and_known_code_without_arbitrary_exception_text(self):
+        value=self.record()
+        self.assertEqual(value,{'version':1,'phase':'source-resolve','code':'ARTIFACT_SOURCE_UNVERIFIABLE',
+            'errno':13,'errno_depth':1,'chain_status':'complete'})
+        self.assertNotIn('secret',json.dumps(value))
+        class SecretFailure(RuntimeError):
+            def __str__(self):raise AssertionError('arbitrary text must not be read')
+        value=self.record(SecretFailure('private contents'))
+        self.assertEqual(value['code'],'UNCLASSIFIED_ERROR');self.assertIsNone(value['errno'])
+
+    def test_suppressed_context_is_typed_but_never_traceback_parsed(self):
+        try:
+            try:raise OSError(28,'secret object name')
+            except OSError:raise supervisor.ArtifactError('ARTIFACT_GIT_EXIT_ERROR') from None
+        except supervisor.ArtifactError as error:value=self.record(error)
+        self.assertEqual((value['errno'],value['errno_depth']),(28,1))
+        self.assertEqual(value['code'],'ARTIFACT_GIT_EXIT_ERROR')
+
+    def test_explicit_cause_precedes_unrelated_context_and_nearest_errno_is_reported(self):
+        error=OSError(5,'outer');error.__cause__=OSError(13,'explicit');error.__context__=OSError(28,'other')
+        value=self.record(error)
+        self.assertEqual((value['code'],value['errno'],value['errno_depth']),('OS_ERROR',5,0))
+        error=supervisor.ArtifactError('ARTIFACT_COPY_FAILED');error.__cause__=OSError(13,'explicit')
+        error.__context__=OSError(28,'other');self.assertEqual(self.record(error)['errno'],13)
+
+    def test_unknown_codes_and_invalid_errno_cannot_leak_strings_or_booleans(self):
+        for code in ('PRIVATE_PATH_CONTENTS',[],True,None):
+            value=self.record(supervisor.ArtifactError(code))
+            self.assertEqual(value['code'],'ARTIFACT_OTHER_ERROR')
+        for number in (True,False,0,-1,4096,'private',None):
+            error=OSError();error.errno=number;value=self.record(error)
+            self.assertIsNone(value['errno']);self.assertIsNone(value['errno_depth'])
+        with self.assertRaises(ValueError):self.record(phase='caller path')
+
+    def test_cycles_and_long_chain_have_fixed_bound_not_false_complete_claim(self):
+        error=RuntimeError();error.__cause__=error
+        self.assertEqual(self.record(error)['chain_status'],'cycle')
+        outer=RuntimeError();node=outer
+        for _ in range(diagnostics.MAX_EXCEPTION_CHAIN):
+            node.__cause__=RuntimeError();node=node.__cause__
+        node.__cause__=OSError(13,'beyond bound')
+        value=self.record(outer);self.assertEqual(value['chain_status'],'bounded');self.assertIsNone(value['errno'])
+
+    def test_boundary_rethrows_exact_original_without_success_or_hub_result(self):
+        error=supervisor.ArtifactError('ARTIFACT_SOURCE_UNVERIFIABLE');error.__cause__=OSError(13,'private')
+        with patch.object(supervisor.sys,'stdout',new_callable=io.StringIO) as output:
+            with self.assertRaises(supervisor.ArtifactError) as caught:
+                with supervisor.diagnostic_boundary('source-resolve'):raise error
+        self.assertIs(caught.exception,error)
+        value=diagnostics.supervisor_observation(output.getvalue().encode())
+        self.assertEqual(value['parse_status'],'parsed');self.assertEqual(value['records'][0]['errno'],13)
+        self.assertNotIn('private',output.getvalue());self.assertNotIn('UAS_ARTIFACT_SUPERVISOR:',output.getvalue())
+        for failure in (OSError(32,'broken pipe'),KeyboardInterrupt(),SystemExit()):
+            with patch('builtins.print',side_effect=failure),self.assertRaises(supervisor.ArtifactError) as caught:
+                with supervisor.diagnostic_boundary('source-resolve'):raise error
+            self.assertIs(caught.exception,error)
+
+    def test_successful_boundary_has_no_extra_output(self):
+        with patch('builtins.print') as output:
+            with supervisor.diagnostic_boundary('source-resolve'):value=object()
+        self.assertIsNotNone(value);output.assert_not_called()
+
+    def test_complete_owned_stdout_retains_middle_record_before_sampling(self):
+        raw=b'a'*700+b'\n'+self.wire(self.record())+b'z'*700
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)/'out';err=Path(directory)/'err'
+            out.write_bytes(raw);err.write_bytes(b'traceback without actual errno')
+            with self.assertRaises(diagnostics.FixtureCommandFailure) as caught:
+                diagnostics.require_file_result('supervisor-alpha',1,out,err,output_limit=1<<20)
+        value=caught.exception.document
+        self.assertEqual(value['outcome'],'exit');self.assertEqual(value['returncode'],1)
+        stream=value['stdout'];self.assertTrue(stream['truncated'])
+        self.assertNotIn('errno',stream['head']+stream['tail'])
+        record=stream['supervisor_observation']['records'][0]
+        self.assertEqual((record['errno'],record['errno_depth']),(13,1))
+
+    def test_strict_parser_rejects_unknown_fields_strings_types_and_duplicates(self):
+        valid=self.record()
+        variants=[{**valid,'private':'contents'},{**valid,'phase':'private-path'},
+            {**valid,'code':'private-content'},{**valid,'errno':True},{**valid,'errno':4096},
+            {**valid,'errno_depth':True},{**valid,'errno_depth':8},{**valid,'errno':None},
+            {**valid,'chain_status':'private'},{**valid,'version':True}]
+        raw=b''.join(self.wire(value) for value in variants)
+        raw+=diagnostics.SUPERVISOR_PREFIX+b'{"version":1,"version":1}\n'
+        raw+=diagnostics.SUPERVISOR_PREFIX+b'\xff\n'
+        raw+=diagnostics.SUPERVISOR_PREFIX+b'x'*513+b'\n'
+        value=diagnostics.supervisor_observation(raw)
+        self.assertEqual(value['records'],[]);self.assertEqual(value['rejected_records'],len(variants)+3)
+        self.assertNotIn('private',json.dumps(value));self.assertEqual(value['unretained_records'],0)
+        for raw,reason in ((b'x','absent'),('not bytes','stream-type'),(b'x'*((1<<20)+1),'oversized')):
+            self.assertEqual(diagnostics.supervisor_observation(raw),{'parse_status':'unavailable','reason':reason})
+
+    def test_record_flood_retains_bounded_facts_and_aggregate_count_below_diagnostic_limit(self):
+        wire=self.wire(self.record());count=(1<<20)//len(wire)
+        value=diagnostics.supervisor_observation(wire*count)
+        self.assertEqual(len(value['records']),diagnostics.MAX_SUPERVISOR_RECORDS)
+        self.assertEqual(value['unretained_records'],count-diagnostics.MAX_SUPERVISOR_RECORDS)
+        self.assertEqual(value['matched_records'],count);self.assertEqual(value['parse_status'],'partial')
+        worst=diagnostics.stream_facts(b'\x00'*1000);worst['supervisor_observation']=value
+        failure=diagnostics.FixtureCommandFailure('supervisor-alpha','exit',returncode=1,
+            stdout=worst,stderr=diagnostics.stream_facts(b'\x00'*1000))
+        self.assertLess(len(str(failure).encode()),diagnostics.MAX_DIAGNOSTIC_BYTES)
+
+    def test_oversized_file_keeps_output_failure_and_does_not_read_whole_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)/'out';err=Path(directory)/'err'
+            out.write_bytes(self.wire(self.record())+b'a'*(1<<20));err.write_bytes(b'')
+            with patch.object(diagnostics.os,'read',wraps=os.read) as read:
+                with self.assertRaises(diagnostics.FixtureCommandFailure) as caught:
+                    diagnostics.require_file_result('supervisor-beta',1,out,err,output_limit=1<<20)
+            self.assertLessEqual(sum(call.args[1] for call in read.call_args_list),1536)
+        value=caught.exception.document;self.assertEqual(value['outcome'],'output')
+        self.assertEqual(value['stdout']['supervisor_observation']['reason'],'oversized')
+
+    def test_expected_negative_records_do_not_change_success_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)/'out';err=Path(directory)/'err'
+            out.write_bytes(self.wire(self.record())+b'UAS_ARTIFACT_SUPERVISOR:{}\n');err.write_bytes(b'')
+            self.assertIsNone(diagnostics.require_file_result('supervisor-alpha',0,out,err,output_limit=1<<20))
+
+    def test_fixed_resolver_materializer_and_control_boundaries_are_wired(self):
+        source=(VM/'artifact_supervisor.py').read_text()
+        for phase in ('source-resolve','source-setup','target-setup','confinement-probes','supervisor-main'):
+            self.assertIn("with diagnostic_boundary('"+phase+"'):",source)
+        for command in ('resolve','current','prepare','start','finish','abort','reconcile'):
+            self.assertIn("'"+command+"':'control-"+command+"'",source)
+        self.assertIn('with diagnostic_boundary(phase):return invoke(command_,payload)',source)
+
+    def test_explicit_resolver_materializer_vocabulary_and_producer_record_bound(self):
+        import ast
+        for relative in ('uas/artifact_target.py','uas/artifact_protocol.py'):
+            module=ast.parse((VM.parent.parent/relative).read_text())
+            for node in ast.walk(module):
+                if (isinstance(node,ast.Call) and isinstance(node.func,ast.Name)
+                        and node.func.id in ('ArtifactError','_fail') and node.args
+                        and isinstance(node.args[0],ast.Constant) and type(node.args[0].value) is str):
+                    self.assertIn(node.args[0].value,diagnostics.SUPERVISOR_CODES)
+        for code in diagnostics.SUPERVISOR_CODES:
+            value=self.record(supervisor.ArtifactError(code),phase='confinement-probes')
+            self.assertLessEqual(len(self.wire(value)),diagnostics.MAX_SUPERVISOR_RECORD_BYTES)
+        self.assertIn('ARTIFACT_PATH_TRAVERSAL_UNAVAILABLE',diagnostics.SUPERVISOR_CODES)
 
 
 def state(kind,accounting,enforcement):
