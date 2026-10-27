@@ -618,7 +618,7 @@ All four fixed commands use `/usr/bin/chroot /var/lib/uas-native-rootfs`, then
 `P11_KIT_NO_USER_CONFIG=1` values. Their inner argv are:
 
 ```
-/usr/bin/python3 -B /usr/bin/update-crypto-policies --no-reload --set DEFAULT
+/usr/bin/python3 -B /usr/share/crypto-policies/python/update-crypto-policies.py --no-reload --set DEFAULT
 /usr/bin/trust extract --format=openssl-bundle --filter=certificates --overwrite --comment /etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt
 /usr/bin/trust extract --format=pem-bundle --filter=ca-anchors --overwrite --comment --purpose server-auth /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 /usr/bin/trust extract --format=java-cacerts --filter=ca-anchors --overwrite --purpose server-auth /etc/pki/ca-trust/extracted/java/cacerts
@@ -643,3 +643,26 @@ mount/configuration, user trust store, guest fetch, broadened weak dependencies,
 generic package scriptlets or security-policy relaxation is involved. Actual
 signed-tool execution and the resulting image remain **unqualified** until the
 next reviewed exact-head deliberate run.
+
+
+### Fixed packaged Python entrypoint after run 40429443685
+
+Run 40429443685 on `e9605e77` completed the RPM and filesystem phases, then
+failed the first trust command. `/usr/bin/update-crypto-policies` is a shell
+wrapper: the captured line 3 invokes
+`/usr/share/crypto-policies/python/update-crypto-policies.py`. Passing the wrapper
+to Python produced a SyntaxError (return code 1, complete 277-byte stderr).
+The failure inventory recorded zero changed files across 8,467 entries /
+133,925,307 bytes. Cleanup completed in 560.145 seconds. Trust output validation,
+image completion, container security and native delivery were not reached.
+Individual verified-input owner/digest details were not separately emitted.
+
+The fixed argv now passes the observed packaged Python entrypoint to Python 3
+with `-B`, unchanged DEFAULT/no-reload options and no shell. The
+[f44 package file declaration](https://src.fedoraproject.org/rpms/crypto-policies/raw/f44/f/crypto-policies.spec)
+places this Python subtree in crypto-policies-scripts. Its actual installed
+owner, header digest and mode are independently checked before execution, in
+addition to the retained wrapper provenance check. No executable path is chosen
+from wrapper content or peer input. All other fresh-output, mutation, containment,
+strict-link, signature, deadline and environment checks remain unchanged.
+This source correction is not evidence that actual generation has passed.

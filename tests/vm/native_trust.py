@@ -20,7 +20,9 @@ FIPS_OUTPUT = 'etc/crypto-policies/back-ends/openssl_fips.config'
 VERIFIED_INPUTS = {
     'usr/bin/env': 'coreutils',
     'usr/bin/python3': 'python3',
+    # Retain wrapper provenance, but execute only its fixed Python target.
     'usr/bin/update-crypto-policies': 'crypto-policies-scripts',
+    'usr/share/crypto-policies/python/update-crypto-policies.py': 'crypto-policies-scripts',
     'usr/bin/trust': 'p11-kit-trust',
     'usr/share/pki/ca-trust-source/ca-bundle.trust.p11-kit': 'ca-certificates',
 }
@@ -30,7 +32,7 @@ ENVIRONMENT = ('P11_KIT_NO_USER_CONFIG=1', 'PATH=/usr/bin:/usr/sbin', 'LC_ALL=C'
 def fixed_commands(root):
     prefix = ('/usr/bin/chroot', str(root), '/usr/bin/env', '-i', *ENVIRONMENT)
     return (
-        (*prefix, '/usr/bin/python3', '-B', '/usr/bin/update-crypto-policies', '--no-reload', '--set', 'DEFAULT'),
+        (*prefix, '/usr/bin/python3', '-B', '/usr/share/crypto-policies/python/update-crypto-policies.py', '--no-reload', '--set', 'DEFAULT'),
         (*prefix, '/usr/bin/trust', 'extract', '--format=openssl-bundle', '--filter=certificates',
          '--overwrite', '--comment', '/' + CA_OUTPUTS[0]),
         (*prefix, '/usr/bin/trust', 'extract', '--format=pem-bundle', '--filter=ca-anchors',

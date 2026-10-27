@@ -53,9 +53,29 @@ class NativeTrustTests(unittest.TestCase):
             self.assertIn('HOME=/nonexistent',args)
         self.assertIn('--no-reload',calls[0]);self.assertIn('-B',calls[0])
         self.assertEqual(evidence['policy'],'DEFAULT');self.assertFalse(evidence['package_scriptlets'])
-        self.assertEqual(len(evidence['verified_inputs']),5);self.assertEqual(len(evidence['outputs']),4)
+        self.assertEqual(len(evidence['verified_inputs']),6);self.assertEqual(len(evidence['outputs']),4)
         self.assertLess(len(json.dumps(evidence)),8192)
         self.assertNotEqual(evidence['before']['sha256'],evidence['after']['sha256'])
+
+    def test_python_entrypoint_is_fixed_and_independently_verified(self):
+        evidence=self.generate()
+        command=trust.fixed_commands(self.root)[0]
+        entry='usr/share/crypto-policies/python/update-crypto-policies.py'
+        self.assertIn('/'+entry,command)
+        self.assertNotIn('/usr/bin/update-crypto-policies',command)
+        self.assertNotIn('/bin/sh',command)
+        inputs={row['path']:row for row in evidence['verified_inputs']}
+        self.assertIn('usr/bin/update-crypto-policies',inputs)
+        self.assertTrue(inputs[entry]['owner'].startswith('crypto-policies-scripts-'))
+        self.assertEqual(inputs[entry]['sha256'],hashlib.sha256((self.root/entry).read_bytes()).hexdigest())
+
+    def test_python_entrypoint_header_mismatch_prevents_any_execution(self):
+        entry='usr/share/crypto-policies/python/update-crypto-policies.py'
+        def corrupt(text):
+            return text.replace('crypto-policies-scripts\t','wrong-owner\t') if '/'+entry+'\t' in text else text
+        self.header_mutation=corrupt
+        with self.assertRaisesRegex(ValueError,'owner'):self.generate()
+        self.assertFalse(any(args[0]=='/usr/bin/chroot' for args,kwargs in self.commands))
 
     def test_existing_output_file_directory_or_symlink_denied_before_commands(self):
         output=self.root/trust.CA_OUTPUTS[0]
