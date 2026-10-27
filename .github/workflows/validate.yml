@@ -70,7 +70,13 @@ jobs:
           UAS_REQUIRE_UNIX_PEER_TESTS: "1"
           UAS_REQUIRE_PARTICIPANT_PROCESS_TESTS: "1"
           UAS_WORKSTATION_CONNECTOR_TEST: "1"
+          UAS_FORGE_HTTP_TEST: "1"
+          UAS_FORGE_CHANNEL_TEST: "1"
         run: ./validate.sh
+
+      - name: Check external read Broker credential separation
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: timeout --signal=TERM --kill-after=2s 25s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/forge_read_smoke.py
 
       - name: Report tests not applicable
         if: steps.changes.outputs.skip_tests == 'true'

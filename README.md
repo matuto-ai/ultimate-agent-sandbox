@@ -105,3 +105,5 @@ Gate-policy configuration: [bounded artifacts compilation](docs/gate-policy-comp
 The [artifacts-only Evaluation slice](docs/gate-artifact-evaluation.md) connects
 Hub adjudication to the private Supervisor boundary; pure tests are not native
 helper qualification, production enablement, or protected-operation authority.
+
+The [external read Broker](docs/forge-read-service.md) documents the full declared GitHub read vocabulary, process-bound external credential boundary, metadata-only Deployment read audit and completed-job log safeguards.

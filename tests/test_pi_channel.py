@@ -1,4 +1,4 @@
-"""Actual pinned Node/Linux raw-FD packet edge probes; not native acceptance."""
+"""Actual Node/Linux raw-FD packet edge probes; not native acceptance."""
 import json
 import os
 from pathlib import Path
@@ -13,8 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALL = os.environ.get('UAS_PI_INSTALL')
 
 
-@unittest.skipUnless(INSTALL, 'Set UAS_PI_INSTALL for required real Node channel tests')
+@unittest.skipUnless(INSTALL or os.environ.get('UAS_FORGE_CHANNEL_TEST') == '1',
+                     'Set UAS_PI_INSTALL or the hosted Forge channel gate')
 class PiChannelTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which('node') is None:
+            raise RuntimeError('required real Node channel tests need Node')
+
     def start(self, mode='reply', arg=''):
         self.host, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         child.setblocking(False)
@@ -124,3 +130,24 @@ class PiChannelTests(unittest.TestCase):
         self.assertTrue(result['fenced'])
         self.assertIn('deadline', result['error'])
         self.assertIn('fenced', result['second'])
+
+    def test_large_read_chunk_output_exact_digest_and_correlation(self):
+        from uas.forge_read_service import send_result
+        self.start('read-chunks')
+        request = self.packet()
+        response = {'request_id':request['request_id'],'ok':True,'receipt':{'data':'x'*180000}}
+        send_result(self.host,request['request_id'],response)
+        result = self.result()
+        self.assertFalse(result['fenced']);self.assertEqual(response,result['result'])
+
+    def test_read_chunk_reordering_digest_and_nonread_stream_are_rejected(self):
+        import base64,hashlib
+        for mode,change in [('read-chunks',{'index':1}),('read-chunks',{'sha256':'f'*64}),('reply',{})]:
+            with self.subTest(mode=mode,change=change):
+                self.start(mode);request=self.packet()
+                raw=json.dumps({'request_id':request['request_id'],'ok':True,'receipt':{}}).encode()
+                frame={'request_id':request['request_id'],'index':0,'count':1,
+                       'sha256':hashlib.sha256(raw).hexdigest(),'data':base64.b64encode(raw).decode(),**change}
+                self.host.send(json.dumps(frame).encode())
+                self.assertTrue(self.result()['fenced'])
+                self.host.close()

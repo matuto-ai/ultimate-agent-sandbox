@@ -34,11 +34,11 @@ export default function (pi) {
   if (channel) pi.registerTool({
     name: 'gh', label: 'Bounded GitHub',
     description: 'Bounded native gh argument vector through the authenticated Room Broker. '
-      + 'Use issue view NUMBER, --help, or issue edit NUMBER --add-assignee @me when write-enabled. No shell, endpoint or identity selection. '
+      + 'Use --help for the approved issue, PR, code, CI and completed-job reads; issue edit NUMBER --add-assignee @me when write-enabled. No shell, endpoint or identity selection. '
       + 'Stable operation id is required for exact retries. Observations never admit a Run.',
     parameters: { type: 'object', additionalProperties: false,
       required: ['id', 'argv'], properties: { id: { type: 'string' },
-        argv: { type: 'array', items: { type: 'string' }, maxItems: 8 } } },
+        argv: { type: 'array', items: { type: 'string' }, maxItems: 20 } } },
     async execute(_toolCallId, input, signal) {
       const args = input.argv[0] === 'gh' ? input.argv.slice(1) : input.argv;
       const kind = args[0] === 'issue' && args[1] === 'edit' && args[3] === '--add-assignee' ? 'forge-write' : 'forge-read';
