@@ -9,6 +9,82 @@ import hashlib
 import os
 import stat
 import subprocess
+import re
+
+PROGRESS_PREFIX=b'UAS_ARTIFACT_PROGRESS:'
+PROBE_KINDS='NPFETMRLWCOHI'
+
+
+def progress_record(value):
+    """Typed partial fixture evidence; never a completed qualification verdict."""
+    if (type(value) is not dict or type(value.get('version')) is not int or value['version']!=1
+            or value.get('room') not in ('alpha','beta')):raise ValueError('invalid progress record')
+    if value.get('kind')=='hub-terminal':
+        if (set(value)!={'version','kind','room','report_sha256','report_bytes'}
+                or type(value['report_sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',value['report_sha256'])
+                or type(value['report_bytes']) is not int or not 0<value['report_bytes']<=1<<20):
+            raise ValueError('invalid Hub terminal checkpoint')
+    elif value.get('kind')=='probe-exit':
+        if (set(value)!={'version','kind','room','probe','running','exit_code','expected_exit','elapsed_ms'}
+                or type(value['probe']) is not str or value['probe'] not in tuple(PROBE_KINDS)
+                or type(value['running']) is not bool
+                or not (value['exit_code'] is None or type(value['exit_code']) is int and 0<=value['exit_code']<=255)
+                or type(value['expected_exit']) is not int or not 0<=value['expected_exit']<=255
+                or type(value['elapsed_ms']) is not int or not 0<=value['elapsed_ms']<=300000):
+            raise ValueError('invalid confinement probe checkpoint')
+    else:raise ValueError('unknown progress record')
+    return dict(value)
+
+
+def progress_observation(data):
+    if type(data) is not bytes or len(data)>1<<20:return {'hub':None,'probes':[],'rejected':1}
+    hub=None;probes={};rejected=0
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            if key in value:raise ValueError('duplicate progress field')
+            value[key]=item
+        return value
+    for line in data.splitlines():
+        if not line.startswith(PROGRESS_PREFIX):continue
+        raw=line[len(PROGRESS_PREFIX):]
+        try:
+            if len(raw)>512:raise ValueError('progress record bound')
+            value=progress_record(json.loads(raw.decode('ascii'),object_pairs_hook=unique))
+            if value['kind']=='hub-terminal':
+                if hub is not None:raise ValueError('duplicate Hub checkpoint')
+                hub=value
+            else:
+                if value['probe'] in probes:raise ValueError('duplicate probe checkpoint')
+                probes[value['probe']]=value
+        except (ValueError,UnicodeError,RecursionError):rejected+=1
+    return {'hub':hub,'probes':list(probes.values()),'rejected':rejected}
+
+
+def partial_hub_results(raw, checkpoint):
+    """Extract fixed outcome vocabulary only after the authenticated digest matches."""
+    progress_record(checkpoint)
+    if (checkpoint['kind']!='hub-terminal' or type(raw) is not bytes
+            or len(raw)!=checkpoint['report_bytes'] or hashlib.sha256(raw).hexdigest()!=checkpoint['report_sha256']):
+        raise ValueError('partial Hub report mismatch')
+    report=json.loads(raw)
+    if type(report) is not dict or report.get('room_id')!=checkpoint['room']:
+        raise ValueError('partial Hub room mismatch')
+    rows=report.get('results')
+    if type(rows) is not list or not 1<=len(rows)<=8:raise ValueError('partial Hub result bound')
+    result={}
+    for row in rows:
+        if type(row) is not dict or row.get('scenario') not in ('present','missing','alternates','mutation','loss','malformed','resource','cleanup'):
+            raise ValueError('unknown partial Hub scenario')
+        evaluation=row.get('evaluation')
+        if type(evaluation) is not dict or type(evaluation.get('result')) is not dict:
+            raise ValueError('invalid partial Hub evaluation')
+        verdict=evaluation['result'].get('verdict')
+        if verdict not in ('passed','failed','error') or row['scenario'] in result:
+            raise ValueError('invalid partial Hub outcome')
+        result[row['scenario']]=verdict
+    return {'room':checkpoint['room'],'report_sha256':checkpoint['report_sha256'],
+        'results':result,'qualification_complete':False}
 
 PHASES=frozenset(('quota-alpha','quota-beta','supervisor-alpha','supervisor-beta',
     'outer-facts','source-init','source-add','source-commit','source-pack',
@@ -380,6 +456,7 @@ def file_facts(path,*,supervisor=False):
             observation=supervisor_observation(data)  # Before head/tail sampling.
             value=stream_facts(data);value['supervisor_observation']=observation
             value['mount_observation']=mount_observation(data)
+            value['progress_observation']=progress_observation(data)
             return value
         if node.st_size<=SAMPLE_BYTES:return stream_facts(os.read(descriptor,SAMPLE_BYTES))
         head=os.read(descriptor,SAMPLE_BYTES//2)

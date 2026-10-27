@@ -4,6 +4,13 @@ Build checks run only where the test runner permits a compiler. Pure source
 cases can be selected under pre-import process/socket/kernel deny guards.
 """
 from pathlib import Path
+import ast
+import hashlib
+import importlib.util
+import os
+import stat
+from types import SimpleNamespace
+from unittest.mock import patch
 import re
 import shutil
 import struct
@@ -133,6 +140,156 @@ class DiffNativeSourceTests(unittest.TestCase):
         bootstrap=(NATIVE/'artifact_bootstrap.c').read_text()
         self.assertIn('n!=36||memcmp(release,"AGR1",4)',bootstrap)
         self.assertNotIn('DGR1',bootstrap)
+
+
+class DiffSmokeSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.source=(ROOT/'tests/linux/diff_smoke.py').read_text()
+        self.tree=ast.parse(self.source)
+
+    def test_native_entry_requires_explicit_owned_hosted_run(self):
+        for fragment in ("sys.argv[1:]==['--run']", "os.geteuid()==0", "os.environ.get('GITHUB_ACTIONS')=='true'",
+                         "os.environ.get('RUNNER_OS')=='Linux'", "DEADLINE_SECONDS=30"):
+            self.assertIn(fragment,self.source)
+        self.assertIn("if __name__=='__main__':main()",self.source)
+        # No top-level native function is invoked merely by test discovery.
+        calls=[node.value for node in self.tree.body if isinstance(node,ast.Expr) and isinstance(node.value,ast.Call)]
+        self.assertEqual(calls,[])
+
+    def test_mapping_and_real_pair_materialization_are_not_profile_monkeypatches(self):
+        for fragment in ('HOST_SUPERVISOR=165533','HOST_HELPER=165530',
+            "'--map-users=0:100000:65536'","'--map-groups=0:100000:65536'",
+            'DiffSourceResolver(ArtifactSourceResolver(supervisor,allocator))',
+            'targets.prepare(scope,source)', 'lease.mark_launch_possible()',
+            'origin=HeldOrigin(record)', 'offer.acknowledge_final(final);offer.confirm_exit()',
+            "'remount,bind,ro,nodev,nosuid,noexec'", 'lease.postverify()==pair'):
+            self.assertIn(fragment,self.source)
+        self.assertNotIn('patch(',self.source)
+        self.assertNotIn('HELPER_HOST_GID=',self.source)
+
+    def test_decisive_case_evidence_is_emitted_before_assertion_and_summary_after_cleanup(self):
+        for name in ('positive','wrong-root','mutated-after-exit','cleanup-identity-loss','symlink-before-launch','missing-ack'):
+            self.assertIn("'"+name+"'",self.source)
+        self.assertLess(self.source.index('reports.append(result);emit(result)'),self.source.index("expect(result['supervisor_exit']==0"))
+        self.assertLess(self.source.index('shutil.rmtree(root)'),self.source.index('emit(summary)'))
+        for reduction in ('omitted-claim','extra-claim','forbidden-path'):
+            self.assertIn("'"+reduction+"'",self.source)
+        self.assertIn('DiffGateHub._checks(variant,facts,None)',self.source)
+        self.assertIn("'native_qualification':False",self.source)
+        self.assertIn("'cleanup_claimed':False",self.source)
+        self.assertLess(self.source.index("expect(complete and safe,'fixture cleanup unconfirmed')"),self.source.index("summary['fixture_cleanup']=True"))
+
+
+class DiffStagingTests(unittest.TestCase):
+    """Ordinary-file copies only; mocked root guard is NOT UID qualification."""
+    def setUp(self):
+        spec=importlib.util.spec_from_file_location('diff_staging_fixture',ROOT/'tests/linux/diff_smoke.py')
+        self.module=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.module)
+        self.directory=tempfile.TemporaryDirectory(prefix='uas-stage-pure-')
+        self.addCleanup(self.directory.cleanup)
+        self.root=Path(self.directory.name)
+        self.source=self.root/'input';self.source.mkdir()
+        (self.source/'pkg').mkdir();(self.source/'pkg/main.py').write_bytes(b'VALUE = 1\n')
+        self.output=self.root/'output';self.output.mkdir()
+        def writable():
+            for directory,dirs,files in os.walk(self.output):
+                Path(directory).chmod(0o755)
+                for name in files:(Path(directory)/name).chmod(0o644)
+        self.addCleanup(writable)
+        root_patch=patch.object(self.module,'ROOT',self.source)
+        root_patch.start();self.addCleanup(root_patch.stop)
+        sources_patch=patch.object(self.module,'SOURCES',('pkg/main.py',))
+        sources_patch.start();self.addCleanup(sources_patch.stop)
+        # Ownership is supplied by the real root-only hosted caller. This test
+        # only exercises bounded ordinary byte-copy/NOFOLLOW/mode semantics.
+        owner_patch=patch.object(self.module.os,'geteuid',return_value=0)
+        owner_patch.start();self.addCleanup(owner_patch.stop)
+
+    def test_exact_readonly_staged_bytes_hashes_and_explicit_extra_paths(self):
+        (self.source/'extra.py').write_bytes(b'EXTRA = 2\n')
+        destination,hashes=self.module.stage_sources(self.output,extra_paths=('extra.py','pkg/main.py'))
+        self.assertEqual(set(hashes),{'pkg/main.py','extra.py'})
+        for relative,digest in hashes.items():
+            self.assertEqual((destination/relative).read_bytes(),(self.source/relative).read_bytes())
+            self.assertEqual(hashlib.sha256((destination/relative).read_bytes()).hexdigest(),digest)
+            self.assertEqual(stat.S_IMODE((destination/relative).stat().st_mode),0o444)
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode),0o555)
+        self.assertEqual(stat.S_IMODE((destination/'pkg').stat().st_mode),0o555)
+        self.assertEqual(stat.S_IMODE(self.source.stat().st_mode),0o755)
+        with self.assertRaises(FileExistsError):self.module.stage_sources(self.output)
+
+    def test_nonroot_staging_and_oversized_closure_are_refused_before_destination(self):
+        with patch.object(self.module.os,'geteuid',return_value=1):
+            with self.assertRaisesRegex(AssertionError,'root-owned'):self.module.stage_sources(self.output)
+        self.assertFalse((self.output/'source').exists())
+        with self.assertRaisesRegex(AssertionError,'file count'):
+            self.module.stage_sources(self.output,extra_paths=tuple('file-'+str(i) for i in range(128)))
+        self.assertFalse((self.output/'source').exists())
+
+    def test_symlink_leaf_ancestor_and_source_root_are_rejected(self):
+        original=self.source/'pkg/main.py';real=self.source/'real.py';original.rename(real)
+        original.symlink_to(real)
+        with self.assertRaises(OSError):self.module.stage_sources(self.output)
+        original.unlink();real.rename(original)
+        import shutil
+        shutil.rmtree(self.output/'source')
+        (self.source/'alias').symlink_to(self.source/'pkg',target_is_directory=True)
+        with patch.object(self.module,'SOURCES',('alias/main.py',)):
+            with self.assertRaises(OSError):self.module.stage_sources(self.output)
+        shutil.rmtree(self.output/'source')
+        alias=self.root/'source-alias';alias.symlink_to(self.source,target_is_directory=True)
+        with patch.object(self.module,'ROOT',alias):
+            with self.assertRaises(OSError):self.module.stage_sources(self.output)
+
+    def test_hardlink_oversize_and_path_escape_never_copy_source(self):
+        os.link(self.source/'pkg/main.py',self.source/'alias.py')
+        with self.assertRaises(AssertionError):self.module.stage_sources(self.output)
+        (self.source/'alias.py').unlink()
+        import shutil
+        shutil.rmtree(self.output/'source')
+        with patch.object(self.module,'MAX_SOURCE_BYTES',2):
+            with self.assertRaises(AssertionError):self.module.stage_sources(self.output)
+        shutil.rmtree(self.output/'source')
+        with patch.object(self.module,'SOURCES',('../outside.py',)):
+            with self.assertRaises(AssertionError):self.module.stage_sources(self.output)
+        self.assertFalse((self.output/'outside.py').exists())
+
+    def test_changed_named_inode_is_rejected_before_copy(self):
+        real_stat=self.module.os.stat
+        def changed(path,*args,**kwargs):
+            node=real_stat(path,*args,**kwargs)
+            if path=='main.py' and 'dir_fd' in kwargs:
+                return SimpleNamespace(**{name:getattr(node,name)+(1 if name=='st_ino' else 0) for name in
+                    ('st_dev','st_ino','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns')})
+            return node
+        with patch.object(self.module.os,'stat',side_effect=changed):
+            with self.assertRaisesRegex(AssertionError,'source changed'):self.module.stage_sources(self.output)
+        self.assertFalse((self.output/'source/pkg/main.py').exists())
+
+    def test_fixed_diff_sources_close_transitive_python_imports_without_discovery(self):
+        text=(ROOT/'tests/linux/diff_smoke.py').read_text();tree=ast.parse(text)
+        declared=next(ast.literal_eval(node.value) for node in tree.body if isinstance(node,ast.Assign)
+            and any(isinstance(name,ast.Name) and name.id=='SOURCES' for name in node.targets))
+        paths=set(declared);self.assertIn('uas/__init__.py',paths)
+        self.assertLessEqual(len(paths),128)
+        for relative in sorted(path for path in paths if path.startswith('uas/') and path.endswith('.py')):
+            module=relative[:-3].replace('/','.')
+            for node in ast.walk(ast.parse((ROOT/relative).read_text())):
+                names=[]
+                if isinstance(node,ast.ImportFrom):
+                    prefix=module.split('.')[:-node.level] if node.level else []
+                    name='.'.join(prefix+([node.module] if node.module else [])) if node.level else node.module or ''
+                    if name=='uas':names=['uas.'+alias.name for alias in node.names]
+                    elif name.startswith('uas.'):names=[name]
+                elif isinstance(node,ast.Import):names=[alias.name for alias in node.names if alias.name.startswith('uas.')]
+                for name in names:self.assertIn(name.replace('.','/')+'.py',paths,(relative,name))
+        self.assertIn("payload,source_hashes=stage_sources(root)",text)
+        self.assertIn("script=payload/'tests/linux/diff_smoke.py'",text)
+        self.assertEqual(text.count('str(script)'),2)
+        self.assertEqual(text.count('cwd=payload'),2)
+        self.assertNotIn('str(Path(__file__).resolve())',text)
+        self.assertIn('build(root,source_root=payload)',text)
+        self.assertIn("'source_sha256':source_hashes,'staged_sources_verified':True",text)
 
 
 class DiffNativeBuildTests(unittest.TestCase):
