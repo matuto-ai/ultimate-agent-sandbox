@@ -33,7 +33,7 @@ class HostedManagerTLSTests(unittest.TestCase):
             command('req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
                 '-nodes', '-keyout', name + '.key', '-out', name + '.csr', '-subj', '/CN=' + name)
             extension = 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n'
-            extension += ('extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost\n'
+            extension += ('extendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,DNS:manager.fixture.invalid\n'
                           if name == 'manager' else 'extendedKeyUsage=clientAuth\n')
             (cls.certroot / (name + '.ext')).write_text(extension)
             command('x509', '-req', '-in', name + '.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key',
@@ -52,7 +52,7 @@ class HostedManagerTLSTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix='uas-manager-hosted-')
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.alpha = RoomIdentity('deployment', 'alpha', 'stream-alpha')
+        self.alpha = getattr(self, 'fixture_alpha', RoomIdentity('deployment', 'alpha', 'stream-alpha'))
         self.beta = RoomIdentity('deployment', 'beta', 'stream-beta')
         self.errors, self.snapshots = [], []
         bindings = {}
@@ -67,6 +67,8 @@ class HostedManagerTLSTests(unittest.TestCase):
         self.listener.bind(('127.0.0.1', 0)); self.listener.listen(8); self.listener.settimeout(.1)
         self.port = self.listener.getsockname()[1]
         self.stop = threading.Event()
+        self.channel_lock = threading.Lock()
+        self.active_channels, self.connection_count = set(), 0
 
         def server():
             model = ManagerReadModel(self.root / 'manager.sqlite3')
@@ -81,6 +83,9 @@ class HostedManagerTLSTests(unittest.TestCase):
                         channel.settimeout(2)
                         secure = context.wrap_socket(channel, server_side=True)
                         session = accept_session(secure, model, certificates)
+                        with self.channel_lock:
+                            self.active_channels.add(secure)
+                            self.connection_count += 1
                         while not self.stop.is_set():
                             serve_once(secure, session)
                     except (OSError, StreamError) as error:
@@ -89,6 +94,8 @@ class HostedManagerTLSTests(unittest.TestCase):
                         if session is not None:
                             session.close()
                         if secure is not None:
+                            with self.channel_lock:
+                                self.active_channels.discard(secure)
                             secure.close()
                         channel.close()
                         self.snapshots.append(model.deployments())
@@ -181,6 +188,64 @@ class HostedManagerTLSTests(unittest.TestCase):
         self.addCleanup(wrong_trust.close)
         with self.assertRaises(ssl.SSLCertVerificationError):
             wrong_trust.connect()
+
+    def test_owned_exporter_worker_survives_stop_reopens_same_stream_and_terminates_before_destroy(self):
+        import json
+        from pathlib import Path
+        from lifecycle_support import FileFixtureBackend
+        from manager_worker_fixture import hosted_manager_worker
+        from uas.ledger import Command, Event, Origin, RoomLedger, Transition
+        from uas.lifecycle import FixtureSpec, Supervisor
+        config = json.loads((Path(__file__).parent / 'fixtures/two-rooms.json').read_text())
+        config['deployment']['id'] = self.alpha.deployment_id
+        config['deployment']['state_root'] = str(self.root / 'control')
+        for room in config['rooms']:
+            room['state_root'] = str(self.root / 'control' / room['id'])
+            for role in room['project']['roots']:
+                path = self.root / room['id'] / role; path.mkdir(parents=True)
+                room['project']['roots'][role] = str(path)
+        room = config['rooms'][0]
+        backend = FileFixtureBackend(self.root / 'resources')
+        supervisor = Supervisor(self.root / 'control', 'alpha', backend,
+                                authorize=lambda *_: True, revoke=backend.revoke)
+        spec = FixtureSpec('alpha', room['project']['id'], tuple(room['project']['roots'].values()),
+            'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64, 'sha256:' + 'c' * 64)
+        supervisor.start(spec)
+        ledger_path = self.root / 'worker-room.sqlite3'
+        ledger = RoomLedger(ledger_path, 'alpha'); self.addCleanup(ledger.close)
+        origin = Origin('actor', 'participant', 'incarnation', 'authority', ('observe',))
+        def advance(number):
+            ledger.apply(Command('worker-event-' + str(number), 'counter', 'target', None, {}), origin,
+                authorize=lambda *_: True, decide=lambda state, _: Transition(state,
+                    (Event('source.changed', {}),), {}))
+        def received(sequence, phase):
+            return lambda projection: (projection['room_seq'] == sequence and
+                projection['sections']['room_lifecycle']['value']['alpha']['phase'] == phase)
+        with hosted_manager_worker(supervisor, ledger_path, self.alpha, config, self.certroot) as fixture:
+            worker = fixture.worker; worker.start()
+            fixture.wait_projection(received(0, 'running'))
+            supervisor.stop()
+            fixture.wait_projection(received(0, 'stopped'))  # No Hub event hides lifecycle propagation.
+            self.assertFalse(worker.status()['terminated'])
+            owned_id = worker.worker_id
+            connections = fixture.disconnect_receiver()
+            advance(1)
+            fixture.wait_projection(received(1, 'stopped'))
+            self.assertGreater(fixture.connection_count(), connections)
+            self.assertEqual(owned_id, worker.worker_id)  # Same live worker reconnects automatically.
+            self.assertFalse(worker.status()['terminated'])
+            worker.request_stop(); self.assertTrue(worker.join(3))
+            advance(2)  # Hub progress while the exporter is offline.
+            restarted = fixture.new_worker(); self.assertNotEqual(worker.worker_id, restarted.worker_id)
+            restarted.start()
+            fixture.wait_projection(received(2, 'stopped'))
+            supervisor.start(spec)
+            fixture.wait_projection(received(2, 'running'))  # Quiet-Hub resume also propagates.
+            with supervisor._locked():
+                restarted.request_stop()  # Never join while this owner lock is held.
+            self.assertTrue(restarted.join(3))
+            self.assertTrue(restarted.status()['terminated'])
+            supervisor.destroy()
 
 
 if __name__ == '__main__':

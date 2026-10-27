@@ -5,10 +5,17 @@ Construct the RoomStream on a separate RoomLedger.open_reader() connection on
 the exporter thread. Never call step from the Hub request-handling thread.
 """
 import math
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from io import StringIO
+import threading
+import time
+import uuid
 
 from .config import load
+from .ledger import RoomLedger
 from .manager_projection import timestamp
-from .manager_stream import RoomStream, StreamError
+from .manager_stream import RoomIdentity, RoomStream, StreamError
 from .manager_transport import ManagerAddress, RoomTLSClient, export_once
 
 
@@ -81,3 +88,131 @@ class RoomManagerExport:
     def close(self):
         self._closed = True
         self.client.close()
+
+
+@contextmanager
+def _ledger_source(reader, identity):
+    yield RoomStream(reader, identity)
+
+
+class RoomManagerWorker:
+    """One host-owned exporter thread, not a Hub/Workstation process or daemon.
+
+    ``open_source(reader, identity)`` is trusted construction on this thread: a
+    context manager yielding the fixed RoomStream and closing any extra owner
+    readers it opens. It is never selected by a Manager/Participant message.
+    Stop retains this worker. Destroy requests stop under the lifecycle lock,
+    then reconciles termination; join must only run outside that lock.
+    """
+    def __init__(self, ledger_path, identity, configuration_text, resolve_tls, *,
+                 open_source=_ledger_source, interval_seconds=15, retry_limit_seconds=60):
+        if (type(identity) is not RoomIdentity or type(configuration_text) is not str
+                or len(configuration_text.encode()) > 1_048_576
+                or not callable(resolve_tls) or not callable(open_source)):
+            raise StreamError('FIXED_MANAGER_CONFIGURATION_REQUIRED')
+        identity.document()
+        self._path, self._identity = ledger_path, identity
+        self._worker_id = uuid.uuid4().hex
+        self._configuration, self._resolve_tls, self._open_source = configuration_text, resolve_tls, open_source
+        self._options = {'interval_seconds': interval_seconds, 'retry_limit_seconds': retry_limit_seconds}
+        self._lock = threading.Lock()
+        self._stop, self._done = threading.Event(), threading.Event()
+        self._thread = None
+        self._phase, self._error, self._last_result = 'new', None, None
+
+    @property
+    def worker_id(self):
+        return self._worker_id
+
+    @property
+    def identity(self):
+        return self._identity
+
+    def start(self):
+        with self._lock:
+            if self._phase != 'new':
+                raise StreamError('MANAGER_WORKER_ALREADY_STARTED')
+            self._phase = 'starting'
+            try:
+                self._thread = threading.Thread(target=self._run, name='uas-manager-' + self.identity.room_id,
+                                                daemon=False)
+            except BaseException:
+                self._phase, self._error = 'failed', 'MANAGER_WORKER_START_FAILED'
+                self._done.set()
+                raise StreamError('MANAGER_WORKER_START_FAILED') from None
+            thread = self._thread
+        try:
+            thread.start()
+        except BaseException:
+            self._stop.set()
+            # Do not discard a thread that might have started before failure.
+            # A never-started standard Thread has no identity or live execution.
+            with self._lock:
+                self._phase, self._error = 'failed', 'MANAGER_WORKER_START_FAILED'
+            if thread.ident is None and not thread.is_alive():
+                self._done.set()
+            raise StreamError('MANAGER_WORKER_START_FAILED') from None
+
+    def request_stop(self):
+        """Nonblocking; safe while holding the Supervisor lifecycle lock."""
+        self._stop.set()
+        with self._lock:
+            if self._phase == 'new':
+                self._phase = 'stopped'
+                self._done.set()
+
+    def join(self, timeout=1):
+        """Bounded wait OUTSIDE owner locks; false means retain this exact worker."""
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 <= timeout <= 5:
+            raise StreamError('INVALID_WORKER_JOIN_TIMEOUT')
+        thread = self._thread
+        if thread is not None:
+            if thread is threading.current_thread():
+                raise StreamError('MANAGER_WORKER_SELF_JOIN')
+            if thread.ident is not None:
+                thread.join(timeout)
+            if thread.is_alive():
+                return False
+        return self._done.is_set()
+
+    def status(self):
+        with self._lock:
+            terminated = self._done.is_set() and (self._thread is None or not self._thread.is_alive())
+            return {'worker_id': self.worker_id, 'identity': self.identity.document(), 'phase': self._phase,
+                    'stop_requested': self._stop.is_set(), 'terminated': terminated,
+                    'error': self._error, 'last_export': None if self._last_result is None else dict(self._last_result)}
+
+    def _run(self):
+        try:
+            if self._stop.is_set():
+                return
+            with RoomLedger.open_reader(self._path, self.identity.room_id) as reader:
+                with self._open_source(reader, self.identity) as source:
+                    if (type(source) is not RoomStream or source.ledger is not reader
+                            or source.identity != self.identity):
+                        raise StreamError('EXPORTER_ROOM_MISMATCH')
+                    if self._stop.is_set():
+                        return
+                    exporter = RoomManagerExport.from_configuration(source, StringIO(self._configuration),
+                        self._resolve_tls, **self._options)
+                    try:
+                        with self._lock:
+                            self._phase = 'running'
+                        while not self._stop.is_set():
+                            result = exporter.step(now=time.monotonic(),
+                                captured_at=datetime.now(timezone.utc).isoformat())
+                            with self._lock:
+                                self._last_result = dict(result)
+                            if result['next_attempt'] is None:
+                                break
+                            self._stop.wait(max(0, result['next_attempt'] - time.monotonic()))
+                    finally:
+                        exporter.close()
+        except BaseException:
+            with self._lock:
+                self._phase, self._error = 'failed', 'MANAGER_WORKER_FAILED'
+        finally:
+            with self._lock:
+                if self._phase != 'failed':
+                    self._phase = 'stopped'
+            self._done.set()

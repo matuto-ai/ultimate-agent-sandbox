@@ -8,10 +8,13 @@ mutation command. Export failures and a disconnected Manager do not stop a Hub.
 ## Source and ownership map
 
 The implementation began at `8fd9ae0c2d7a9c664ec4be67317b1768f0253d85` and
-includes the non-destructive #73 main union at `cfd0e39c571bc1bad607a16a9790bab9c403b72d`.
+includes non-destructive #73/#74 main unions through
+`4c970c66925fb7a724dc15680fe1743da1b47617`.
 The installed Bruno workflow, #75/#74, source reconciliation, and actual owners
 were read before implementation. Gate schema ownership was coordinated with
-the #73 owner; neither Gate files nor the Room ledger are changed here.
+the #73 owner. This slice adds the Gate-owned passive snapshot helper and an
+existing-store read-only Room ledger constructor; it does not change Gate
+adjudication or the Hub's write transitions.
 
 | Seam | Existing authority | Passive export and limit |
 | --- | --- | --- |
@@ -23,15 +26,15 @@ the #73 owner; neither Gate files nor the Room ledger are changed here.
 | Checkout | Supervisor checkout manifest | Exact host path, branch, Run, Participant, intent and phase; retained owner-probed working-tree state and its own observation time, or explicitly unknown. `manager_observations()` never enters the Git-probing path. |
 | Forge diagnostics | `ForgeAudit` | One read transaction, Room-filtered metadata, committed outcome/contact/completeness. No provider access, payload, stdout, body, signed URL or credential. |
 | Dependencies | `ReadOnlyForgeBroker` | Exact immutable Broker receipt referenced by the canonical Run, fenced to the Hub cut and checked against Project/repository/issue identity. Existing observation, not a fresh provider query. |
-| Gate | Hub Gate owner | Immutable saved results are history, **not current pass**. Current Gate truth needs the Gate owner's separately versioned refresh observation. |
-| Review / candidate / pending CI | Hub review owner (#74) | Explicit unavailable until that owner exists and exports canonical facts. |
+| Gate / external checkpoint | Hub Gate owner | Owner-defined pure `snapshot_gate_state()` exposes retained verdict/version/time, known generation/policy staleness, missing evaluations and actual in-flight owner checkpoints. Historical pass is **never current pass**. |
+| Review / candidate | Hub review owner (#74) | `snapshot_review_run()` consumes the identical Hub cut. Canonical submission, candidate, reviewer, round, stage, timestamp and finite attention reason are allowlisted; stale generation/target remains stale. |
 | Provider / inference / quota / context measurements | Runtime adapter | Separate finite typed observations; unsupported existing provider telemetry remains unavailable, not zero quota, healthy inference or ready state. |
 
 `RoomStream` accepts the actual Supervisor, Participant controller, checkout
 allocator, Forge audit and retained-read Broker objects through fixed, Room-checked constructor
 parameters. It invokes their passive export methods, rather than asking an
 application to invent `SourceObservation` values. The finite typed observation
-interface also defines the not-yet-connected Gate/review/runtime facts; it does
+interface also defines unavailable runtime observations; it does
 not grant a caller authority over those sources.
 
 The three Supervisor manifests retain their existing required version-1 fields
@@ -67,6 +70,22 @@ status, freshness and reason. Its provenance applies to every field in its
 value. Facts from different owners are never merged under one envelope.
 Independently captured external owners are not advertised as an atomic cut
 with the Hub.
+
+The Gate and Review passive helpers consume this exact same Hub cut, not new
+per-Run reads. Gate currentness remains unknown without a fresh dependency
+observation; retained completed verdict/version/time are separate fields. A
+generation/policy mismatch already established by the cut is explicitly stale.
+The `pending_ci` rows identify an actual external Gate owner checkpoint
+(`evaluation` or `refresh`), **not a claim that remote CI is pending**. Remote CI
+state remains unobserved there; no provider request is triggered by reading it.
+These exports contain no Gate authorization token, review evidence body, request
+text, native review payload or generic action vocabulary.
+
+`submission_id` is the internal review submission operation; `review_reference`
+is the exact verified GitHub review URL and stays null until a result exists.
+They are not interchangeable identifiers. A canonical Gate-bound candidate is
+visible before review starts, and an older review cannot replace a newer bound
+candidate in the read model.
 
 1. A new authenticated Room connection asks for the Manager's durable cursor.
 2. The source captures one detached projection at Hub sequence `cut`.
@@ -163,6 +182,32 @@ launch, service lifetime and the actual credential resolver. The host must:
 - connect canonical #73/#74/runtime exports where those owners actually hold
   the required observations, without enabling UI/actions in this slice.
 
+`RoomManagerWorker` provides the actual owned exporter thread for that host. It
+creates the separate read-only connection on its thread, resolves the fixed
+configuration there and uses `RoomManagerExport.step()` plus interruptible waits.
+Trusted `open_source(reader, identity)` construction supplies a context manager
+for real passive owners; it cannot be selected by a wire message. A host-minted
+read-only `worker_id` identifies this exact execution separately from the
+persistent Room stream identity. A new worker cannot prove termination of an
+older worker that used the same stream.
+
+Start is explicit and one-shot. Workstation Stop retains the worker. Destroy
+calls nonblocking `request_stop()` while holding lifecycle authority and waits
+or reconciles **outside** the Supervisor lock: capture can need that lock.
+`join(timeout)` is bounded to at most five seconds; false retains the exact
+owned worker and must not authorize resource removal or replacement. Interrupted
+construction closes owned readers; uncertain start retains any live thread.
+Terminal status requires both completed cleanup and no live thread. No second
+daemon, credential store, remote action route or thread-kill mechanism is added.
+
+The existing hosted-only mTLS job also exercises the real worker, stopped-Room
+exports at an unchanged Hub sequence, automatic reconnect after a real accepted
+socket interruption, exporter restart with the retained stream/cursor, and termination before
+fixture Destroy. `tests/manager_worker_fixture.py` exposes that same bounded
+receiver proof for #61's real control-plane harness. Only its exact temporary
+fixture endpoint is routed to loopback; TLS hostname and certificate checks
+remain real. This hosted proof is not executed by ordinary local unit discovery.
+
 There is no deployment, external probe, production credential use, account
 change, or permissions change in this work. Manager storage keeps the replay
 archive; retention/capacity policy must not silently discard required events.
@@ -197,8 +242,16 @@ test in `test_checkouts.py`, reserved for hosted CI. `test_manager_host.py`
 covers the actual separate SQLite reader, inert protocol transfer, scheduling,
 outage backoff and fixed reference resolution without sockets or threads.
 
-Full #75 acceptance still requires host startup/reconnect wiring, real
-source-owner integration for remaining required
-facts, and exact-candidate independent Standards/Specification/Runtime review.
-Missing #73/#74 work is not a blocker to implementing this read-side transport,
-but unavailable placeholders are not evidence that those integrations passed.
+The worker is the concrete #75 outbound connection/lifetime interface. #61 owns
+its attachment to the persistent launcher and service revocation, rather than
+duplicating the exporter or its credential store. The direct #75 worker fixture
+crosses real Hub SQLite, real HTTPS/mTLS and lifecycle transitions; #61 reuses
+the same receiver helper in its service-process proof. Neither slice claims
+deployment into a user's environment from these controlled hosted results.
+
+The #73 Gate and merged #74 Review passive owners are integrated at the same
+read-only Hub cut. Provider/quota/context observations unsupported by the current
+runtime owner remain explicitly unavailable; this slice does not invent native
+telemetry or turn missing measurements into readiness. Final acceptance requires
+the new exact candidate's hosted worker proof, aggregate CI and independent
+Standards/Specification/Runtime review. Earlier receipts alone do not qualify it.

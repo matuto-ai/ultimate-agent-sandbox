@@ -53,7 +53,8 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertEqual(re.findall(r'^        if: (.+)$', gates, re.MULTILINE), [])
                     self.assertIn('40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run & diff=$!', gates)
                     self.assertIn('15s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/gate_forge_smoke.py & broker=$!', gates)
-                    self.assertIn('for child in "$diff" "$broker"; do', gates)
+                    self.assertIn('30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!', gates)
+                    self.assertIn('for child in "$diff" "$broker" "$review"; do', gates)
                     self.assertIn('wait "$child" || status=1', gates)
                     self.assertIn('exit "$status"', gates)
                     for job, script, seconds in (

@@ -78,8 +78,14 @@ def _fields(row, fields):
                     or '..' in value.split('/') or any(ord(c) < 32 or ord(c) == 127 for c in value)):
                 raise ProjectionError('INVALID_CHECKOUT_PATH')
             result[key] = value
-        elif key == 'working_tree_observed_at':
-            result[key] = timestamp(row[key])
+        elif key in {'working_tree_observed_at', 'observation_time', 'updated_at'}:
+            result[key] = None if row[key] is None else timestamp(row[key])
+        elif key == 'review_reference':
+            value = row[key]
+            if value is not None and (type(value) is not str or len(value) > 1024 or not re.fullmatch(
+                    r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#pullrequestreview-[1-9][0-9]*', value)):
+                raise ProjectionError('INVALID_REVIEW_REFERENCE')
+            result[key] = value
         else:
             result[key] = _scalar(row[key])
     return result
@@ -132,10 +138,13 @@ EXTERNAL_FIELDS = {
                                    'unit', 'state', 'reason')),
     'context_observations': ('runtime-adapter', ('participant_id', 'context_generation', 'used',
                                                    'limit', 'unit', 'state', 'reason')),
-    'review': ('hub-review', ('run_id', 'generation', 'candidate_sha', 'review_id', 'reviewer_id',
-                               'verdict', 'round', 'state')),
-    'gate_truth': ('hub-gate', ('run_id', 'generation', 'gate_id', 'evaluation_id', 'state', 'reason')),
-    'pending_ci': ('hub-review', ('run_id', 'generation', 'candidate_sha', 'owner', 'checkpoint', 'state')),
+    'review': ('hub-review', ('run_id', 'generation', 'candidate_sha', 'submission_id', 'review_reference', 'reviewer_id',
+                               'verdict', 'round', 'state', 'reason', 'updated_at')),
+    'gate_truth': ('hub-gate', ('run_id', 'generation', 'gate_id', 'evaluation_id', 'state', 'reason',
+        'observed_state', 'observed_generation', 'observation_version', 'observation_time',
+        'last_refresh_state', 'owner', 'checkpoint')),
+    'pending_ci': ('hub-gate', ('run_id', 'generation', 'gate_id', 'evaluation_id', 'candidate_sha',
+                               'owner', 'checkpoint', 'state', 'reason')),
     'dependencies': ('forge-broker', ('issue_id', 'issue_number', 'state', 'completeness',
         'repository', 'run_id', 'kind', 'blocked_issue_id', 'blocked_issue_number',
         'dependency_count', 'observation_version')),
@@ -219,11 +228,39 @@ def project_hub(snapshot, *, captured_at, observations=()):
         hub('runs', _rows(state['runs'], ('run_id', 'generation', 'status', 'outcome', 'issue_number',
             'issue_id', 'repository', 'project_id', 'participant_id', 'actor_id', 'delivery_class',
             'context_generation', 'control_revision', 'control_reason', 'projection')))
-        # Review workflow (#74) has not yet established a canonical candidate
-        # snapshot API. Absence of guessed keys is not evidence of no candidate.
-        sections['candidate'] = fact('hub', seq, status='unavailable', reason='SOURCE_NOT_CONNECTED')
+        from .run_review import snapshot_review_run
+        from .gate_evaluation import snapshot_gate_state
+        retained_gates = snapshot_gate_state(snapshot, snapshot['room_id'])
+        candidates, reviews, review_attention = retained_gates['candidates'], {}, {}
+        for run_id, run in state['runs'].items():
+            retained = snapshot_review_run(snapshot, snapshot['room_id'], run_id)
+            review = retained['review']
+            current = None if review is None else review['current']
+            if current is None:
+                continue
+            target = current['target']
+            stale = current['generation'] != run['generation'] or target != run.get('gate_target')
+            if run_id not in candidates:
+                candidates[run_id] = {'candidate_sha': target['head_sha'], 'pull_number': target['pull_number'],
+                    'generation': current['generation'], 'state': 'stale' if stale else 'recorded'}
+            reviewer = current['reviewer']
+            reviews[run_id] = {'run_id': run_id, 'generation': current['generation'],
+                'candidate_sha': target['head_sha'], 'submission_id': current['submission_id'],
+                'review_reference': current['review_reference'],
+                'reviewer_id': None if reviewer is None else reviewer['actor_id'],
+                'verdict': current['result'], 'round': current['round'],
+                'state': 'STALE' if stale else current['stage'],
+                'reason': 'CANDIDATE_BINDING_CHANGED' if stale else current['reason'],
+                'updated_at': current.get('updated_at')}
+            if current['stage'] == 'ATTENTION' and not stale:
+                review_attention[run_id] = {'review_state': current['stage'], 'review_reason': current['reason']}
+        hub('candidate', _rows(candidates, ('candidate_sha', 'pull_number', 'generation', 'state')), freshness='unknown')
+        if 'review' not in seen:
+            sections['review'] = SourceObservation('review', 'hub-review', seq, None, reviews).document()
         hub('attention', {token(key): _fields(row, ('coordinator_attention', 'control_reason', 'status'))
                           for key, row in state['runs'].items()})
+        for run_id, attention in review_attention.items():
+            sections['attention']['value'][run_id].update(attention)
     else:
         for name in ('runs', 'candidate', 'attention'):
             missing(name)
@@ -268,6 +305,11 @@ def project_hub(snapshot, *, captured_at, observations=()):
     else:
         missing('gate_history')
     # A past immutable result cannot be relabeled as a currently passing Gate.
+    if any('gates' in run.get('policy', {}) for run in state.get('runs', {}).values()):
+        if 'gate_truth' not in seen:
+            sections['gate_truth'] = SourceObservation('gate_truth', 'hub-gate', seq, None, retained_gates['gates']).document()
+        if 'pending_ci' not in seen:
+            sections['pending_ci'] = SourceObservation('pending_ci', 'hub-gate', seq, None, retained_gates['pending_ci']).document()
     if sections['gate_truth']['observed_version'] is None:
         sections['gate_truth'] = fact('hub-gate', None, status='unknown', reason='FRESH_OWNER_OBSERVATION_REQUIRED')
 
@@ -292,8 +334,8 @@ HUB_FIELDS = {
     'runs': ('run_id', 'generation', 'status', 'outcome', 'issue_number', 'issue_id', 'repository',
              'project_id', 'participant_id', 'actor_id', 'delivery_class', 'context_generation',
              'control_revision', 'control_reason', 'projection'),
-    'candidate': ('candidate_sha', 'pull_number', 'generation'),
-    'attention': ('coordinator_attention', 'control_reason', 'status'),
+    'candidate': ('candidate_sha', 'pull_number', 'generation', 'state'),
+    'attention': ('coordinator_attention', 'control_reason', 'status', 'review_state', 'review_reason'),
     'adapter_connections': ('participant_id', 'incarnation_id', 'context_generation', 'attachment_id'),
     'readiness': ('readiness',), 'last_observation': ('observation_id',),
     'work_requests': ('id', 'run_id', 'generation', 'sender', 'status', 'attention', 'submitted_seq'),

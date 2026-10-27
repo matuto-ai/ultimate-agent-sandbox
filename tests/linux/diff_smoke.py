@@ -87,6 +87,7 @@ SOURCES = (
     'uas/peer.py',
     'uas/pi_fixture.py',
     'uas/pi_runtime.py',
+    'uas/review_broker.py',
     'uas/run_admission.py',
     'uas/run_control.py',
     'uas/run_coordination.py',
