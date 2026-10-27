@@ -65,11 +65,19 @@ def guest_guard(nonce, *, run):
     require(interfaces == ['lo', INTERFACE], 'unexpected network device in selected guest')
     require(Path('/sys/class/net/' + INTERFACE + '/address').read_text().strip() == MAC,
             'wrong selected NIC identity')
+    # IPv4-only address output omits link-layer fields in iproute2. Observe
+    # the selected link separately; do not treat an absent MAC as a match.
+    raw = run('ip', '-j', 'link', 'show', 'dev', INTERFACE, timeout=3)
+    require(len(raw) <= 8192, 'oversized link observation')
+    links = json.loads(raw)
+    require(type(links) is list and len(links) == 1 and type(links[0]) is dict
+            and links[0].get('ifname') == INTERFACE
+            and links[0].get('address') == MAC, 'wrong actual NIC')
     raw = run('ip', '-j', '-4', 'address', 'show', 'dev', INTERFACE, timeout=3)
     require(len(raw) <= 8192, 'oversized NIC observation')
     observed = json.loads(raw)
-    require(type(observed) is list and len(observed) == 1 and observed[0].get('ifname') == INTERFACE
-            and observed[0].get('address') == MAC, 'wrong actual NIC')
+    require(type(observed) is list and len(observed) == 1 and type(observed[0]) is dict
+            and observed[0].get('ifname') == INTERFACE, 'wrong IPv4 interface')
     addresses = observed[0].get('addr_info')
     require(type(addresses) is list and len(addresses) == 1 and addresses[0].get('family') == 'inet'
             and addresses[0].get('local') == ADDRESS.split('/')[0]

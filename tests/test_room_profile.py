@@ -35,16 +35,23 @@ class RoomProfileTests(unittest.TestCase):
         self.assertEqual({key:value for key,value in room_profile.marker('a'*32).items()
                           if key not in ('version','nonce')}, EGRESS_PROFILE)
         marker = room_profile.marker('a'*32)
-        def check(*, interfaces=None, address=None, route=None, ipv6=None, nonce='a'*32, mode=0o600):
+        def check(*, interfaces=None, link=None, mac=None, address=None, route=None, ipv6=None, nonce='a'*32, mode=0o600):
             def read(path):
                 if path == room_profile.MARKER: return json.dumps(marker)
                 if path.name == 'uas-vm-fixture': return nonce
-                return room_profile.MAC
-            addresses=[{'ifname':room_profile.INTERFACE,'address':room_profile.MAC,
+                return room_profile.MAC if mac is None else mac
+            links=[{'ifname':room_profile.INTERFACE,'address':room_profile.MAC}]
+            # Actual iproute2 IPv4-filtered shape: no link-layer address field.
+            addresses=[{'ifname':room_profile.INTERFACE,
                         'addr_info':[{'family':'inet','local':'10.0.2.15','prefixlen':24}]}]
             routes=[{'gateway':room_profile.GATEWAY,'dev':room_profile.INTERFACE}]
-            run=Mock(side_effect=[json.dumps(addresses if address is None else address),
-                json.dumps(routes if route is None else route),json.dumps([] if ipv6 is None else ipv6)])
+            observations = {
+                ('ip','-j','link','show','dev','uas-egress'): links if link is None else link,
+                ('ip','-j','-4','address','show','dev','uas-egress'): addresses if address is None else address,
+                ('ip','-j','-4','route','show','default'): routes if route is None else route,
+                ('ip','-j','-6','route','show','default'): [] if ipv6 is None else ipv6,
+            }
+            run=Mock(side_effect=lambda *args, **kwargs: json.dumps(observations[args]))
             with patch.object(room_profile.os,'geteuid',return_value=0), \
                  patch.object(Path,'lstat',return_value=SimpleNamespace(st_mode=stat.S_IFREG|mode,
                        st_uid=0,st_nlink=1,st_size=300)),patch.object(Path,'read_text',read), \
@@ -52,10 +59,25 @@ class RoomProfileTests(unittest.TestCase):
                     (['lo','uas-egress'] if interfaces is None else interfaces)]):
                 value=room_profile.guest_guard('a'*32,run=run)
                 self.assertEqual(room_profile.PROFILE,value['profile'])
+                self.assertEqual([
+                    ('ip','-j','link','show','dev','uas-egress'),
+                    ('ip','-j','-4','address','show','dev','uas-egress'),
+                    ('ip','-j','-4','route','show','default'),
+                    ('ip','-j','-6','route','show','default'),
+                ], [call.args for call in run.call_args_list])
                 self.assertTrue(all(call.kwargs == {'timeout':3} for call in run.call_args_list))
         check()
         for values in ({'interfaces':['lo']},{'interfaces':['lo','uas-egress','extra']},
-                       {'address':[]},{'route':[]},{'ipv6':[{'dev':'uas-egress'}]},
+                       {'link':[]},{'link':[{}]},{'link':[None]},
+                       {'link':[{'ifname':'wrong','address':room_profile.MAC}]},
+                       {'link':[{'ifname':'uas-egress','address':'52:54:00:62:00:02'}]},
+                       {'link':[{'ifname':'uas-egress'}]},
+                       {'link':[{'ifname':'uas-egress','address':room_profile.MAC}]*2},
+                       {'mac':'52:54:00:62:00:02'},
+                       {'address':[]},{'address':[None]},{'address':[{'ifname':'wrong'}]},
+                       {'address':[{'ifname':'uas-egress','addr_info':[]}]},
+                       {'address':[{'ifname':'uas-egress','addr_info':[{'family':'inet','local':'10.0.2.16','prefixlen':24}]}]},
+                       {'route':[]},{'ipv6':[{'dev':'uas-egress'}]},
                        {'nonce':'b'*32},{'mode':0o644}):
             with self.subTest(values=values),self.assertRaises(RuntimeError):check(**values)
 

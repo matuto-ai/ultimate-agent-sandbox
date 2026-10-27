@@ -162,20 +162,38 @@ class RoomFixtureTests(unittest.TestCase):
         from types import SimpleNamespace
         import stat
         marker = {'version':1,'nonce':'a'*32,**room.EGRESS_PROFILE}
-        addresses = [{'ifname':'uas-egress','address':'52:54:00:62:00:01',
+        links = [{'ifname':'uas-egress','address':'52:54:00:62:00:01'}]
+        # Actual IPv4-filtered address output does not contain a link-layer MAC.
+        addresses = [{'ifname':'uas-egress',
                       'addr_info':[{'family':'inet','local':'10.0.2.15','prefixlen':24}]}]
         routes = [{'dev':'uas-egress','gateway':'10.0.2.2'}]
-        def check(*,document=None,mac='52:54:00:62:00:01',address=None,route=None,ipv6=None,mode=0o600):
+        def check(*,document=None,mac='52:54:00:62:00:01',link=None,address=None,route=None,ipv6=None,mode=0o600):
             def read(path):
                 return json.dumps(marker if document is None else document) if path.name=='uas-room-network-profile' else mac
+            observations = {
+                ('ip','-j','link','show','dev','uas-egress'): links if link is None else link,
+                ('ip','-j','-4','address','show','dev','uas-egress'): addresses if address is None else address,
+                ('ip','-j','-4','route','show','default'): routes if route is None else route,
+                ('ip','-j','-6','route','show','default'): [] if ipv6 is None else ipv6,
+            }
             with patch.object(Path,'lstat',return_value=SimpleNamespace(st_mode=stat.S_IFREG|mode,
                       st_uid=0,st_nlink=1,st_size=300)),patch.object(Path,'read_text',read), \
-                    patch.object(room,'command',side_effect=[json.dumps(addresses if address is None else address),
-                        json.dumps(routes if route is None else route),json.dumps([] if ipv6 is None else ipv6)]) as command:
+                    patch.object(room,'command',side_effect=lambda *args: json.dumps(observations[args])) as command:
                 EGRESS(self.backend)
-                self.assertEqual(3,command.call_count)
+                self.assertEqual([
+                    ('ip','-j','link','show','dev','uas-egress'),
+                    ('ip','-j','-4','address','show','dev','uas-egress'),
+                    ('ip','-j','-4','route','show','default'),
+                    ('ip','-j','-6','route','show','default'),
+                ], [call.args for call in command.call_args_list])
         check()
         for values in ({'document':{**marker,'nonce':'b'*32}},{'mac':'52:54:00:00:00:02'},
-                       {'mode':0o644},{'address':[]},{'route':[]},{'route':[{'dev':'other','gateway':'10.0.2.2'}]},
+                       {'mode':0o644},{'link':[]},{'link':[{}]},{'link':[None]},
+                       {'link':[{'ifname':'wrong','address':'52:54:00:62:00:01'}]},
+                       {'link':[{'ifname':'uas-egress','address':'52:54:00:62:00:02'}]},
+                       {'link':[{'ifname':'uas-egress'}]},{'link':links*2},
+                       {'address':[]},{'address':[None]},{'address':[{'ifname':'wrong'}]},
+                       {'address':[{'ifname':'uas-egress','addr_info':[]}]},
+                       {'address':[{'ifname':'uas-egress','addr_info':[{'family':'inet','local':'10.0.2.16','prefixlen':24}]}]},{'route':[]},{'route':[{'dev':'other','gateway':'10.0.2.2'}]},
                        {'ipv6':[{'dev':'uas-egress','gateway':'fe80::1'}]}):
             with self.subTest(values=values),self.assertRaises(LifecycleError):check(**values)

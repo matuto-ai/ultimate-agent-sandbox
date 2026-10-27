@@ -170,10 +170,16 @@ class RoomLaunchFixtureBackend(GuestBoundaryBackend):
             raw = command('ip', '-j', *args)
             self._require(len(raw) <= 8192, 'ROOM_NETWORK_OBSERVATION')
             return json.loads(raw)
+        # ip -4 address omits the link-layer MAC. Keep a separate exact link
+        # observation instead of manufacturing that field in address fixtures.
+        links = observe('link', 'show', 'dev', interface)
+        self._require(type(links) is list and len(links) == 1 and type(links[0]) is dict
+                      and links[0].get('ifname') == interface
+                      and links[0].get('address') == EGRESS_PROFILE['mac'], 'ROOM_NETWORK_INTERFACE')
         addresses = observe('-4', 'address', 'show', 'dev', interface)
         self._require(type(addresses) is list and len(addresses) == 1
-                      and addresses[0].get('ifname') == interface
-                      and addresses[0].get('address') == EGRESS_PROFILE['mac'], 'ROOM_NETWORK_INTERFACE')
+                      and type(addresses[0]) is dict
+                      and addresses[0].get('ifname') == interface, 'ROOM_NETWORK_INTERFACE')
         ipv4 = addresses[0].get('addr_info')
         self._require(type(ipv4) is list and len(ipv4) == 1 and ipv4[0].get('family') == 'inet'
                       and ipv4[0].get('local') == '10.0.2.15' and ipv4[0].get('prefixlen') == 24,

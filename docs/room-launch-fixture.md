@@ -152,8 +152,8 @@ before sharing only the offline assembly implementation. Room admission repeats
 the actual selected interface/MAC/address/default-route checks. No monkeypatch,
 generic allow-network flag or later attachment bypasses the old guard.
 `room-launch.yml` is deliberately triggered only by manual dispatch or the
-trusted exact-review label; it is not automatic per-patch CI. No NIC-enabled VM
-has run for this candidate.
+trusted exact-review label; it is not automatic per-patch CI. The one authorized NIC-enabled VM run is recorded below; it failed during
+preflight and does not qualify the composed candidate.
 
 ## Evidence plan and stopping condition
 
@@ -176,3 +176,24 @@ evidence, not successful sockets, SCM pidfds, SELinux, Docker, quotas or egress.
 The recovery check covers container/network/storage after the service has been
 torn down; it is not persistent Participant/Broker restart integration for #61.
 No acceptance checkbox or production-launch claim is made from source alone.
+
+## Single-run checkpoint — 2026-10-27
+
+The explicitly authorized single [run 40577280219](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40577280219)
+on head `94797363a1cb1467332a1081d15730c7f6d15a2a` failed before any
+qualification checks. Guest preflight reported `RuntimeError: wrong actual NIC`.
+The guest shut down and the outer runner confirmed removal of its owned temporary
+directory after 323.304 seconds. No retry is authorized or scheduled.
+
+The guard incorrectly expected the link-layer `address` (MAC) field in
+`ip -j -4 address` output. Upstream iproute2's `print_linkinfo` emits that field
+only for an unspecified/link family or detailed output; IPv4-only output omits
+it. The pure fixture had supplied the nonexistent field, masking the defect.
+See [iproute2 ipaddress.c](https://github.com/iproute2/iproute2/blob/main/ip/ipaddress.c).
+Both boot preflight and Room admission now obtain a separate bounded
+`ip -j link show dev uas-egress` observation and verify its exact MAC and
+interface, while retaining the sysfs MAC, IPv4 address/prefix and route checks.
+No network policy or identity check is relaxed. Regression fixtures use the
+IPv4-only shape without a MAC and explicitly deny missing, malformed, extra,
+or mismatched link observations. These are pure parser/policy tests; actual
+composed VM qualification remains pending.
