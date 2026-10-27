@@ -101,7 +101,7 @@ from uas import workstation_service, workstation_control, workstation_hub, works
 from uas import docker_exec_api, workstation_exec, workstation_admission, pi_runtime
 from uas.forge import ReadOnlyForgeBroker
 from uas.ledger import RoomLedger, Origin
-from uas.peer import FixturePeerHub, FixtureParticipant, Message
+from uas.peer import FixturePeerHub, FixtureParticipant, Message, WorkRequest
 
 def forbidden_broker(*args, **kwargs):
     raise AssertionError('Broker construction is unavailable in native profile')
@@ -123,6 +123,10 @@ with tempfile.TemporaryDirectory(dir=stage) as directory:
         receipt = hub.submit(connection, message, origin=origin, authorize=lambda: True)
         assert hub.submit(connection, message, origin=origin, authorize=lambda: True) == receipt
         assert ledger.snapshot()['state']['peer_traffic']['traffic']['staged-message']['actor_id'] == 'actor-a'
+        request = WorkRequest('staged-request', 'native-run', 1, 'bob', 'staged request closure')
+        hub.submit(connection, request, origin=origin, authorize=lambda: True)
+        recipient = hub.connect('connect-bob', 'bob', 'incarnation-b', object())
+        assert {item['id'] for item in hub._pending(recipient)} == {'staged-message', 'staged-request'}
         assert not hasattr(hub, 'broker') and not hasattr(hub, 'provider_for_actor')
     finally:
         ledger.close()

@@ -99,6 +99,7 @@ class FixturePiRpcReceiver:
         self._reader = self._stderr = None
         self._condition = threading.Condition()
         self._write_lock = threading.Lock()
+        self._scope_lock = threading.RLock()
         self._transport_fenced = False
         self._initial_state_timeout = initial_state_timeout
         self._initial_state_started = None
@@ -459,6 +460,12 @@ class FixturePiRpcReceiver:
         return {key: value for key, value in envelope.items() if key not in ('delivery_id', 'incarnation_id')}
 
     def accept(self, envelope):
+        # A handoff and an owner generation CAS cannot interleave between the
+        # scope check and native injection. An already prepared old offer loses.
+        with self._scope_lock:
+            return self._accept(envelope)
+
+    def _accept(self, envelope):
         if (type(envelope) is not dict
                 or any(type(envelope.get(key)) is not type(value) or envelope.get(key) != value for key, value in self.scope.items())
                 or envelope.get('incarnation_id') != self.incarnation_id):
@@ -570,6 +577,51 @@ class FixturePiRpcReceiver:
                 'unknown_intents': self.db.execute("SELECT count(*) FROM handoffs WHERE state='INTENT'").fetchone()[0],
                 'provider_configuration': 'separate-not-qualified', 'inference_health': 'separate-not-qualified',
                 'hang_uncertainty': 'no-native-hang-signal', 'image_digest': 'not-qualified'}
+
+    def advance_run_generation(self, expected_scope, target_scope, *, authorize):
+        """Owner-only CAS after canonical policy fencing; never a context reset.
+
+        The Run and native session stay identical. Old handoffs remain immutable
+        history and cannot be reinjected in the new generation. Authorization
+        must verify the canonical paused migration and exact owned incarnation.
+        """
+        with self._scope_lock:
+            return self._advance_run_generation(expected_scope, target_scope, authorize=authorize)
+
+    def _advance_run_generation(self, expected_scope, target_scope, *, authorize):
+        if (not callable(authorize) or authorize() is not True or self._closed
+                or type(expected_scope) is not dict or type(target_scope) is not dict
+                or set(expected_scope) != set(self.scope) or set(target_scope) != set(self.scope)
+                or any(type(target_scope[k]) is not type(expected_scope[k])
+                       or target_scope[k] != expected_scope[k] for k in self.scope if k != 'generation')
+                or any(type(expected_scope[k]) is not str or not expected_scope[k]
+                       for k in ('room_id', 'participant_id', 'run_id'))
+                or type(expected_scope.get('context_generation')) is not int
+                or not 1 <= expected_scope['context_generation'] <= 2**53 - 1
+                or type(expected_scope.get('generation')) is not int
+                or not 1 <= expected_scope['generation'] < 2**53 - 1
+                or type(target_scope.get('generation')) is not int
+                or target_scope['generation'] != expected_scope['generation'] + 1
+                or target_scope['generation'] > 2**53 - 1):
+            raise NativeUnavailable('invalid same-context generation migration')
+        try:
+            self.db.execute('BEGIN IMMEDIATE')
+            row = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
+            current = json.loads(row[0]) if row else None
+            if (type(current) is not dict or set(current) != set(expected_scope)
+                    or any(type(current[k]) is not type(expected_scope[k]) for k in expected_scope)
+                    or current not in (expected_scope, target_scope)
+                    or self.scope not in (expected_scope, target_scope)):
+                raise NativeUnavailable('native generation binding conflict')
+            if authorize() is not True:
+                raise NativeUnavailable('native generation authority revoked')
+            self.db.execute('UPDATE binding SET scope=? WHERE singleton=1', (json.dumps(target_scope),))
+            self.db.commit()
+            self.scope = dict(target_scope)
+        except BaseException:
+            self.db.rollback()
+            raise
+        return dict(self.scope)
 
     def close(self):
         # Every resource slot exists before initialization can fail. Retrying

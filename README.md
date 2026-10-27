@@ -89,9 +89,9 @@ The [Claude native fixture adapter](docs/claude-runtime.md) crosses official Cla
 
 The existing official Pi Participant channel now supports bounded native `gh issue view` observations through authenticated process authority and durable sanitized RoomLedger results. See [connected GitHub read observations](docs/forge-read-observations.md) for supported routes, account-free tests, uncertainty handling, and the still-open production/Run/credential qualification limits.
 
-### Restricted Run-admission foundation
+### Bounded Run admission and control
 
-An account-free [first-Run admission source slice](docs/run-admission-foundation.md) connects explicit trusted human commands, fresh bounded GitHub facts, durable canonical Run/policy binding, owned Git checkouts and real Pi Work Request delivery. Only already-correct assignment and unused native contexts are eligible. Explicit canonical pause/resume holds Hub traffic with same-generation revision fencing; it does not stop native inference. General Run management, withdrawal, terminal stop, Forge projections, production authentication and #72 acceptance remain unimplemented.
+The account-free [Run admission/control fixture](docs/run-admission-foundation.md) connects exact human commands and authenticated Participant Run Requests/proposals to fresh Forge facts, atomic Run/policy/checkout binding and actual Pi Work Requests. It adds exact human proposal approval, generation-preserving pause/resume, policy migration fencing, bounded human-appointed coordination, verified owned force/terminal stop and safe withdrawal/retarget reconciliation. Native context reset and clean checkout rules remain mandatory across Runs. Review/merge completion, Manager login and production authentication remain separate; controlled GitHub responses are not live-account qualification.
 
 The optional [audited self-assignment source slice](docs/forge-assignment.md) connects
 one bounded write and read-only uncertain-outcome reconciliation to canonical Run

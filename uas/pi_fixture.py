@@ -22,6 +22,7 @@ class FixturePiRecipe:
         self.scope = dict(scope)
         self.timeout = timeout
         self.session = str(Path(session).resolve()) if session is not None else None
+        self.checkout = checkout is not None
         self.node = shutil.which('node')
         self.package = self.install / 'node_modules/@earendil-works/pi-coding-agent'
         ai = self.install / 'node_modules/@earendil-works/pi-ai'
