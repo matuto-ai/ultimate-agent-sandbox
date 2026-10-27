@@ -38,7 +38,86 @@ def diagnostic_record(kind,value):
         except Exception:pass
 
 
-def startup_observer(launch,participant):
+class HeldPiStartupFacts:
+    """Fixed proc-stat observations of an already held task; never authority."""
+    def __init__(self,launch):
+        self.origin=launch.origin
+        self.identity=tuple(self.origin.identity)
+        self.pidfd=self.origin.pidfd
+        self.pid=self.origin.credentials[0]
+        self.procfd=None;self.starttime=None;self.error=None;self.close_errors=[]
+        self.proc_owner_uid=None
+        try:
+            self._held()
+            expect(type(self.pid) is int and 0<self.pid<2**31,'unavailable held diagnostic PID')
+            self.procfd=os.open('/proc/'+str(self.pid),
+                os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW)
+            self.proc_owner_uid=os.fstat(self.procfd).st_uid
+            # PR_SET_DUMPABLE=0 can expose root-owned proc entries. 100000 is
+            # namespace root in this fixture's already-verified fixed map.
+            # Ownership is diagnostic, never a replacement for the held task.
+            expect(type(self.proc_owner_uid) is int
+                   and self.proc_owner_uid in (self.origin.credentials[1],0,100000),
+                   'unexpected proc diagnostic owner')
+            self._held()
+        except Exception as error:
+            self.error=type(error).__name__
+            self.close()
+        self.start=self.sample()
+
+    def _held(self):
+        expect(not self.origin.revoked and self.origin.pidfd==self.pidfd
+               and tuple(self.origin.identity)==self.identity
+               and _identity(self.pidfd)==self.identity and alive(self.pidfd),
+               'held diagnostic task unavailable')
+
+    def sample(self):
+        result={}
+        if self.error is not None:
+            return {**result,'unavailable':self.error}
+        try:
+            result['monotonic_seconds']=round(time.monotonic(),6)
+            self._held()
+            descriptor=os.open('stat',os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=self.procfd)
+            try:raw=os.read(descriptor,4097)
+            finally:os.close(descriptor)
+            expect(len(raw)<=4096,'oversized held diagnostic stat')
+            value=raw.decode('ascii')
+            expect(value.startswith(str(self.pid)+' ('),'held diagnostic stat PID differs')
+            fields=value[value.rfind(')')+2:].split()
+            expect(len(fields)>=20 and fields[0] in tuple('RSDZTWtXxKWPIN'),'invalid held diagnostic stat')
+            task={'state':fields[0],'utime_ticks':int(fields[11]),
+                  'stime_ticks':int(fields[12]),'starttime_ticks':int(fields[19])}
+            expect(all(task[key]>=0 for key in ('utime_ticks','stime_ticks','starttime_ticks')),
+                   'negative held diagnostic counter')
+            expect(self.starttime is None or task['starttime_ticks']==self.starttime,
+                   'held diagnostic task start time differs')
+            ticks=os.sysconf('SC_CLK_TCK')
+            expect(type(ticks) is int and ticks>0,'invalid clock tick scale')
+            self._held()
+            self.starttime=task['starttime_ticks']
+            result.update(task,clock_ticks_per_second=ticks)
+        except Exception as error:
+            self.error=type(error).__name__
+            result['unavailable']=self.error
+        return result
+
+    def finish(self):
+        try:end=self.sample()
+        except Exception as error:end={'unavailable':type(error).__name__}
+        finally:self.close()
+        return {'authority':'observation-only','held_identity':list(self.identity),
+                'proc_directory_uid_at_open':self.proc_owner_uid,
+                'start':self.start,'end':end,'close_errors':list(self.close_errors)}
+
+    def close(self):
+        if self.procfd is not None:
+            descriptor,self.procfd=self.procfd,None
+            try:os.close(descriptor)
+            except Exception as error:self.close_errors.append(type(error).__name__)
+
+
+def startup_observer(launch,participant,facts=None):
     def observe(receiver,error):
         # Invoked before receiver close and launch revocation. Never retries an
         # RPC, adopts a task, changes authority or interprets a live stream as Pi.
@@ -54,7 +133,9 @@ def startup_observer(launch,participant):
             observed=launch.engine.inspect(launch.exec_id)  # One bounded GET only.
             fields={key:observed.get(key) for key in ('Running','ExitCode','Pid')}
             if (observed.get('ID')!=launch.exec_id or observed.get('ContainerID')!=launch.seat.container_id
-                    or type(fields['Running']) is not bool or type(fields['ExitCode']) is not int
+                    or 'ExitCode' not in observed
+                    or type(fields['Running']) is not bool
+                    or (fields['ExitCode'] is not None and type(fields['ExitCode']) is not int)
                     or type(fields['Pid']) is not int or fields['Pid']<0):
                 raise ValueError('invalid exact-exec diagnostic')
             value['exec']=fields
@@ -62,6 +143,9 @@ def startup_observer(launch,participant):
         except Exception as problem:value['exec_unavailable']=type(problem).__name__
         try:value['held_alive_after']=alive(origin.pidfd)
         except Exception as problem:value['held_after_unavailable']=type(problem).__name__
+        if facts is not None:
+            try:value['held_task']=facts.finish()
+            except Exception as problem:value['held_task_unavailable']=type(problem).__name__
         diagnostic_record('pi-startup-failure',value)
     return observe
 
@@ -134,17 +218,21 @@ def scenario(config, peer_fd, control_fd):
             launch.launch(peer)
             diagnostic_record('seat-released',{'participant':participant,'slot':launch.seat.slot,
                 'exec_id':launch.exec_id,'held_identity':list(launch.origin.identity),'state':launch.state})
-            native=launch.attach_native(journal=journal/(participant+'-native.db'),
-                scope={'room_id':'alpha','participant_id':participant,'run_id':'native-run',
-                       'generation':1,'context_generation':1},profile_digest=config['profile_digest'],
-                startup_observer=startup_observer(launch,participant))
+            facts=HeldPiStartupFacts(launch)
+            try:
+                native=launch.attach_native(journal=journal/(participant+'-native.db'),
+                    scope={'room_id':'alpha','participant_id':participant,'run_id':'native-run',
+                           'generation':1,'context_generation':1},profile_digest=config['profile_digest'],
+                    initial_state_timeout=30,startup_observer=startup_observer(launch,participant,facts))
+                startup_task=facts.finish()
+            finally:facts.close()
             seat=AdmissionSeat('alpha',config['nonce'],participant,actor,'native-pi-v1',('peer-traffic',),receiver)
             client=SupervisorAdmission(launch,seat,control,hub_origin=hub_origin,controller=ready['controller'],control_lock=control_lock)
             client.admit(str(index+1)*32,1)
             result['seats'].append({'participant':participant,'actor':actor,'exec_id':launch.exec_id,
                 'origin_identity':list(launch.origin.identity),'host_pid_diagnostic':launch.origin.credentials[0],
                 'readiness':launch.native_readiness})
-            diagnostic_record('seat-admitted',result['seats'][-1])
+            diagnostic_record('seat-admitted',{**result['seats'][-1],'startup_task':startup_task})
             clients.append(client);launches.append(launch)
         expect(launches[0].origin.identity!=launches[1].origin.identity,'two distinct kernel tasks required')
         print('UAS_NATIVE_PHASE:idle',flush=True)

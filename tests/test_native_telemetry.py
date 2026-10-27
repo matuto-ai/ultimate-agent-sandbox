@@ -22,7 +22,7 @@ IMAGE='sha256:'+'b'*64
 
 class NativeSupervisorDiagnosticsTests(unittest.TestCase):
     def launch(self):
-        origin=SimpleNamespace(identity=(7,9),pidfd=22,credentials=(234,165532,165532))
+        origin=SimpleNamespace(identity=(7,9),pidfd=22,credentials=(234,165532,165532),revoked=False)
         seat=SimpleNamespace(slot='seat-a',container_id='c'*64)
         launch=SimpleNamespace(origin=origin,seat=seat,state='released',exec_id='d'*64,engine=Mock())
         launch.engine.inspect.return_value={'ID':launch.exec_id,'ContainerID':seat.container_id,
@@ -60,6 +60,33 @@ class NativeSupervisorDiagnosticsTests(unittest.TestCase):
             supervisor.startup_observer(launch,'alice')(receiver,RuntimeError())
         self.assertNotIn('exec',emit.call_args.args[1])
         self.assertEqual(emit.call_args.args[1]['exec_unavailable'],'ValueError')
+
+    def test_nullable_exit_status_is_retained_but_missing_or_wrong_types_are_not(self):
+        for value in (None,0,17,True,'0','missing'):
+            with self.subTest(value=value):
+                launch=self.launch();record=launch.engine.inspect.return_value
+                if value=='missing':del record['ExitCode']
+                else:record['ExitCode']=value
+                receiver=Mock();receiver.startup_diagnostic.return_value={}
+                with patch.object(supervisor,'alive',return_value=True),patch.object(supervisor,'diagnostic_record') as emit:
+                    supervisor.startup_observer(launch,'alice')(receiver,RuntimeError())
+                actual=emit.call_args.args[1]
+                if value is None or type(value) is int:
+                    self.assertEqual(actual['exec']['ExitCode'],value)
+                    self.assertTrue(actual['exec']['Running'])
+                else:
+                    self.assertNotIn('exec',actual)
+                    self.assertEqual(actual['exec_unavailable'],'ValueError')
+                launch.engine.inspect.assert_called_once()
+
+    def test_failed_task_sample_cannot_replace_receiver_error_or_exec_facts(self):
+        launch=self.launch();receiver=Mock();receiver.startup_diagnostic.return_value={}
+        facts=Mock();facts.finish.side_effect=PermissionError('PRIVATE')
+        with patch.object(supervisor,'alive',return_value=True),patch.object(supervisor,'diagnostic_record') as emit:
+            supervisor.startup_observer(launch,'alice',facts)(receiver,RuntimeError('original'))
+        actual=emit.call_args.args[1]
+        self.assertIn('exec',actual);self.assertEqual(actual['held_task_unavailable'],'PermissionError')
+        self.assertNotIn('PRIVATE',json.dumps(actual));facts.finish.assert_called_once()
 
     def test_bounded_records_and_writer_failures_do_not_change_effect(self):
         with patch('builtins.print') as output:

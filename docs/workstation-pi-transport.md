@@ -866,3 +866,74 @@ checkpoint telemetry records delivery counts/hashes rather than message bodies.
 No RPC retry, initialization allowance, liveness deadline, image-import cap,
 overall cap, policy or confinement change is introduced; a causal fix awaits
 actual initialization evidence, not a guessed cold-start explanation.
+
+### Actual confinement retained; separate initial-state budget: run 40449547243
+
+The [run on `25751a3c`](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40449547243/job/122008784053)
+retained actual passed payload, full Workstation/outside-Hub confinement,
+same-Room/sibling/private socket-policy, Hub-startup and guest-cleanup checks.
+The strict rootfs had **24,885 entries / 374,549,340 bytes**, manifest SHA-256
+`d723b31c73bd234566c12b45cdd7f2542a266065dcd53dcd1e60b95f4aa81feb`.
+The completed archive was **411,627,520 bytes**, SHA-256
+`7139a306aa137e6173e486defa42f26fc598c79fb5b2a95c8732595d8a041e4b`.
+The import start/end observation interval was **222.445 seconds**, and the
+confirmed image was
+`sha256:e50fb9dfc4306b52de8fae57f1382875a04fa897763d6085555abf1472c05c05`.
+These retained records, unlike earlier control-flow inferences, establish the
+completed checks; they do not establish any later native-delivery gate.
+
+Alice / seat-a was the first failing attachment, in `state-rpc`, after
+**8.080305 seconds** with the eight-second response budget. Held identity
+`[5,3324]` remained alive before and after the observer. The transport was
+unfenced with open streams and live readers, no I/O error, no retained events,
+responses or notifications, and **zero observed stderr bytes**. Exact exec GET
+validation returned `ValueError`, without retaining its fields; the actual
+field that failed cannot be reconstructed. Actor attribution, wrong-process,
+control-loss and resource checks were NOT RUN. The full retained job log is
+248,481 bytes, SHA-256
+`2d9771ffbf35022deaa33a8ee01435e62837430d0c63d233834364fc24c705a9`;
+disposable VM scratch cleanup completed in 1,480.0 seconds. No live import or
+native task remains outside the destroyed disposable VM to reconcile.
+
+The Engine server schema permits an explicit null `ExitCode`: the
+[Moby v28 server response](https://github.com/moby/moby/blob/v28.0.0/api/types/backend/backend.go)
+uses a nullable integer and the
+[exec inspection implementation](https://github.com/moby/moby/blob/v28.0.0/daemon/inspect.go)
+returns it directly. These are protocol references, not proof of the installed
+29.8.2 implementation or the discarded response. Diagnostic validation now
+accepts a **present** null or exact integer, while missing/boolean/string values
+remain invalid. Exact exec/container IDs, boolean Running and nonnegative integer
+Pid checks remain; null never means exit, success, or process authority.
+
+The fixed connector releases its already-held task and immediately execves cold
+Node/Pi. Official
+[Pi 1.4.0 RPC startup](https://github.com/earendil-works/pi/blob/v1.4.0/packages/coding-agent/src/modes/rpc/rpc-mode.ts)
+binds extensions before attaching its JSONL input reader. The observed silence
+does **not** identify an internal startup cause. The scoped change is instead an
+explicit **30-second initial-state budget**, opted into only by this VM fixture.
+One absolute monotonic deadline covers the single initial prompt write, RPC
+response, matching native-state notification and validation. Progress, buffered
+responses and phase changes cannot renew or bypass it. There is no second
+prompt, automatic retry, reinjection, or late activation. Default/general
+initialization stays unchanged; subsequent RPC, observation and fresh-context
+proof retain the existing eight-second timeout semantics. Fresh native context,
+held identity, activation and authenticated ADMIT gates remain mandatory.
+
+The VM also samples only fixed `stat` fields through one held proc-directory
+file descriptor for the already-held kernel-credential PID, at startup and
+before failure cleanup (or successful attachment). Held pidfd identity/liveness
+bracket each sample; task start time must match. The observed proc-directory UID
+is recorded, not used as process authority. Linux
+[proc ownership rules](https://man7.org/linux/man-pages/man5/proc_pid.5.html)
+permit root ownership for nondumpable tasks; this fixed fixture accepts the held
+credential UID, global root 0, or mapped root 100000 from its already-verified
+`0 100000 65536` map. An unrelated owner stays unavailable, and root ownership
+cannot override an exited or mismatched held task. Read size is at most 4,096 bytes,
+and only state, CPU counters, start time and clock scale are retained, never
+comm, command lines or arbitrary process files. No new pidfd lookup/adoption is
+performed. Exit, identity mismatch and unreadable data are explicitly unavailable;
+diagnostic cleanup errors are retained separately. Neither is an authority
+fallback, and a failed read is not retried. These observations do not reset deadlines or grant readiness. The
+ordinary receiver stays silent unless its owner explicitly enables diagnostics.
+Import 240 seconds, serial idle 300 seconds, guest outer 1,200 seconds, workflow
+45 minutes and all stock SELinux/capability/seccomp boundaries remain unchanged.

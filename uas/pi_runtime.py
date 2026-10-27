@@ -7,6 +7,7 @@ import base64
 from collections import deque
 import hashlib
 import json
+import math
 import os
 import select
 import sqlite3
@@ -51,7 +52,8 @@ class FixturePiRpcReceiver:
         return receiver
 
     @classmethod
-    def attach_workstation(cls, launch, *, journal, scope, timeout=8, startup_observer=None):
+    def attach_workstation(cls, launch, *, journal, scope, timeout=8, startup_observer=None,
+                           initial_state_timeout=None):
         """Attach native I/O separately from the Supervisor's held task object.
 
         Source integration seam only: it does not qualify image, mounts or
@@ -64,17 +66,30 @@ class FixturePiRpcReceiver:
             raise NativeUnavailable('verified released exec required')
         if startup_observer is not None and not callable(startup_observer):
             raise NativeUnavailable('trusted startup observer must be callable')
+        cls._validate_initial_state_timeout(initial_state_timeout)
         receiver = cls.__new__(cls)
         receiver._initialize(transport=launch.transport.rpc_io(),
             task_alive=lambda: (launch.state in {'released', 'active'}
                                 and not launch.origin.revoked and alive(launch.origin.pidfd)),
             journal=journal, runtime_version='1.4.0', scope=scope,
-            incarnation_id=launch.incarnation, timeout=timeout, startup_observer=startup_observer)
+            incarnation_id=launch.incarnation, timeout=timeout, startup_observer=startup_observer,
+            initial_state_timeout=initial_state_timeout)
         return receiver
+
+    @staticmethod
+    def _validate_initial_state_timeout(value):
+        if value is not None and (type(value) not in (int, float)
+                or not 0 < value <= 30 or not math.isfinite(value)):
+            raise NativeUnavailable('initial state timeout must be finite and within 30 seconds')
+
+    @staticmethod
+    def _require_initial_deadline(deadline):
+        if time.monotonic() >= deadline:
+            raise NativeUnavailable('initial native state deadline exceeded; hold without reinjection')
 
     def _initialize(self, *, journal, runtime_version, scope, timeout,
                     process=None, argv=None, cwd=None, env=None, incarnation_id=None,
-                    transport=None, task_alive=None, startup_observer=None):
+                    transport=None, task_alive=None, startup_observer=None, initial_state_timeout=None):
         self._closed = False
         self._owns_process = process is None and transport is None
         self._task_alive = task_alive
@@ -85,6 +100,8 @@ class FixturePiRpcReceiver:
         self._condition = threading.Condition()
         self._write_lock = threading.Lock()
         self._transport_fenced = False
+        self._initial_state_timeout = initial_state_timeout
+        self._initial_state_started = None
         # Only an explicit trusted owner opts in. No general receiver output,
         # event/command content capture or liveness/authority decision is added.
         self._startup_lock = threading.Lock()
@@ -94,6 +111,7 @@ class FixturePiRpcReceiver:
                 'started': time.monotonic(), 'finished': None, 'bytes': 0,
                 'hash': hashlib.sha256(), 'head': bytearray(), 'tail': bytearray()}
         try:
+            self._validate_initial_state_timeout(initial_state_timeout)
             if startup_observer is not None and not callable(startup_observer):
                 raise NativeUnavailable('trusted startup observer must be callable')
             if runtime_version != '1.4.0':
@@ -136,16 +154,29 @@ class FixturePiRpcReceiver:
             self._reader.start()
             self._stderr.start()
             self._startup_stage('state-rpc')
-            state = self._native('state', {})['state']
+            initial_deadline = None
+            if initial_state_timeout is None:
+                state = self._native('state', {})['state']
+            else:
+                # The explicit owner-only cold-start allowance is one fixed
+                # deadline, not a new timeout for each initialization stage.
+                self._initial_state_started = time.monotonic()
+                initial_deadline = self._initial_state_started + initial_state_timeout
+                state = self._native('state', {}, deadline=initial_deadline)['state']
+                self._require_initial_deadline(initial_deadline)
             self._startup_stage('validation')
             if state.get('api_baseline') != runtime_version or state.get('readiness') not in {r.value for r in Readiness}:
                 raise NativeUnavailable('unsupported or absent native observation')
-            self._binding = {key: state[key] for key in ('runtime_id', 'session_id')}
+            binding = {key: state[key] for key in ('runtime_id', 'session_id')}
+            readiness = Readiness(state['readiness'])
+            if initial_deadline is not None:
+                self._require_initial_deadline(initial_deadline)
+            self._binding = binding
             if self.incarnation_id is None:
-                self.incarnation_id = state['runtime_id']
+                self.incarnation_id = binding['runtime_id']
             self.initial_state = state
             self.last_observation = state
-            self.readiness = Readiness(state['readiness'])
+            self.readiness = readiness
             self._startup_stage('complete')
             try:
                 self._finish_startup_capture()
@@ -224,7 +255,14 @@ class FixturePiRpcReceiver:
                       'stage': value['stage'], 'elapsed_seconds': round(max(0, now - value['started']), 6),
                       'capture_active': value['active'], 'stderr': stderr}
         timeout = getattr(self, 'timeout', None)
-        result['budget_seconds'] = timeout if type(timeout) in (int, float) and 0 < timeout <= 3600 else None
+        ordinary = timeout if type(timeout) in (int, float) and 0 < timeout <= 3600 else None
+        initial = self._initial_state_timeout
+        initial = initial if type(initial) in (int, float) and 0 < initial <= 30 else None
+        result['ordinary_timeout_seconds'] = ordinary
+        result['initial_state_timeout_seconds'] = initial
+        result['budget_seconds'] = initial if initial is not None else ordinary
+        result['initial_state_elapsed_seconds'] = (None if self._initial_state_started is None else
+            round(max(0, now - self._initial_state_started), 6))
         try:
             result['held_task_alive'] = bool(self._alive())
         except Exception as error:
@@ -293,9 +331,13 @@ class FixturePiRpcReceiver:
         except (OSError, ValueError):
             pass  # Controller may close streams after reaping its owned process.
 
-    def _wait(self, values, request_id, timeout=None):
-        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+    def _wait(self, values, request_id, timeout=None, *, deadline=None):
+        initial_deadline = deadline is not None
+        if deadline is None:
+            deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         with self._condition:
+            if initial_deadline:
+                self._require_initial_deadline(deadline)
             while request_id not in values:
                 if self._transport_fenced:
                     raise NativeUnavailable('native transport fenced after incomplete write')
@@ -303,8 +345,12 @@ class FixturePiRpcReceiver:
                     raise NativeUnavailable('native process lost')
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    if initial_deadline:
+                        self._require_initial_deadline(deadline)
                     raise NativeUnavailable('missing native response; hold without reinjection')
                 self._condition.wait(remaining)
+            if initial_deadline:
+                self._require_initial_deadline(deadline)
             return values.pop(request_id)
 
     def _write(self, wire, deadline):
@@ -338,16 +384,22 @@ class FixturePiRpcReceiver:
                 self._transport_fenced = True
             self._write_lock.release()
 
-    def rpc(self, command, *, timeout=None, **fields):
+    def rpc(self, command, *, timeout=None, _deadline=None, **fields):
         budget = self.timeout if timeout is None else timeout
-        deadline = time.monotonic() + budget
+        deadline = time.monotonic() + budget if _deadline is None else _deadline
+        if _deadline is not None:
+            self._require_initial_deadline(deadline)
         request_id = uuid.uuid4().hex
         wire = json.dumps({'id': request_id, 'type': command, **fields}, ensure_ascii=False).encode() + b'\n'
         with self._condition:
             self._rpc_pending.add(request_id)
         try:
             self._write(wire, deadline)
-            result = self._wait(self._responses, request_id, max(0, deadline - time.monotonic()))
+            if _deadline is None:
+                result = self._wait(self._responses, request_id, max(0, deadline - time.monotonic()))
+            else:
+                result = self._wait(self._responses, request_id, deadline=deadline)
+                self._require_initial_deadline(deadline)
             if result.get('success') is not True:
                 raise NativeUnavailable('native command rejected: ' + str(result.get('error', 'unknown')))
             return result
@@ -356,7 +408,7 @@ class FixturePiRpcReceiver:
                 self._rpc_pending.discard(request_id)
                 self._responses.pop(request_id, None)
 
-    def _native(self, command, payload):
+    def _native(self, command, payload, *, deadline=None):
         request_id = uuid.uuid4().hex
         message = base64.urlsafe_b64encode(json.dumps({**payload, 'request_id': request_id},
                                                       ensure_ascii=False).encode()).decode()
@@ -364,10 +416,18 @@ class FixturePiRpcReceiver:
             self._native_pending.add(request_id)
         try:
             # "handled" only means extension dispatch completed, NEVER delivery.
-            self.rpc('prompt', message=f'/uas-{command} {message}')
+            if deadline is None:
+                self.rpc('prompt', message=f'/uas-{command} {message}')
+            else:
+                self._require_initial_deadline(deadline)
+                self.rpc('prompt', message=f'/uas-{command} {message}', _deadline=deadline)
             if command == 'state':
                 self._startup_stage('state-notification')
-            return self._wait(self._notifications, request_id)
+            if deadline is None:
+                return self._wait(self._notifications, request_id)
+            result = self._wait(self._notifications, request_id, deadline=deadline)
+            self._require_initial_deadline(deadline)
+            return result
         finally:
             with self._condition:
                 self._native_pending.discard(request_id)
