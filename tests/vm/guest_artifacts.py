@@ -17,6 +17,7 @@ import shutil
 import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -44,47 +45,225 @@ def emit(name,value):
     print('UAS_ARTIFACT_CHECK:'+data,flush=True)
 
 
-def labeled_listener(path,group,level):
-    """Root fixture setup child actually listens as165533 before FD transfer.
+SETUP_CHILD_PHASES=('alarm','close-parent','drop-groups-gid','drop-uid','socket',
+    'bind','listen','group','mode','send')
+SETUP_FAILURE=struct.Struct('!4sBI')
+SETUP_CREDENTIALS=struct.Struct('3i')
+SETUP_MAX_RIGHTS=253
 
-    Chown alone would leave root SO_PEERCRED and fail static bootstrap checks.
-    No helper/Supervisor is made privileged, no SELinux policy is installed.
+
+class ListenerSetupFailure(RuntimeError):
+    """Bounded typed setup facts only; never raw payload, argv or environment."""
+    def __init__(self,document):
+        self.document=document
+        data=json.dumps(document,sort_keys=True,ensure_ascii=True,separators=(',',':'))
+        expect(len(data.encode())<=8192,'bounded listener diagnostics')
+        super().__init__('artifact listener setup failure: '+data)
+
+
+def setup_child_outcome(child,deadline):
+    """Only our exact unreaped fork child; never a helper PID or adopted task."""
+    while True:
+        try:pid,status=os.waitpid(child,os.WNOHANG)
+        except InterruptedError:
+            if time.monotonic()>=deadline:return {'outcome':'unconfirmed'}
+            continue
+        except OSError as error:return {'outcome':'wait-error','errno':error.errno}
+        if pid==child:
+            if os.WIFEXITED(status):return {'outcome':'exit','exit_code':os.WEXITSTATUS(status)}
+            if os.WIFSIGNALED(status):return {'outcome':'signal','signal':os.WTERMSIG(status)}
+            return {'outcome':'unexpected-status','status':status}
+        if pid!=0:return {'outcome':'unexpected-child'}
+        if time.monotonic()>=deadline:return {'outcome':'unconfirmed'}
+        time.sleep(.01)
+
+
+
+def require_setup_reaping():
+    """Fixed single-threaded Linux CPython fixture owns all child reaping.
+
+    SIG_DFL alone is insufficient if inherited sigaction has SA_NOCLDWAIT.
+    CPython PyOS_setsig uses a fresh sigaction with only SA_ONSTACK, clearing
+    that flag: Python/pylifecycle.c v3.14.0 lines3365-3372. Refuse another
+    disposition/interpreter; never overwrite a custom handler or repair policy.
+    getsignal/return values are Python handler-state checks, not kernel flag
+    observations; the successful fresh reset supplies the no-auto-reap premise.
+    https://github.com/python/cpython/blob/v3.14.0/Python/pylifecycle.c
     """
-    library=ctypes.CDLL('libselinux.so.1',use_errno=True)
-    library.setsockcreatecon.argtypes=[ctypes.c_char_p];library.setsockcreatecon.restype=ctypes.c_int
-    context=('system_u:system_r:container_t:'+level).encode()
-    if library.setsockcreatecon(context):raise OSError(ctypes.get_errno(),'stock socket creation label denied')
-    left=right=None;child=None
+    expect(sys.platform=='linux' and sys.implementation.name=='cpython',
+        'fixed Linux CPython setup child ownership required')
+    expect(signal.getsignal(signal.SIGCHLD)==signal.SIG_DFL,
+        'setup child auto-reaping or custom handler unsupported')
+    expect(signal.signal(signal.SIGCHLD,signal.SIG_DFL)==signal.SIG_DFL,
+        'setup child disposition changed before reset')
+
+
+def receive_setup_listener(channel,child,diagnostic):
+    """CLOEXEC is an allowed returned bit, not a truncation or success fact.
+
+    SO_PASSCRED is explicitly enabled before fork. Linux may return the input
+    MSG_CMSG_CLOEXEC flag: net/socket.c ____sys_recvmsg (v6.18 lines2674/2697).
+    Parse installed descriptors FIRST so malformed records cannot leak them.
+    """
+    installed=[];result=None
+    diagnostic.setdefault('cleanup_errors',[])
+    raw,ancillary,flags,_=channel.recvmsg(64,
+        socket.CMSG_SPACE(SETUP_CREDENTIALS.size)+socket.CMSG_SPACE(SETUP_MAX_RIGHTS*4),
+        socket.MSG_CMSG_CLOEXEC)
+    diagnostic['transfer']={'raw_bytes':len(raw),'flags':flags,'ancillary_count':len(ancillary),
+        'ancillary':[{'level':level,'type':kind,'bytes':len(data)} for level,kind,data in ancillary[:16]]}
+    credentials=[];rights=[];invalid=bool(flags & ~socket.MSG_CMSG_CLOEXEC)
     try:
+        for level,kind,data in ancillary:
+            if level==socket.SOL_SOCKET and kind in (socket.SCM_RIGHTS,getattr(socket,'SCM_PIDFD',4)):
+                fds=array.array('i');fds.frombytes(data[:len(data)-len(data)%4])
+                installed.extend(fd for fd in fds if fd>=0)
+                if kind==socket.SCM_RIGHTS:rights.extend(fds)
+                else:invalid=True  # unexpected pidfds are still owned/closed
+                invalid|=bool(len(data)%4 or any(fd<0 for fd in fds))
+            elif level==socket.SOL_SOCKET and kind==socket.SCM_CREDENTIALS and len(data)==SETUP_CREDENTIALS.size:
+                credentials.append(SETUP_CREDENTIALS.unpack(data))
+            else:invalid=True
+        expect(not invalid and len(credentials)==1 and credentials[0][0]==child,
+            'exact child ancillary identity required')
+        diagnostic['sender']={'pid_matches_child':True,'uid':credentials[0][1],'gid':credentials[0][2]}
+        expect(all(not os.get_inheritable(fd) for fd in installed),'noninheritable received descriptors required')
+        if len(raw)==SETUP_FAILURE.size and raw[:4]==b'LSF1':
+            _,phase,number=SETUP_FAILURE.unpack(raw)
+            expect(not rights and 1<=phase<=len(SETUP_CHILD_PHASES) and 0<=number<=4095,
+                'fixed child failure packet required')
+            # A failed credential drop may still be root. This is diagnostic
+            # only, never a path to accept a root-created listener descriptor.
+            expect(credentials[0][1:] in ((0,0),(0,165533),(165533,165533)),
+                'unexpected failed child credentials')
+            diagnostic['child_failure']={'phase':SETUP_CHILD_PHASES[phase-1],'errno':number or None}
+            raise RuntimeError('setup child reported failure')
+        expect(raw==b'LISTENER' and len(rights)==1 and len(ancillary)==2
+            and credentials[0][1:]==(165533,165533),'one exact Supervisor listener required')
+        result=socket.socket(fileno=rights[0]);installed.remove(rights[0])
+        expect(result.family==socket.AF_UNIX
+            and result.getsockopt(socket.SOL_SOCKET,socket.SO_TYPE)==socket.SOCK_SEQPACKET
+            and result.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)==1,
+            'received descriptor is not the expected listening seqpacket socket')
+        accepted=result;result=None;return accepted
+    finally:
+        if result is not None:
+            try:result.close()
+            except BaseException as failure:
+                diagnostic['cleanup_errors'].append({'phase':'received-listener-close',
+                    'errno':getattr(failure,'errno',None)})
+        failed=0;errnos=set()
+        for descriptor in set(installed):
+            try:os.close(descriptor)
+            except BaseException as failure:
+                failed+=1
+                number=getattr(failure,'errno',None)
+                errnos.add(number if type(number) is int and 1<=number<=4095 else None)
+            # Attempt every other FD; uncertain cleanup remains a failed fact.
+        if failed:
+            diagnostic['cleanup_errors'].append({'phase':'installed-descriptor-close','count':failed,
+                'errnos':sorted(errnos,key=lambda value:-1 if value is None else value)[:8],
+                'errno_types_truncated':len(errnos)>8})
+
+
+def labeled_listener(path,group,level):
+    """Root fixture child listens as165533, transfers exact FD, then exits.
+
+    No helper/Supervisor is privileged, no policy installed or authority adopted.
+    Every received FD is closed on failure, including final label-reset failure.
+    """
+    diagnostic={'version':1,'phase':'fixed-profile','cleanup_errors':[]}
+    left=right=result=None;child=None;child_done=False;error=None;library=None;attempted=False
+    deadline=time.monotonic()+12
+    try:
+        expect(os.geteuid()==0 and group in (165530,165531) and level in LEVELS.values()
+            and path.is_absolute() and path.name==('gate.sock' if group==165530 else 'hub.sock'),
+            'fixed root fixture listener profile required')
+        diagnostic['phase']='child-reaping-policy';require_setup_reaping()
+        diagnostic['phase']='socket-label'
+        library=ctypes.CDLL('libselinux.so.1',use_errno=True)
+        library.setsockcreatecon.argtypes=[ctypes.c_char_p];library.setsockcreatecon.restype=ctypes.c_int
+        context=('system_u:system_r:container_t:'+level).encode()
+        attempted=True
+        if library.setsockcreatecon(context):raise OSError(ctypes.get_errno(),'stock socket creation label denied')
+        diagnostic['phase']='socketpair'
         left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
-        child=os.fork()
+        left.setsockopt(socket.SOL_SOCKET,socket.SO_PASSCRED,1)
+        expect(left.getsockopt(socket.SOL_SOCKET,socket.SO_PASSCRED)==1,'setup credentials unavailable')
+        diagnostic['phase']='fork';child=os.fork()
         if child==0:
-            left.close()
+            phase='alarm'
             try:
                 signal.signal(signal.SIGALRM,signal.SIG_DFL);signal.alarm(10)
-                os.setgroups([group]);os.setgid(165533);os.setuid(165533)
+                phase='close-parent';left.close();right.settimeout(1)
+                phase='drop-groups-gid';os.setgroups([group]);os.setgid(165533)
+                phase='drop-uid';os.setuid(165533)
+                phase='socket'
                 with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as listener:
-                    listener.bind(str(path));listener.listen(4)
-                    os.chown(path,-1,group);os.chmod(path,0o620)
-                    right.sendmsg([b'LISTENER'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[listener.fileno()]))])
+                    phase='bind';listener.bind(str(path))
+                    phase='listen';listener.listen(4)
+                    phase='group';os.chown(path,-1,group)
+                    phase='mode';os.chmod(path,0o620)
+                    phase='send'
+                    sent=right.sendmsg([b'LISTENER'],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[listener.fileno()]))])
+                    if sent!=8:raise OSError(errno.EIO,'incomplete fixed listener transfer')
                 os._exit(0)
-            except BaseException:os._exit(125)
+            except BaseException as failure:
+                number=getattr(failure,'errno',None)
+                if type(number) is not int or not 1<=number<=4095:number=0
+                try:right.send(SETUP_FAILURE.pack(b'LSF1',SETUP_CHILD_PHASES.index(phase)+1,number))
+                except BaseException:pass
+                os._exit(125)
         right.close();right=None;left.settimeout(5)
-        raw,ancillary,flags,_=left.recvmsg(32,socket.CMSG_SPACE(4),socket.MSG_CMSG_CLOEXEC)
-        expect(raw==b'LISTENER' and not flags and len(ancillary)==1,'exact setup listener transfer')
-        level_,kind,data=ancillary[0];fds=array.array('i');fds.frombytes(data)
-        expect(level_==socket.SOL_SOCKET and kind==socket.SCM_RIGHTS and len(fds)==1,'one owned listener')
-        _,status=os.waitpid(child,0);child=None;expect(status==0,'unprivileged listener setup failed')
-        result=socket.socket(fileno=fds[0])
-        run('chcon','-t','container_file_t','-l',level,str(path))
-        return result
+        diagnostic['phase']='receive'
+        result=receive_setup_listener(left,child,diagnostic)
+        diagnostic['phase']='listener-identity'
+        expect(result.getsockname()==str(path),'received listener path differs')
+        node=path.lstat()
+        expect(stat.S_ISSOCK(node.st_mode) and node.st_uid==165533 and node.st_gid==group
+            and stat.S_IMODE(node.st_mode)==0o620,'fixed socket path ownership differs')
+        diagnostic['phase']='child-exit'
+        diagnostic['child']=setup_child_outcome(child,deadline)
+        child_done=diagnostic['child']['outcome'] in ('exit','signal')
+        expect(diagnostic['child']=={'outcome':'exit','exit_code':0},'setup child did not exit successfully')
+        diagnostic['phase']='path-label'
+        run('chcon','-t','container_file_t','-l',level,str(path),timeout=5)
+    except BaseException as failure:
+        error=failure
+        diagnostic['error_type']=type(failure).__name__;diagnostic['errno']=getattr(failure,'errno',None)
     finally:
-        if library.setsockcreatecon(None):raise OSError(ctypes.get_errno(),'socket label reset denied')
+        # Reset failure must NEVER bypass descriptor and exact-child cleanup.
+        if attempted:
+            try:
+                if library.setsockcreatecon(None):raise OSError(ctypes.get_errno(),'socket label reset denied')
+            except BaseException as failure:
+                diagnostic['cleanup_errors'].append({'phase':'socket-label-reset','errno':getattr(failure,'errno',None)})
+                if error is None:error=failure
         for value in (left,right):
-            if value is not None:value.close()
-        if child is not None:
-            # This is the exact forked setup child, never a looked-up helper PID.
-            os.waitpid(child,0)
+            if value is not None:
+                try:value.close()
+                except BaseException as failure:
+                    diagnostic['cleanup_errors'].append({'phase':'setup-channel-close','errno':getattr(failure,'errno',None)})
+                    if error is None:error=failure
+        if child is not None and child>0 and not child_done:
+            outcome=setup_child_outcome(child,deadline)
+            if outcome['outcome']=='unconfirmed':
+                # Exact still-unreaped fork child cannot be PID-reused. This is
+                # disposable setup cleanup, never helper cancellation authority.
+                try:os.kill(child,signal.SIGKILL)
+                except OSError as failure:outcome={'outcome':'kill-error','errno':failure.errno}
+                else:outcome=setup_child_outcome(child,time.monotonic()+1)
+            diagnostic['child']=outcome
+            if outcome['outcome'] not in ('exit','signal'):
+                diagnostic['cleanup_errors'].append({'phase':'child-exit-unconfirmed'})
+                if error is None:error=RuntimeError('exact setup child exit unconfirmed')
+        if error is not None and result is not None:
+            try:result.close()
+            except BaseException as failure:
+                diagnostic['cleanup_errors'].append({'phase':'listener-close','errno':getattr(failure,'errno',None)})
+            result=None
+    if error is not None:raise ListenerSetupFailure(diagnostic) from None
+    return result
 
 
 def storage(nonce,ownership):
@@ -290,11 +469,20 @@ def scenario(nonce,manifest,checks):
                 and quota_exhaustion[room]['project_hard_quota_enforced'] is True,
                 'missing exact independently observed project quota enforcement')
             quota_observations[room]={'before':before,'after':after}
+            # Preserve accepted quota facts even if a later setup phase fails.
+            quota_checkpoint=json.dumps({'version':1,'room':room,'result':quota_exhaustion[room]},
+                sort_keys=True,ensure_ascii=True,separators=(',',':'))
+            if len(quota_checkpoint.encode())>16384:
+                quota_checkpoint=json.dumps({'version':1,'room':room,'checkpoint':'overbound',
+                    'accepted_child_bytes':len(result.stdout)},sort_keys=True)
+            print('UAS_ARTIFACT_QUOTA_RESULT:'+quota_checkpoint,flush=True)
         rooms['beta']['foreign_scratch']=rooms['alpha']['scratch']
         for room,paths in rooms.items():
             listener=labeled_listener(Path(paths['gate'])/'gate.sock',165530,paths['level'])
+            listeners.append(listener)  # Own it before the second creation can fail.
             control=labeled_listener(Path(paths['control'])/'hub.sock',165531,paths['level'])
-            listeners.extend((listener,control));paths['listener_fds']=(listener.fileno(),control.fileno())
+            listeners.append(control)
+            paths['listener_fds']=(listener.fileno(),control.fileno())
             ws=create(image,'uas-artifact-'+nonce+'-'+room,paths,nonce,foreign=rooms['alpha']['scratch'] if room=='beta' else None);owned.append(ws);run('docker','start',ws)
             hub=create(image,'uas-artifact-'+nonce+'-'+room+'-hub',paths,nonce,hub=True);owned.append(hub)
             containers[room]={'workstation':ws,'hub':hub}
@@ -405,6 +593,11 @@ def scenario(nonce,manifest,checks):
         return checks
     finally:
         original=sys.exc_info()[1];failures=[]
+        if isinstance(original,ListenerSetupFailure):
+            # Preserve unresolved setup ownership/reset facts. Later whole-VM
+            # teardown does not prove a missing child exit or rewrite failure.
+            failures.extend({'resource':'listener-setup','error':'ListenerSetupFailure','detail':dict(item)}
+                for item in original.document['cleanup_errors'])
         def cleanup(name,action):
             try:action()
             except Exception as error:failures.append({'resource':name,'error':type(error).__name__})
