@@ -375,7 +375,7 @@ class MutationAuditTests(unittest.TestCase):
             with sqlite3.connect(path) as db:
                 self.assertEqual(version, db.execute('SELECT version FROM deployment').fetchone()[0])
             with ForgeAudit(path, 'deployment-a') as migrated:
-                self.assertEqual(4, migrated._db.execute('SELECT version FROM deployment').fetchone()[0])
+                self.assertEqual(5, migrated._db.execute('SELECT version FROM deployment').fetchone()[0])
                 self.assertEqual(raw, migrated._db.execute("SELECT metadata FROM starts WHERE id='legacy'").fetchone()[0])
                 self.assertTrue(migrated.begin_mutation('new', metadata())['started'])
             with ForgeAudit(path, 'deployment-a') as reopened:

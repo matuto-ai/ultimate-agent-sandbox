@@ -405,7 +405,7 @@ class ForgeAudit:
                 self._db.execute('CREATE INDEX scope_idx ON starts(scope)')
                 self._db.execute('INSERT INTO deployment VALUES(1, 1, ?)', (deployment_id,))
             row = self._db.execute('SELECT version,id FROM deployment WHERE singleton=1').fetchone()
-            if row is None or row['id'] != deployment_id or row['version'] not in {1, 2, 3, 4}:
+            if row is None or row['id'] != deployment_id or row['version'] not in {1, 2, 3, 4, 5}:
                 raise LedgerError('DEPLOYMENT_MISMATCH')
             if row['version'] == 1:
                 _schema(self._db, _V1_SCHEMA)
@@ -422,7 +422,13 @@ class ForgeAudit:
                 for statement in _RECONCILIATION_SCHEMA.values():
                     self._db.execute(statement)
                 self._db.execute('UPDATE deployment SET version=4 WHERE singleton=1')
-            _schema(self._db, {**_V1_SCHEMA, **_READ_SCHEMA, **_MUTATION_SCHEMA, **_RECONCILIATION_SCHEMA})
+            from .git_audit import GIT_SCHEMA
+            if row['version'] in {1, 2, 3, 4}:
+                _schema(self._db, {**_V1_SCHEMA, **_READ_SCHEMA, **_MUTATION_SCHEMA, **_RECONCILIATION_SCHEMA})
+                for statement in GIT_SCHEMA.values():
+                    self._db.execute(statement)
+                self._db.execute('UPDATE deployment SET version=5 WHERE singleton=1')
+            _schema(self._db, {**_V1_SCHEMA, **_READ_SCHEMA, **_MUTATION_SCHEMA, **_RECONCILIATION_SCHEMA, **GIT_SCHEMA})
             self._db.commit()
         except (sqlite3.Error, OSError) as error:
             self.close()

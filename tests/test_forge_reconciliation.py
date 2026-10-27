@@ -212,17 +212,19 @@ class ForgeReconciliationTests(unittest.TestCase):
         self.assertEqual('UNKNOWN', observations[-1]['observation']['status'])
         self.assertEqual('AUTHORITY_REVOKED', observations[-1]['observation']['error_code'])
 
-    def test_v3_to_v4_preserves_all_existing_prepared_terminal_bytes_and_marks_legacy_unknown(self):
+    def test_v3_to_v5_preserves_all_existing_prepared_terminal_bytes_and_marks_legacy_unknown(self):
         envelope, _ = self.uncertain()
         key = envelope['audit_reference']
         self.audit.close()
+        from uas.git_audit import GIT_SCHEMA
         with sqlite3.connect(self.path) as db:
+            for table in reversed(GIT_SCHEMA): db.execute('DROP TABLE ' + table)
             for table in reversed(_RECONCILIATION_SCHEMA): db.execute('DROP TABLE ' + table)
             db.execute('UPDATE deployment SET version=3')
             before = {table: db.execute('SELECT * FROM ' + table).fetchall() for table in
                       ('mutation_starts', 'mutation_prepared', 'mutation_confirmed', 'mutation_rejected', 'mutation_terminals')}
         self.reopen()
-        self.assertEqual(4, self.audit._db.execute('SELECT version FROM deployment').fetchone()[0])
+        self.assertEqual(5, self.audit._db.execute('SELECT version FROM deployment').fetchone()[0])
         for table, rows in before.items():
             self.assertEqual(rows, [tuple(row) for row in self.audit._db.execute('SELECT * FROM ' + table)])
         self.assertIsNone(self.audit.get_mutation(key)['steps'][0]['intent'])

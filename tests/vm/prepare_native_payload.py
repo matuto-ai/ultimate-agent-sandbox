@@ -4,6 +4,7 @@
 RPMs stay in the existing Fedora-signature-verified pool. The guest builds its
 root with the native package solver, offline and without RPM scriptlets.
 """
+import ast
 import hashlib
 import json
 import os
@@ -84,6 +85,58 @@ def archive_tree(root, target):
             'sha256': sha256(target)}
 
 
+def require_git_python_sources(source):
+    """Check the reviewed local Python import closure without importing it."""
+    pending, seen = ['__init__', 'git_launcher', 'git_worker'], set()
+    while pending:
+        module = pending.pop()
+        if module in seen: continue
+        if len(seen) >= 128 or not re.fullmatch(r'[a-z_][a-z0-9_]*', module):
+            raise ValueError('bounded controlled Git Python source closure required')
+        seen.add(module)
+        path = source / 'uas' / (module + '.py')
+        if not path.is_file():
+            raise ValueError('complete controlled Git Python source allowlist required: ' + module)
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                if node.level != 1:
+                    raise ValueError('unsupported controlled Git relative import')
+                pending.extend([node.module] if node.module else [name.name for name in node.names])
+
+
+def stage_git(source, base, run):
+    """Optional fixed assets from the explicit source allowlist; no Git package.
+
+    Absence preserves the existing native profile. A partial Git selection is
+    rejected, not silently staged as a public launcher with no trusted worker.
+    """
+    directory = source / 'runtime/git'
+    connector = source / 'runtime/workstation/git_worker_connector.c'
+    if not directory.exists() and not connector.exists(): return None
+    required = ('launcher.py', 'worker.py', 'ssh-shim.py', 'reference-transaction.py', 'public-entries.json')
+    if not connector.is_file() or any(not (directory / name).is_file() for name in required):
+        raise ValueError('complete controlled Git source allowlist required')
+    require_git_python_sources(source)
+    entries = json.loads((directory / 'public-entries.json').read_text())
+    if (type(entries) is not list or not 1 <= len(entries) <= 128 or any(type(name) is not str or not re.fullmatch(r'(?:git(?:-[a-z0-9-]+)?|scalar)', name) for name in entries)
+            or entries != sorted(set(entries)) or 'git' not in entries):
+        raise ValueError('invalid controlled Git public entries')
+    destination = base / 'runtime/git'; destination.mkdir(parents=True)
+    for name in required:
+        shutil.copyfile(directory / name, destination / name)
+    for name, source_name in (('git', 'launcher.py'), ('git-ssh-shim', 'ssh-shim.py')):
+        shutil.copyfile(directory / source_name, base / 'bin' / name)
+        (base / 'bin' / name).chmod(0o555)
+    run(['cc', '-static', '-Os', '-Wall', '-Wextra', '-Werror', '-o', str(base / 'bin/git-worker-connector'),
+         str(connector)], timeout=60)
+    (base / 'bin/git-worker-connector').chmod(0o555)
+    hooks = base / 'git-hooks'; hooks.mkdir()
+    shutil.copyfile(directory / 'reference-transaction.py', hooks / 'reference-transaction')
+    (hooks / 'reference-transaction').chmod(0o555)
+    return {'version': 1, 'entries': entries, 'launcher_sha256': sha256(base / 'bin/git'),
+            'connector_sha256': sha256(base / 'bin/git-worker-connector')}
+
+
 def stage_native(work, payload, run, fetch):
     """Use only manifest-bound source copies under payload/repo, not originals."""
     source = payload / 'repo'
@@ -143,11 +196,13 @@ def stage_native(work, payload, run, fetch):
     # Static libc avoids binding the connector to the runner distribution ABI.
     run(['cc', '-static', '-Os', '-Wall', '-Wextra', '-Werror', '-o', str(base / 'bin/pi-connector'),
          str(source / 'runtime/workstation/pi_connector.c')], timeout=60)
+    git_runtime = stage_git(source, base, run)
     result = archive_tree(root, payload / 'native-runtime.tar')
     result.update({'profile': PROFILE, 'node_version': NODE_VERSION, 'node_archive_sha256': NODE_SHA256,
                    'pi_version': '1.4.0', 'pi_lock_sha256': hashlib.sha256((pi / 'package-lock.json').read_bytes()).hexdigest(),
                    'rpm_roots': list(RPM_ROOTS), 'rpm_scriptlets': False,
                    'dependencies_reproducibly_pinned': False})
+    if git_runtime is not None: result['git_runtime'] = git_runtime
     # RPM candidates are signature verified and manifest-pinned for this build,
     # not a claim that Fedora repository resolution is reproducible over time.
     details = payload / 'native-files.json'
