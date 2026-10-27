@@ -32,6 +32,19 @@ export default function (pi) {
     },
   });
   if (channel) pi.registerTool({
+    name: 'uas_run', label: 'Bounded Run request',
+    description: 'Propose one exact Project issue for human approval, consume one exact authenticated human Run Request, or nominate a configured coordinator (human appointment required). '
+      + 'No selectors, automatic retries, batch intake, identity fields or implicit coordinator authority.',
+    parameters: { type: 'object', additionalProperties: false,
+      required: ['id', 'kind', 'payload'], properties: { id: { type: 'string' },
+        kind: { type: 'string', enum: ['run-propose', 'run-open-requested', 'run-coordinator-nominate'] },
+        payload: { type: 'object' } } },
+    async execute(_toolCallId, envelope, signal) {
+      const reply = await channel.request(envelope, { signal, timeoutMs: 45000 });
+      return { content: [{ type: 'text', text: JSON.stringify(reply) }], details: reply, isError: !reply.ok };
+    },
+  });
+  if (channel) pi.registerTool({
     name: 'gh', label: 'Bounded GitHub',
     description: 'Bounded native gh argument vector through the authenticated Room Broker. '
       + 'Use --help for the approved issue, PR, code, CI and completed-job reads; bounded Project issue/PR/comment/label/dependency/submitted-review writes when write-enabled. No shell, endpoint or identity selection. '

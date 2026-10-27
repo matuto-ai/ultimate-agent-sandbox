@@ -218,7 +218,17 @@ class FixturePeerHub:
                     cursor = events[-1]["room_seq"]
             state["peer_traffic"]["connections"][participant_id] = {
                 **binding, "readiness": Readiness.AMBIGUOUS.value, "observation_id": None}
-            return self._transition(state, "peer.attached", binding, binding)
+            events = []
+            for run in state.get('runs', {}).values():
+                coordinator = run.get('coordinator')
+                if (coordinator and coordinator['participant_id'] == participant_id
+                        and coordinator['incarnation_id'] != incarnation_id):
+                    run.update(coordinator=None, coordinator_attention='COORDINATOR_LOST')
+                    run['control_revision'] = min(MAX_CONTEXT_GENERATION, run.get('control_revision', 0) + 1)
+                    events.append(Event('run.coordinator-lost', {'run_id': run['run_id'],
+                                  'participant_id': participant_id, 'attention': 'COORDINATOR_LOST'}))
+            self._reserve_capacity(state)
+            return Transition(state, (Event('peer.attached', binding),) + tuple(events), binding)
         self._control(operation_id, "attach", binding, decide,
                       authorize=lambda: self._context_current(participant_id, context_generation))
         # Even an exact attach retry cannot revive a superseded attachment.
@@ -271,9 +281,20 @@ class FixturePeerHub:
         def decide(state, _):
             current = state["peer_traffic"]["connections"][connection.participant_id]
             current.update(readiness=readiness.value, observation_id=observation_id)
-            return self._transition(state, "peer.observed", {
+            transition = self._transition(state, "peer.observed", {
                 "participant_id": connection.participant_id, "incarnation_id": connection.incarnation_id,
                 "readiness": readiness.value}, {"observation_id": observation_id})
+            events = []
+            if readiness is Readiness.LOST:
+                for run in state.get('runs', {}).values():
+                    coordinator = run.get('coordinator')
+                    if coordinator and coordinator['participant_id'] == connection.participant_id:
+                        run.update(coordinator=None, coordinator_attention='COORDINATOR_LOST')
+                        run['control_revision'] = min(MAX_CONTEXT_GENERATION, run.get('control_revision', 0) + 1)
+                        events.append(Event('run.coordinator-lost', {'run_id': run['run_id'],
+                                      'participant_id': connection.participant_id, 'attention': 'COORDINATOR_LOST'}))
+            self._reserve_capacity(state)
+            return Transition(state, transition.events + tuple(events), transition.result)
         return self._control(observation_id, "observe", {"participant_id": connection.participant_id,
                              "readiness": readiness.value}, decide,
                              authorize=lambda: self._current(connection))
@@ -369,6 +390,16 @@ class FixturePeerHub:
                   "submitted_seq": self.ledger.snapshot()["room_seq"] + 1, "deliveries": {}}
         if command.kind == "peer.work-request":
             record.update(status="QUEUED", response_started_at=None, reason=None, attention=None)
+            from .run_coordination import current_coordinator
+            run = state.get('runs', {}).get(command.target)
+            coordinator = current_coordinator(run) if run else None
+            if (coordinator and coordinator['participant_id'] == connection.participant_id
+                    and coordinator['incarnation_id'] == connection.incarnation_id
+                    and coordinator['requests_used'] < coordinator['request_budget']):
+                # Priority only. Existing recipient capacity, acceptance and
+                # policy checks stay authoritative; no capability is granted.
+                coordinator['requests_used'] += 1
+                record['coordinator_appointment'] = coordinator['appointment']
         domain["traffic"][command.id] = record
         self._reserve_capacity(state)
         return self._transition(state, "peer.submitted", {"traffic_id": command.id, "recipients": recipients},
@@ -391,11 +422,17 @@ class FixturePeerHub:
         for key, pending in list(reserved.get('forge_pending', {}).items()):
             funding = pending.get('admission_funding')
             if funding is not None and reserved.get('run_admissions', {}).get(
-                    funding['run_id'], {}).get('status') == 'PREPARING':
+                    funding['run_id'], {}).get('status') in {'PREPARING', 'WITHDRAWING'}:
                 ReadOnlyForgeBroker._release_pending(reserved, key)
         for admission in reserved.get('run_admissions', {}).values():
-            if admission['status'] == 'PREPARING':
+            if admission['status'] in {'PREPARING', 'WITHDRAWING'}:
                 admission['attention'] = 'x' * 256
+        for grant in reserved.get('run_requests', {}).values():
+            grant.update(status='CONSUMED', reserved_run='x' * 256, consumed_run='x' * 256, reason='x' * 256)
+        for proposal in reserved.get('run_proposals', {}).values():
+            proposal.update(status='APPROVED', request_id='x' * 256)
+        from .run_control import reserve_run_control_capacity
+        reserve_run_control_capacity(reserved)
         for run in reserved.get('runs', {}).values():
             run.update(control_revision=MAX_CONTEXT_GENERATION, control_reason='x' * 256)
         reserve_context_capacity(reserved)
@@ -522,7 +559,16 @@ class FixturePeerHub:
             if previous and (item["kind"] == "peer.message" or previous["incarnation_id"] == connection.incarnation_id):
                 continue
             pending.append(item)
-        return sorted(pending, key=lambda item: item["submitted_seq"])
+        from .run_coordination import current_coordinator
+        def priority(item):
+            run = snapshot['state'].get('runs', {}).get(item['run_id'])
+            coordinator = current_coordinator(run) if run else None
+            is_coordinator = (coordinator is not None and item['kind'] == 'peer.work-request'
+                              and item['sender'] == coordinator['participant_id']
+                              and domain['connections'].get(item['sender'], {}).get('incarnation_id') == coordinator['incarnation_id']
+                              and item.get('coordinator_appointment') == coordinator['appointment'])
+            return (0 if is_coordinator else 1, item['submitted_seq'])
+        return sorted(pending, key=priority)
 
     @staticmethod
     def _delivery_authority(authorize):

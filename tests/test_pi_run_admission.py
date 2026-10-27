@@ -149,8 +149,8 @@ class RunAdmissionTests(unittest.TestCase):
 
     def test_git_success_before_return_recovers_same_owned_slot_no_duplicate(self):
         allocate = self.allocator.allocate
-        def interrupted(*args):
-            allocate(*args)
+        def interrupted(*args, **kwargs):
+            allocate(*args, **kwargs)
             raise LedgerError('STORAGE_ERROR')
         with patch.object(self.allocator, 'allocate', interrupted):
             self.error('STORAGE_ERROR', self.open)

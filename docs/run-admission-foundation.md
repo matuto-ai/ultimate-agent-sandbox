@@ -1,99 +1,61 @@
-> The later [audited self-assignment slice](forge-assignment.md) adds an opt-in
-> path for currently unassigned issues, preserving the original no-write default
-> and all remaining admission limits described below. The later
-> [Hub projection outbox](forge-projections.md) atomically queues lifecycle labels
-> without making projection success an admission prerequisite.
+# Bounded Run admission and control
 
-# Restricted canonical Run-admission foundation
+This completes the **account-free fixture scope** of [#72](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/72): one exact Forge item, authenticated Participant entry paths, canonical Run controls, owned native stop and context/checkout reconciliation. It reuses `RunAdmission`, the RoomLedger, Participant controller, CheckoutAllocator, Pi adapter, and existing Forge observation/assignment/projection services. It is not Manager login, production Workstation authentication, live GitHub/account qualification, review adjudication, authorized merge verification, or whole-product completion.
 
-This is an account-free, source-level vertical slice of [#72](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/72), **not complete or generally usable Run management**. The projection outbox is described separately in [Hub projections](forge-projections.md). No production human authentication, live credential/account qualification, human merge, deployment/image, or hostile-Hub qualification is claimed.
+## Admission and authority
 
-## Connected path
+`RunAdmission(controller, broker, allocator, config, ..., authorize_human=...)` accepts trusted human commands through a freshly checked scoped `Origin` callback. That callback is an integration seam, **not a production human-authentication implementation**. `controller.bind_runs(admission)` connects Participant requests to the existing per-record Linux credentials, held child/pidfd, immutable badge and revocation checks. A client cannot supply an Origin, actor, Project, repository, policy, or human capability.
 
-`RunAdmission` in `uas/run_admission.py` connects the existing RoomLedger, Supervisor/CheckoutAllocator, process-owned official Pi 1.4.0 adapter and read-only Forge Broker. The only caller is a trusted typed human-command seam with a freshly checked `Origin`/authorization callback. No native Participant tool or untrusted payload can select human authority. The callback is an integration boundary, **not** a Manager login implementation.
+Three explicit paths share the same admission transaction:
 
-The command names one positive issue number and one configured Pi implementer in the pinned Room Project. The configured Actor has an explicit immutable `github_user_id`; it is configuration, not live credential/account proof. A pending refresh rejects changed Actor-ID, configured seat/profile/capability or process-seat binding before Git, provider or native effects. An already-terminal exact attempt still returns its immutable result under fresh human authorization; configuration changes do not migrate the snapshotted policy. The configured profile and supplied seat must both permit implementation. The default configured policy is snapshotted, and its complete bounded policy/evidence contract is included in the implementation Work Request rather than merely its name. Policies too large for that delivery fail before admission or Git effects.
+- `open(operation_id, issue_number, implementer, human=...)`: trusted human opens one exact positive issue number in the pinned Project.
+- `issue_request(operation_id, issue_number, requester, implementer, human=...)`: persists one exact authenticated human Run Request. The named requester needs `can-open-requested-run` in its current configured profile **and** effective process badge to consume it with `open_requested(operation_id, request_id, origin=..., authorize=...)`.
+- `propose(operation_id, issue_number, implementer, origin=..., authorize=...)` records data only. `approve_proposal(operation_id, proposal_id, digest, human=...)` requires the exact immutable proposal digest and creates a Run Request for that same requester/issue/implementer. Repeated or conflicting approvals cannot create another grant.
 
-1. One ledger transaction reserves the exact issue, Participant, bounded context entry and future Run/request footprint. Concurrent reservations serialize. The pending admission has no product Run status and has **not consumed** the human authorization. Capacity rejection leaves no partial reservation, no Git effect and no queued retry.
-2. The existing allocator commits its own intent before actual Git effects. Explicit recovery first inspects its authoritative manifest/Git state and reuses only the exact owned Run/Participant slot. Dirty, unknown, mismatched or oversized observations hold; nothing calls `git clean`, force-delete or global prune.
-3. Only an unused first native context is admitted. A fresh official Pi process starts in the actual owned checkout, with the existing fixed account-free recipe and process-bound authority. An already-used or live preceding Run is not relabelled. Native empty-session proof, immutable scope, PID-owned working directory, safe-point evidence and fresh authority must agree. A dead exact pending child can be replaced; unverified live retired PIDs block replacement.
-4. The trusted controller requests an audited Broker read under its owned process authority. This is not a claim that the human request originated as a Pi `gh` tool call. The same provider reads the exact issue, all bounded native blocker pages and all bounded label pages. Eligibility requires an open issue, complete all-closed blockers, exactly the configured implementer's GitHub ID as sole assignee, and one known delivery class. Missing assignment, external conflict, permissions, missing/conflicting labels and incomplete reads hold with durable attention. No assignment is created or overwritten.
-5. Git is reobserved after provider I/O. The final observation must be at most five seconds old; the provider traversal itself is bounded to thirty seconds. This is a bounded observation interval, **not an atomic GitHub snapshot or assignment lock**.
-6. One transaction commits the canonical `ACTIVE` Run, policy/issue/slot/context binding, exactly one `QUEUED` implementation request, authorization consumption, and a derived `pending` lifecycle projection outbox item. Existing safe-point delivery then advances the request; timing starts only after the native receipt. Work-request completion or `FixtureContextHub.close_run` cannot complete the canonical Run.
+The process channel accepts only `{id, kind, payload}` with `run-propose`, `run-open-requested`, or `run-coordinator-nominate`; each payload has an exact allowlist. The official Pi fixture exposes these through `uas_run`. Human creation/approval needs `human-open-run`; revocation and lifecycle controls need `human-control-run`. Human and Participant operation attribution remain separate in the durable admission and grant records.
 
-The checkout/process are prepared before the final eligibility read because this restricted Broker seam needs owned process authority. An ineligible issue may therefore retain a clean owned checkout and an unused native context, but receives no implementation request and no canonical ACTIVE Run.
+No selectors, batch opening, schedule, backlog polling, external label event, implicit coordinator authority, or retry queue exists. Grants/proposals each have a 32-row bound; admission and canonical Run tables retain their existing bounds. Exhaustion is an explicit refusal, not hidden intake or automatic pruning.
 
-## Immutable attempts and uncertainty
+## One atomic binding
 
-`open(root_operation_id, issue_number, participant_id, human=...)` uses a stable initial attempt ID. An explicit human refresh supplies a **new** `attempt_id` while retaining the same admission root and exact human authorization. Exact retries preserve immutable attempt results: a held attempt returns the original reason without another provider contact, and an activated attempt returns its original result rather than a mutable Run projection. Conflicting operation reuse fails.
+1. The ledger reserves the exact issue, implementer, native context namespace and future bounded Run/request footprint. Competing SQLite connections serialize. At most one non-closed reservation/Run owns the same issue or implementer. A Run Request may be reserved by only that admission root; it remains **UNUSED**, not consumed.
+2. The authoritative allocator inspects/reuses the exact owned Run/Participant checkout. Admission authorization is checked inside its mutation lock. Dirty, mismatched or uncertain state is preserved. No cleanup, branch reset or overwrite is inferred from a new Run.
+3. A first Run requires an unused native context and fresh official Pi context proof. A later Run requires a verified stopped/closed predecessor, a new exact authorization, and the existing native reset protocol. Reserving the next Run does not relabel the old context. Successful reset advances context generation before delivery; dirty/unknown checkout reuse remains blocked independently.
+4. Fresh bounded native GitHub reads bind the exact open issue, complete all-closed dependencies, current sole assignment, and known delivery class. The optional audited self-assignment path never overwrites another assignee. Conflicts/unknown facts hold activation with durable attention. Git is observed again after provider I/O; the final Forge read must be at most five seconds old. This is a bounded observation interval, not an atomic remote GitHub lock.
+5. Activation refreshes the configured default Run Policy and binds its complete versioned evidence contract, implementer, checkout, Run generation and native context generation. One ledger transaction commits `ACTIVE`, exactly one implementation Work Request, Run Request consumption (when applicable), and the existing Forge projection outbox intent. Capacity/storage failure rolls the transaction back without consuming the grant.
 
-Each attempt has a stable Broker observation ID. Before read contact, the Broker atomically transfers its bounded pending-read footprint from that admission's reserved bytes, retaining a durable refund record. The joint peer/context reservation model budgets the eventual refund and maximum attention reason, so other traffic cannot consume temporary padding. Terminal read, abandonment and restart recovery refund exactly once; a completed canonical activation retires obsolete funding. Saturated peer traffic and all 64 context rows do not strand the admitted read/activation/delivery. A pending read is recovered as unknown, never blindly repeated; an existing completed read is not reused as fresh activation proof. A new explicit refresh is required. Possible activation-commit acknowledgement loss is reconciled against the immutable terminal receipt before any compensating hold. Verified late process-authority loss uses the existing Broker abandonment path and cannot leak pending-read reservations or downgrade a committed read.
+A pending admission may own an unused process/checkout before eligibility succeeds, but owns no active Run and queues no implementation request. Explicit `attempt_id` refreshes retain the same exact root/grant/target and re-read facts. Exact retries return immutable receipts after fresh authority checks; they do not repeat remote contact or consume another grant. Revocation during preparation fences subsequent effects and consumption.
 
-Known eligibility failures record `PREPARING` admission attention with authorization unconsumed. Storage uncertainty retains intent/ownership for explicit recovery. There is no background retry, backlog selection, scheduler, label-triggered opening, selector, batch intake, or coordinator privilege.
+## Pause, migration, and native restoration
 
-## Explicit pause/resume
+`pause` and `resume` require exact `(run_id, generation, expected_revision)` and a bounded reason. `ACTIVE ↔ PAUSED` retains generation, policy, context and checkout. A monotonic control revision prevents an old Resume from affecting a newer pause cycle. Pause holds **Hub delivery**, not native inference or Project writes. Unknown native handoffs stay unknown.
 
-The same `RunAdmission` owner exposes `pause(operation_id, run_id, generation,
-expected_revision, reason, human=...)` and `resume(...)`. These typed trusted
-calls require the separate `human-control-run` capability and the fresh scoped
-human authorization callback on every attempt, including exact retries. The
-callback is still not human authentication. The bounded reason is a token,
-recorded with the authenticated origin in the ledger.
+`migrate_policy(operation_id, run_id, generation, revision, policy_id, policy_version, reason, human=...)` selects one exact currently configured policy. Its first transaction pauses/fences the old Run generation, cancels stale traffic, snapshots the new policy, and queues one new-generation implementation request while delivery remains held. It preserves context generation, Run binding, native session and old handoff records. The owner advances the Pi journal and existing context checkpoint with exact scope CAS; an interrupted two-store update remains pending and the same explicit operation repairs it. A successful migration still needs explicit Resume.
 
-`ACTIVE → PAUSED → ACTIVE` preserves Run generation, native context generation,
-policy, issue/Participant binding, checkout, implementation request, and
-consumed admission. A separate monotonic `control_revision` starts at zero and
-increments on each transition. Callers must supply the current revision; an old
-Resume cannot apply to a later pause cycle with the same Run generation. At the
-maximum revision (`2**53 - 1`), new controls fail closed. Existing canonical rows
-without that field are treated as revision zero. The immutable exact operation
-receipt is returned before current revision/state checks, but only after fresh
-authorization. A retried admission still returns its original ACTIVE receipt,
-not the mutable current Run status; read the canonical ledger projection for
-current state.
+Every native handoff is serialized with journal scope CAS. An old prepared offer cannot inject after rebind. A checkpoint keeps its exact native session and original reset lineage; missing native proof fails closed rather than being reconstructed from a canonical Run row. Ordinary explicit `controller.restore_pi(seat, recipe)` uses the same checkpoint/session and passes through the exact checkout. Restoration is not a new Run or a context reset.
 
-Pause is a **Hub traffic hold, not native inference interruption or verified
-process stop**. Work already handed to Pi may continue, including Project-file
-changes. New Run-scoped submissions, offers and confirmations are fenced by
-the existing canonical Run scope gate. An in-flight native receipt arriving
-after pause leaves its durable Hub offer UNCONFIRMED; neither control changes
-that unknown into success, cancellation or failure. Resume atomically enqueues a new projection intent but does not contact the
-provider, relaunch, reset, automatically deliver, or inject another request.
-Normal safe-point delivery may subsequently reconcile the same native receipt
-without reinjection; an unresolved native intent remains unknown. Policy
-migration, process restoration and native stop remain distinct operations.
+## Force-stop, terminal stop and withdrawal
 
-Control commits serialize with admission on the existing RoomLedger. A control
-cannot queue itself against a pending admission: before canonical activation it
-fails UNKNOWN_RUN; after activation it applies only to the exact current
-revision. Reserved projection capacity includes the largest future revision and
-reason, so ordinary traffic cannot consume already-admitted control headroom.
+`force_stop(operation_id, run_id, generation, revision, reason, human=...)` is an out-of-band human command, not a Message. It durably pauses/fences the old generation and cancels stale traffic before stopping exact owned native children. It attempts same-context generation/checkpoint preservation first; missing restoration metadata cannot prevent the stop, and is retained as explicit restore attention. Stop succeeds only after exact ownership and native exit are verified. Persisted numeric PIDs are never adopted as kill authority; possible retired writers and replacement races remain unresolved.
 
-Admission withdrawal is deliberately still unavailable. Current admission can
-allocate Git state and launch an owned Pi outside its final activation lock;
-merely writing a withdrawn tombstone would fence final activation but could
-still permit an in-flight launch. Safe cancellation requires explicit stage and
-ownership reconciliation before it can claim cancellation or resource release.
-Held admissions retain their exact owned process, context and checkout for
-inspection/explicit same-root refresh. No new orphan or cleanup state is added.
+A stopped Run cannot resume by flipping its status. Explicit same-context native restoration must first establish a live owned handle in the current scope and **canonical checkout**. Human Resume then queues one current-generation implementation request; it does not replay cancelled/unknown old traffic. Failed native restoration remains held, or a human may terminal-stop the attempt.
 
-## Exact specification boundary
+`terminal_stop(..., reason, human=..., successor_run=None)` records `CLOSED`, outcome `stopped`, the exact reason and optional successor reference after verified stop. A later exact Run uses the native-reset path; closed history is never reactivated. `completed` still requires later policy/review/human-merge evidence and is not produced here.
 
-The frozen #58/#72 contracts require fresh facts, exact human authority, unique non-closed work-item ownership, policy/checkout/context binding, conflict attention, and no authorization consumption on capacity failure. This restricted path implements those source invariants for an **already correctly assigned issue**; the protocol explicitly calls Forge lifecycle labels projections, not locks. No accepted sentence makes successful assignment-write/label projection a precondition for a correctly preassigned issue, so admission may remain authoritative while its separately committed lifecycle projection is pending or failed. The formal dependency graph is unchanged and this is not #72 acceptance.
+`withdraw(operation_id, pending_run_id, reason, human=...)` first fences a pending admission as `WITHDRAWING`. Allocator and launch/reset callbacks recheck that fence inside effect locks. Funded Forge reads and uncertain assignment writes must settle/reconcile before closure; withdrawal never retries a POST or rewrites an unknown outcome as absent. Owned native children are stopped, checkout release is delegated to its authoritative allocator, and dirty/unknown resources remain preserved. Failed/in-progress resets retain their exact unknown context state. Only terminal withdrawal releases an unused grant's reservation; it never changes its exact issue/requester/implementer. Retargeting requires a separate exact command, never editing the held root.
 
-Canonical activation now reports `projection: pending`. Its transaction enqueues the derived Hub lifecycle/Run-status labels; pause/resume and blocked Work Request transitions update that intent atomically. The [projection outbox](forge-projections.md) synchronizes through the external audited Broker separately. Unavailable credentials, drift or failed synchronization never rewrite canonical Run truth. The Hub ledger owns intent and view history; the existing Deployment ForgeAudit remains the single owner of provider execution evidence.
+Stop/release actions recheck the exact pending command and fresh human authority inside each owner's effect lock. A loss of acknowledgement is reconciled against immutable receipts before repeating effects. No filesystem cleanup, assignment removal, new permissions, deployment or credential changes are implied by stop/withdrawal.
 
-**Deliberately unavailable:** admission withdrawal/retargeting, Participant Run Requests/proposal approval, policy migration, coordinator changes, force-stop/terminal stop, canonical Run completion and later cross-Run admission. A held intent retains its issue/Participant/checkout; another issue cannot take that seat. Explicit same-root refresh can resolve repaired facts, but changing one's mind requires later withdrawal/native-reset work. Do not advertise this as general operational Run management or bypass these limitations with fixture close/reset calls. No production CLI/Manager action is exposed.
+## Temporary coordination
 
-The controlled Pi recipe has no built-in coding tools and uses a local faux provider. Evidence proves **delivery of an implementation Work Request**, not autonomous issue implementation, paid inference, live GitHub permissions, or the full Pi/Claude/review/merge lifecycle.
+`appoint_coordinator(..., participant_id, human=..., ttl_seconds=300, request_budget=8)` can assign, replace or remove one configured, current, same-Run Participant. Bounds are 1–3600 seconds and 1–16 prioritized Work Requests; appointment is tied to the exact process incarnation and Run generation. It changes no capability, merge, cancellation or force-stop permission.
 
-## Verification
+A coordinator's bounded Requests receive delivery priority but never forced acceptance or additional work slots. Excess Requests remain ordinary peer traffic. Participant nomination/handoff is data requiring a human appointment. Loss or connection replacement atomically clears coordination and records human attention while the Run continues in peer mode. Expired appointments immediately lose effective priority; the owner's explicit reconciliation records expiry attention without a background intake scheduler.
 
-```sh
-./validate.sh
-UAS_PI_INSTALL=/path/to/locked/pi-install sh tests/pi/run-tests.sh
-```
+## Evidence and limits
 
-`test_run_control.py` covers fresh scoped authority, immutable retry/reopen/replay, stale generation/revision, ABA fencing, concurrent same-revision controls, exhaustion, control-commit rollback and lost-acknowledgement recovery. Actual Pi admission tests additionally cover paused queued delivery, same-binding resume, dirty-byte retention, activation/control serialization, late-ACK reconciliation without reinjection and literal native unknown retention, and maximal control revision/reason growth after peer/context capacity saturation.
+Pure tests (`test_run_requests`, `test_run_lifecycle_control`, `test_run_coordination`, `test_run_generation_binding`) exercise positive/negative admission, exact approval, capacity, storage rollback/lost acknowledgements, stale generations/revisions, ownership races, migration CAS, checkpoint recovery, uncertainty, and bounded coordinator authority. Their synthetic handles/observations are **not process, native Runtime or live-provider proof**.
 
-`test_run_admission.py` covers typed authority/capability refusal, exact selectors, immutable IDs, bounded policy/context/shared projection capacity and a concurrent separate-SQLite-connection reservation race. `test_pi_run_admission.py` crosses actual Git, actual official Pi and controlled GitHub responses: durable canonical admission/delivery, exact retries, conflict/unknown/dependency holds, explicit refresh, Git-effect and activation-acknowledgement loss, native exit, stale-read recovery and late process revocation. Provider/configuration tests cover bounded label pagination and immutable-ID validation. Existing Claude/CI/VM policy sources are unchanged; no VM or paid provider is triggered by this work.
+The existing automatic `pi-native` workflow, still capped at **three minutes**, runs `test_pi_run_management` alongside the original admission/context suites. The new fixture crosses actual owned Git, official Pi 1.4.0, a kernel-authenticated fixture requester, durable ledger and controlled account-free GitHub responses. It covers request/proposal approval, wrong-process refusal, no-capacity/no-consumption, migration with same native context, verified force/terminal stop, same-session restoration in the canonical checkout, dirty-state retention, cross-Run native reset, and coordinator loss. Existing tests retain human open, duplicate race, dependencies, assignment conflict, pause/resume, provider uncertainty and projection coverage.
+
+Local source-only work must run only explicitly audited pure cases with fail-closed native guards installed before repository imports. Real process/socket/Git/native fixtures belong in bounded hosted CI; skipped or unexecuted checks are not evidence. No VM, live account, paid inference or production qualification is added by this slice.

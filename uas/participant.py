@@ -154,6 +154,7 @@ class FixtureParticipantController:
         self.supervisor, self.hub, self.credentials = supervisor, hub, credentials
         self.forge_broker = None
         self.read_service = None
+        self.run_admission = None
         self.handles = {}
         self.fenced = set()
         self.store_failed = False
@@ -365,15 +366,17 @@ class FixtureParticipantController:
         return reset(self, operation_id, seat, recipe,
                      expected_context_generation=expected_context_generation, target_run=target_run)
 
-    def launch_pi(self, seat, recipe):
+    def launch_pi(self, seat, recipe, *, authorize=None):
         from .pi_fixture import FixturePiRecipe
         if type(recipe) is not FixturePiRecipe or type(seat) is not FixtureSeat:
             raise LedgerError('INVALID_SEAT')
         if self.hub.contexts.scope(seat.participant_id)['context_generation'] > 1:
+            if authorize is not None:
+                raise LedgerError('EXPLICIT_CONTEXT_RESTORE_REQUIRED')
             return self.restore_pi(seat, recipe)
-        return self._launch_pi(seat, recipe)
+        return self._launch_pi(seat, recipe, authorize=authorize)
 
-    def _launch_pi(self, seat, recipe, *, reset=None, restoring=None):
+    def _launch_pi(self, seat, recipe, *, reset=None, restoring=None, authorize=None):
         """Explicit fixed Pi fixture recipe, not a generic spawn/adopt API.
 
         The controller owns the sole child/pidfd/socket. Native attachment may
@@ -397,6 +400,8 @@ class FixtureParticipantController:
         try:
             with self.supervisor._locked():
                 state = self._room()
+                if authorize is not None and authorize() is not True:
+                    raise LedgerError('ADMISSION_REVOKED')
                 self.supervisor._allowed("participant-start", state)
                 document = self._read()
                 previous = document["seats"].get(seat.participant_id)
@@ -455,6 +460,7 @@ class FixtureParticipantController:
                 child_socket = None
 
             receiver = recipe.attach(process, badge)  # Native RPC, never under lock.
+            handle.pi_recipe = recipe
             if (getattr(receiver, "process", None) is not process
                     or getattr(receiver, "incarnation_id", None) != badge.incarnation_id
                     or getattr(receiver, "scope", None) != expected_scope):
@@ -467,6 +473,8 @@ class FixtureParticipantController:
                     raise LedgerError('NATIVE_SESSION_MISMATCH')
             with self.supervisor._locked():
                 state = self._room()
+                if authorize is not None and authorize() is not True:
+                    raise LedgerError('ADMISSION_REVOKED')
                 self.supervisor._allowed("participant-start", state)
                 document = self._read()
                 current = document["seats"].get(seat.participant_id)
@@ -560,6 +568,9 @@ class FixtureParticipantController:
         value = {'version': 1, 'room_instance': self.instance, 'participant': participant,
                  'reset_id': reset_id, 'scope': recipe.scope, 'directory': str(recipe.directory),
                  'native': proof}
+        self._write_pi_checkpoint(path, value)
+
+    def _write_pi_checkpoint(self, path, value):
         encoded = _canonical(value)
         if len(encoded.encode()) > 8192:
             raise LedgerError('NATIVE_CHECKPOINT_CAPACITY')
@@ -574,6 +585,49 @@ class FixtureParticipantController:
             self.supervisor._sync_directory(path.parent)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def _advance_pi_generation_locked(self, handle, expected_scope, target_scope, *, authorize):
+        """Run owner calls under lifecycle lock; checkpoint + journal are CAS.
+
+        A crash between the two durable writes is repaired only by the same
+        explicit pending generation operation. Session/context are unchanged.
+        """
+        from copy import copy
+        if authorize() is not True:
+            raise LedgerError('FORBIDDEN')
+        self._authority(handle, (handle.process.pid, os.getuid(), os.getgid()))
+        receiver = handle.connection.receiver
+        recipe = getattr(handle, 'pi_recipe', None)
+        if recipe is None:
+            raise LedgerError('NATIVE_CONTEXT_RESTORE_UNVERIFIED')
+        participant = handle.badge.participant_id
+        path = self._pi_checkpoint_path(participant)
+        try:
+            if path.exists():
+                if path.is_symlink() or path.stat().st_size > 8192:
+                    raise ValueError()
+                saved = json.loads(path.read_text(), object_pairs_hook=_unique_object)
+                if (set(saved) != {'version', 'room_instance', 'participant', 'reset_id', 'scope', 'directory', 'native'}
+                        or saved['version'] != 1 or saved['room_instance'] != self.instance
+                        or saved['participant'] != participant or saved['scope'] not in (expected_scope, target_scope)
+                        or saved['directory'] != str(recipe.directory)
+                        or saved['native']['session_id'] != receiver.initial_state['session_id']):
+                    raise ValueError()
+                reset_id, proof = saved['reset_id'], saved['native']
+            else:
+                # No stored native proof means no qualified restoration.
+                # A canonical admission row cannot prove this replacement session.
+                raise ValueError()
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise LedgerError('NATIVE_CONTEXT_RESTORE_UNVERIFIED') from error
+        receiver.advance_run_generation(expected_scope, target_scope, authorize=authorize)
+        if authorize() is not True:
+            raise LedgerError('FORBIDDEN')
+        updated = copy(recipe)
+        updated.scope = dict(target_scope)
+        self._save_pi_checkpoint(participant, updated, reset_id, proof)
+        handle.pi_recipe = updated
+        return dict(target_scope)
 
     def restore_pi(self, seat, recipe):
         """Restore only this ledger-approved context, never an older generation.
@@ -596,8 +650,15 @@ class FixtureParticipantController:
                 if (set(saved) != {'version', 'room_instance', 'participant', 'reset_id', 'scope', 'directory', 'native'}
                         or type(saved['version']) is not int or saved['version'] != 1 or saved['room_instance'] != self.instance
                         or saved['participant'] != seat.participant_id or _canonical(saved['scope']) != _canonical(scope)
-                        or recipe.scope != scope or saved['directory'] != str(recipe.directory)
-                        or self.hub.contexts.reset_status(saved['reset_id'])['status'] != 'SUCCEEDED'):
+                        or recipe.scope != scope or saved['directory'] != str(recipe.directory)):
+                    raise ValueError()
+                if saved['reset_id'] is None:
+                    admission = self.hub.ledger.snapshot()['state'].get('run_admissions', {}).get(scope['run_id'])
+                    if (scope['context_generation'] != 1 or not admission
+                            or admission['participant_id'] != seat.participant_id
+                            or admission['status'] not in {'PREPARING', 'ACTIVE'}):
+                        raise ValueError()
+                elif self.hub.contexts.reset_status(saved['reset_id'])['status'] != 'SUCCEEDED':
                     raise ValueError()
                 native = saved['native']
                 if (type(native) is not dict or set(native) != {'runtime_id', 'session_id', 'session_file', 'source'}
@@ -623,10 +684,11 @@ class FixtureParticipantController:
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
                 raise LedgerError('NATIVE_CONTEXT_RESTORE_UNVERIFIED') from error
         selected = FixturePiRecipe(recipe.install, recipe.directory, scope=scope,
-                                   session=None if fresh else str(session), timeout=recipe.timeout)
+                                   session=None if fresh else str(session), timeout=recipe.timeout,
+                                   checkout=recipe.workdir if recipe.checkout else None)
         return self._launch_pi(seat, selected, restoring={**saved, 'fresh': fresh})
 
-    def reset_pi(self, operation_id, seat, recipe, *, expected_context_generation, target_run):
+    def reset_pi(self, operation_id, seat, recipe, *, expected_context_generation, target_run, authorize=None):
         """Trusted fixture reset of one seat, never participant-claimed completion.
 
         Request fencing is durable before process effects. Failed/unknown reset
@@ -640,6 +702,8 @@ class FixtureParticipantController:
         if seat.runtime != 'pi-fixture' or seat.arguments:
             raise LedgerError('INVALID_RESET_RECIPE')
         with self.supervisor._locked():
+            if authorize is not None and authorize() is not True:
+                raise LedgerError('ADMISSION_REVOKED')
             self.supervisor._allowed('participant-reset', self._room())
             previous = self._read()['seats'].get(seat.participant_id)
             if previous and previous['seat'] != definition:
@@ -660,6 +724,8 @@ class FixtureParticipantController:
             if recipe.scope != expected:
                 raise LedgerError('PEER_BINDING_CONFLICT')
             with self.supervisor._locked():
+                if authorize is not None and authorize() is not True:
+                    raise LedgerError('ADMISSION_REVOKED')
                 old = self.handles.get(seat.participant_id)
                 preceding_session = (old.managed_receiver.initial_state['session_id']
                                      if old is not None and old.managed_receiver is not None else None)
@@ -682,7 +748,7 @@ class FixtureParticipantController:
                     finally:
                         os.close(descriptor)
             return self._launch_pi(seat, recipe, reset={'id': operation_id,
-                'expected_generation': expected_context_generation, 'preceding_session': preceding_session})
+                'expected_generation': expected_context_generation, 'preceding_session': preceding_session}, authorize=authorize)
         except BaseException:
             # Read after an uncertain success commit BEFORE any compensating
             # transition. A succeeded reset is never downgraded or reopened.
@@ -863,6 +929,15 @@ class FixtureParticipantController:
             and (message.get('kind')=='forge-read' or (message.get('kind') in {'forge-write','forge-reconcile'}
                 and self.read_service.write_enabled is True)))
 
+    def bind_runs(self, admission):
+        """Trusted same-Room owner only; envelopes never select this service."""
+        from .run_admission import RunAdmission
+        if (type(admission) is not RunAdmission or admission.controller is not self
+                or admission.ledger is not self.hub.ledger
+                or self.run_admission is not None and self.run_admission is not admission):
+            raise LedgerError('ADMISSION_BINDING_MISMATCH')
+        self.run_admission = admission
+
     def receive(self, handle):
         """Consume one kernel-authenticated record and dispatch to #65/#60.
 
@@ -876,6 +951,7 @@ class FixtureParticipantController:
         request_id = None
         forge_intent = None
         read_intent = None
+        run_intent = None
         try:
             data, credentials = self._record(handle.channel)
             data, credentials = self._forge_packet(handle,data,credentials)
@@ -890,7 +966,11 @@ class FixtureParticipantController:
                             or type(message["envelope"]) is not dict):
                         raise LedgerError("INVALID_NATIVE_FRAME")
                     message = message["envelope"]
-                if self._external_forge(message):
+                if type(message) is dict and str(message.get('kind', '')).startswith('run-'):
+                    if self.run_admission is None:
+                        raise LedgerError('RUN_CONTROL_UNAVAILABLE')
+                    run_intent = message
+                elif self._external_forge(message):
                     from .forge_read_service import reserve_forge_operation
                     reserve_forge_operation(self.hub.ledger,self.read_service.binding,message,
                         handle.badge.origin(),lambda:self._authority(handle,credentials))
@@ -904,6 +984,12 @@ class FixtureParticipantController:
                 else:
                     receipt = self.hub.submit(handle.connection, message, origin=handle.badge.origin(),
                                               authorize=lambda: self._authority(handle, credentials))
+            if run_intent is not None:
+                # Admission owns stage locks and rechecks the same kernel-bound
+                # requester before any effect and final consumption. Never hold
+                # the lifecycle lock across provider/native I/O.
+                receipt = self.run_admission.submit(run_intent, origin=handle.badge.origin(),
+                    authorize=lambda: self._authority(handle, credentials))
             if read_intent is not None:
                 receipt = self.read_service.perform(read_intent)
                 with self.supervisor._locked():
@@ -976,13 +1062,18 @@ class FixtureParticipantController:
         if handle is not None and handle.connection is not None and self.hub._current(handle.connection):
             self.hub.observe(handle.connection, Readiness.LOST)
 
-    def revoke(self, participant, *, close=False):
+    def revoke(self, participant, *, close=False, expected_incarnation=None, authorize=None):
         with self.supervisor._locked():
+            if authorize is not None and authorize() is not True:
+                raise LedgerError('FORBIDDEN')
             state = self._room(running=False)
             self.supervisor._allowed("participant-close" if close else "participant-revoke", state)
             document = self._read()
             if participant not in document["seats"]:
                 raise LedgerError("UNKNOWN_PARTICIPANT")
+            if (expected_incarnation is not None
+                    and document['seats'][participant]['incarnation_id'] != expected_incarnation):
+                raise LedgerError('NATIVE_OWNERSHIP_CHANGED')
             try:
                 if document["seats"][participant]["status"] != "closed":
                     self._fence(document, participant, "closed" if close else "revoked", "explicit-revocation")
