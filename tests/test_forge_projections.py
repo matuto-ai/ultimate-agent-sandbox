@@ -1,7 +1,9 @@
 """Pure disk/transaction/provider-seam proof; no native processes or live accounts."""
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 import sqlite3
 import tempfile
 import unittest
@@ -363,6 +365,7 @@ class CanonicalProjectionHookTests(unittest.TestCase):
         else: self.fail('expected bounded shared capacity')
         self.assertGreater(count, 0)
         admission = RunAdmission.__new__(RunAdmission)
+        admission.supervisor = SimpleNamespace(_locked=nullcontext)
         admission.ledger = self.ledger; admission.authorize_human = lambda *_: True
         human = replace(ORIGIN, capabilities=('human-control-run',))
         admission.pause('pause', 'run-a', 1, 0, 'hold', human=human)
@@ -379,6 +382,7 @@ class CanonicalProjectionHookTests(unittest.TestCase):
     def test_actual_pause_resume_owner_enqueues_in_same_transaction_and_retry_is_noop(self):
         from uas.run_admission import RunAdmission
         admission = RunAdmission.__new__(RunAdmission)
+        admission.supervisor = SimpleNamespace(_locked=nullcontext)
         admission.ledger = self.ledger
         admission.authorize_human = lambda *_: True
         human = replace(ORIGIN, capabilities=('human-control-run',))

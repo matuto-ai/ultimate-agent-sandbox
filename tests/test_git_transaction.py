@@ -145,6 +145,63 @@ class SequenceTests(unittest.TestCase):
             self.assertEqual(NEW, proof.created)
             self.assertEqual(1, proof.target_count)
 
+    def test_packed_noop_marker_keeps_exact_outer_cleanup_pending_until_completion(self):
+        for kind, ref in (('commit', 'AUTO_MERGE'), ('cherry-pick', 'AUTO_MERGE'),
+                          ('cherry-pick', 'CHERRY_PICK_HEAD'), ('abort', 'CHERRY_PICK_HEAD')):
+            proof = sequence(kind=kind)
+            if kind == 'commit':
+                proof.accept('prepared', updates())
+                proof.accept('committed', updates())
+            cleanup = updates(old=ZERO, new=ZERO, ref=ref)
+            proof.accept('preparing', cleanup)
+            outer = proof.preparing
+            proof.accept('aborted', cleanup)
+            self.assertEqual(outer, proof.preparing)
+            self.assertTrue(proof.auxiliary_abort)
+            with self.assertRaises(GitTransactionError):
+                proof.committed_oid(required=kind == 'commit')
+            proof.accept('prepared', cleanup)
+            with self.assertRaises(GitTransactionError):
+                proof.committed_oid(required=kind == 'commit')
+            proof.accept('committed', cleanup)
+            self.assertEqual(NEW if kind == 'commit' else None,
+                             proof.committed_oid(required=kind == 'commit'))
+            self.assertEqual(1 if kind == 'commit' else 0, proof.target_count)
+
+    def test_abort_marker_never_accepts_target_wrong_updates_order_or_duplicate(self):
+        cleanup = updates(old=ZERO, new=ZERO, ref='AUTO_MERGE')
+        cases = [[('aborted', cleanup)], [('preparing', updates(ref='HEAD')), ('aborted', updates(ref='HEAD'))],
+                 [('prepared', cleanup), ('aborted', cleanup)],
+                 [('preparing', cleanup), ('aborted', updates(old=ZERO, ref='AUTO_MERGE'))],
+                 [('preparing', cleanup), ('aborted', updates(new=ZERO, ref='AUTO_MERGE'))],
+                 [('preparing', cleanup), ('aborted', updates(old=ZERO, new=ZERO, ref='CHERRY_PICK_HEAD'))],
+                 [('preparing', cleanup), ('aborted', cleanup), ('aborted', cleanup)],
+                 [('preparing', cleanup), ('aborted', cleanup), ('committed', cleanup)],
+                 [('preparing', cleanup), ('aborted', cleanup), ('prepared', updates())]]
+        for phases in cases:
+            proof = sequence(kind='cherry-pick')
+            with self.subTest(phases=phases), self.assertRaises(GitTransactionError):
+                for phase, raw in phases:
+                    proof.accept(phase, raw)
+            self.assertTrue(proof.failed)
+            self.assertIsNone(proof.created)
+
+    def test_abort_marker_does_not_complete_cleanup_or_reset_phase_budget(self):
+        cleanup = updates(old=ZERO, new=ZERO, ref='AUTO_MERGE')
+        proof = sequence(kind='cherry-pick')
+        for _ in range(16):
+            for phase in ('preparing', 'aborted', 'prepared', 'committed'):
+                proof.accept(phase, cleanup)
+        self.assertEqual(64, proof.count)
+        self.assertIsNone(proof.committed_oid(required=False))
+        with self.assertRaises(GitTransactionError):
+            proof.accept('preparing', cleanup)
+        proof = sequence(kind='abort')
+        raw = updates(old=ZERO, new=ZERO, ref='ORIG_HEAD')
+        proof.accept('preparing', raw)
+        with self.assertRaises(GitTransactionError):
+            proof.accept('aborted', raw)  # Not a fixed supported cleanup marker.
+
     def test_abort_complete_reset_is_not_created_commit_proof_and_keeps_partial_unknown(self):
         proof = sequence(kind='abort')
         for raw in (updates(ref='ORIG_HEAD'), updates(old='d' * 40)):

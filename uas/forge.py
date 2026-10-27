@@ -175,9 +175,9 @@ class ReadOnlyForgeBroker:
                     or not 65536 <= funding['released_bytes'] <= 131072):
                 raise LedgerError('INVALID_ADMISSION_RESERVATION')
             admission = state.get('run_admissions', {}).get(funding['run_id'])
-            if not admission or admission['status'] not in {'PREPARING', 'ACTIVE'}:
+            if not admission or admission['status'] not in {'PREPARING', 'WITHDRAWING', 'ACTIVE'}:
                 raise LedgerError('INVALID_ADMISSION_RESERVATION')
-            if admission['status'] == 'PREPARING':
+            if admission['status'] in {'PREPARING', 'WITHDRAWING'}:
                 if type(admission.get('reservation')) is not str:
                     raise LedgerError('INVALID_ADMISSION_RESERVATION')
                 admission['reservation'] += 'x' * funding['released_bytes']

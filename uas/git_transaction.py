@@ -111,6 +111,7 @@ class TransactionSequence:
         self.expected_old, self.expected_ref, self.kind = expected_old or ZERO, expected_ref, kind
         self.pending = None
         self.preparing = None
+        self.auxiliary_abort = False
         self.created = None
         self.target_count = 0
         self.count = 0
@@ -150,6 +151,18 @@ class TransactionSequence:
             self.count += 1
             updates = parse_updates(raw)
             if phase == 'aborted':
+                # Files-backend deletion can abort an unnecessary packed-ref
+                # subtransaction while its outer cleanup is still preparing.
+                # There is no transaction ID: do NOT infer which transaction
+                # aborted or complete anything. Retain the exact outer state,
+                # permit only one fixed no-op marker, and still require its
+                # matching prepared/committed phases before any result.
+                if (self.pending is None and not self.auxiliary_abort
+                        and self.preparing == (updates, ('auxiliary',))
+                        and len(updates) == 1 and updates[0][:2] == (ZERO, ZERO)
+                        and updates[0][2] in ('AUTO_MERGE', 'CHERRY_PICK_HEAD')):
+                    self.auxiliary_abort = True
+                    return
                 raise GitTransactionError()
             classification = self._classify(updates, preparing=phase == 'preparing')
             if phase == 'preparing':
@@ -157,6 +170,7 @@ class TransactionSequence:
                         or classification[0] == 'target' and self.target_count):
                     raise GitTransactionError()
                 self.preparing = (updates, classification)
+                self.auxiliary_abort = False
             elif phase == 'prepared':
                 if self.pending is not None or (classification[0] == 'target' and self.target_count):
                     raise GitTransactionError()
@@ -165,6 +179,7 @@ class TransactionSequence:
                     if previous_class != classification or (classification[0] == 'auxiliary' and previous != updates):
                         raise GitTransactionError()
                 self.preparing = None
+                self.auxiliary_abort = False
                 self.pending = (updates, classification)
             else:
                 if self.preparing is not None or self.pending != (updates, classification):
@@ -179,6 +194,7 @@ class TransactionSequence:
 
     def committed_oid(self, *, required):
         if (type(required) is not bool or self.failed or self.pending is not None or self.preparing is not None
+                or self.auxiliary_abort
                 or self.target_count > 1):
             raise GitTransactionError()
         if self.kind == 'abort':

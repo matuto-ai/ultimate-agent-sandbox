@@ -143,7 +143,7 @@ session. Complete phase/ref/old/new expectations select the created OID. The
 worker then reads and hashes that exact raw commit; the external store verifies
 identity, expected parent and source attribution. Filenames, terminal output,
 post-command mutable HEAD and caller-reported commit bytes never select evidence.
-Unexpected multiple/partial/aborted transactions or failed post-effect object
+Unexpected multiple/partial/aborted target transactions or failed post-effect object
 verification retain uncertainty and fence the checkout rather than replay.
 After a complete ordinary commit/amend target transaction, the exact native
 `AUTO_MERGE` cleanup (`zero -> zero`, deletion with unspecified old value) is
@@ -153,6 +153,14 @@ nonzero values or incomplete phases still refuse. This follows Git's fixed
 [post-commit cleanup](https://github.com/git/git/blob/v2.55.0/sequencer.c#L2782-L2804),
 and was observed through the authenticated hosted receipt path, not inferred
 from stdout or a later HEAD lookup.
+Git's files backend can emit an `aborted` marker for an unnecessary packed-ref
+subtransaction during fixed auxiliary deletion. There is no transaction ID, so
+the verifier does not treat that marker as completed cleanup or infer its owner:
+at most one exact zero/zero `AUTO_MERGE` or `CHERRY_PICK_HEAD` marker may occur
+inside an already-admitted matching auxiliary `preparing` state. That state stays
+open until the exact outer `prepared` and `committed` phases arrive. Abort alone,
+target abort, repetition, mismatches and missing completion remain unverified.
+See the [files-backend no-op abort](https://github.com/git/git/blob/v2.55.0/refs/files-backend.c#L2842-L2875).
 
 Sources must be anchored in a completed authenticated upload-pack advertisement.
 Historical source support verifies a raw hash/parent chain from one of the 32

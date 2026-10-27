@@ -246,8 +246,8 @@ class CheckoutAllocator:
         except Exception:
             return False
 
-    def allocate(self, run, participant):
-        return self._allocate(run, participant, 'allocate')
+    def allocate(self, run, participant, *, authorize=None):
+        return self._allocate(run, participant, 'allocate', authorize=authorize)
 
     def reserve(self, run, participant):
         """Reserve while stopped; Start never reuses a released slot implicitly.
@@ -258,10 +258,14 @@ class CheckoutAllocator:
         """
         return self._allocate(run, participant, 'reserve')
 
-    def _allocate(self, run, participant, action):
+    def _allocate(self, run, participant, action, *, authorize=None):
         if not _identifier(run) or not _identifier(participant):
             raise LifecycleError('INVALID_CHECKOUT_BINDING')
         with self._locked(action) as state:
+            # A trusted Run owner may withdraw while Git work is waiting for
+            # this lock. Check inside the same lock, before intent or effects.
+            if authorize is not None and authorize() is not True:
+                raise LifecycleError('ADMISSION_REVOKED')
             for key, slot in state['slots'].items():
                 if slot['active'] and slot['run'] == run:
                     if slot['participant'] != participant:
@@ -323,8 +327,10 @@ class CheckoutAllocator:
         slot['identity'] = {'directory': _identity(slot['path']), 'git_metadata': _identity(Path(slot['path']) / '.git')}
         slot['phase'] = 'ready'; self._save(state)
 
-    def release(self, run, participant):
+    def release(self, run, participant, *, authorize=None):
         with self._locked('release') as state:
+            if authorize is not None and authorize() is not True:
+                raise LifecycleError('ADMISSION_REVOKED')
             for key, slot in state['slots'].items():
                 if slot['run'] == run and slot['phase'] != 'removed':
                     if slot['participant'] != participant:
