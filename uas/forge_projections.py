@@ -69,6 +69,8 @@ def _intent(state, room_id, run_id):
                   and r.get('generation') == run['generation'] and r.get('status') == 'BLOCKED'
                   for r in state.get('peer_traffic', {}).get('traffic', {}).values())
     lifecycle = ('lifecycle:attention' if status == 'PAUSED' else
+                 'lifecycle:attention' if run.get('review_stage') == 'ATTENTION' else
+                 'lifecycle:review' if run.get('review_stage') in {'REVIEWING', 'READY_FOR_HUMAN'} else
                  'lifecycle:blocked' if blocked else 'lifecycle:active')
     labels = ['run:' + status.lower()]
     if status != 'CLOSED': labels.append(lifecycle)
@@ -122,7 +124,7 @@ def validate_intent(value):
             or any(label not in OWNED_LABELS for label in value['labels'])
             or value['labels'] not in (['lifecycle:active', 'run:active'],
                 ['lifecycle:blocked', 'run:active'], ['lifecycle:review', 'run:active'],
-                ['lifecycle:attention', 'run:paused'], ['run:closed'])):
+                ['lifecycle:attention', 'run:active'], ['lifecycle:attention', 'run:paused'], ['run:closed'])):
         raise LedgerError('INVALID_PROJECTION_INTENT')
     if value['reconcile_operation'] is not None: _token(value['reconcile_operation'])
     return deepcopy(value)

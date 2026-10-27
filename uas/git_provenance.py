@@ -10,7 +10,7 @@ The private ledger retains metadata, exact source author headers and digests,
 never commit messages or patch contents. GitHub's initial SHA-1 commit format
 is deliberate; SHA-256 repositories are not silently interpreted as SHA-1.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import hashlib
 import json
@@ -242,6 +242,8 @@ class GitProvenance:
 
     @contextmanager
     def _transaction(self):
+        if getattr(self, '_history_fenced', False):
+            raise LedgerError('GIT_HISTORY_FENCED')
         db = self._connection()
         try:
             db.execute('BEGIN IMMEDIATE')
@@ -743,6 +745,52 @@ class GitProvenance:
                 raise LedgerError('GIT_SOURCE_UNANCHORED')
             return {'repository': repository, 'oid': oid, 'author': row['author'],
                     'raw_digest': row['raw_digest'], 'contributors': self._taints(db, oid)}
+
+    @contextmanager
+    def history_fence(self):
+        """Pin known history through a consuming Room transition, not raw edits.
+
+        Lock order is admission -> Git -> Room ledger. Controlled writes on any
+        other connection wait; same-owner mutations fail without releasing this
+        transaction. Only known_contribution_snapshot may read this held cut.
+        """
+        with self._transaction():
+            self._history_fenced = True
+            try:
+                yield
+            finally:
+                self._history_fenced = False
+
+    def known_contribution_snapshot(self, run_scope, repository, oid=None):
+        """Atomic known-history cut, never proof of unobservable filesystem edits.
+
+        An unanchored object is unknown, not a clean contributor list. Run-level
+        controlled mutations remain tainted after abort or context replacement.
+        """
+        scope = _json(_run_scope(run_scope))
+        repository = _repository(repository)
+        if oid is not None: _oid(oid)
+        with (nullcontext(self._connection()) if getattr(self, '_history_fenced', False)
+              else self._transaction()) as db:
+            selected_scope = json.loads(scope)
+            actors = set()
+            for mutation in db.execute('SELECT run_scope,origin FROM mutations'):
+                prior = json.loads(mutation['run_scope'])
+                if (prior['run_id'] == selected_scope['run_id']
+                        and prior['generation'] <= selected_scope['generation']):
+                    actors.add(json.loads(mutation['origin'])['actor_id'])
+            if oid is not None:
+                anchor = db.execute('SELECT 1 FROM anchors WHERE repository=? AND oid=?',
+                                    (repository, oid)).fetchone()
+                committed = db.execute("SELECT 1 FROM operations WHERE commit_oid=? AND status='COMMITTED'", (oid,)).fetchone()
+                if anchor is None and committed is None:
+                    raise LedgerError('GIT_SOURCE_UNANCHORED')
+                actors.update(self._taints(db, oid))
+            if len(actors) > 128: raise LedgerError('GIT_PROVENANCE_CAPACITY')
+            value = {'run_scope': json.loads(scope), 'repository': repository,
+                     'head_sha': oid, 'contributors': sorted(actors)}
+            return {**value, 'history_status': 'read',
+                    'version': hashlib.sha256(_json(value).encode()).hexdigest()}
 
     def actor_contributions(self, actor_id):
         """Conservative mutation history survives abort, context and replacement."""

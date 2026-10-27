@@ -104,8 +104,22 @@ def validate_paths(paths):
 
 
 def scope_digest(scope, target):
-    validate_scope(scope); validate_target(target)
-    return hashlib.sha256(canonical({'profile': PROFILE_ID, 'scope': scope, 'target': target})).hexdigest()
+    return profile_scope_digest(PROFILE_ID, scope, target)
+
+
+def profile_scope_digest(profile, scope, target):
+    if profile not in ('artifacts-v1-source', 'command-v1-source', 'diff-claims-v1-source'):
+        raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
+    validate_scope(scope)
+    if profile == 'command-v1-source':
+        from .gate_repository import validate_command_target
+        validate_command_target(target)
+    elif profile == 'diff-claims-v1-source':
+        from .diff_protocol import validate_diff_target
+        validate_diff_target(target)
+    else:
+        validate_target(target)
+    return hashlib.sha256(canonical({'profile': profile, 'scope': scope, 'target': target})).hexdigest()
 
 
 def expected_header(scope, target, paths, *, kind='header'):

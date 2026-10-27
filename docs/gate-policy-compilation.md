@@ -1,68 +1,81 @@
-# Bounded Gate-policy compilation
+# Bounded Gate policy compilation
 
-This increment implements only the configuration prerequisite of #73 under #58
-and the surviving Gate contract in [#25's resolution](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/25#issuecomment-6397323807).
-The compiler itself does not evaluate a Gate or authorize a protected operation.
-The separate [artifacts Evaluation slice](gate-artifact-evaluation.md) consumes
-this exact snapshot; its boundary still requires fresh manual qualification.
+The Room configuration loader compiles the complete policy before Run admission.
+A generation snapshots that result; edits to installation configuration never
+rewrite active policy or inherit evidence through a generation migration.
+Compilation performs no execution, identity lookup, provider contact or I/O.
 
-## Supported definition
+Every definition has a stable ID, kind and validated kind-specific configuration.
+`protected_operations` maps `submit-for-review` and `complete` to nonempty Gate ID
+lists. The Hub requires their conjunction; no optional flag, skipped branch,
+Boolean expression, wall-clock TTL or conditional workflow DAG is supported.
+Unknown kinds/evaluators, duplicate IDs, unguarded Gates, dangling references,
+unknown fields and unsupported limits fail admission rather than remove checks.
 
-Trusted Project configuration may define a mechanical `artifacts` Gate with a
-nonempty bounded list of explicit target-relative paths, each with `type` (`file`
-or `directory`) and a boolean `nonempty` requirement. The compiler rejects missing
-configuration, duplicate items, absolute/traversing/ambiguous paths, Git metadata,
-patterns, unknown fields, unknown guard targets and dangling references. Paths
-remain at most 1024 Unicode characters, 4095 UTF-8 bytes, 32 components, and 255
-UTF-8 bytes per component, matching the fixed helper source profile. It does
-not touch the filesystem. Filesystem containment, symlink rejection, actual
-presence/type/content, unchanged exact-revision target proof and helper isolation
-remain obligations of the evaluator boundary, not consequences of lexical checks.
+## Mechanical definitions
 
-For this one evaluator the accepted contract determines the source
-(`supervisor-one-shot-helper`), scope (`exact-head-tree`) and freshness
-(`dependency-changes`). Those are compiler outputs, not extra operator knobs or
-Participant-selected claims. Dependencies name the Run ID/generation, policy
-ID/version, repository and exact head SHA. Guards are derived from the existing
-operation-to-Gate mapping, using conjunction, not duplicated configurable rules.
-There is no TTL, optional-pass flag, Boolean expression or workflow DAG.
+- `artifacts`: `items` is a nonempty list of at most 128 literal target-relative
+  paths, with exact `type` (`file` or `directory`) and boolean `nonempty`.
+  Presence is not semantic correctness. Paths reject traversal, Git metadata,
+  globs, ambiguous separators, invalid Unicode and filesystem byte/depth excess.
+- `diff-claims`: exact `allowed_paths`, `forbidden_paths`, `require_nonempty`.
+  Constraints are bounded literal path sets, not shell expressions. A separate
+  typed implementer declaration supplies untrusted claimed paths against the
+  already authenticated, durably bound base/head subject. It cannot select the
+  target, helper, constraints or verdict. The helper reports actual paths; the
+  Hub derives exact-set equality and one path-constraint Check per actual path.
+- `command`: exact deployment-owned argv, target-relative cwd, timeout, bounded
+  environment, process/memory/output bounds and immutable executable identities.
+  Only the separately admitted command profile can execute it. No shell
+  interpolation, inherited deployment environment, network or Participant
+  capability is created. See the command profile's source/runtime qualification
+  record for supported dependencies and scratch behavior; policy acceptance alone
+  is not evidence that the selected Workstation admits that profile.
+- `forge-state`: fixed GitHub Broker observations, with explicit CI selectors,
+  producer/context identity, complete-suite/focused/specialized purpose and exact
+  head or verified test-merge coverage. Branch requirements are independently
+  read and cannot be disabled by the policy. See [Forge Gates](gate-forge-state.md).
 
-All other evaluator names, including accepted-but-not-yet-implemented `command`,
-`diff-claims` and `forge-state`, are explicitly unavailable in this increment.
-Attestation and decision definitions are also unavailable until their own complete
-compiler contracts exist. Superseded `findings-clear` is not supported. Unknown or
-incomplete definitions cannot degrade to fewer checks.
+`findings-clear` is superseded and remains rejected; there is no evaluator plugin
+interface. Artifact/command evidence binds the exact head tree. Diff evidence
+binds exact base and head. Forge evidence additionally binds PR identity, selected
+CI attempts, relevant branch requirements and provider state. Source, scope,
+freshness and guarded operations are compiler consequences, not caller claims.
 
-The existing configuration loader compiles the whole policy before returning any
-Room configuration. Existing canonical Run admission uses this loader before
-provider selection, assignment, Git allocation or native launch, and snapshots
-the compiled policy in its existing durable admission/Run records. Exact retries
-retain the original policy snapshot; editing configuration is not migration or a
-way to rewrite an existing generation. No new ledger or evaluation projection is
-introduced. No per-session commands or additional authentication surface exist.
+## Identity definitions
 
-## Intentional fixture migration
+`attestation` and `decision` configurations require `statement_id`, `scope` (`run`
+or `head`), nonempty bounded `eligible_actors`, `relationship`,
+`required_capability`, explicit `allow_self` and `continuing_authority` booleans.
+Relationships are `human`, `participant`, `implementer` or
+`independent-reviewer`. Independent review requires head scope, `review`
+capability, no self approval and continuing authority. An implementer assertion
+must explicitly allow self evidence. Authority and exact contribution history
+remain trusted runtime observations, not facts inferred from configured names.
 
-Both Rooms in `tests/fixtures/two-rooms.json` now have one explicit
-`fixture-artifacts` definition checking `README.md` as a nonempty file. This is
-**schema data only**, never evidence that the file was checked or a Gate passed.
-It replaces the old incomplete `checks`, `review` and `human-merge` placeholders;
-the compiler never guesses commands or identity authority from those IDs.
-The oversized-policy refusal test now constructs complete artifact definitions.
+The typed submission accepts only an exact statement/action, bounded note and
+bounded evidence references. A decision accepts approve/reject/withdraw;
+attestation accepts assert/withdraw. The latest submission per durable identity
+supersedes its previous statement. A newer in-flight evaluation blocks fallback;
+a rejection or withdrawal does not veto a different eligible identity's terminal
+approval. Only mechanical evidence is displayed as verified: identity evidence
+is attested or decided.
 
-Canonical independent review and authorized-human exact-candidate merge remain
-separate mandatory workflow responsibilities; this fixture neither implements
-nor waives them. No review or human-merge approval is modeled as a placeholder
-attestation/decision. Existing `submit-for-review`/`complete` policy mapping names
-do not mean those protected operations have been implemented.
+Historical run-scoped statements without continuing authority are independent of
+later head changes. Revision-scoped review and continuing authority are freshly
+checked, including later contributor ineligibility. Unknown identity facts fail
+closed. The original identity, source, Checks and verdict are immutable.
 
-## Evidence and limits
+## Enforcement and evidence
 
-Pure configuration tests cover the supported canonical definition and refused
-incomplete, unsafe, unsupported and unbound definitions. Admission tests show
-failure before provider/Git/native effects and durable exact-retry preservation
-of the compiled snapshot after a trusted configuration change. This is not Gate
-runtime qualification. The compiler establishes no helper execution, evidence,
-Checks, verdicts or eligibility. The connected artifacts-only slice has separate
-pure policy and boundary tests; protected-operation advancement and policy
-migration remain unavailable. No native or listener qualification is run locally.
+The deep [Gate Hub interface](gate-hub.md) records start/terminal evidence, exact
+retries and fresh projections in the existing Room ledger. Gate views are not
+transferable approval tokens. The actual protected transition owner must compare
+current dependencies while holding its authority fence; no Gate read launches
+long-running evaluation implicitly. #74 owns review/candidate/human-merge closure
+invariants and is not waived by a mechanical pass.
+
+Pure policy/Hub tests establish deterministic semantics, not process isolation.
+Separate connected hosted and native qualification must establish each admitted
+helper profile and authenticated Broker channel. Missing or unsupported native
+admission remains unavailable, never a synthetic successful evaluation.

@@ -32,7 +32,7 @@ from uas.kernel_origin import HeldOrigin, OriginDenied, _identity, alive, enable
 from uas.lifecycle import Supervisor, FixtureSpec
 from artifact_hub import RELEASE, DONE_ACK
 from artifact_diagnostics import (captured, decoded_json, supervisor_failure, SUPERVISOR_PREFIX,
-    mount_failure, MOUNT_PREFIX)
+    mount_failure, MOUNT_PREFIX, progress_record, PROGRESS_PREFIX)
 
 UID=165533
 HELPER=165530
@@ -372,8 +372,13 @@ def probe_task(engine,config,listener,target,kind,journal):
                 channel.close();channel=None
         wait_exit(origin,deadline)
         terminal=engine.inspect(exec_id);expected={'R':0,'L':0,'W':0,'C':137,'H':142,'O':126,'I':0}.get(kind,159)
-        expect(terminal['Running'] is False and terminal['ExitCode']==expected,'fixed confinement probe did not produce expected terminal outcome')
         elapsed=round(time.monotonic()-started,3)
+        checkpoint=progress_record({'version':1,'kind':'probe-exit','room':config['room'],
+            'probe':kind,'running':terminal['Running'],'exit_code':terminal['ExitCode'],
+            'expected_exit':expected,'elapsed_ms':round(elapsed*1000)})
+        durable_probe_record(intent,{'state':'observed-exit','test_payload':True,**checkpoint})
+        print(PROGRESS_PREFIX.decode()+canonical(checkpoint).decode(),flush=True)
+        expect(terminal['Running'] is False and terminal['ExitCode']==expected,'fixed confinement probe did not produce expected terminal outcome')
         if kind=='C':expect(elapsed<15,'CPU ceiling failed before wall timer')
         if kind=='H':expect(12<=elapsed<=18,'self wall alarm interval outside bound')
         durable_probe_record(intent,{'kind':kind,'state':'exited','test_payload':True,'exec_id':exec_id,
@@ -483,6 +488,10 @@ def scenario(config,gate_fd,control_fd):
                 control.send(DONE_ACK);wait_exit(hub,time.monotonic()+5);break
             dispatch_gate_control(control,hub,service,controller=controller)
         expect(terminal is not None,'bounded concrete Hub scenario incomplete')
+        checkpoint=progress_record({'version':1,'kind':'hub-terminal','room':config['room'],
+            'report_sha256':terminal['report_digest'],'report_bytes':terminal['report_bytes']})
+        durable_probe_record(journal/'hub-terminal.json',checkpoint,create=True)
+        print(PROGRESS_PREFIX.decode()+canonical(checkpoint).decode(),flush=True)
         if config['room']=='alpha':
             with diagnostic_boundary('confinement-probes'):
                 native_probes=confinement_probes(engine,config,listener,journal/'probes',capacity,reservations)

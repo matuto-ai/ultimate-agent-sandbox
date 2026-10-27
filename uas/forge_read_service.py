@@ -151,8 +151,12 @@ class ReadBrokerClient:
             if type(ready) is not dict: raise OriginDenied('invalid Broker bootstrap')
             self.write_enabled = ready.get('mutation_enabled') is True
             self.projection_enabled = ready.get('projection_enabled') is True
+            self.gate_enabled = ready.get('gate_enabled') is True
+            self.review_enabled = ready.get('review_enabled') is True
             extensions={**({'mutation_enabled':True} if self.write_enabled else {}),
-                **({'projection_enabled':True} if self.projection_enabled else {})}
+                **({'projection_enabled':True} if self.projection_enabled else {}),
+                **({'gate_enabled':True} if self.gate_enabled else {}),
+                **({'review_enabled':True} if self.review_enabled else {})}
             if ready != {**expected,**extensions}:
                 raise OriginDenied('uncorrelated Broker bootstrap')
             self.worker = HeldOrigin(record)
@@ -163,6 +167,10 @@ class ReadBrokerClient:
             raise LedgerError('FORGE_WRITE_UNAVAILABLE')
         if type(envelope) is dict and envelope.get('kind')=='forge-projection' and not self.projection_enabled:
             raise LedgerError('FORGE_PROJECTION_UNAVAILABLE')
+        if type(envelope) is dict and envelope.get('kind') in {'gate-forge', 'gate-target'} and not self.gate_enabled:
+            raise LedgerError('GATE_FORGE_UNAVAILABLE')
+        if type(envelope) is dict and envelope.get('kind') in {'review-observe', 'review-comment', 'review-reconcile'} and not self.review_enabled:
+            raise LedgerError('REVIEW_BROKER_UNAVAILABLE')
         state = self.supervisor._read()  # Caller holds existing lifecycle lock.
         if (not state or state['phase'] != 'running' or state['instance_id'] != self.room_instance
                 or state['spec']['project_id'] != self.binding.project_id):
@@ -212,7 +220,7 @@ class ReadBrokerClient:
                 if guard is not None:
                     with self.supervisor._locked():
                         if guard() is not True: raise LedgerError('FORBIDDEN')
-                return ({'admission':'not-evaluated', **result['observation']} if packet['envelope']['kind'] in {'forge-write','forge-reconcile','forge-projection'}
+                return ({'admission':'not-evaluated', **result['observation']} if packet['envelope']['kind'] in {'forge-write','forge-reconcile','forge-projection','gate-forge','gate-target','review-observe','review-comment','review-reconcile'}
                         else {'admission': 'not-evaluated', 'observation': result['observation']})
             except (OSError, OriginDenied, ValueError):
                 self.close()
@@ -271,6 +279,112 @@ class ProjectionBrokerClient:
         return self._call('repair',intent,operation_id,authorize,observed)
 
 
+class GateForgeBrokerClient:
+    """Hub-only Gate read on the existing process-authenticated Broker channel.
+
+    Participant dispatch has no gate-forge route. Every page challenges current
+    Hub/Run authorization and Room incarnation; fixed external startup alone
+    chooses the credential Actor. The Hub must reserve its Evaluation first.
+    """
+    def __init__(self, client):
+        if type(client) is not ReadBrokerClient or not getattr(client, 'gate_enabled', False):
+            raise LedgerError('GATE_FORGE_UNAVAILABLE')
+        self.client = client
+
+    def observe(self, target, config, operation_id, *, authorize):
+        from .gate_forge import (gate_forge_origin, validate_forge_target,
+                                 compile_forge_config, validate_forge_observation)
+        from .ledger import _token
+        target = validate_forge_target(target)
+        config = compile_forge_config(config)
+        if target['repository'] != self.client.binding.repository or not callable(authorize):
+            raise LedgerError('PROJECT_MISMATCH')
+        envelope = {'id': _token(operation_id), 'kind': 'gate-forge', 'target': target, 'config': config}
+        def guard():
+            state = self.client.supervisor._read()
+            return (state is not None and state['phase'] == 'running'
+                and state['instance_id'] == self.client.room_instance and authorize() is True)
+        with self.client.supervisor._locked():
+            if not guard(): raise LedgerError('FORBIDDEN')
+            packet = self.client.prepare(envelope, gate_forge_origin(self.client.room_instance), authorize=guard)
+        reply = self.client.perform(packet)
+        reply.pop('admission', None)
+        if type(reply) is not dict or set(reply) != {'observation', 'audit_reference'}:
+            raise LedgerError('INVALID_FORGE_OBSERVATION')
+        _token(reply['audit_reference'])
+        validate_forge_observation(reply['observation'], target)
+        return reply
+
+    def observe_target(self, target, operation_id, *, authorize):
+        from .gate_forge import gate_forge_origin, validate_forge_target, validate_target_observation
+        from .ledger import _token
+        target = validate_forge_target(target)
+        if target['repository'] != self.client.binding.repository or not callable(authorize):
+            raise LedgerError('PROJECT_MISMATCH')
+        envelope = {'id': _token(operation_id), 'kind': 'gate-target', 'target': target}
+        def guard():
+            state = self.client.supervisor._read()
+            return (state is not None and state['phase'] == 'running'
+                and state['instance_id'] == self.client.room_instance and authorize() is True)
+        with self.client.supervisor._locked():
+            if not guard(): raise LedgerError('FORBIDDEN')
+            packet = self.client.prepare(envelope, gate_forge_origin(self.client.room_instance), authorize=guard)
+        reply = self.client.perform(packet)
+        reply.pop('admission', None)
+        if type(reply) is not dict or set(reply) != {'observation', 'audit_reference'}:
+            raise LedgerError('INVALID_FORGE_OBSERVATION')
+        _token(reply['audit_reference'])
+        validate_target_observation(reply['observation'], target)
+        return reply
+
+
+
+class ReviewBrokerClient:
+    """Hub-only typed seam over the same held-kernel-origin private channel."""
+    def __init__(self, client):
+        if type(client) is not ReadBrokerClient or not getattr(client, 'review_enabled', False):
+            raise LedgerError('REVIEW_BROKER_UNAVAILABLE')
+        self.client = client
+
+    def _call(self, kind, target, operation_id, authorize, body=None, attempt_id=None):
+        from .review_broker import review_origin, validate_review_observation, validate_comment_receipt
+        from .gate_forge import validate_forge_target
+        from .ledger import _token
+        target = validate_forge_target(target)
+        if target['repository'] != self.client.binding.repository or not callable(authorize):
+            raise LedgerError('PROJECT_MISMATCH')
+        envelope = {'id': _token(operation_id), 'kind': kind, 'target': target}
+        if kind != 'review-observe': envelope['body'] = body
+        if attempt_id is not None:
+            envelope['preflight_id' if kind == 'review-comment' else 'reconciliation_id'] = _token(attempt_id)
+        def guard():
+            state = self.client.supervisor._read()
+            return (state is not None and state['phase'] == 'running'
+                and state['instance_id'] == self.client.room_instance and authorize() is True)
+        with self.client.supervisor._locked():
+            if not guard(): raise LedgerError('FORBIDDEN')
+            packet = self.client.prepare(envelope, review_origin(self.client.room_instance), authorize=guard)
+        reply = self.client.perform(packet)
+        reply.pop('admission', None)
+        if kind == 'review-observe':
+            if type(reply) is not dict or set(reply) != {'observation', 'audit_reference'}:
+                raise LedgerError('INVALID_REVIEW_OBSERVATION')
+            validate_review_observation(reply['observation'], target)
+        else:
+            validate_comment_receipt(reply, target)
+        _token(reply['audit_reference'])
+        return reply
+
+    def observe(self, target, operation_id, *, authorize):
+        return self._call('review-observe', target, operation_id, authorize)
+
+    def comment(self, target, body, operation_id, *, authorize, preflight_id=None):
+        return self._call('review-comment', target, operation_id, authorize, body, preflight_id)
+
+    def reconcile_comment(self, target, body, operation_id, *, authorize, reconciliation_id=None):
+        return self._call('review-reconcile', target, operation_id, authorize, body, reconciliation_id)
+
+
 def serve(channel, broker, *, supervisor_uid, supervisor_gid):
     """Fixed external process entrypoint over an inherited private endpoint."""
     if type(broker) is not ExternalReadBroker: raise LedgerError('INVALID_READ_BROKER')
@@ -289,7 +403,9 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
     try:
         ready = _json({'kind':'READ_BROKER_READY','nonce':hello['nonce'],'binding':hello['binding'],
             **({'mutation_enabled':True} if broker.mutations is not None else {}),
-            **({'projection_enabled':True} if broker.projections is not None else {})}).encode()
+            **({'projection_enabled':True} if broker.projections is not None else {}),
+            **({'gate_enabled':True} if broker.gates is not None else {}),
+            **({'review_enabled':True} if broker.reviews is not None else {})}).encode()
         if channel.send(ready) != len(ready): raise OriginDenied('partial Broker bootstrap')
         while alive(supervisor.pidfd):
             try:
@@ -319,7 +435,7 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
                 origin = Origin(**{**origin_doc, 'capabilities': tuple(origin_doc['capabilities'])})
                 def current_authority():
                     if not alive(supervisor.pidfd): return False
-                    if packet['envelope'].get('kind') not in {'forge-write','forge-reconcile','forge-projection'}: return True
+                    if packet['envelope'].get('kind') not in {'forge-write','forge-reconcile','forge-projection','gate-forge','gate-target','review-observe','review-comment','review-reconcile'}: return True
                     nonce = uuid.uuid4().hex
                     send_result(channel,packet['request_id'],{'authorize':nonce})
                     with receive(channel) as record:
@@ -384,7 +500,7 @@ def main():
     config = json.loads(sys.stdin.buffer.readline(16385), object_pairs_hook=_unique_object)
     expected = {'room_id','room_instance','project_id','repository','deployment_id','audit_path',
         'result_root','credential_path','gh_executable','gh_sha256','supervisor_uid','supervisor_gid'}
-    if (type(config) is not dict or set(config) not in (expected,expected|{'mutation_actors','work_labels'},expected|{'mutation_actors','work_labels','projection_actor'})
+    if (type(config) is not dict or set(config) - {'gate_actor', 'review_actor'} not in (expected,expected|{'mutation_actors','work_labels'},expected|{'mutation_actors','work_labels','projection_actor'})
             or any(type(config[k]) is not int or config[k] <= 0 for k in ('supervisor_uid','supervisor_gid'))
             or config['supervisor_uid'] == os.getuid()):
         raise LedgerError('INVALID_READ_BROKER')
@@ -425,8 +541,16 @@ def main():
                 raise LedgerError('INVALID_PROJECTION_OWNER')
             projections=ExternalProjectionBroker(binding,config['room_instance'],audit,actor,
                 config['mutation_actors'][actor],mutation_provider)
+        gates = None
+        if 'gate_actor' in config:
+            from .gate_forge import ExternalGateForgeBroker
+            gates = ExternalGateForgeBroker(binding, config['room_instance'], audit, config['gate_actor'], select)
+        reviews = None
+        if 'review_actor' in config:
+            from .review_broker import ExternalReviewBroker
+            reviews = ExternalReviewBroker(binding, config['room_instance'], audit, config['review_actor'], select, mutations)
         broker = ExternalReadBroker(binding,config['room_instance'],audit,select,config['result_root'],
-            mutations=mutations,projections=projections)
+            mutations=mutations,projections=projections,gates=gates,reviews=reviews)
         # The exclusive owner lock proves no old process can still complete a
         # pending read. Recovery records unknown, never repeats provider I/O.
         broker.recover(lambda _:True)
