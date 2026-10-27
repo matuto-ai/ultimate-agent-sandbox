@@ -88,6 +88,16 @@ class GatePolicyTests(unittest.TestCase):
                 self.gate['config']['items'][0]['path'] = path
                 self.refuses('.path')
 
+    def test_unicode_component_bytes_and_path_depth_match_artifacts_profile(self):
+        for path in ('a' * 256, '\U0001f642' * 64, '/'.join(['a'] * 33)):
+            with self.subTest(path=path):
+                self.gate['config']['items'][0]['path'] = path
+                self.refuses('.path')
+        for path in ('a' * 255, '\U0001f642' * 63, '/'.join(['a'] * 32)):
+            with self.subTest(path=path):
+                self.gate['config']['items'][0]['path'] = path
+                self.assertEqual(path, self.compile()['gates'][0]['config']['items'][0]['path'])
+
     def test_duplicate_paths_and_unknown_item_fields_refused(self):
         item = self.gate['config']['items'][0]
         self.gate['config']['items'].append(deepcopy(item))

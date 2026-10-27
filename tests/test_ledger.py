@@ -67,6 +67,31 @@ class LedgerTests(unittest.TestCase):
         self.error("STALE_GENERATION", lambda: self.apply(command("new-id")))
         self.assertEqual(2, len(self.ledger.replay(0)))
 
+    def test_exact_read_authorizes_and_compares_without_reserving_or_domain_effects(self):
+        before = self.ledger.snapshot()
+        self.assertIsNone(self.ledger.exact_receipt(command(), ORIGIN, authorize=authorized))
+        self.assertEqual(before, self.ledger.snapshot())
+        receipt = self.apply()
+        self.apply(command('later', generation=1))
+        self.assertEqual(receipt, self.ledger.exact_receipt(command(), ORIGIN, authorize=authorized))
+        self.error('ID_CONFLICT', lambda: self.ledger.exact_receipt(
+            command(generation=2), ORIGIN, authorize=authorized))
+        self.error('FORBIDDEN', lambda: self.ledger.exact_receipt(
+            command(), ORIGIN, authorize=lambda *_: False))
+        self.error('FORBIDDEN', lambda: self.ledger.exact_receipt(
+            command('unseen'), ORIGIN, authorize=lambda *_: 1))
+        self.assertEqual(2, self.ledger.snapshot()['room_seq'])
+
+    def test_exact_read_detaches_authorizer_payload_and_returned_receipt(self):
+        receipt = self.apply()
+        def mutating_authorizer(origin, operation):
+            operation.payload['amount'] = 900
+            return True
+        found = self.ledger.exact_receipt(command(), ORIGIN, authorize=mutating_authorizer)
+        self.assertEqual(receipt, found)
+        found['result']['value'] = 999
+        self.assertEqual(receipt, self.ledger.exact_receipt(command(), ORIGIN, authorize=authorized))
+
     def test_restart_public_interface_preserves_result_state_and_events(self):
         result = self.apply()
         snapshot, events = self.ledger.snapshot(), self.ledger.replay(0)

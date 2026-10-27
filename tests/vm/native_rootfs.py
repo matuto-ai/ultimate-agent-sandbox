@@ -78,18 +78,26 @@ def verify_runtime(payload, native):
     """Verify both complete assets before any rootfs creation or extraction."""
     if not payload.is_absolute() or payload.resolve() != payload or not stat.S_ISDIR(payload.lstat().st_mode):
         raise ValueError('canonical read-only payload directory required')
-    if (type(native) is not dict or native.get('profile') != 'native-pi-v1'
-            or native.get('node_version') != '24.22.1' or native.get('pi_version') != '1.4.0'
+    if (type(native) is not dict or native.get('profile') not in ('native-pi-v1', 'artifacts-v1-source')
             or native.get('rpm_roots') != list(ROOTS) or native.get('rpm_scriptlets') is not False
             or native.get('dependencies_reproducibly_pinned') is not False):
         raise ValueError('unsupported native payload profile')
+    artifact = native['profile'] == 'artifacts-v1-source'
+    if (not artifact and (native.get('node_version') != '24.22.1' or native.get('pi_version') != '1.4.0')):
+        raise ValueError('unsupported native Pi runtime')
+    if artifact and (set(native.get('helper_sha256', {})) != {'artifact-bootstrap', 'artifact-evaluator',
+            'artifact-test-bootstrap', 'artifact-confinement-probe'}
+            or any(type(value) is not str or not HEX.fullmatch(value) for value in native['helper_sha256'].values())
+            or native.get('production_enabled') is not False):
+        raise ValueError('unsupported artifacts source profile')
+    prefix = 'artifact' if artifact else 'native'
     archive = checked_asset(payload, {k: native.get(k) for k in ('file', 'bytes', 'sha256')},
-                            'native-runtime.tar', MAX_ARCHIVE_BYTES)
-    listing = checked_asset(payload, native.get('file_manifest'), 'native-files.json', 8 * 1024 * 1024)
+                            prefix + '-runtime.tar', MAX_ARCHIVE_BYTES)
+    listing = checked_asset(payload, native.get('file_manifest'), prefix + '-files.json', 8 * 1024 * 1024)
     data = json.loads(listing.read_bytes(), object_pairs_hook=unique)
     if (type(data) is not dict or set(data) != {'version', 'profile', 'files'}
             or type(data['version']) is not int or data['version'] != 1
-            or data['profile'] != 'native-pi-v1' or type(data['files']) is not list
+            or data['profile'] != native['profile'] or type(data['files']) is not list
             or not 0 < len(data['files']) <= MAX_FILES):
         raise ValueError('invalid native file manifest')
     files, total = {}, 0
@@ -108,6 +116,11 @@ def verify_runtime(payload, native):
             or total != native['unpacked_bytes'] or type(native.get('file_count')) is not int
             or len(files) != native['file_count']):
         raise ValueError('native file budgets disagree')
+    if artifact:
+        for name, expected in native['helper_sha256'].items():
+            item = files.get('opt/uas/bin/' + name)
+            if item is None or item['sha256'] != expected or item['mode'] != 0o555:
+                raise ValueError('artifacts immutable binary manifest differs')
     return archive, files
 
 

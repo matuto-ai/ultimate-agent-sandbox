@@ -42,6 +42,13 @@ def compile_policy(value, field):
             _object(item, ip, ('path', 'type', 'nonempty'))
             path = _text(item['path'], ip + '.path', 1024)
             parts = path.split('/')
+            try:
+                encoded = path.encode('utf-8', errors='strict')
+                if (len(encoded) > 4095 or len(parts) > 32
+                        or any(len(p.encode('utf-8')) > 255 for p in parts)):
+                    raise ValueError()
+            except (UnicodeError, ValueError) as error:
+                raise ConfigError(ip + '.path', 'artifact path exceeds UTF-8 filesystem bounds') from error
             if (PurePosixPath(path).is_absolute() or any(p in ('', '.', '..') for p in parts)
                     or '\\' in path or any(c in path for c in '*?[]')
                     or any(p.lower() == '.git' for p in parts)):

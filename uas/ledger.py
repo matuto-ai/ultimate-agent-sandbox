@@ -263,6 +263,38 @@ class RoomLedger:
             db.rollback()
             raise
 
+    def exact_receipt(self, command: Command, origin: Origin, *, authorize):
+        """Authorize and compare the complete request before read-side effects.
+
+        Trusted domain services use this before a read-only external resolver.
+        A missing receipt is not a reservation: apply must still authorize,
+        deduplicate and atomically reserve before any materialization/launch.
+        No generation or domain freshness check precedes this exact lookup.
+        """
+        if type(command) is not Command or type(origin) is not Origin:
+            raise LedgerError('INVALID_COMMAND')
+        canonical = _json({'room_id': self.room_id, 'command': command.canonical(),
+                           'origin': origin.canonical()})
+        operation = Command(**json.loads(canonical)['command'])
+        db = self._connection()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            if authorize(origin, operation) is not True:
+                raise LedgerError('FORBIDDEN')
+            row = db.execute('SELECT canonical, receipt FROM operations WHERE id=?',
+                             (command.id,)).fetchone()
+            if row is not None and row['canonical'] != canonical:
+                raise LedgerError('ID_CONFLICT')
+            receipt = None if row is None else json.loads(row['receipt'])
+            db.rollback()
+            return receipt
+        except sqlite3.Error as error:
+            db.rollback()
+            raise LedgerError('STORAGE_ERROR') from error
+        except BaseException:
+            db.rollback()
+            raise
+
     def operation_receipt(self, operation_id, origin, *, authorize):
         """Trusted read-side reconciliation, not a client operation-ID endpoint.
 

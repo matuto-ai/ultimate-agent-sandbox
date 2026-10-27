@@ -77,6 +77,20 @@ jobs:
         run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; this exemption is not runtime or security evidence.'
 
 
+  artifact-linux-smoke:
+    # Fast real Linux seams, NOT stock-policy/native/VM qualification.
+    # Runs alongside Docker after validate: 1 + max(1, 2) <= 3 minutes.
+    needs: validate
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check actual nonroot artifact paths, listeners and copied Git
+        run: timeout --signal=TERM --kill-after=2s 43s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/artifact_smoke.py --run
+
   docker-lifecycle:
     # This is fixture lifecycle evidence, not production launch qualification.
     needs: validate

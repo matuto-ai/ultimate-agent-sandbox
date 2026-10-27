@@ -425,7 +425,7 @@ def exact_install_roots(manifest, exact_roots=None):
     """
     if exact_roots is None:
         return REQUIRED_PACKAGES
-    expect(manifest.get('profile') == 'native-pi-v1' and type(exact_roots) is dict
+    expect(manifest.get('profile') in ('native-pi-v1', 'artifacts-v1-source') and type(exact_roots) is dict
            and bool(exact_roots) and set(exact_roots) <= set(REQUIRED_PACKAGES),
            'exact package roots require explicit native profile')
     selected = {}
@@ -486,7 +486,7 @@ def install(nonce, manifest_hash, *, exact_roots=None, defer_engine_start=False)
     run('mount', '-o', 'ro,nodev,nosuid,noexec', '/dev/disk/by-label/UAS_PAYLOAD', str(PAYLOAD))
     manifest = verify_payload(nonce, manifest_hash)
     expect(type(defer_engine_start) is bool and (not defer_engine_start
-           or manifest.get('profile') == 'native-pi-v1'), 'daemon deferral requires native profile')
+           or manifest.get('profile') in ('native-pi-v1', 'artifacts-v1-source')), 'daemon deferral requires native profile')
     install_packages(nonce, manifest, exact_roots=exact_roots)
     shutil.copytree(PAYLOAD / 'repo', ROOT)
     shutil.copyfile(PAYLOAD / 'fixture', ROOT / 'fixture')
