@@ -666,3 +666,59 @@ addition to the retained wrapper provenance check. No executable path is chosen
 from wrapper content or peer input. All other fresh-output, mutation, containment,
 strict-link, signature, deadline and environment checks remain unchanged.
 This source correction is not evidence that actual generation has passed.
+
+### Signed pre-generated DEFAULT after run 40431200029
+
+Run 40431200029 on `94067032` passed the RPM transaction and signed filesystem
+metadata checks. The corrected Python entrypoint executed, then failed before
+policy mutation: its `is_fips_auto_bind_mounted()` opens
+`/proc/self/mountinfo`, which is absent in the deliberately mount-free chroot.
+The complete 973-byte stderr identifies `FileNotFoundError`; the failure
+inventory reports zero changed files across 8,466 entries / 133,924,742 bytes.
+Runner scratch cleanup completed in 870.452 seconds. Trust validation, runtime
+extraction, final fingerprint, Docker startup and native delivery were not reached.
+
+The live-system updater has no offline application option. Its separate build
+entrypoint generates backend text and invokes backend-specific test tools, not
+fresh installed policy state. Neither is necessary for a fixed DEFAULT image:
+the [Fedora 44 package contract](https://src.fedoraproject.org/rpms/crypto-policies/raw/f44/f/crypto-policies.spec)
+already installs signed pre-generated DEFAULT assets, and its post-install
+initialization maps these assets to the corresponding ghost backend paths.
+The [exact package file list](https://packages.fedoraproject.org/pkgs/crypto-policies/crypto-policies/fedora-44.html)
+contains 13 DEFAULT backends and their ghost destinations.
+
+The current implementation supersedes the updater invocation above. It accepts
+only `bind`, `gnutls`, `java`, `krb5`, `libreswan`, `libssh`, `nss`, `openssh`,
+`opensshserver`, `openssl_fips`, `opensslcnf`, `rpm-sequoia` and `sequoia`. It checks
+the installed crypto-policies owner, SHA-256 algorithm, each ordinary asset's
+mode/digest, the complete fixed DEFAULT directory and all 15 exact ghost
+contracts (13 backend targets, config and current marker). All outputs and their
+canonical parents must be fresh/ordinary as applicable before writing anything.
+
+It copies the exact signed `default-config` bytes to `etc/crypto-policies/config`
+after verifying that its only non-comment directive is DEFAULT. The current
+marker contains only `DEFAULT\n`, matching package initialization rather than
+copying configuration comments. Each backend receives its exact absolute
+in-image `/usr/share/crypto-policies/DEFAULT/<name>.txt` link. No backend crypto
+content is handwritten or fetched; no `CURRENT.pol` dump or updater-parity claim
+is manufactured. This is explicit fixed package-default materialization, not
+execution of general package scriptlets.
+
+The package intentionally hardlinks some data assets. Before accepting these,
+a bounded whole-root inventory counts every device/inode occurrence and rejects
+external or changing hardlinks; the same proof runs afterward and the final
+strict fingerprint still applies. This does not relax the single-link ordinary
+checks for executable tools, runtime archives, tini or fresh CA files.
+
+The three CA extract commands, clean environment and 90-second child deadlines
+remain unchanged. The unused explicit crypto-policies-scripts RPM root, updater
+execution and wrapper/Python verification machinery are removed. The mutation
+allowlist is narrowed to exactly 18 generated paths: 13 backend links, config,
+current and the three CA outputs. Other crypto-policy subtree changes, including
+any `CURRENT.pol`, fail closed. Post-generation checks also verify the exact
+config/current bytes and all backend targets; permitted paths cannot silently
+change to another in-root policy. Partial materialization/command failures retain
+bounded before/after inventory. No proc fabrication/mount, host trust import,
+policy change or native security weakening is introduced. Pure tests do not
+qualify actual package materialization, CA execution or native delivery; a fresh
+reviewed exact-head deliberate run remains required.

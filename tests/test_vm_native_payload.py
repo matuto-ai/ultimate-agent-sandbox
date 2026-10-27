@@ -60,7 +60,7 @@ class NativePayloadTests(unittest.TestCase):
         self.assertIn('profile="static-go-v1"', text)
         self.assertIn('MAX_WORK_BYTES = 2 * 1024 * 1024 * 1024', text)
         self.assertIn('BUILD_TIMEOUT = 900', text)
-        self.assertEqual(native.RPM_ROOTS, ('python3', 'tini', 'glibc', 'libstdc++', 'crypto-policies-scripts'))
+        self.assertEqual(native.RPM_ROOTS, ('python3', 'tini', 'glibc', 'libstdc++'))
 
     def test_stage_is_manifest_bound_and_install_scripts_disabled(self):
         import io

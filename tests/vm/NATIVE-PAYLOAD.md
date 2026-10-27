@@ -25,17 +25,24 @@ The C connector is statically compiled, not run; acquired Node is not run.
 8 MiB maximum file list binds each runtime file's path, size, mode and digest.
 The guest must verify both before extracting ordinary relative paths and must
 reject duplicate/traversing/symlink/hardlink/special archive members. The native
-profile's signed RPM roots are Python 3, tini, glibc, libstdc++ and the explicit
-crypto-policies-scripts package (not a weak-dependency expansion); the guest
+profile's signed RPM roots are Python 3, tini, glibc and libstdc++; the guest
 owns offline `dnf --installroot` with `tsflags=noscripts`, exact local repository
 only, disabled weak dependencies, and signature verification. It copies the
 packaged tini to fixed `/opt/uas/bin/tini` and measures/hashes the final rootfs.
 Package scriptlets remain disabled. The RPM automatic sysusers helper is distinct
-and remains enabled inside the disposable root. Fixed signed Fedora tools generate
-DEFAULT crypto-policy and packaged CA trust outputs offline before fingerprinting;
+and remains enabled inside the disposable root. The signed crypto-policies package
+in this dependency closure supplies pre-generated DEFAULT backend assets. A fixed
+13-backend materializer verifies installed owner/header digests and exact ghost
+destinations before creating fresh links, preserving signed default-config bytes
+and deriving the exact `DEFAULT\n` current marker. It never runs the live-system
+policy updater, creates a `CURRENT.pol` dump, or mounts proc. Bounded whole-root
+inode counts prove packaged data hardlinks remain internal; tools still require
+single-link ordinary files. Three fixed signed Fedora trust-extract commands
+generate packaged CA outputs offline before fingerprinting;
 no host configuration, user credentials, downloaded CA data or generic package
 scriptlets are used. See the native transport qualification record for the exact
-commands, mutation checks and remaining actual-image qualification gate.
+commands, exact 18-path mutation allowlist and remaining actual-image qualification
+gate. The unused explicit crypto-policies-scripts root has been removed.
 
 The Node artifact and npm packages are exact pinned inputs. Fedora RPM candidate
 resolution remains version-observed and signed, **not reproducibly pinned across

@@ -14,7 +14,7 @@ import stat
 import tarfile
 
 PAYLOAD = Path('/mnt/uas-payload')
-ROOTS = ('python3', 'tini', 'glibc', 'libstdc++', 'crypto-policies-scripts')
+ROOTS = ('python3', 'tini', 'glibc', 'libstdc++')
 MAX_FILES = 30000
 MAX_FILE_BYTES = 160 * 1024 * 1024
 MAX_RUNTIME_BYTES = 512 * 1024 * 1024
