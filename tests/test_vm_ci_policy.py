@@ -7,7 +7,7 @@ import unittest
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 2, 1], 'claude-native.yml': [2],
+        budgets = {'validate.yml': [1, 1, 1, 2, 1], 'claude-native.yml': [2],
                    'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
@@ -20,11 +20,21 @@ class VMCITriggerTests(unittest.TestCase):
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
-                    integrations = {'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams'}
+                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams'}
                     self.assertEqual(set(jobs), {'validate'} | integrations)
                     self.assertEqual(re.findall(r'^    needs: (.+)$', jobs['validate'], re.MULTILINE), [])
                     for job in integrations:
                         self.assertEqual(re.findall(r'^    needs: (.+)$', jobs[job], re.MULTILINE), ['validate'])
+                        self.assertEqual(re.findall(r'^    if: (.+)$', jobs[job], re.MULTILINE), [
+                            "${{ needs.validate.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}"])
+                    forge = jobs['forge-broker-smoke']
+                    self.assertNotIn('continue-on-error:', forge)
+                    self.assertEqual(re.findall(r'^        if: (.+)$', forge, re.MULTILINE), [])
+                    for script in ('forge_read_smoke.py', 'forge_mutation_smoke.py'):
+                        command = ('        run: timeout --signal=TERM --kill-after=2s 25s sudo -n '
+                                   '--preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/' + script + '\n')
+                        self.assertEqual(text.count(command), 1)
+                        self.assertIn(command, forge)
                     self.assertLessEqual(actual[0] + max(actual[1:]), 3)
                 else:
                     self.assertLessEqual(sum(actual), 3)
