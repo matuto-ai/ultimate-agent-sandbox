@@ -439,6 +439,7 @@ def namespace(root):
         authority = Authority()
         send(worker_parent, {'kind': 'fixture-go'})
         operation = None
+        direct_finish_pending = False
         results, terminals = [], []
         while True:
             with receive(worker_parent) as record:
@@ -454,9 +455,15 @@ def namespace(root):
                     terminals.append(terminal)
                 except GitPolicyError:
                     require(operation == 'push-other-denied', 'unexpected fixture policy denial')
+                    direct_finish_pending = True
                     send(worker_parent, {'kind': 'refused', 'error': 'GIT_PROJECT_MISMATCH', 'record': None})
+            elif value == {'kind': 'stream-finished'}:
+                # Only this deliberately local policy refusal bypasses relay().
+                # No ready/data was sent, so its exact finish marker is next.
+                require(operation == 'push-other-denied' and direct_finish_pending, 'unexpected direct stream finish')
+                direct_finish_pending = False
             elif set(value) == {'kind', 'operation', 'code'} and value['kind'] == 'fixture-result':
-                require(value['operation'] == operation, 'fixture operation result crossed')
+                require(value['operation'] == operation and not direct_finish_pending, 'fixture operation result crossed')
                 results.append(value)
                 operation = None
             elif set(value) == {'kind', 'commit_oid'} and value['kind'] == 'fixture-done':
