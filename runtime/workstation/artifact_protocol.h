@@ -28,6 +28,9 @@
 #ifndef AG_NPROC
 #define AG_NPROC 1U
 #endif
+#ifndef AG_FSIZE
+#define AG_FSIZE 0U
+#endif
 #define AG_HEADER_BYTES 104U
 #define AG_ITEM_BYTES 60U
 #define AG_MAX_ITEMS 128U

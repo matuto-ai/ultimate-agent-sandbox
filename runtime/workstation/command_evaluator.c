@@ -1,8 +1,8 @@
-/* Single-process exact-argv command profile. Never a shell or Participant.
- * The trusted parent alone owns the private Gate channel. Command code sees
- * only harmless stdin and two output pipes, an immutable executable at exec,
- * a read-only disposable target, and read-only provisioned runtime libraries.
- * No children, network, credentials, target writes or mutable checkout access.
+/* Bounded child-tree exact-argv profile. Never a shell or Participant.
+ * The trusted observer alone owns the private Gate channel. Project code sees
+ * harmless stdin/output pipes, immutable provisioned executable/runtime reads,
+ * the read-only revision and a separate hard-bounded disposable work directory.
+ * No network, credentials, target writes or mutable checkout access.
  */
 #define main artifact_unused_main
 #include "artifact_evaluator.c"
@@ -12,6 +12,7 @@
 #include <time.h>
 #include <linux/sched.h>
 #include <stdio.h>
+#include <sys/vfs.h>
 
 #define CG_MAX_ARGV 32U
 #define CG_MAX_ENV 4U
@@ -33,16 +34,21 @@ static void bounded_limit(int resource,rlim_t bound) {
     if(setrlimit(resource,&value))fail();
 }
 static void command_identity(void) {
+    /* WNOWAIT pins the unreaped guard identity. Inherited ignored SIGCHLD or
+     * SA_NOCLDWAIT would destroy that ownership premise before observation. */
+    struct sigaction children={.sa_handler=SIG_DFL};sigset_t unblocked;
+    if(sigemptyset(&children.sa_mask)||sigemptyset(&unblocked)
+       ||sigaction(SIGCHLD,&children,NULL)||sigprocmask(SIG_SETMASK,&unblocked,NULL))fail();
     if(getuid()!=AG_UID||geteuid()!=AG_UID||getgid()!=AG_UID||getegid()!=AG_UID
        ||prctl(PR_GET_NO_NEW_PRIVS,0,0,0,0)!=1||prctl(PR_SET_DUMPABLE,0))fail();
     limit_valid(RLIMIT_AS,AG_MEMORY_BYTES);limit_valid(RLIMIT_CPU,AG_CPU_SECONDS);
     limit_valid(RLIMIT_NOFILE,AG_MAX_FDS);limit_valid(RLIMIT_CORE,0);
-    limit_valid(RLIMIT_FSIZE,0);limit_valid(RLIMIT_NPROC,64);
+    limit_valid(RLIMIT_FSIZE,8U*1024U*1024U);limit_valid(RLIMIT_NPROC,64);
     struct stat root;struct statvfs filesystem;
     if(fstat(AG_TARGET_FD,&root)||!S_ISDIR(root.st_mode)||root.st_uid!=AG_SUPERVISOR_UID
        ||(root.st_mode&07777)!=0555||fstatvfs(AG_TARGET_FD,&filesystem)
-       ||!(filesystem.f_flag&ST_RDONLY))fail();
-    for(int fd=5;fd<(int)AG_MAX_FDS;fd++)if(fcntl(fd,F_GETFD)!=-1||errno!=EBADF)fail();
+       ||(filesystem.f_flag&(ST_RDONLY|ST_NOEXEC))!=(ST_RDONLY|ST_NOEXEC))fail();
+    for(int fd=6;fd<(int)AG_MAX_FDS;fd++)if(fcntl(fd,F_GETFD)!=-1||errno!=EBADF)fail();
     for(int fd=0;fd<3;fd++) {
         struct stat node;
         if(fstat(fd,&node)||!S_ISCHR(node.st_mode)||node.st_rdev!=makedev(1,3)
@@ -68,7 +74,7 @@ static void read_rule(int ruleset,int parent,uint64_t access) {
     struct landlock_path_beneath_attr rule={.parent_fd=parent,.allowed_access=access};
     if(syscall(SYS_landlock_add_rule,ruleset,LANDLOCK_RULE_PATH_BENEATH,&rule,0))fail();
 }
-static void confinement(int executable,int libraries,int loader,int *dependencies,unsigned dependency_count) {
+static void confinement(int executable,int libraries,int libraries64,int loader,int *dependencies,unsigned dependency_count) {
     if(syscall(SYS_landlock_create_ruleset,NULL,0,LANDLOCK_CREATE_RULESET_VERSION)<3)fail();
     struct landlock_ruleset_attr rules={.handled_access_fs=
         LANDLOCK_ACCESS_FS_EXECUTE|LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_READ_FILE
@@ -79,25 +85,37 @@ static void confinement(int executable,int libraries,int loader,int *dependencie
     int ruleset=(int)syscall(SYS_landlock_create_ruleset,&rules,sizeof(rules),0);
     if(ruleset<0)fail();
     read_rule(ruleset,AG_TARGET_FD,LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR);
+    read_rule(ruleset,5,LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR
+        |LANDLOCK_ACCESS_FS_WRITE_FILE|LANDLOCK_ACCESS_FS_REMOVE_DIR|LANDLOCK_ACCESS_FS_REMOVE_FILE
+        |LANDLOCK_ACCESS_FS_MAKE_DIR|LANDLOCK_ACCESS_FS_MAKE_REG|LANDLOCK_ACCESS_FS_MAKE_SYM
+        |LANDLOCK_ACCESS_FS_REFER|LANDLOCK_ACCESS_FS_TRUNCATE);
     read_rule(ruleset,executable,LANDLOCK_ACCESS_FS_EXECUTE|LANDLOCK_ACCESS_FS_READ_FILE);
     for(unsigned i=0;i<dependency_count;i++)read_rule(ruleset,dependencies[i],LANDLOCK_ACCESS_FS_EXECUTE|LANDLOCK_ACCESS_FS_READ_FILE);
     read_rule(ruleset,libraries,LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR);
+    if(libraries64>=0)read_rule(ruleset,libraries64,LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR);
     if(loader>=0)read_rule(ruleset,loader,LANDLOCK_ACCESS_FS_EXECUTE|LANDLOCK_ACCESS_FS_READ_FILE);
     if(syscall(SYS_landlock_restrict_self,ruleset,0)||close(ruleset))fail();
 }
 
 #define CG_ALLOW(nr) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,nr,0,1),ALLOW
-/* Target code may run a dynamic language runtime, but cannot create a process,
- * network endpoint, control channel, mount, namespace or mutate a filesystem.
- * Landlock separately restricts all path reads to exact target/runtime roots.
- * execveat is only the pinned CLOEXEC FD5 initial transfer; no execve is allowed.
+/* Project children inherit the fixed group, hard limits and this filter.
+ * No network, group/namespace/credential/limit changes, or helper signals.
+ * Landlock confines writes to bounded work and execution to pinned programs;
+ * exact initial transfer uses CLOEXEC FD5, child execs use the admitted set.
  */
 static void child_filter(void) {
     const struct sock_filter code[]={
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,arch)),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AUDIT_ARCH_X86_64,1,0),DENY,LOAD_NR,
-        CG_ALLOW(SYS_exit),CG_ALLOW(SYS_exit_group),CG_ALLOW(SYS_read),CG_ALLOW(SYS_readv),
+        CG_ALLOW(SYS_exit),CG_ALLOW(SYS_exit_group),CG_ALLOW(SYS_mkdir),CG_ALLOW(SYS_mkdirat),
+        CG_ALLOW(SYS_unlink),CG_ALLOW(SYS_unlinkat),CG_ALLOW(SYS_rmdir),CG_ALLOW(SYS_rename),CG_ALLOW(SYS_renameat),
+        CG_ALLOW(SYS_renameat2),CG_ALLOW(SYS_fchmod),
+        CG_ALLOW(SYS_truncate),CG_ALLOW(SYS_ftruncate),CG_ALLOW(SYS_fsync),CG_ALLOW(SYS_fdatasync),
+        CG_ALLOW(SYS_symlink),CG_ALLOW(SYS_symlinkat),CG_ALLOW(SYS_link),CG_ALLOW(SYS_linkat),
+        CG_ALLOW(SYS_read),CG_ALLOW(SYS_readv),
         CG_ALLOW(SYS_pread64),CG_ALLOW(SYS_write),CG_ALLOW(SYS_writev),CG_ALLOW(SYS_close),
+        CG_ALLOW(SYS_pipe),CG_ALLOW(SYS_pipe2),CG_ALLOW(SYS_dup),CG_ALLOW(SYS_dup2),CG_ALLOW(SYS_dup3),
+        CG_ALLOW(SYS_close_range),CG_ALLOW(SYS_chdir),CG_ALLOW(SYS_fchdir),CG_ALLOW(SYS_getppid),CG_ALLOW(SYS_sched_yield),
         CG_ALLOW(SYS_fstat),CG_ALLOW(SYS_newfstatat),CG_ALLOW(SYS_statx),CG_ALLOW(SYS_lseek),
         CG_ALLOW(SYS_openat),CG_ALLOW(SYS_openat2),CG_ALLOW(SYS_getdents64),CG_ALLOW(SYS_readlink),
         CG_ALLOW(SYS_readlinkat),CG_ALLOW(SYS_access),CG_ALLOW(SYS_faccessat),CG_ALLOW(SYS_faccessat2),
@@ -111,9 +129,18 @@ static void child_filter(void) {
         CG_ALLOW(SYS_getrandom),CG_ALLOW(SYS_clock_gettime),CG_ALLOW(SYS_gettimeofday),
         CG_ALLOW(SYS_clock_nanosleep),CG_ALLOW(SYS_nanosleep),CG_ALLOW(SYS_getrlimit),
         CG_ALLOW(SYS_getrusage),CG_ALLOW(SYS_sched_getaffinity),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fcntl,0,4),LOAD_ARG(1),
-        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETPIPE_SZ,0,1),DENY,ALLOW,LOAD_NR,
-        CG_ALLOW(SYS_ioctl),CG_ALLOW(SYS_poll),CG_ALLOW(SYS_ppoll),
+        /* Async-owner operations can signal trusted same-UID owners without
+         * kill(2). Only descriptor flags/dup and non-async status changes exist. */
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_fcntl,0,17),LOAD_ARG(1),
+        CG_ALLOW(F_GETFD),CG_ALLOW(F_SETFD),CG_ALLOW(F_GETFL),
+        CG_ALLOW(F_DUPFD),CG_ALLOW(F_DUPFD_CLOEXEC),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,F_SETFL,1,0),DENY,LOAD_ARG(2),
+        BPF_JUMP(BPF_JMP|BPF_JSET|BPF_K,O_ASYNC,0,1),DENY,ALLOW,LOAD_NR,
+        /* No devices or sockets are available; harmless terminal probes fail
+         * without allowing FIOASYNC/FIOSETOWN or another ioctl effect. */
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_ioctl,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|ENOTTY),
+        CG_ALLOW(SYS_poll),CG_ALLOW(SYS_ppoll),
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,SYS_prlimit64,0,10),
         LOAD_ARG(0),BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,0,1,0),DENY,
         LOAD_ARG(2),BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,0,1,0),DENY,
@@ -145,6 +172,11 @@ static void parent_filter(void) {
         BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,AUDIT_ARCH_X86_64,1,0),DENY,LOAD_NR,
         CG_ALLOW(SYS_read),CG_ALLOW(SYS_readv),CG_ALLOW(SYS_pread64),CG_ALLOW(SYS_write),CG_ALLOW(SYS_writev),
         CG_ALLOW(SYS_close),CG_ALLOW(SYS_close_range),CG_ALLOW(SYS_openat),CG_ALLOW(SYS_openat2),
+        CG_ALLOW(SYS_pipe),CG_ALLOW(SYS_dup),CG_ALLOW(SYS_chdir),CG_ALLOW(SYS_sched_yield),
+        CG_ALLOW(SYS_mkdir),CG_ALLOW(SYS_mkdirat),CG_ALLOW(SYS_unlink),CG_ALLOW(SYS_unlinkat),CG_ALLOW(SYS_rmdir),
+        CG_ALLOW(SYS_rename),CG_ALLOW(SYS_renameat),CG_ALLOW(SYS_renameat2),CG_ALLOW(SYS_chmod),CG_ALLOW(SYS_fchmod),
+        CG_ALLOW(SYS_fchmodat),CG_ALLOW(SYS_truncate),CG_ALLOW(SYS_ftruncate),CG_ALLOW(SYS_fsync),CG_ALLOW(SYS_fdatasync),
+        CG_ALLOW(SYS_utimensat),CG_ALLOW(SYS_symlink),CG_ALLOW(SYS_symlinkat),CG_ALLOW(SYS_link),CG_ALLOW(SYS_linkat),
         CG_ALLOW(SYS_fstat),CG_ALLOW(SYS_newfstatat),CG_ALLOW(SYS_statx),CG_ALLOW(SYS_fstatfs),
         CG_ALLOW(SYS_getdents64),CG_ALLOW(SYS_lseek),CG_ALLOW(SYS_readlink),CG_ALLOW(SYS_readlinkat),
         CG_ALLOW(SYS_access),CG_ALLOW(SYS_faccessat),CG_ALLOW(SYS_faccessat2),CG_ALLOW(SYS_fchdir),
@@ -186,6 +218,38 @@ static int environment_valid(const char *entry) {
     return !strcmp(entry,"LANG=C")||!strcmp(entry,"LC_ALL=C")||!strcmp(entry,"TZ=UTC")
         ||!strcmp(entry,"PYTHONDONTWRITEBYTECODE=1");
 }
+static unsigned cleanup_entries=0;
+static void clean_work(int directory,unsigned depth,dev_t device) {
+    if(depth>AG_MAX_DEPTH||lseek(directory,0,SEEK_SET)<0)fail();
+    for(;;) {
+        unsigned char buffer[4096];long count=syscall(SYS_getdents64,directory,buffer,sizeof(buffer));
+        if(count<0)fail();
+        if(!count)return;
+        int removed=0;
+        for(size_t offset=0;offset<(size_t)count;) {
+            struct linux_dirent64_local *entry=(void*)(buffer+offset);size_t base=offsetof(struct linux_dirent64_local,name);
+            if((size_t)count-offset<base+1||entry->reclen<base+1||entry->reclen>(size_t)count-offset)fail();
+            size_t length=strnlen(entry->name,entry->reclen-base);
+            if(!length||length==entry->reclen-base||memchr(entry->name,'/',length))fail();
+            offset+=entry->reclen;
+            if(!strcmp(entry->name,".")||!strcmp(entry->name,".."))continue;
+            if(++cleanup_entries>AG_MAX_ENTRIES)fail();
+            struct stat node;if(fstatat(directory,entry->name,&node,AT_SYMLINK_NOFOLLOW)
+               ||node.st_dev!=device||node.st_uid!=AG_UID)fail();
+            if(S_ISDIR(node.st_mode)) {
+                struct open_how how={.flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW,
+                    .resolve=RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS|RESOLVE_NO_XDEV};
+                int child=(int)syscall(SYS_openat2,directory,entry->name,&how,sizeof(how));struct stat held;
+                if(child<0||fstat(child,&held)||held.st_dev!=node.st_dev||held.st_ino!=node.st_ino)fail();
+                clean_work(child,depth+1,device);if(close(child)||unlinkat(directory,entry->name,AT_REMOVEDIR))fail();
+            } else if(S_ISREG(node.st_mode)||S_ISLNK(node.st_mode)) {
+                if(unlinkat(directory,entry->name,0))fail();
+            } else fail();
+            removed=1;break;
+        }
+        if(removed&&lseek(directory,0,SEEK_SET)<0)fail();
+    }
+}
 /* A guard death is observed by its direct parent before reaping. A parent
  * death is delivered to this fixed handler, never to project code. The guard
  * itself is the nonescaping process-group leader, so kill(0) cannot select a
@@ -197,7 +261,7 @@ static void guard_stop(int signal_number) {
 }
 static void guard_message(int fd,uint32_t tag,uint32_t status) {
     unsigned char data[8];ag_put32(data,tag);ag_put32(data+4,status);
-    if(write(fd,data,sizeof(data))!=(ssize_t)sizeof(data))fail();
+    if(write(fd,data,sizeof(data))!=(ssize_t)sizeof(data))guard_stop(0);
 }
 int main(int argc,char **argv,char **environment) {
     (void)argv;
@@ -205,17 +269,28 @@ int main(int argc,char **argv,char **environment) {
     command_identity();
     parent_filter();
     unsigned char request[CG_REQUEST_BYTES+1];ssize_t received=read(AG_CHANNEL_FD,request,sizeof(request));
-    if(received<100||received>CG_REQUEST_BYTES||memcmp(request,"CGQ1",4))fail();
+    if(received<140||received>CG_REQUEST_BYTES||memcmp(request,"CGQ1",4))fail();
     unsigned seconds=ag_u32(request+68),arguments=ag_u32(request+72),environments=ag_u32(request+76),cwdlen=ag_u32(request+80);
     if(seconds<1||seconds>10||!arguments||arguments>CG_MAX_ARGV||environments>CG_MAX_ENV||!cwdlen||cwdlen>AG_MAX_PATH_BYTES)fail();
     unsigned process_limit=ag_u32(request+84),memory_limit=ag_u32(request+88),output_limit=ag_u32(request+92);
     if(!process_limit||process_limit>32||memory_limit<64U*1024U*1024U||memory_limit>AG_MEMORY_BYTES
        ||output_limit<1024||output_limit>CG_STREAM_LIMIT)fail();
     unsigned dependency_count=ag_u32(request+96);if(dependency_count>8)fail();
-    size_t position=100;if(position+cwdlen>(size_t)received)fail();
+    struct stat work_node;struct statvfs work_fs;struct statfs work_kind;
+    if(fstat(5,&work_node)||!S_ISDIR(work_node.st_mode)||work_node.st_uid!=AG_SUPERVISOR_UID
+       ||work_node.st_gid!=AG_UID||(work_node.st_mode&07777)!=0770
+       ||(uint64_t)work_node.st_dev!=ag_u64(request+100)||(uint64_t)work_node.st_ino!=ag_u64(request+108)
+       ||ag_u64(request+116)!=8U*1024U*1024U||fstatvfs(5,&work_fs)||fstatfs(5,&work_kind)
+       ||work_kind.f_type!=0x01021994||(work_fs.f_flag&ST_RDONLY)
+       ||(work_fs.f_flag&(ST_NOSUID|ST_NODEV|ST_NOEXEC))!=(ST_NOSUID|ST_NODEV|ST_NOEXEC)
+       ||!work_fs.f_frsize||work_fs.f_frsize>4096||work_fs.f_blocks>8U*1024U*1024U/work_fs.f_frsize)fail();
+    struct stat source_node;
+    if(fstat(AG_TARGET_FD,&source_node)||(uint64_t)source_node.st_dev!=ag_u64(request+124)
+       ||(uint64_t)source_node.st_ino!=ag_u64(request+132))fail();
+    size_t position=140;if(position+cwdlen>(size_t)received)fail();
     char cwd[AG_MAX_PATH_BYTES+1];memcpy(cwd,request+position,cwdlen);cwd[cwdlen]=0;position+=cwdlen;
     if(memchr(cwd,0,cwdlen)|| (strcmp(cwd,".")&&!path_valid((unsigned char*)cwd,cwdlen)))fail();
-    char *command[CG_MAX_ARGV+1]={0},*env[CG_MAX_ENV+1]={0};char data[CG_REQUEST_BYTES];size_t used=0;
+    char *command[CG_MAX_ARGV+1]={0},*env[CG_MAX_ENV+3]={0};char data[CG_REQUEST_BYTES];size_t used=0;
     for(unsigned index=0;index<arguments+environments;index++) {
         if(position+4>(size_t)received)fail();
         size_t size=ag_u32(request+position);position+=4;
@@ -224,15 +299,17 @@ int main(int argc,char **argv,char **environment) {
         if(index<arguments)command[index]=value;
         else {if(!environment_valid(value))fail();env[index-arguments]=value;}
     }
+    env[environments]="TMPDIR=/proc/self/fd/4";env[environments+1]="HOME=/proc/self/fd/4";
     if(strncmp(command[0],"/usr/bin/",9)||strchr(command[0]+9,'/')||!command[0][9])fail();
     const char *base=command[0]+9;
     if(!strcmp(base,"sh")||!strcmp(base,"bash")||!strcmp(base,"dash")||!strcmp(base,"zsh")
        ||!strcmp(base,"ksh")||!strcmp(base,"csh")||!strcmp(base,"tcsh")||!strcmp(base,"fish")
        ||!strcmp(base,"busybox")||!strcmp(base,"env"))fail();
-    int bin=immutable_directory("/usr/bin"),libraries=immutable_directory("/usr/lib"),loader=-1;
+    int bin=immutable_directory("/usr/bin"),libraries=immutable_directory("/usr/lib"),libraries64=-1,loader=-1;
+    struct stat lib64_node;if(!lstat("/usr/lib64",&lib64_node))libraries64=immutable_directory("/usr/lib64");else if(errno!=ENOENT)fail();
     const char *loaders[]={"/usr/lib64/ld-linux-x86-64.so.2","/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"};
     for(unsigned i=0;i<2&&loader<0;i++) {
-        loader=open(loaders[i],O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        loader=open(loaders[i],O_RDONLY|O_CLOEXEC);
         if(loader<0&&errno!=ENOENT&&errno!=ELOOP)fail();
     }
     if(loader>=0) {
@@ -266,7 +343,8 @@ int main(int argc,char **argv,char **environment) {
         if(fd<0||fstat(fd,&before)||!S_ISREG(before.st_mode)||before.st_uid!=0||(before.st_mode&0022)
            ||!(before.st_mode&0111)||before.st_nlink!=1||before.st_size<4||before.st_size>16*1024*1024)fail();
         size_t count=0;while(count<(size_t)before.st_size) {
-            ssize_t n=read(fd,executable_bytes+count,(size_t)before.st_size-count);if(n<=0)fail();count+=(size_t)n;
+            ssize_t n=read(fd,executable_bytes+count,(size_t)before.st_size-count);if(n<=0)fail();
+            count+=(size_t)n;
         }
         unsigned char actual[32];path_digest(executable_bytes,count,actual);
         if(memcmp(executable_bytes,"\177ELF",4)||memcmp(actual,request+position,32)||fstat(fd,&after)||!unchanged(&before,&after))fail();
@@ -275,7 +353,7 @@ int main(int argc,char **argv,char **environment) {
     if(position!=(size_t)received)fail();
     how.flags=O_RDONLY|O_DIRECTORY|O_CLOEXEC;
     int directory=(int)syscall(SYS_openat2,AG_TARGET_FD,cwd,&how,sizeof(how));if(directory<0)fail();
-    confinement(executable,libraries,loader,dependencies,dependency_count);
+    confinement(executable,libraries,libraries64,loader,dependencies,dependency_count);
     unsigned char header[36];memcpy(header,"CGS1",4);memcpy(header+4,request+4,32);emit_raw(header,sizeof(header));
     /* Guard is group leader. Observer pins it with WNOWAIT and is a
      * subreaper, so unexpected guard loss can never strand adopted children.
@@ -284,34 +362,65 @@ int main(int argc,char **argv,char **environment) {
     if(pipe2(pipes[0],O_CLOEXEC)||pipe2(pipes[1],O_CLOEXEC)||pipe2(metadata,O_CLOEXEC)
        ||prctl(PR_SET_CHILD_SUBREAPER,1,0,0,0))fail();
     uint64_t start=milliseconds(),deadline=start+(uint64_t)seconds*1000;
-    pid_t guard=fork();if(guard<0)fail();
+    pid_t observer=getpid(),guard=fork();if(guard<0)fail();
     if(guard==0) {
-        if(setpgid(0,0)||close(AG_CHANNEL_FD)||close(metadata[0])
-           ||close(pipes[0][0])||close(pipes[1][0])||prctl(PR_SET_CHILD_SUBREAPER,1,0,0,0))fail();
-        struct sigaction action={.sa_handler=guard_stop};
-        if(sigemptyset(&action.sa_mask)||sigaction(SIGUSR1,&action,NULL)||sigaction(SIGALRM,&action,NULL)
-           ||prctl(PR_SET_PDEATHSIG,SIGUSR1)||getppid()==1)guard_stop(SIGUSR1);
+        if(setpgid(0,0))fail(); /* No child or owned group exists on failure. */
+        if(close(AG_CHANNEL_FD)||close(metadata[0])||close(pipes[0][0])||close(pipes[1][0])
+           ||prctl(PR_SET_CHILD_SUBREAPER,1,0,0,0))guard_stop(0);
+        struct sigaction action={.sa_handler=guard_stop},ignore_pipe={.sa_handler=SIG_IGN};
+        if(sigemptyset(&action.sa_mask)||sigemptyset(&ignore_pipe.sa_mask)
+           ||sigaction(SIGPIPE,&ignore_pipe,NULL)||sigaction(SIGUSR1,&action,NULL)||sigaction(SIGALRM,&action,NULL)
+           ||prctl(PR_SET_PDEATHSIG,SIGUSR1)||getppid()!=observer)guard_stop(SIGUSR1);
         alarm(seconds+1);
-        pid_t child=fork();if(child<0)fail();
+        int release[2];if(pipe2(release,O_CLOEXEC))guard_stop(0);
+        pid_t guardian=getpid(),child=fork();if(child<0)guard_stop(0);
         if(child==0) {
-            if(prctl(PR_SET_PDEATHSIG,SIGKILL)||getppid()==1||dup2(pipes[0][1],1)!=1
-               ||dup2(pipes[1][1],2)!=2||fchdir(directory))fail();
-            int pinned=fcntl(executable,F_DUPFD_CLOEXEC,32);if(pinned<0)fail();
-            if(dup3(pinned,5,O_CLOEXEC)!=5||close_range(3,4,0)||close_range(6,~0U,0))fail();
+            struct sigaction normal_pipe={.sa_handler=SIG_DFL};
+            if(sigemptyset(&normal_pipe.sa_mask)||sigaction(SIGPIPE,&normal_pipe,NULL)
+               ||prctl(PR_SET_PDEATHSIG,SIGKILL)||getppid()!=guardian||close(release[1]))fail();
+            unsigned char released;
+            if(read(release[0],&released,1)!=1||released!=1||close(release[0])
+               ||dup2(pipes[0][1],1)!=1||dup2(pipes[1][1],2)!=2||fchdir(directory))fail();
+            int pinned=fcntl(executable,F_DUPFD_CLOEXEC,32),scratch=fcntl(5,F_DUPFD_CLOEXEC,32);
+            if(pinned<0||scratch<0||dup2(scratch,4)!=4||dup3(pinned,5,O_CLOEXEC)!=5
+               ||close_range(3,3,0)||close_range(6,~0U,0))fail();
             bounded_limit(RLIMIT_NPROC,process_limit);bounded_limit(RLIMIT_AS,memory_limit);
             bounded_limit(RLIMIT_CPU,seconds<5?seconds:5);
             child_filter();syscall(SYS_execveat,5,"",command,env,AT_EMPTY_PATH);fail();
         }
-        if(close(pipes[0][1])||close(pipes[1][1]))fail();
-        int root_seen=0;
+        if(close(release[0]))guard_stop(0);
+        /* Trusted PID handoff precedes project execution. On forced guard
+         * termination the observer can collect the adopted root's real status. */
+        guard_message(metadata[1],0,(uint32_t)child);
+        unsigned char released=1;
+        if(write(release[1],&released,1)!=1||close(release[1])
+           ||close(pipes[0][1])||close(pipes[1][1]))guard_stop(0);
+        /* Publish actual root status while WNOWAIT still pins its PID. If
+         * guard dies before publication, the unreaped root is adopted by the
+         * observer; after publication, metadata is authoritative even if a
+         * descendant later receives the freed numeric PID. */
+        siginfo_t root_status;memset(&root_status,0,sizeof(root_status));
         for(;;) {
-            int status;pid_t done=waitpid(-1,&status,0);
-            if(done>0) {
-                if(done==child) {root_seen=1;guard_message(metadata[1],1,(uint32_t)status);}
-                continue;
-            }
+            if(!waitid(P_PID,(id_t)child,&root_status,WEXITED|WNOWAIT))break;
+            if(errno!=EINTR)guard_stop(0);
+        }
+        if(root_status.si_pid!=child)guard_stop(0);
+        int status;
+        if(root_status.si_code==CLD_EXITED&&root_status.si_status>=0&&root_status.si_status<=255)
+            status=root_status.si_status<<8;
+        else if((root_status.si_code==CLD_KILLED||root_status.si_code==CLD_DUMPED)
+                &&root_status.si_status>0&&root_status.si_status<128)
+            status=root_status.si_status|(root_status.si_code==CLD_DUMPED?0x80:0);
+        else {guard_stop(0);status=0;}
+        guard_message(metadata[1],1,(uint32_t)status);
+        int confirmed;pid_t root_reaped;
+        do {root_reaped=waitpid(child,&confirmed,__WALL);} while(root_reaped<0&&errno==EINTR);
+        if(root_reaped!=child||confirmed!=status)guard_stop(0);
+        for(;;) {
+            int descendant_status;pid_t done=waitpid(-1,&descendant_status,__WALL);
+            if(done>0)continue;
             if(errno==EINTR)continue;
-            if(errno!=ECHILD||!root_seen)fail();
+            if(errno!=ECHILD)guard_stop(0);
             guard_message(metadata[1],2,0);_exit(0);
         }
     }
@@ -320,25 +429,29 @@ int main(int argc,char **argv,char **environment) {
     for(unsigned index=0;index<2;index++)if(fcntl(pipes[index][0],F_SETFL,O_NONBLOCK))fail();
     if(fcntl(metadata[0],F_SETFL,O_NONBLOCK))fail();
     int status=0,root_seen=0,tree_message=0,reaped=0,closed[2]={0},timed_out=0,limited=0,killed=0,guard_error=0;
-    unsigned char meta[16];size_t meta_size=0;
-    while(!reaped||!closed[0]||!closed[1]) {
+    unsigned char meta[24];size_t meta_size=0;int metadata_closed=0;pid_t command_pid=0;
+    while(!reaped||!closed[0]||!closed[1]||!metadata_closed) {
         uint64_t now=milliseconds();
         siginfo_t info;memset(&info,0,sizeof(info));
         if(!killed&&waitid(P_PID,(id_t)guard,&info,WEXITED|WNOHANG|WNOWAIT))fail();
         int guard_done=info.si_pid==guard;
         for(;;) {
-            unsigned char record[16];ssize_t n=read(metadata[0],record,sizeof(record));
+            unsigned char record[24];ssize_t n=read(metadata[0],record,sizeof(record));
             if(n<0) {if(errno==EAGAIN||errno==EINTR)break;fail();}
-            if(n==0)break;
+            if(n==0) {metadata_closed=1;break;}
             if(meta_size+(size_t)n>sizeof(meta))fail();
             memcpy(meta+meta_size,record,(size_t)n);meta_size+=(size_t)n;
         }
         if(meta_size>=8) {
-            if(ag_u32(meta)!=1)fail();
-            status=(int)ag_u32(meta+4);root_seen=1;
+            if(ag_u32(meta)!=0||!ag_u32(meta+4)||ag_u32(meta+4)>INT32_MAX)fail();
+            command_pid=(pid_t)ag_u32(meta+4);
         }
-        if(meta_size==16) {
-            if(ag_u32(meta+8)!=2||ag_u32(meta+12))fail();
+        if(meta_size>=16) {
+            if(ag_u32(meta+8)!=1)fail();
+            status=(int)ag_u32(meta+12);root_seen=1;
+        }
+        if(meta_size==24) {
+            if(ag_u32(meta+16)!=2||ag_u32(meta+20))fail();
             tree_message=1;
         }
         if(!killed&&(now>=deadline||limited||guard_done)) {
@@ -351,8 +464,11 @@ int main(int argc,char **argv,char **environment) {
         }
         if(killed&&!reaped) {
             for(;;) {
-                int observed;pid_t done=waitpid(-1,&observed,WNOHANG);
-                if(done>0)continue;
+                int observed;pid_t done=waitpid(-1,&observed,WNOHANG|__WALL);
+                if(done>0) {
+                    if(done==command_pid&&!root_seen) {status=observed;root_seen=1;}
+                    continue;
+                }
                 if(done==0)break;
                 if(errno==ECHILD) {reaped=1;break;}
                 if(errno!=EINTR)fail();
@@ -375,14 +491,18 @@ int main(int argc,char **argv,char **environment) {
         }
     }
     if(guard_error&&!timed_out&&!limited)fail();
-    if(!root_seen) {if(!timed_out&&!limited)fail();status=SIGKILL;}
-    if(!WIFEXITED(status)&&!WIFSIGNALED(status))fail();
+    clean_work(5,0,work_node.st_dev);
+    /* Lost status is an explicit helper error, never a fabricated SIGKILL. */
+    if(!root_seen||(!WIFEXITED(status)&&!WIFSIGNALED(status)))fail();
+    struct stat cleaned,source_after;
+    if(fstat(5,&cleaned)||cleaned.st_dev!=work_node.st_dev||cleaned.st_ino!=work_node.st_ino
+       ||fstat(AG_TARGET_FD,&source_after)||!unchanged(&source_node,&source_after))fail();
     emit_stream(0);emit_stream(1);
-    unsigned char terminal[68]={0};memcpy(terminal,"CGE1",4);
+    unsigned char terminal[72]={0};memcpy(terminal,"CGE1",4);
     ag_put32(terminal+4,WIFEXITED(status)?(uint32_t)WEXITSTATUS(status):UINT32_MAX);
     ag_put32(terminal+8,WIFSIGNALED(status)?(uint32_t)WTERMSIG(status):0);
     ag_put32(terminal+12,timed_out);ag_put32(terminal+16,limited);ag_put64(terminal+20,milliseconds()-start);
-    memcpy(terminal+28,digest,32);ag_put32(terminal+60,1);ag_put32(terminal+64,!tree_message);
+    memcpy(terminal+28,digest,32);ag_put32(terminal+60,1);ag_put32(terminal+64,!tree_message);ag_put32(terminal+68,1);
     emit_raw(terminal,sizeof(terminal));
     memcpy(header,"CGF1",4);emit_raw(header,sizeof(header));
     unsigned char ack[37];

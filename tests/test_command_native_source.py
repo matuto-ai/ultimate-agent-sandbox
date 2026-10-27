@@ -30,25 +30,43 @@ class CommandNativeSourceTests(unittest.TestCase):
     def test_group_identity_remains_pinned_until_one_signal_then_whole_tree_reap(self):
         observer = self.source[self.source.index('if(setpgid(guard,guard)'):]
         self.assertLess(observer.index('WNOWAIT'), observer.index('kill(-guard,SIGKILL)'))
-        self.assertLess(observer.index('kill(-guard,SIGKILL)'), observer.index('waitpid(-1,&observed,WNOHANG)'))
+        self.assertLess(observer.index('kill(-guard,SIGKILL)'), observer.index('waitpid(-1,&observed,WNOHANG|__WALL)'))
         self.assertIn('if(!killed&&', observer)
         self.assertIn('if(errno==ECHILD) {reaped=1;break;}', observer)
         self.assertEqual(observer.count('kill(-guard,SIGKILL)'), 1)
+        self.assertIn('sigaction(SIGCHLD,&children,NULL)', self.source)
+        self.assertIn('waitpid(-1,&descendant_status,__WALL)', self.source)
+        self.assertIn('waitid(P_PID,(id_t)child,&root_status,WEXITED|WNOWAIT)', self.source)
+        self.assertIn('if(done==command_pid&&!root_seen)', self.source)
 
     def test_independent_guard_lifetime_and_private_fd_closure_precede_project_exec(self):
         self.assertIn('PR_SET_PDEATHSIG,SIGUSR1', self.source)
         self.assertIn('sigaction(SIGALRM,&action,NULL)', self.source)
         self.assertIn('alarm(seconds+1)', self.source)
+        self.assertIn('sigaction(SIGPIPE,&ignore_pipe,NULL)', self.source)
+        self.assertIn('sigaction(SIGPIPE,&normal_pipe,NULL)', self.source)
+        self.assertIn('getppid()!=observer', self.source)
+        self.assertNotIn('status=SIGKILL', self.source)
         self.assertIn('syscall(SYS_kill,0,SIGKILL)', self.source)
         child = self.source[self.source.index('if(child==0)'):]
-        self.assertLess(child.index('close_range(3,4,0)'), child.index('SYS_execveat'))
+        self.assertLess(child.index('close_range(3,3,0)'), child.index('SYS_execveat'))
         self.assertLess(child.index('child_filter()'), child.index('SYS_execveat'))
 
     def test_child_limits_cannot_be_raised_or_escape_group_and_runtime_execute_is_not_recursive(self):
         child = self.source[self.source.index('static void child_filter'):self.source.index('static void parent_filter')]
         for syscall in ('setsid', 'setpgid', 'kill', 'tkill', 'tgkill', 'prctl', 'setrlimit'):
             self.assertNotIn('CG_ALLOW(SYS_' + syscall + ')', child)
+        for syscall in ('chmod', 'fchmodat', 'utimensat'):
+            self.assertNotIn('CG_ALLOW(SYS_' + syscall + ')', child)
+        self.assertIn('(ST_RDONLY|ST_NOEXEC)', self.source)
+        self.assertIn('ag_u64(request+124)', self.source)
+        self.assertIn('ag_u64(request+132)', self.source)
+        self.assertIn('!unchanged(&source_node,&source_after)', self.source)
         self.assertNotIn('CG_ALLOW(SYS_prlimit64)', child)
+        self.assertNotIn('CG_ALLOW(SYS_ioctl)', child)
+        self.assertIn('O_ASYNC,0,1),DENY', child)
+        self.assertNotIn('CG_ALLOW(F_SETOWN)', child)
+        self.assertNotIn('CG_ALLOW(F_SETSIG)', child)
         self.assertIn('CLONE_CHILD_CLEARTID', child)
         self.assertNotIn('|CLONE_PARENT|', child)
         self.assertIn('read_rule(ruleset,libraries,LANDLOCK_ACCESS_FS_READ_FILE|LANDLOCK_ACCESS_FS_READ_DIR)', self.source)

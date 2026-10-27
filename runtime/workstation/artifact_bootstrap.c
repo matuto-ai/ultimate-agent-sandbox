@@ -75,7 +75,7 @@ int main(int argc,char **argv) {
     if(prctl(PR_SET_DUMPABLE,0)||prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0))fail();
     identity();
     lower(RLIMIT_AS,AG_MEMORY_BYTES);lower(RLIMIT_CPU,AG_CPU_SECONDS);
-    lower(RLIMIT_NOFILE,AG_MAX_FDS);lower(RLIMIT_CORE,0);lower(RLIMIT_FSIZE,0);
+    lower(RLIMIT_NOFILE,AG_MAX_FDS);lower(RLIMIT_CORE,0);lower(RLIMIT_FSIZE,AG_FSIZE);
     lower(RLIMIT_NPROC,AG_NPROC);lower(RLIMIT_STACK,8U*1024U*1024U);
     if(close_range(3,~0U,0))fail();
     struct stat before_dir,before_node,after_dir,after_node;
@@ -121,10 +121,22 @@ int main(int argc,char **argv) {
     if(tree<0||fstat(tree,&info)||fstatvfs(tree,&filesystem)
        ||!(filesystem.f_flag&ST_RDONLY)||!S_ISDIR(info.st_mode)
        ||info.st_uid!=AG_SUPERVISOR_UID||(info.st_mode&07777)!=0555)fail();
+#ifdef AG_COMMAND_WORK
+    int work_root=open_beneath(root,"uas/gate-work",O_PATH|O_DIRECTORY|O_CLOEXEC,containment);
+    int work=work_root<0?-1:open_beneath(work_root,target,O_RDONLY|O_DIRECTORY|O_CLOEXEC,containment|RESOLVE_NO_XDEV);
+    struct stat work_info;
+    if(work<0||fstat(work,&work_info)||!S_ISDIR(work_info.st_mode)
+       ||work_info.st_uid!=AG_SUPERVISOR_UID||work_info.st_gid!=AG_UID
+       ||(work_info.st_mode&07777)!=0770)fail();
+#endif
     /* peer is 3 after the close_range; avoid descriptor replacement overlap. */
     if(peer!=AG_CHANNEL_FD||dup2(tree,AG_TARGET_FD)!=AG_TARGET_FD
        ||fcntl(AG_CHANNEL_FD,F_SETFD,0)||fcntl(AG_TARGET_FD,F_SETFD,0))fail();
+#ifdef AG_COMMAND_WORK
+    if(dup2(work,5)!=5||fcntl(5,F_SETFD,0)||close_range(6,~0U,0))fail();
+#else
     if(close_range(5,~0U,0))fail();
+#endif
     /* Keep harmless fixed stdio so future target opens start at FD5. The final
      * filter permits neither read nor write on these /dev/null descriptors. */
     int harmless=open("/dev/null",O_RDONLY|O_CLOEXEC|O_NOFOLLOW);

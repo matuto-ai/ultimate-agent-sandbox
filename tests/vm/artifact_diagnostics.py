@@ -110,6 +110,8 @@ SUPERVISOR_PHASES=frozenset(('supervisor-main','source-setup','source-resolve','
     'control-resolve','control-current','control-prepare','control-start','control-finish',
     'control-abort','control-reconcile','control-unsupported','confinement-probes'))
 SUPERVISOR_CODES=frozenset((
+    'INVALID_ARTIFACT_REVISION',
+    'UNSUPPORTED_GATE_PROFILE',
     'ARTIFACT_ALLOCATION_LIMIT',
     'ARTIFACT_ALTERNATE_UNSUPPORTED',
     'ARTIFACT_CAPACITY_ADMISSION_REQUIRED',
