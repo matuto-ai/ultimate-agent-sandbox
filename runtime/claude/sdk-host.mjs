@@ -6,7 +6,7 @@ import {createReadStream, readFileSync, lstatSync, realpathSync, writeSync} from
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID, NativeState, listingState} from './sdk-policy.mjs';
-import {closeOwned, collectListing, validateLoopback} from './sdk-resources.mjs';
+import {closeOwned, collectListing, validateLoopback, nativeDeadline, CONTROL_DEADLINE} from './sdk-resources.mjs';
 
 import {PermissionSlot, permissionProfile, terminatePending} from './permission-policy.mjs';
 import {PermissionNativeState} from './permission-state.mjs';
@@ -30,7 +30,6 @@ process.once('exit', () => {
     shutdownRecord?.reason, shutdownRecord?.code, shutdownRecord?.fence, lifecycle);
 });
 const queries = new Set();
-const DEADLINE = 1500;
 const write = value => {
   const wire = JSON.stringify(value) + '\n';
   const size = Buffer.byteLength(wire);
@@ -68,11 +67,9 @@ function kernelIdentity() {
   return {start: fields[19], state: fields[0]};
 }
 function deadline(promise, reason) {
-  let timer;
-  return Promise.race([promise, new Promise((_, reject) => {
-    timer = setTimeout(() => { state.hold(reason); shutdown(reason, 2); reject(new Error(reason)); }, DEADLINE);
-  })]).finally(() => clearTimeout(timer));
+  return nativeDeadline(promise, reason, reason => { state.hold(reason); shutdown(reason, 2); });
 }
+
 function makeInput() {
   let resolve, queued = null, done = false;
   return {
@@ -92,7 +89,7 @@ function makeInput() {
 async function publicListing(env) {
   const p = spawn(binary, ['agents', '--json', '--all', '--setting-sources', ''],
     {cwd, env, stdio: ['ignore', 'pipe', 'pipe']});
-  return await collectListing(p, queries, DEADLINE);
+  return await collectListing(p, queries, CONTROL_DEADLINE);
 }
 async function sample(env) {
   kernelIdentity();

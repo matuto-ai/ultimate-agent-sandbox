@@ -115,5 +115,23 @@ unknown intent stayed unresolved. Historical failures remain documented.
 
 The default receiver remains tool-less and permanently fences attention. The
 [qualified diagnostic integration](claude-permission-qualification.md#qualified-hub-holding-and-allow-only-recovery)
-does not qualify production approvals, arbitrary tool profiles, deny recovery,
+does not qualify production approvals, arbitrary tool profiles, arbitrary denial recovery,
 permission restoration, native reset or the full Participant acceptance scope.
+
+### Bounded cold-start budget
+
+The shared fixture host allows **5000ms once** for the public SDK initialization
+result. Ongoing public-control liveness and native listing remain bounded at
+**1500ms**; owned cleanup retains its **2200ms** fallback. No traffic resets the
+initialization timer and no timeout retries or reinitializes the native process.
+Host-ready still follows the qualified public initialization result, version and
+kernel identity checks; this budget grants no delivery or permission authority.
+The low-level test harness waits up to 8s for host-ready (matching the receiver),
+so a 5s startup timeout and owned cleanup can finish; probe/stop waits are unchanged.
+
+This separation follows repeated cold-initialization timeouts, including PR108
+run 40434533748: its typed record observed the native child live/sleeping at
+1512ms, then exit 0 with complete cleanup and no forced kill. It establishes the
+failed deadline boundary, not the cause of the native initialization delay or
+an environmental-transient diagnosis. New actual-native validation is required;
+pure deadline tests are not proof that startup will complete within the new cap.
