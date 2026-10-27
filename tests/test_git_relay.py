@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from uas.forge import ForgeBinding
 from uas.git_service import GitBrokerClient
-from uas.git_stream import data_frame
+from uas.git_stream import GitStreamError, data_frame
 from uas.kernel_origin import OriginDenied, Record
 from uas.ledger import Origin
 from test_git_stream import Poll
@@ -51,7 +51,8 @@ class RelayTests(unittest.TestCase):
     def run_relay(self, ticks, *, broker=None, caller=None):
         self.poll = Poll(ticks)
         incoming = {self.client.channel: iter(broker or [{'kind': 'ready'}, json.loads(data_frame(b'answer')), self.terminal]),
-                    self.caller: iter(caller or [json.loads(data_frame(b'query')), {'kind': 'eof'}])}
+                    self.caller: iter(caller or [json.loads(data_frame(b'query')), {'kind': 'eof'}, {'kind': 'stream-finished'}])}
+        self.incoming = incoming
         def recv(channel):
             value = next(incoming[channel])
             if isinstance(value, BaseException): raise value
@@ -74,7 +75,7 @@ class RelayTests(unittest.TestCase):
         self.assertEqual([value['kind'] for value in self.caller.sent], ['ready', 'data', 'exit'])
         self.assertEqual(self.caller.mode, 35)
         self.assertEqual(self.client.channel.mode, 35)
-        self.assertEqual(self.authority.require.call_count, 2)
+        self.assertEqual(self.authority.require.call_count, 3)
         self.assertGreaterEqual(self.authority.current.call_count, 8)
         self.assertTrue(all(value <= .1 for value in self.poll.timeouts))
 
@@ -119,3 +120,84 @@ class RelayTests(unittest.TestCase):
                 self.run_relay([])
         finally: self.client._stream_lock.release()
         self.assertEqual(self.client.channel.sent, [])
+
+    def test_crossed_input_drained_through_finish_before_return(self):
+        marker = {'kind': 'stream-finished'}
+        terminal = self.run_relay([[('broker', 1)], [('caller', 2)]],
+            broker=[{'kind': 'ready'}, self.terminal],
+            caller=[json.loads(data_frame(b'crossed')), {'kind': 'eof'}, marker, {'kind': 'result'}])
+        self.assertEqual(terminal, self.terminal)
+        self.assertEqual([x['kind'] for x in self.client.channel.sent], ['GIT_OPEN'])
+        self.assertEqual(self.authority.require.call_count, 3)
+        self.assertEqual(next(self.incoming[self.caller]), {'kind': 'result'})
+        self.assertFalse(self.client.closed)
+
+    def test_initial_refusal_requires_authenticated_finish(self):
+        refusal = {'kind': 'refused', 'error': 'GIT_STREAM_ALREADY_CONSUMED', 'record': None}
+        self.assertEqual(self.run_relay([], broker=[refusal],
+            caller=[{'kind': 'stream-finished'}]), refusal)
+        self.assertEqual(self.authority.require.call_count, 1)
+        self.assertEqual(self.caller.sent, [refusal])
+
+    def test_terminal_drain_failure_closes_without_retry(self):
+        tails = [
+            [{'kind': 'result'}],
+            [{'kind': 'stream-finished', 'extra': True}],
+            [{'kind': 'eof'}, {'kind': 'eof'}],
+            [{'kind': 'eof'}, json.loads(data_frame(b'x'))],
+            [OriginDenied('peer closed before finish')],
+        ]
+        for tail in tails:
+            with self.subTest(tail=tail):
+                self.setUp()
+                with self.assertRaises((OriginDenied, GitStreamError)):
+                    self.run_relay([[('broker', 1)], [('caller', 2)]],
+                        broker=[{'kind': 'ready'}, self.terminal], caller=tail)
+                self.assertTrue(self.client.closed)
+                self.assertEqual(self.client.channel.sent[-1], {'kind': 'cancel'})
+
+    def test_terminal_drain_checks_authority_after_terminal(self):
+        self.authority.require.side_effect = OriginDenied('revoked caller')
+        with self.assertRaises(OriginDenied):
+            self.run_relay([[('broker', 1)], [('caller', 2)]],
+                broker=[{'kind': 'ready'}, self.terminal], caller=[{'kind': 'stream-finished'}])
+        self.assertTrue(self.client.closed)
+
+    def test_terminal_drain_backpressure_waits_without_lock_and_checks_deadline(self):
+        self.run_relay([[('broker', 1)], [('caller', 2)]],
+            broker=[{'kind': 'ready'}, self.terminal],
+            caller=[BlockingIOError(), {'kind': 'stream-finished'}])
+        self.assertFalse(self.client.closed)
+
+    def test_terminal_drain_input_bound(self):
+        with patch('uas.git_stream.MAX_BYTES', 0), self.assertRaises(OriginDenied):
+            self.run_relay([[('broker', 1)], [('caller', 2)]],
+                broker=[{'kind': 'ready'}, self.terminal], caller=[json.loads(data_frame(b'x'))])
+        self.assertTrue(self.client.closed)
+
+    def test_terminal_drain_deadline_cannot_wait_forever(self):
+        now = [0.0]
+        original = self.caller._send
+        def send(raw):
+            result = original(raw)
+            if json.loads(raw)['kind'] == 'exit': now[0] = 33.0
+            return result
+        self.caller.send.side_effect = send
+        with patch('uas.git_service.time.monotonic', side_effect=lambda: now[0]), self.assertRaises(OriginDenied):
+            self.run_relay([[('broker', 1)], [('caller', 2)]],
+                broker=[{'kind': 'ready'}, self.terminal], caller=[{'kind': 'stream-finished'}])
+        self.assertTrue(self.client.closed)
+
+    def test_terminal_drain_preserves_preterminal_eof_and_byte_count(self):
+        for tail in ({'kind': 'eof'}, json.loads(data_frame(b'x'))):
+            with self.subTest(tail=tail):
+                self.setUp()
+                with self.assertRaises(OriginDenied):
+                    self.run_relay([[('caller', 1)], [('broker', 1)], [('caller', 2)]],
+                        broker=[{'kind': 'ready'}, self.terminal], caller=[{'kind': 'eof'}, tail])
+                self.assertTrue(self.client.closed)
+        self.setUp()
+        with patch('uas.git_stream.MAX_BYTES', 1), self.assertRaises(OriginDenied):
+            self.run_relay([[('caller', 1)], [('broker', 1)], [('caller', 2)]],
+                broker=[{'kind': 'ready'}, self.terminal],
+                caller=[json.loads(data_frame(b'x')), json.loads(data_frame(b'y'))])

@@ -262,7 +262,7 @@ class GitBrokerClient:
     def _relay(self, caller, authority, *, operation_id, argv, lock):
         """Bounded bidirectional seqpacket pump; no blocking I/O under lock."""
         import select
-        from .git_stream import parse_frame
+        from .git_stream import MAX_BYTES, parse_frame
         if self.closed: raise LedgerError('GIT_BROKER_UNAVAILABLE')
         target = parse_ssh(argv, self.binding)
         request = {'kind': 'GIT_OPEN', 'id': _token(operation_id), 'binding': self.scope,
@@ -284,6 +284,36 @@ class GitBrokerClient:
                     return
                 except BlockingIOError:
                     select.select([], [channel], [], .1)
+        input_bytes = 0
+        input_eof = False
+        def accept_input(raw):
+            nonlocal input_bytes, input_eof
+            kind, payload = parse_frame(raw)
+            if kind == 'eof':
+                if input_eof: raise OriginDenied('duplicate Git input EOF')
+                input_eof = True
+            elif kind == 'data':
+                if input_eof: raise OriginDenied('Git input data after EOF')
+                input_bytes += len(payload)
+                if input_bytes > MAX_BYTES: raise OriginDenied('Git relay input limit')
+            else:
+                raise OriginDenied('unexpected Git input frame')
+        def finish_terminal():
+            # The Worker acknowledges consuming our terminal on the same FIFO
+            # channel as earlier input. Drain only that authenticated stream;
+            # never let crossed data/EOF become the next command's input.
+            while True:
+                current()
+                try:
+                    with receive(caller) as record:
+                        with lock(): authority.require(record)
+                        value = decode(record.data)
+                        if value == {'kind': 'stream-finished'}:
+                            current()
+                            return
+                        accept_input(record.data)
+                except BlockingIOError:
+                    select.select([caller], [], [], .1)
         try:
             caller.setblocking(False); self.channel.setblocking(False)
             transmit(self.channel, request)
@@ -296,7 +326,9 @@ class GitBrokerClient:
                 except BlockingIOError:
                     select.select([self.channel], [], [], .1)
             if reply.get('kind') == 'refused':
-                validate_reply(reply, target); transmit(caller, reply); return reply
+                validate_reply(reply, target); transmit(caller, reply)
+                finish_terminal()
+                return reply
             if reply != {'kind': 'ready'}: raise OriginDenied('invalid Git stream readiness')
             transmit(caller, reply)
             queued = {'caller': [], 'broker': []}
@@ -317,6 +349,7 @@ class GitBrokerClient:
                 while True:
                     current()
                     if terminal is not None and not queued['caller']:
+                        finish_terminal()
                         return terminal
                     for name, other in (('caller', 'broker'), ('broker', 'caller')):
                         events = selectors.EVENT_WRITE if queued[name] else 0
@@ -331,7 +364,7 @@ class GitBrokerClient:
                                 with receive(channel) as record:
                                     if name == 'caller':
                                         with lock(): authority.require(record)
-                                        parse_frame(record.data)
+                                        accept_input(record.data)
                                         frame = decode(record.data)
                                     else:
                                         self.worker.require(record)

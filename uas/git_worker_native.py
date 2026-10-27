@@ -242,6 +242,10 @@ class WorkerBridge:
                             send(self.shim_channel, value)
                             if kind in {'exit', 'refused'}:
                                 terminal = True
+                                # FIFO barrier for bytes already forwarded to the
+                                # Supervisor before its terminal crossed our input.
+                                # No later shim input is forwarded while terminal.
+                                send(self.channel, {'kind': 'stream-finished'})
         except BaseException:
             self.failure = 'GIT_WORKER_BRIDGE_FAILED'
             self.cancelled.set()

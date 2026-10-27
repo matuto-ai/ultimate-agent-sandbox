@@ -460,7 +460,7 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(all(call.args == (self.channel, self.supervisor) for call in received.call_args_list))
         self.assertEqual(2, held.return_value.require.call_count)
         held.return_value.close.assert_called_once()
-        self.assertEqual(['ssh-open', 'ready', 'data', 'exit', 'shim-finish-ack'], [value['kind'] for _, value in sent])
+        self.assertEqual(['ssh-open', 'ready', 'data', 'exit', 'stream-finished', 'shim-finish-ack'], [value['kind'] for _, value in sent])
 
     def terminal_sequence(self, tail, *, terminal=None, authority_error=False, stop_before_finish=False):
         opened = {'kind': 'ssh-open', 'argv': ['git@github.com', "git-upload-pack 'owner/repo.git'"]}
@@ -493,7 +493,7 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(self.bridge._active)
         self.assertEqual(3, held.return_value.require.call_count)
         held.return_value.close.assert_called_once()
-        self.assertEqual([{'kind':'ssh-open','argv':['git@github.com', "git-upload-pack 'owner/repo.git'"]}],
+        self.assertEqual([{'kind':'ssh-open','argv':['git@github.com', "git-upload-pack 'owner/repo.git'"]}, {'kind':'stream-finished'}],
                          [value for channel,value in sent if channel is self.channel])
         self.assertEqual(['exit','shim-finish-ack'], [value['kind'] for channel,value in sent if channel is self.local])
 
