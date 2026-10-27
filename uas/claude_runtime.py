@@ -342,8 +342,9 @@ class _ClaudeJournal:
             raise ClaudeUnavailable('only an isolated loopback fixture endpoint is supported')
         if (type(scope) is not dict or set(scope) != {'room_id', 'participant_id', 'run_id', 'generation', 'context_generation'}
                 or any(type(scope[k]) is not str or not scope[k] for k in ('room_id', 'participant_id', 'run_id'))
-                or any(type(scope[k]) is not int or scope[k] != 1 for k in ('generation', 'context_generation'))):
-            raise ClaudeUnavailable('only fixed fixture Run/context generation 1 is supported')
+                or any(type(scope[k]) is not int or not 1 <= scope[k] <= 2**53 - 1
+                       for k in ('generation', 'context_generation'))):
+            raise ClaudeUnavailable('invalid fixed fixture Run/context generation')
         with open(binary, 'rb') as handle:
             if hashlib.file_digest(handle, 'sha256').hexdigest() != BINARY_SHA256:
                 raise ClaudeUnavailable('unqualified Claude binary')
@@ -447,6 +448,8 @@ class DirectClaudeDiagnosticReceiver(_ClaudeJournal):
     """
     def __init__(self, binary, *, cwd, home, gateway_url, fixture_key, journal,
                  scope, resume=False, timeout=8, safe_for=2):
+        if any(scope.get(k) != 1 for k in ("generation", "context_generation")):
+            raise ClaudeUnavailable("diagnostic only supports Run/context generation 1")
         self.db = self.owner = self.process = None
         self.reader = self.stderr = None
         try:
@@ -702,7 +705,7 @@ def _sdk_startup_diagnostic(lines):
 
 
 class FixtureClaudeReceiver(_ClaudeJournal):
-    """Qualified tool-less SDK fixture, not a Supervisor-owned native badge.
+    """Qualified tool-less SDK fixture; Supervisor binding is explicit and optional.
 
     The fixed SDK host owns the native CLI. Every observation and send performs
     a fresh non-model public control/listing check; no synthetic bootstrap or
@@ -711,7 +714,11 @@ class FixtureClaudeReceiver(_ClaudeJournal):
     MAX_FRAME = 256 * 1024
 
     def __init__(self, binary, *, sdk_install, node, cwd, home, gateway_url, fixture_key,
-                 journal, scope, resume=False, timeout=8, diagnostic_nonce_file=None):
+                 journal, scope, resume=False, timeout=8, diagnostic_nonce_file=None, incarnation_id=None, defer_ready=False):
+        self.authorize = None
+        self.resumed = resume
+        self.startup_error = None
+        self.startup_cleanup_succeeded = None
         self.db = self.owner = self.process = None
         self.reader = self.stderr = None
         self.host_pidfd = self.native_pidfd = None
@@ -731,6 +738,10 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             if self.diagnostic_nonce_file is not None and resume:
                 raise ClaudeUnavailable('permission diagnostic cannot resume or replay decisions')
             self._open_journal(binary, gateway_url, fixture_key, journal, scope, resume, timeout)
+            if incarnation_id is not None:
+                from .ledger import _token
+                _token(incarnation_id)
+                self.incarnation_id = incarnation_id
             self.signals = ClaudeSignals(self.session_id, safe_for=0,
                                          diagnostic_nonce_file=self.diagnostic_nonce_file)
             host = Path(__file__).resolve().parents[1] / 'runtime/claude/sdk-host.mjs'
@@ -748,32 +759,69 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             self.stderr = threading.Thread(target=self._errors, daemon=True)
             self.reader.start()
             self.stderr.start()
-            self._wait(lambda: self.ready)
+            if not defer_ready:
+                self._wait(lambda: self.ready)
             # Initialization is not readiness and makes no model request.
         except BaseException as error:
-            process = self.process
-            signals = getattr(self, 'signals', None)
-            facts = {'initialized': bool(signals and signals.initialized),
-                     'ready': self.ready, 'ended_before_cleanup': self.ended,
-                     'fenced_before_cleanup': bool(signals and signals.fenced)}
-            cleanup_succeeded = False
-            try:
-                self.close()
-                cleanup_succeeded = True
-            except BaseException:
-                # Existing cleanup attempts all resources before raising. Report
-                # its outcome without leaking arbitrary exception/stderr text.
-                pass
-            facts.update(cleanup_succeeded=cleanup_succeeded,
-                         host_returncode=process.returncode if process is not None and type(process.returncode) is int else None,
-                         host_reaped=process is not None and type(process.returncode) is int,
-                         resources_released=self.process is None and self.host_pidfd is None
-                         and self.native_pidfd is None and self.db is None and self.owner is None,
-                         host=_sdk_startup_diagnostic(list(self.errors)))
-            # Original exception/type/traceback/cause survive. All new fields are
-            # fixed codes or scalars; no error text, key, argv or session content.
-            error.add_note('SDK startup diagnostic: ' + json.dumps(facts, ensure_ascii=True, sort_keys=True))
+            self._startup_failed(error)
             raise
+
+    def _startup_failed(self, error):
+        process = self.process
+        signals = getattr(self, 'signals', None)
+        facts = {'initialized': bool(signals and signals.initialized),
+                 'ready': self.ready, 'ended_before_cleanup': self.ended,
+                 'fenced_before_cleanup': bool(signals and signals.fenced)}
+        cleanup_succeeded = False
+        try:
+            self.close()
+            cleanup_succeeded = True
+        except BaseException:
+            # Existing cleanup attempts all resources before raising. Report
+            # its outcome without leaking arbitrary exception/stderr text.
+            pass
+        self.startup_cleanup_succeeded = cleanup_succeeded
+        facts.update(cleanup_succeeded=cleanup_succeeded,
+                     host_returncode=process.returncode if process is not None and type(process.returncode) is int else None,
+                     host_reaped=process is not None and type(process.returncode) is int,
+                     resources_released=self.process is None and self.host_pidfd is None
+                     and self.native_pidfd is None and self.db is None and self.owner is None,
+                     host=_sdk_startup_diagnostic(list(self.errors)))
+        # Original exception/type/traceback/cause survive. All new fields are
+        # fixed codes or scalars; no error text, key, argv or session content.
+        error.add_note('SDK startup diagnostic: ' + json.dumps(facts, ensure_ascii=True, sort_keys=True))
+
+    def wait_ready(self):
+        """Complete bounded SDK initialization after Supervisor owns the host."""
+        try:
+            self._wait(lambda: self.ready)
+        except BaseException as error:
+            # The Supervisor owns this deferred host already. Preserve its
+            # native descriptors until controller cleanup has retained copies.
+            self.startup_error = error
+            raise
+
+    def _authorized(self):
+        if getattr(self, "authorize", None) is not None:
+            try:
+                if self.authorize() is not True:
+                    raise LedgerError("AUTHORITY_REVOKED")
+            except LedgerError as error:
+                raise ClaudeUnavailable("Supervisor authority unavailable") from error
+
+    def accept(self, envelope):
+        self._authorized()
+        receipt = super().accept(envelope)
+        self._authorized()  # Late revocation cannot start the Hub clock.
+        return receipt
+
+    def prove_fresh_context(self, *, preceding_session=None):
+        if (getattr(self, "resumed", True) or self.session_id == preceding_session
+                or self.db.execute("SELECT count(*) FROM handoffs").fetchone()[0] != 0
+                or self._probe() is not Readiness.SAFE):
+            raise ClaudeUnavailable("fresh native context unverified")
+        return {"session_id": self.session_id,
+                "source": "fresh-home-explicit-session-native-idle-no-input"}
 
     def _host_alive(self):
         return not self.closing and self.process is not None and _pidfd_alive(self.host_pidfd)
@@ -801,7 +849,17 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                     if self.closing:
                         break
                     kind = frame.get('type')
-                    if kind == 'host-ready':
+                    if kind == 'native-spawned':
+                        if (self.native_pid is not None or frame.get('host_pid') != self.process.pid
+                                or frame.get('session_id') != self.session_id
+                                or type(frame.get('native_pid')) is not int
+                                or frame['native_pid'] <= 0 or frame['native_pid'] == self.process.pid
+                                or type(frame.get('native_start')) is not str):
+                            raise ValueError('invalid early native ownership')
+                        self.native_pidfd = _sdk_native_pidfd(frame['native_pid'], self.process.pid, frame['native_start'])
+                        self.native_pid, self.native_start = frame['native_pid'], frame['native_start']
+                        # Ownership is never initialization or readiness.
+                    elif kind == 'host-ready':
                         if (self.ready or frame.get('host_pid') != self.process.pid
                                 or type(frame.get('native_pid')) is not int or frame['native_pid'] <= 0
                                 or frame['native_pid'] == self.process.pid
@@ -814,14 +872,15 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                             if type(incarnation) is not str or str(uuid.UUID(incarnation)) != incarnation:
                                 raise ValueError('invalid permission fixture incarnation')
                             self.signals.permission_incarnation = incarnation
-                        self.native_pid = frame['native_pid']
+                        if (self.native_pid != frame['native_pid']
+                                or self.native_start != frame.get('native_start')
+                                or self.native_pidfd is None):
+                            raise ValueError('ready identity differs from owned native')
                         fields = Path(f'/proc/{self.native_pid}/stat').read_text().rsplit(')', 1)[1].split()
                         if fields[1] != str(self.process.pid):
                             raise ValueError('SDK host does not own native process')
                         if type(frame.get('native_start')) is not str or frame['native_start'] != fields[19]:
                             raise ValueError('invalid SDK native start binding')
-                        self.native_start = frame['native_start']
-                        self.native_pidfd = _sdk_native_pidfd(self.native_pid, self.process.pid, self.native_start)
                         self.ready = True
                     elif kind in ('attention', 'decision'):
                         if self.diagnostic_nonce_file is None:
@@ -907,6 +966,7 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             fd = self.process.stdin.fileno()
             while offset < len(wire):
                 try:
+                    self._authorized()  # Outside condition: no lifecycle/reader lock inversion.
                     with self.condition:
                         remaining = deadline - time.monotonic()
                         if self.ended or self.signals.fenced or not self._host_alive() or remaining <= 0:
@@ -954,6 +1014,10 @@ class FixtureClaudeReceiver(_ClaudeJournal):
             return Readiness.AMBIGUOUS if self._kernel() in ('T', 't', 'Z', 'X', 'D') else Readiness.SAFE
 
     def observe(self):
+        try:
+            self._authorized()
+        except ClaudeUnavailable:
+            return Readiness.LOST
         if not self._host_alive() or self.ended:
             return Readiness.LOST
         if self._unknown() or self.signals.fenced:
@@ -1010,7 +1074,9 @@ class FixtureClaudeReceiver(_ClaudeJournal):
 
     def evidence(self):
         return {'runtime': 'Claude Code', 'version': VERSION, 'sdk_version': '0.3.310',
-                'binary_sha256': BINARY_SHA256, 'authority': 'sdk-host-owned-fixture-only',
+                'binary_sha256': BINARY_SHA256,
+                'authority': ('supervisor-owned-native-pidfd-fixture' if self.authorize is not None
+                              else 'sdk-host-owned-fixture-only'),
                 'permission_authority': 'fixture-controller-only' if self.diagnostic_nonce_file else None,
                 'permission_attention': self.signals.permission,
                 'permission_decision': self.signals.permission_decision,
@@ -1023,7 +1089,9 @@ class FixtureClaudeReceiver(_ClaudeJournal):
                 'unknown_intents': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NULL AND retryable != 1').fetchone()[0],
                 'retryable_intents': self.db.execute('SELECT count(*) FROM handoffs WHERE receipt IS NULL AND retryable=1').fetchone()[0],
                 'provider': 'no-upstream-loopback-protocol-fixture', 'inference_health': 'not-qualified',
-                'image_digest': 'not-qualified', 'native_reset': 'not-qualified', 'mcp_reconnect': 'not-qualified'}
+                'image_digest': 'not-qualified',
+                'native_reset': ('supervisor-context-ledger' if self.authorize is not None else 'not-qualified'),
+                'mcp_reconnect': 'not-qualified'}
 
     def close(self):
         with self.close_lock:

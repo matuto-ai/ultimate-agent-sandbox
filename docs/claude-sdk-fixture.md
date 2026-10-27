@@ -4,7 +4,9 @@ This is the fixed account-free default `uas.claude_runtime.FixtureClaudeReceiver
 not a production authority or provider qualification. It uses the supported SDK
 seam proved below; the old `DirectClaudeDiagnosticReceiver` remains explicit
 historical test code, never an automatic fallback. Main's Run-admission and
-Forge work are preserved; Claude cross-Run reset/admission is still unqualified.
+Forge work are preserved. The [Supervisor/context integration](claude-context-reset.md)
+adds immutable process authority, same-Run restoration and native cross-Run reset.
+Canonical GitHub Run admission is a separate product concern.
 
 ## Fixed public surfaces
 
@@ -28,8 +30,10 @@ Forge work are preserved; Claude cross-Run reset/admission is still unqualified.
 
 ## Authority, containment and local protocol
 
-`runtime/claude/sdk-host.mjs` is an SDK-owned **fixture** child, not a
-Supervisor-owned native Participant badge. Host PID and native PID are separate.
+`runtime/claude/sdk-host.mjs` is an SDK-owned **fixture** child. Its PID is never
+a native Participant badge. Standalone receivers retain fixture-only authority;
+`FixtureParticipantController.launch_claude` separately owns the host lifecycle
+and binds a Supervisor badge to the verified native PID/pidfd. The two stay distinct.
 The Python boundary verifies the owned host/native parent and start identities.
 It never promotes the wrapper PID to native authority or clears an unknown
 intent because a replacement host reports idle.
@@ -97,8 +101,9 @@ retention, loss-of-return reconciliation, actual history resume, stale scope,
 receipt/classification crash windows, owned-host partial-pipe uncertainty and
 native SIGSTOP. Source fault/parser tests are labeled separately. In particular,
 requires_action/missing-identity coverage is **not** actual permission-path proof.
-Tool-bearing profiles, production Supervisor authority, real authenticated
-inference, native reset, compaction and MCP reconnect remain unqualified.
+Tool-bearing profiles, production Workstation authority, real authenticated
+inference, compaction and MCP reconnect remain unqualified. The separate
+Supervisor fixture proves its own native reset/restore path, not those features.
 
 The existing automatic Claude job retains its two-minute limit and existing
 triggers. Qualification and adapter changes stay in one draft PR;
@@ -116,7 +121,8 @@ unknown intent stayed unresolved. Historical failures remain documented.
 The default receiver remains tool-less and permanently fences attention. The
 [qualified diagnostic integration](claude-permission-qualification.md#qualified-hub-holding-and-allow-only-recovery)
 does not qualify production approvals, arbitrary tool profiles, arbitrary denial recovery,
-permission restoration, native reset or the full Participant acceptance scope.
+permission restoration or native reset within the permission diagnostic profile.
+The separate tool-less Supervisor recipe never replays or restores permission decisions.
 
 ### Bounded cold-start budget
 

@@ -47,7 +47,7 @@ class FixtureSeat:
     def document(self):
         for value in (self.participant_id, self.actor_id, self.profile_id):
             _token(value)
-        if self.runtime not in {"fixture", "pi-fixture"} or self.provider_host != "forge.fixture.invalid":
+        if self.runtime not in {"fixture", "pi-fixture", "claude-fixture"} or self.provider_host != "forge.fixture.invalid":
             raise LedgerError("FIXTURE_ONLY")
         for values in (self.capabilities, self.required_credentials, self.arguments):
             if type(values) is not tuple or len(values) > 32:
@@ -131,6 +131,10 @@ class ProcessHandle:
     runtime_directory: Path
     protocol: str = "fixture"
     managed_receiver: object = None
+    native_pid: int | None = None
+    host_pidfd: int | None = None
+    cleanup_started: bool = False
+    cleanup_verified: bool = False
 
 
 class FixtureParticipantController:
@@ -170,13 +174,16 @@ class FixtureParticipantController:
                 # Never reconstruct authority from persisted PID/UID. A new
                 # owner fences every prior process, even if one is still alive.
                 for seat in document["seats"].values():
+                    if seat.get("host_pid") is not None:
+                        document["retired_pids"].append(seat["host_pid"])
+                        seat["host_pid"] = None
                     if seat["pid"] is not None:
                         document["retired_pids"].append(seat["pid"])
                         seat["pid"] = None
                     if seat["status"] != "closed":
                         seat.update(status="revoked", epoch=min(MAX_EPOCH, seat["epoch"] + 1), reason="controller-replaced")
                 document["retired_pids"] = sorted(set(document["retired_pids"]))
-                if len(document["retired_pids"]) > MAX_SEATS:
+                if len(document["retired_pids"]) > 2 * MAX_SEATS:
                     raise LedgerError("RETIRED_PROCESSES_UNVERIFIED")
                 document["controller_id"] = self.controller_id
             self._save(document)
@@ -196,11 +203,16 @@ class FixtureParticipantController:
                     or type(document["seats"]) is not dict or len(document["seats"]) > MAX_SEATS):
                 raise ValueError()
             _token(document["controller_id"])
-            if (type(document["retired_pids"]) is not list or len(document["retired_pids"]) > MAX_SEATS
+            if (type(document["retired_pids"]) is not list or len(document["retired_pids"]) > 2 * MAX_SEATS
                     or any(type(pid) is not int or pid < 1 for pid in document["retired_pids"])):
                 raise ValueError()
             for participant, record in document["seats"].items():
-                if set(record) != {"seat", "epoch", "incarnation_id", "status", "reason", "pid"}:
+                required = {"seat", "epoch", "incarnation_id", "status", "reason", "pid"}
+                if set(record) not in (required, required | {"host_pid", "cleanup_pending"}):
+                    raise ValueError()
+                if "host_pid" in record and (record["seat"]["runtime"] != "claude-fixture"
+                        or type(record["cleanup_pending"]) is not bool
+                        or (record["host_pid"] is not None and (type(record["host_pid"]) is not int or record["host_pid"] < 1))):
                     raise ValueError()
                 seat = record["seat"]
                 normalized = FixtureSeat(**{**seat, **{key: tuple(seat[key]) for key in
@@ -339,6 +351,19 @@ class FixtureParticipantController:
             finally:
                 if child_socket is not None:
                     child_socket.close()
+
+    def launch_claude(self, seat, recipe):
+        from .claude_participant import launch
+        return launch(self, seat, recipe)
+
+    def restore_claude(self, seat, recipe):
+        from .claude_participant import restore
+        return restore(self, seat, recipe)
+
+    def reset_claude(self, operation_id, seat, recipe, *, expected_context_generation, target_run):
+        from .claude_participant import reset
+        return reset(self, operation_id, seat, recipe,
+                     expected_context_generation=expected_context_generation, target_run=target_run)
 
     def launch_pi(self, seat, recipe):
         from .pi_fixture import FixturePiRecipe
@@ -695,7 +720,14 @@ class FixtureParticipantController:
         # sender PID is for this exact record. A duplicated/passed socket does
         # not duplicate its sender's kernel credentials; a live pidfd prevents
         # PID recycling from making a different process match the original.
-        if credentials != (handle.process.pid, os.getuid(), os.getgid()):
+        expected_pid = handle.native_pid if handle.protocol == "claude" else handle.process.pid
+        if handle.protocol == "claude":
+            from .claude_runtime import ClaudeUnavailable
+            try:
+                handle.managed_receiver._kernel()
+            except (ClaudeUnavailable, AttributeError) as error:
+                raise LedgerError("PROCESS_EXITED") from error
+        if credentials != (expected_pid, os.getuid(), os.getgid()):
             raise LedgerError("WRONG_PROCESS")
         return True
 
@@ -839,6 +871,8 @@ class FixtureParticipantController:
         provider I/O runs outside it; terminal publication rechecks authority.
         Replies can be lost; exact authorized retry retains ledger idempotency.
         """
+        if handle.protocol == "claude":
+            raise LedgerError("NATIVE_CHANNEL_UNAVAILABLE")  # invocation-only adapter
         request_id = None
         forge_intent = None
         read_intent = None
@@ -987,6 +1021,9 @@ class FixtureParticipantController:
                     self._fence(document, participant, "revoked", "room-stopped")
             for handle in self.handles.values():
                 self._dispose(handle)
+            document = self._read()  # disposal may change durable cleanup state
+            if any(record.get("cleanup_pending", False) for record in document["seats"].values()):
+                return False  # no held identity survived an uncertain constructor/owner
             # A new controller does not own old pidfds. It may prove absence,
             # never adopt/kill by a persisted PID. A reused live PID conservatively
             # blocks Stop/Destroy rather than granting authority or being killed.
@@ -1019,8 +1056,9 @@ class FixtureParticipantController:
             # Native state/unexpected files are retained, never recursively
             # removed. Pi's explicit persistent recipe directory is not ours.
 
-    @staticmethod
-    def _dispose(handle):
+    def _dispose(self, handle):
+        if handle.protocol == "claude":
+            return self._dispose_claude(handle)
         if handle.process.poll() is None:
             handle.process.terminate()
             try:
@@ -1047,6 +1085,71 @@ class FixtureParticipantController:
             FixtureParticipantController._remove_empty_runtime_directory(handle.runtime_directory)
         if receiver_error is not None:
             raise LedgerError("NATIVE_RECEIVER_CLOSE_FAILED") from receiver_error
+
+    def _dispose_claude(self, handle):
+        """Keep independently held identities until both native and host stop.
+
+        Receiver cleanup may release its own copies even when it raises. These
+        duplicates and the durable pending marker prevent a second Stop/reset
+        from interpreting lost cleanup evidence as verified process absence.
+        """
+        from .claude_runtime import _dispose_sdk_process
+        if handle.cleanup_verified:
+            return
+        try:
+            document = self._read(require_owner=False)
+        except (LedgerError, OSError):
+            document = None
+        record = document['seats'].get(handle.badge.participant_id) if document else None
+        owns_record = (document is not None and document['controller_id'] == self.controller_id
+                       and record is not None and record['incarnation_id'] == handle.badge.incarnation_id)
+        if owns_record:
+            record['cleanup_pending'] = True
+            self._save(document)  # no cleanup effect before durable uncertainty
+        try:
+            if not handle.cleanup_started:
+                # Early public SDK spawn metadata may arrive while initialization
+                # is still pending. Retain its verified pidfd before close clears it.
+                receiver = handle.managed_receiver
+                with receiver.condition:
+                    if handle.native_pid is None and receiver.native_pidfd is not None:
+                        handle.pidfd = os.dup(receiver.native_pidfd)
+                        handle.native_pid = receiver.native_pid
+                handle.cleanup_started = True
+                if receiver.startup_error is not None:
+                    receiver._startup_failed(receiver.startup_error)
+                    if receiver.startup_cleanup_succeeded is not True:
+                        raise LedgerError('NATIVE_STOP_UNVERIFIED')
+                else:
+                    receiver.close()
+            else:
+                # A bounded retry uses only our still-held host/native identities,
+                # never the receiver's now-cleared fields or a numeric PID scan.
+                _dispose_sdk_process(handle.process, handle.host_pidfd,
+                    handle.pidfd if handle.native_pid is not None else None)
+            if (handle.native_pid is None or handle.process.returncode is None or handle.pidfd < 0
+                    or not select.select([handle.pidfd], [], [], 3)[0]):
+                raise LedgerError('NATIVE_STOP_UNVERIFIED')
+            if owns_record:
+                document = self._read()
+                record = document['seats'].get(handle.badge.participant_id)
+                if record is not None and record['incarnation_id'] == handle.badge.incarnation_id:
+                    record['cleanup_pending'] = False
+                    self._save(document)
+            # Signal receipt and host reap alone never prove native exit. Only
+            # the held target's exit observation above releases its descriptor.
+            handle.cleanup_verified = True  # verified absence survives descriptor-close faults
+            try:
+                os.close(handle.pidfd)
+            finally:
+                handle.pidfd = -1
+                if handle.host_pidfd is not None:
+                    try:
+                        os.close(handle.host_pidfd)
+                    finally:
+                        handle.host_pidfd = None
+        except BaseException as error:
+            raise LedgerError('NATIVE_STOP_UNVERIFIED') from error
 
     def snapshot(self):
         with self.supervisor._locked():
