@@ -7,7 +7,7 @@ import unittest
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 2], 'claude-native.yml': [2],
+        budgets = {'validate.yml': [1, 1, 2, 1], 'claude-native.yml': [2],
                    'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
@@ -15,12 +15,16 @@ class VMCITriggerTests(unittest.TestCase):
                 actual = list(map(int, re.findall(r'^    timeout-minutes: (\d+)$', text, re.MULTILINE)))
                 self.assertEqual(expected, actual)
                 if name == 'validate.yml':
-                    # Both narrow integration jobs depend only on validate and
-                    # run in parallel; never sum parallel wall-clock budgets.
-                    smoke = text.split('  artifact-linux-smoke:\n', 1)[1].split('  docker-lifecycle:\n', 1)[0]
-                    docker = text.split('  docker-lifecycle:\n', 1)[1]
-                    self.assertEqual(re.findall(r'^    needs: (.+)$', smoke, re.MULTILINE), ['validate'])
-                    self.assertEqual(re.findall(r'^    needs: (.+)$', docker, re.MULTILINE), ['validate'])
+                    # Every integration job depends only on validate and runs
+                    # in parallel; never sum parallel wall-clock budgets.
+                    jobs = dict(re.findall(
+                        r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
+                        text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
+                    integrations = {'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams'}
+                    self.assertEqual(set(jobs), {'validate'} | integrations)
+                    self.assertEqual(re.findall(r'^    needs: (.+)$', jobs['validate'], re.MULTILINE), [])
+                    for job in integrations:
+                        self.assertEqual(re.findall(r'^    needs: (.+)$', jobs[job], re.MULTILINE), ['validate'])
                     self.assertLessEqual(actual[0] + max(actual[1:]), 3)
                 else:
                     self.assertLessEqual(sum(actual), 3)
