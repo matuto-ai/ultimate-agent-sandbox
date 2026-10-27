@@ -23,32 +23,32 @@ class NativeImportRunnerTests(unittest.TestCase):
             'stdout': {'output': 'sha256:' + 'a' * 64}, 'stderr': {'output': ''}})).start()
         self.generic = patch.object(boundary.subprocess, 'run').start()
 
-    def test_exact_file_argv_uses_owned_runner_and_original_deadline(self):
-        self.assertEqual(boundary.run(*COMMAND, timeout=120, native_import_context=True), 'sha256:' + 'a' * 64)
-        self.execute.assert_called_once_with(COMMAND, timeout=120, phase='image-import')
+    def test_exact_file_argv_uses_owned_runner_and_fixed_build_budget(self):
+        self.assertEqual(boundary.run(*COMMAND, timeout=240, native_import_context=True), 'sha256:' + 'a' * 64)
+        self.execute.assert_called_once_with(COMMAND, timeout=240, phase='image-import')
         self.generic.assert_not_called()
 
     def test_changed_path_stdin_options_timeout_fds_or_dual_mode_rejected(self):
         for args, options in ((COMMAND[:-1] + ('-',), {}), (COMMAND + ('tag',), {}),
-                (COMMAND[:-1] + ('/other.tar',), {}), (COMMAND, {'timeout': 121}),
+                (COMMAND[:-1] + ('/other.tar',), {}), (COMMAND, {'timeout': 120}), (COMMAND, {'timeout': 241}),
                 (COMMAND, {'pass_fds': (4,)}), (COMMAND, {'native_failure_context': True}),
                 (COMMAND, {'native_trust_context': True}), (COMMAND, {'native_trust_context': 0})):
             with self.subTest(args=args, options=options), self.assertRaises(ValueError):
-                boundary.run(*args, native_import_context=True, **{'timeout': 120, **options})
+                boundary.run(*args, native_import_context=True, **{'timeout': 240, **options})
         self.execute.assert_not_called(); self.generic.assert_not_called()
 
     def test_nonboolean_flag_rejected(self):
         for value in (1, None, 'true'):
-            with self.assertRaises(ValueError): boundary.run(*COMMAND, timeout=120, native_import_context=value)
+            with self.assertRaises(ValueError): boundary.run(*COMMAND, timeout=240, native_import_context=value)
         self.execute.assert_not_called(); self.generic.assert_not_called()
 
     def test_failure_and_timeout_preserved_without_retry(self):
         self.execute.return_value = (7, {'stderr': {'output': 'error import'}, 'stdout': {'output': ''}})
         with self.assertRaisesRegex(RuntimeError, 'error import'):
-            boundary.run(*COMMAND, timeout=120, native_import_context=True)
-        self.execute.side_effect = subprocess.TimeoutExpired(COMMAND, 120)
+            boundary.run(*COMMAND, timeout=240, native_import_context=True)
+        self.execute.side_effect = subprocess.TimeoutExpired(COMMAND, 240)
         with self.assertRaises(subprocess.TimeoutExpired):
-            boundary.run(*COMMAND, timeout=120, native_import_context=True)
+            boundary.run(*COMMAND, timeout=240, native_import_context=True)
         self.assertEqual(self.execute.call_count, 2); self.generic.assert_not_called()
 
     def test_generic_import_remains_unchanged_without_opt_in(self):
@@ -82,14 +82,14 @@ class NativeImageEvidenceTests(unittest.TestCase):
                 patch.object(guest, 'emit_evidence') as emit, \
                 patch.object(guest, 'import_failure_diagnostics') as logs, patch('builtins.print'):
             self.assertEqual(guest.import_image(Path(COMMAND[-1])), 'sha256:' + 'a' * 64)
-        run.assert_called_once_with(*COMMAND, timeout=120, native_import_context=True)
+        run.assert_called_once_with(*COMMAND, timeout=240, native_import_context=True)
         self.assertEqual([call.args[0] for call in emit.call_args_list], ['import-start', 'import-end'])
         self.assertEqual(facts.sample.call_count, 2); facts.close.assert_called_once(); logs.assert_not_called()
 
     def test_failure_samples_and_logs_before_close_without_masking_or_retry(self):
         events = []; facts = Mock(); facts.sample.return_value = {'daemon_error': 'PermissionError'}
         facts.close.side_effect = lambda: events.append('close')
-        error = subprocess.TimeoutExpired(COMMAND, 120)
+        error = subprocess.TimeoutExpired(COMMAND, 240)
         with patch.object(guest, 'ImportDaemonFacts', return_value=facts), \
                 patch.object(guest, 'run', side_effect=error) as run, \
                 patch.object(guest, 'emit_evidence') as emit, \
@@ -133,7 +133,7 @@ class NativeImageEvidenceTests(unittest.TestCase):
                 target={'sample':facts.sample,'emit':emit,'logs':logs,'close':facts.close,
                         'writer':writer,'constructor':factory}[failing]
                 target.side_effect=OSError('diagnostic failure')
-                original=subprocess.TimeoutExpired(COMMAND,120)
+                original=subprocess.TimeoutExpired(COMMAND,240)
                 run=stack.enter_context(patch.object(guest,'run',side_effect=original))
                 with self.assertRaises(subprocess.TimeoutExpired) as caught:
                     guest.import_image(Path(COMMAND[-1]))

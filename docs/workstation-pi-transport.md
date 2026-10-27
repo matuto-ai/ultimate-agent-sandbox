@@ -770,3 +770,43 @@ No polling heartbeat, stdin transport change, timeout increase, arbitrary log
 collection, custom policy, proc mount, confinement change or retry is introduced.
 The original outer/serial limits and final disposable-VM cleanup still apply.
 Pure/mock diagnostic tests do not establish an import cause or native success.
+
+### Observed active import and fixed cold-build budget: run 40441259078
+
+The [diagnostic run on `57b4160a`](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40441259078/job/121981894711)
+again completed signed DEFAULT/CA generation and the strict rootfs manifest.
+All ordered diagnostic fragments were retained and their whole-record hashes
+verified. Exact completed rootfs facts are **24,885 entries / 374,542,453 bytes**,
+manifest SHA-256
+`a654912ce0770aec7b3e018a5635dac6bdfd36e04056971f292abefd44d859d9`.
+The completed tar was **411,617,280 bytes**, SHA-256
+`f85dda12044e8e11b0d2d3e6533623406c0fc4cab85a4b3c14ea6f7d5449dade`.
+Trust evidence records exactly 18 changed paths, the 13 signed DEFAULT assets,
+their closed internal hardlinks, all three successful CA extracts, installed
+tool/input owner and header digests, and no executed updater or package scriptlet.
+Actual installed RPM/RPM-libs were 6.0.1-2.fc44 and DNF5/libdnf5 5.4.1.0-1.fc44.
+
+The 120-second import expired with zero CLI stdout/stderr bytes. Its owned group
+was killed and reaped with return code -9 and no cleanup errors. The same held
+dockerd task (PID 2682, start time 69347 ticks) remained observable at both ends:
+over 120.112 seconds, its counters gained **119.66 CPU seconds**, 247,788,187
+`rchar` bytes, 223,455,640 `wchar` bytes and 269,008,896 `write_bytes`.
+Filesystem available space was 3,677,204,480 bytes before and 3,540,824,064 after.
+The fixed AVC query returned status 1 / `-- No entries --`; the untruncated
+4,145-byte daemon journal contained startup but no import-specific failure.
+These are active-daemon observations, not an import completion fraction, proof
+of no possible denials, or a proven internal latency cause. No image ID or native
+container gate was reached. Full retained job log SHA-256 is
+`768be0b1d96bbe411c47abab40b8ca2fb448260339c98b7cef737705bf1764dc`
+(247,166 bytes); disposable VM scratch cleanup completed in 1,162.248 seconds.
+
+This evidence motivates one explicit **240-second cold image-build budget**,
+only for the fixed native archive-file import. It is not an unchanged retry or
+an adaptive deadline. The exact command still runs once, and received output
+cannot renew its deadline. Owned-client cleanup, unknown daemon outcome and
+best-effort diagnostic preservation are unchanged. Engine startup remains
+120 seconds, serial inactivity 300 seconds, guest boot/install/scenario/shutdown
+1,200 seconds and the manual workflow 45 minutes. No heartbeat, runtime-liveness
+change, retry, VM resource increase or confinement/policy relaxation is added.
+The larger build allowance does not guarantee successful import or leave the
+remaining native scenario exempt from the existing outer cap.

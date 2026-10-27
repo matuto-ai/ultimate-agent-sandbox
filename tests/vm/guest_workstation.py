@@ -157,7 +157,7 @@ def import_image(archive):
     try:
         import_diagnostic('start-sample',lambda:record('import-start'))
         try:
-            image=run('docker','import',str(archive),timeout=120,native_import_context=True).strip()
+            image=run('docker','import',str(archive),timeout=240,native_import_context=True).strip()
         except BaseException:
             import_diagnostic('failure-sample',lambda:record('import-failure'))
             import_diagnostic('failure-logs',import_failure_diagnostics)

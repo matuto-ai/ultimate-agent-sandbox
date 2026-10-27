@@ -210,7 +210,7 @@ def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False,
     if type(native_import_context) is not bool:
         raise ValueError("invalid native import diagnostic option")
     if native_import_context:
-        if (native_failure_context or native_trust_context or pass_fds or timeout != 120
+        if (native_failure_context or native_trust_context or pass_fds or timeout != 240
                 or arguments != ('docker', 'import', '/var/lib/uas-native-rootfs.tar')):
             raise ValueError('native import requires fixed archive-file command')
         code, streams = native_command(arguments, timeout=timeout, phase='image-import')
