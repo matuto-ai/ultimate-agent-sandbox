@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
+import json
 import uuid
 
 from uas.context import (FixtureContextHub, FixtureRun, MAX_CONTEXT_GENERATION,
@@ -68,6 +69,34 @@ class FixtureConnection:
     context_generation: int
     attachment_id: str
     receiver: object
+
+
+@dataclass(frozen=True)
+class DeliveryOffer:
+    """Bounded Hub-local immutable intent context, never a process credential.
+
+    The JSON string makes nested envelope mutation impossible; external native
+    delivery receives a defensive copy. Observation/attachment remain Hub-local.
+    """
+    envelope_json: str
+    observation_id: str
+    attachment_id: str
+
+    def __post_init__(self):
+        if (type(self.envelope_json) is not str or len(self.envelope_json.encode()) > 65536
+                or type(self.observation_id) is not str or len(self.observation_id) > 256
+                or type(self.attachment_id) is not str or len(self.attachment_id) > 256):
+            raise LedgerError("INVALID_DELIVERY_OFFER")
+        try:
+            value = json.loads(self.envelope_json)
+            if type(value) is not dict or _json(value) != self.envelope_json:
+                raise LedgerError("INVALID_DELIVERY_OFFER")
+        except (ValueError, TypeError, RecursionError) as error:
+            raise LedgerError("INVALID_DELIVERY_OFFER") from error
+
+    @property
+    def envelope(self):
+        return json.loads(self.envelope_json)
 
 
 MAX_TEXT_BYTES = 16_384
@@ -481,96 +510,146 @@ class FixturePeerHub:
             pending.append(item)
         return sorted(pending, key=lambda item: item["submitted_seq"])
 
-    def deliver(self, connection, *, limit=100):
-        """At-least-once offer; commit intent, receive proof, then confirm.
+    @staticmethod
+    def _delivery_authority(authorize):
+        if authorize is not None and not callable(authorize):
+            raise LedgerError("INVALID_DELIVERY_AUTHORITY")
+        return authorize is None or authorize() is True
 
-        An absent/mismatched receipt or a changed observation leaves an unresolved
-        durable offer. It is not evidence that the receiver had no effect.
+    def prepare_delivery(self, connection, *, traffic_id=None, authorize=None):
+        """Commit one offer while caller holds current admission authorization.
+
+        The optional authorize callback is a pure recheck inside ledger.apply;
+        it must not acquire reverse-order locks or write an authority store.
+        None means held/no eligible traffic, not proof of native acceptance.
         """
+        if authorize is not None and not callable(authorize):
+            raise LedgerError("INVALID_DELIVERY_AUTHORITY")
+        if not self._current(connection, safe=True):
+            return None
+        pending = self._pending(connection)
+        if traffic_id is not None:
+            _token(traffic_id)
+            pending = [item for item in pending if item["id"] == traffic_id]
+        return None if not pending else self._prepare_delivery(connection, pending[0], authorize)
+
+    def _prepare_delivery(self, connection, item, authority):
+        current = self._state()["connections"][connection.participant_id]
+        observation = current["observation_id"]
+        if not self._current(connection, safe=True):
+            return None
+        envelope = {key: value for key, value in item.items() if key in (
+            "id", "kind", "sender", "actor_id", "run_id", "generation", "text", "parent_id", "correlation_id", "submitted_seq")}
+        envelope.update(room_id=self.ledger.room_id, participant_id=connection.participant_id,
+                        incarnation_id=connection.incarnation_id, context_generation=connection.context_generation)
+        delivery_id = "delivery-" + digest(envelope)
+        envelope["delivery_id"] = delivery_id
+        envelope_digest = digest(envelope)
+        def begin(state, _, envelope=envelope, envelope_digest=envelope_digest):
+            request = state["peer_traffic"]["traffic"][envelope["id"]]
+            if "fixture_context" in state:
+                self.contexts.reserve_delivery(state, connection.participant_id, connection.context_generation,
+                                               envelope["run_id"], envelope["generation"])
+            if request.get("status") in TERMINAL:
+                raise LedgerError("DELIVERY_FENCED")
+            offers = state["peer_traffic"]["offers"].setdefault(envelope["id"], {})
+            previous = offers.get(connection.participant_id)
+            history = deepcopy(previous["superseded_unconfirmed"]) if previous else {
+                "count": 0, "first_seq": 0, "last_seq": 0}
+            superseded = None
+            if previous and previous["outcome"] == "UNCONFIRMED":
+                history["count"] += 1
+                history["first_seq"] = history["first_seq"] or previous["offer_seq"]
+                history["last_seq"] = previous["offer_seq"]
+                superseded = previous["delivery_id"]
+            offer = {"delivery_id": envelope["delivery_id"], "digest": envelope_digest,
+                     "incarnation_id": connection.incarnation_id,
+                     "context_generation": connection.context_generation,
+                     "outcome": "UNCONFIRMED", "offer_seq": self.ledger.snapshot()["room_seq"] + 1,
+                     "superseded_unconfirmed": history}
+            offers[connection.participant_id] = offer
+            return self._transition(state, "peer.delivery.offered", {
+                **offer, "traffic_id": envelope["id"], "participant_id": connection.participant_id,
+                "supersedes_unconfirmed": superseded}, {"delivery_id": envelope["delivery_id"]})
+        authorize = lambda: (self._delivery_authority(authority)
+                             and self._current(connection, safe=True, observation_id=observation))
+        def offer_allowed():
+            current_item = self._state()["traffic"].get(item["id"], {})
+            return (authorize() and current_item.get("status") not in TERMINAL
+                    and self._scope_permits(connection.participant_id, connection.context_generation,
+                                            item["run_id"], item["generation"]))
+        self._control(delivery_id + ":offer", "offer", envelope, begin, offer_allowed)
+        # Recheck even an exact offer retry before possible external contact.
+        if not offer_allowed():
+            raise LedgerError("DELIVERY_FENCED")
+        return DeliveryOffer(_json(envelope), observation, connection.attachment_id)
+
+    def confirm_delivery(self, connection, offer, receipt, *, authorize=None):
+        """Confirm native receipt after caller reacquires current admission.
+
+        Native acceptance must occur outside the admission/ledger lock. A lost
+        receipt or late revoke leaves the exact existing offer UNCONFIRMED.
+        """
+        if authorize is not None and not callable(authorize):
+            raise LedgerError("INVALID_DELIVERY_AUTHORITY")
+        if type(offer) is not DeliveryOffer or type(connection) is not FixtureConnection:
+            raise LedgerError("INVALID_DELIVERY_OFFER")
+        envelope = offer.envelope
+        if (offer.attachment_id != connection.attachment_id
+                or envelope.get("room_id") != self.ledger.room_id
+                or envelope.get("participant_id") != connection.participant_id
+                or envelope.get("incarnation_id") != connection.incarnation_id
+                or type(envelope.get("context_generation")) is not int
+                or envelope["context_generation"] != connection.context_generation):
+            raise LedgerError("DELIVERY_FENCED")
+        delivery_id = envelope.get("delivery_id")
+        _token(delivery_id)
+        envelope_digest = digest(envelope)
+        expected = {"delivery_id": delivery_id, "digest": envelope_digest,
+                    "participant_id": connection.participant_id, "incarnation_id": connection.incarnation_id,
+                    "context_generation": connection.context_generation}
+        if (type(receipt) is not dict or set(receipt) != set(expected)
+                or any(type(receipt[key]) is not type(value) or receipt[key] != value
+                       for key, value in expected.items())):
+            raise LedgerError("UNCONFIRMED_DELIVERY")
+        def confirm(state, _, envelope=envelope, receipt=receipt):
+            domain = state["peer_traffic"]
+            offer = domain["offers"].get(envelope["id"], {}).get(connection.participant_id)
+            request = domain["traffic"][envelope["id"]]
+            if (not offer or offer["delivery_id"] != envelope["delivery_id"]
+                    or offer["digest"] != receipt["digest"] or request.get("status") in TERMINAL):
+                raise LedgerError("DELIVERY_FENCED")
+            if "fixture_context" in state:
+                self.contexts.confirm_delivery(state, connection.participant_id, connection.context_generation,
+                                               envelope["run_id"], envelope["generation"])
+            offer["outcome"] = "CONFIRMED"
+            now = _now()
+            request["deliveries"][connection.participant_id] = {**receipt, "confirmed_at": now}
+            if request.get("status") == "QUEUED":
+                request.update(status="DELIVERED", response_started_at=now)
+            domain["cursors"][connection.participant_id] = max(
+                domain["cursors"][connection.participant_id], request["submitted_seq"])
+            return self._transition(state, "peer.delivery.confirmed", receipt, receipt)
+        confirm_allowed = lambda: (self._delivery_authority(authorize)
+            and self._current(connection, safe=True, observation_id=offer.observation_id)
+            and self._scope_permits(connection.participant_id, connection.context_generation,
+                                    envelope["run_id"], envelope["generation"]))
+        return self._control(delivery_id + ":confirm", "confirm", receipt, confirm, confirm_allowed)
+
+    def deliver(self, connection, *, limit=100):
+        """Compatibility wrapper: same pending order, offers, effect and receipts."""
         if type(limit) is not int or not 1 <= limit <= 100:
             raise LedgerError("INVALID_LIMIT")
         if not self._current(connection, safe=True):
             return {"outcome": "HELD", "deliveries": []}
         delivered = []
         for item in self._pending(connection)[:limit]:
-            current = self._state()["connections"][connection.participant_id]
-            observation = current["observation_id"]
-            if not self._current(connection, safe=True):
+            offer = self._prepare_delivery(connection, item, None)
+            if offer is None:
                 break
-            envelope = {key: value for key, value in item.items() if key in (
-                "id", "kind", "sender", "actor_id", "run_id", "generation", "text", "parent_id", "correlation_id", "submitted_seq")}
-            envelope.update(room_id=self.ledger.room_id, participant_id=connection.participant_id,
-                            incarnation_id=connection.incarnation_id, context_generation=connection.context_generation)
-            delivery_id = "delivery-" + digest(envelope)
-            envelope["delivery_id"] = delivery_id
-            envelope_digest = digest(envelope)
-            def begin(state, _, envelope=envelope, envelope_digest=envelope_digest):
-                request = state["peer_traffic"]["traffic"][envelope["id"]]
-                if "fixture_context" in state:
-                    self.contexts.reserve_delivery(state, connection.participant_id, connection.context_generation,
-                                                   envelope["run_id"], envelope["generation"])
-                if request.get("status") in TERMINAL:
-                    raise LedgerError("DELIVERY_FENCED")
-                offers = state["peer_traffic"]["offers"].setdefault(envelope["id"], {})
-                previous = offers.get(connection.participant_id)
-                history = deepcopy(previous["superseded_unconfirmed"]) if previous else {
-                    "count": 0, "first_seq": 0, "last_seq": 0}
-                superseded = None
-                if previous and previous["outcome"] == "UNCONFIRMED":
-                    history["count"] += 1
-                    history["first_seq"] = history["first_seq"] or previous["offer_seq"]
-                    history["last_seq"] = previous["offer_seq"]
-                    superseded = previous["delivery_id"]
-                offer = {"delivery_id": envelope["delivery_id"], "digest": envelope_digest,
-                         "incarnation_id": connection.incarnation_id,
-                         "context_generation": connection.context_generation,
-                         "outcome": "UNCONFIRMED", "offer_seq": self.ledger.snapshot()["room_seq"] + 1,
-                         "superseded_unconfirmed": history}
-                offers[connection.participant_id] = offer
-                return self._transition(state, "peer.delivery.offered", {
-                    **offer, "traffic_id": envelope["id"], "participant_id": connection.participant_id,
-                    "supersedes_unconfirmed": superseded}, {"delivery_id": envelope["delivery_id"]})
-            authorize = lambda: self._current(connection, safe=True, observation_id=observation)
-            def offer_allowed():
-                current_item = self._state()["traffic"].get(item["id"], {})
-                return (authorize() and current_item.get("status") not in TERMINAL
-                        and self._scope_permits(connection.participant_id, connection.context_generation,
-                                                item["run_id"], item["generation"]))
-            self._control(delivery_id + ":offer", "offer", envelope, begin, offer_allowed)
-            # Recheck even an exact offer retry before possible receiver contact.
-            if not offer_allowed():
-                raise LedgerError("DELIVERY_FENCED")
-            # This is the only external effect. Nothing runs inside ledger.apply.
-            receipt = connection.receiver.accept(envelope)
-            expected = {"delivery_id": delivery_id, "digest": envelope_digest,
-                        "participant_id": connection.participant_id, "incarnation_id": connection.incarnation_id,
-                        "context_generation": connection.context_generation}
-            if (type(receipt) is not dict or set(receipt) != set(expected)
-                    or any(type(receipt[key]) is not type(value) or receipt[key] != value
-                           for key, value in expected.items())):
-                raise LedgerError("UNCONFIRMED_DELIVERY")
-            def confirm(state, _, envelope=envelope, receipt=receipt):
-                domain = state["peer_traffic"]
-                offer = domain["offers"].get(envelope["id"], {}).get(connection.participant_id)
-                request = domain["traffic"][envelope["id"]]
-                if (not offer or offer["delivery_id"] != envelope["delivery_id"]
-                        or offer["digest"] != receipt["digest"] or request.get("status") in TERMINAL):
-                    raise LedgerError("DELIVERY_FENCED")
-                if "fixture_context" in state:
-                    self.contexts.confirm_delivery(state, connection.participant_id, connection.context_generation,
-                                                   envelope["run_id"], envelope["generation"])
-                offer["outcome"] = "CONFIRMED"
-                now = _now()
-                request["deliveries"][connection.participant_id] = {**receipt, "confirmed_at": now}
-                if request.get("status") == "QUEUED":
-                    request.update(status="DELIVERED", response_started_at=now)
-                domain["cursors"][connection.participant_id] = max(
-                    domain["cursors"][connection.participant_id], request["submitted_seq"])
-                return self._transition(state, "peer.delivery.confirmed", receipt, receipt)
-            confirm_allowed = lambda: authorize() and self._scope_permits(
-                connection.participant_id, connection.context_generation, item["run_id"], item["generation"])
-            result = self._control(delivery_id + ":confirm", "confirm", receipt, confirm, confirm_allowed)
-            delivered.append(result)
+            # Sole external effect, outside either reusable ledger phase.
+            receipt = connection.receiver.accept(offer.envelope)
+            delivered.append(self.confirm_delivery(connection, offer, receipt))
         return {"outcome": "CONFIRMED" if delivered else "HELD", "deliveries": delivered}
 
     def snapshot(self):

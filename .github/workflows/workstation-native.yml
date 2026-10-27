@@ -1,0 +1,39 @@
+name: workstation-native-deliberate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workstation-native-deliberate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  two-pi-outside-hub:
+    # Root/reviewer deliberately opts in only after review and ordinary fast CI.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.label.name == 'qualify-native-workstation' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
+      - name: Install disposable runner image and payload tools
+        timeout-minutes: 10
+        run: python3 tests/vm/install_runner_tools.py boundary
+      - name: Verify fixed payload build tools
+        run: |
+          test "$(node --version)" = v24.22.1
+          command -v npm
+          printf 'int main(void){return 0;}\n' | cc -static -x c - -o "$RUNNER_TEMP/uas-static-compiler-check"
+          rm "$RUNNER_TEMP/uas-static-compiler-check"
+      - name: Deliberate no-NIC native Workstation and outside Hub
+        run: python3 tests/vm/run_workstation.py

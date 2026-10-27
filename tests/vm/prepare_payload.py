@@ -51,7 +51,7 @@ def _bytes(directory):
     return sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
 
 
-def command(arguments, *, directory, timeout=300, environment=None):
+def command(arguments, *, directory, timeout=300, environment=None, work_limit=MAX_WORK_BYTES):
     """Bound logs/time/workspace; do not inherit account/config environment."""
     identifier = uuid.uuid4().hex
     stdout, stderr = (directory / (identifier + suffix) for suffix in (".out", ".err"))
@@ -81,12 +81,12 @@ def command(arguments, *, directory, timeout=300, environment=None):
                     last_progress = now
                 if max(stdout.stat().st_size, stderr.stat().st_size) > MAX_COMMAND_OUTPUT:
                     raise RuntimeError("payload command output budget exceeded")
-                if _bytes(directory) > MAX_WORK_BYTES:
+                if _bytes(directory) > work_limit:
                     raise RuntimeError("payload workspace byte budget exceeded")
                 time.sleep(0.2)
             if max(stdout.stat().st_size, stderr.stat().st_size) > MAX_COMMAND_OUTPUT:
                 raise RuntimeError("payload command output budget exceeded")
-            if _bytes(directory) > MAX_WORK_BYTES:
+            if _bytes(directory) > work_limit:
                 raise RuntimeError("payload workspace byte budget exceeded")
             if process.returncode:
                 detail = stderr.read_bytes()[-2048:].decode(errors="replace")
@@ -210,7 +210,7 @@ def source_files(repository_root, paths):
     return selected
 
 
-def build_payload(directory, repository_root, nonce, *, source_paths):
+def build_payload(directory, repository_root, nonce, *, source_paths, profile="static-go-v1"):
     """Return an owned read-only ISO; all installations occur later in guest.
 
     ``source_paths`` is the caller's explicit repository-relative allowlist. The
@@ -218,6 +218,11 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
     existing Go fixture is ``/fixture``; signed packages are ``/rpms`` and the
     fingerprint-checked certificate and manifest are at the ISO root.
     """
+    if profile not in ("static-go-v1", "native-pi-v1"):
+        raise ValueError("unknown payload profile")
+    native = None
+    if profile == "native-pi-v1":
+        import prepare_native_payload as native
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.geteuid() == 0:
         raise RuntimeError("payload preparation runs only as unprivileged disposable CI user")
     if not re.fullmatch(r"[0-9a-f]{32}", nonce):
@@ -245,11 +250,12 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
     (payload / "repo").mkdir()
     started = time.monotonic()
 
-    def run(arguments, timeout=300):
-        remaining = BUILD_TIMEOUT - (time.monotonic() - started)
+    def run(arguments, timeout=300, environment=None):
+        remaining = (native.BUILD_TIMEOUT if native else BUILD_TIMEOUT) - (time.monotonic() - started)
         if remaining <= 0:
             raise RuntimeError("payload build exceeded its total time budget")
-        return command(arguments, directory=work, timeout=min(timeout, remaining))
+        return command(arguments, directory=work, timeout=min(timeout, remaining),
+                       **({"environment": environment, "work_limit": native.MAX_WORK_BYTES} if native else {}))
 
     def fetch(url, target, maximum):
         if maximum <= 0:
@@ -281,8 +287,9 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
            "--setopt=logdir=" + str(work / "logs"), "--disableplugin=*", "--enableplugin=download"]
     # forcearch sets the solver basearch, not the download query's architecture
     # filter: DNF4 otherwise selects all compatible arches, including i686.
+    roots = (*PACKAGES, *native.RPM_ROOTS) if native else PACKAGES
     urls = package_urls(run([*dnf, "download", "--arch=x86_64,noarch", "--resolve", "--alldeps", "--url", "--urlprotocol=https",
-                             *PACKAGES], timeout=600))
+                             *roots], timeout=600))
     print("VM payload phase: downloading and verifying RPM candidates:", len(urls), flush=True)
     manifest = {"version": 1, "nonce": nonce, "release": "44", "signing_fingerprint": fingerprint,
                 "key": {"file": key.name, "sha256": hashlib.sha256(key.read_bytes()).hexdigest(), "bytes": key.stat().st_size},
@@ -306,7 +313,7 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
             print("VM payload progress:", json.dumps({"verified_packages": len(manifest["packages"]),
                   "packages_total": len(urls), "package_bytes": total,
                   "elapsed_seconds": round(time.monotonic() - started)}), flush=True)
-    if not set(PACKAGES) <= {item["name"] for item in manifest["packages"]}:
+    if not set(roots) <= {item["name"] for item in manifest["packages"]}:
         raise RuntimeError("resolved package bundle omitted a required package")
     # DNF4 download resolves each requested root separately, so its union may
     # contain conflicting alternatives. Offer the signed RPMs as candidates to
@@ -330,10 +337,13 @@ def build_payload(directory, repository_root, nonce, *, source_paths):
     if not binary.is_file() or not 0 < binary.stat().st_size <= 32 * 1024 * 1024:
         raise RuntimeError("static fixture is missing or exceeds its byte budget")
     manifest["fixture"] = {"sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "bytes": binary.stat().st_size}
+    if native:
+        manifest["profile"] = profile
+        manifest["native_runtime"] = native.stage_native(work, payload, run, fetch)
     (payload / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
     iso = work / "payload.iso"
     run(["genisoimage", "-quiet", "-output", str(iso), "-volid", "UAS_PAYLOAD", "-joliet", "-rock", str(payload)])
-    if not iso.is_file() or iso.stat().st_size > MAX_PACKAGE_TOTAL + 64 * 1024 * 1024:
+    if not iso.is_file() or iso.stat().st_size > MAX_PACKAGE_TOTAL + 64 * 1024 * 1024 + (native.MAX_ARCHIVE_BYTES if native else 0):
         raise RuntimeError("payload ISO is missing or exceeds its byte budget")
     iso.chmod(0o444)
     print("VM payload:", json.dumps({"packages": len(manifest["packages"]), "package_bytes": total,

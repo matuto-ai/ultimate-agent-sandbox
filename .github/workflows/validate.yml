@@ -69,6 +69,7 @@ jobs:
         env:
           UAS_REQUIRE_UNIX_PEER_TESTS: "1"
           UAS_REQUIRE_PARTICIPANT_PROCESS_TESTS: "1"
+          UAS_WORKSTATION_CONNECTOR_TEST: "1"
         run: ./validate.sh
 
       - name: Report tests not applicable
