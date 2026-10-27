@@ -91,6 +91,60 @@ class SequenceTests(unittest.TestCase):
         proof.accept('committed', raw)
         self.assertEqual(NEW, proof.committed_oid(required=True))
 
+    def test_native_commit_cleanup_follows_complete_target_without_changing_created_oid(self):
+        for preparing in (False, True):
+            proof = sequence()
+            if preparing:
+                proof.accept('preparing', updates(ref='HEAD'))
+            proof.accept('prepared', updates())
+            proof.accept('committed', updates())
+            cleanup = updates(old=ZERO, new=ZERO, ref='AUTO_MERGE')
+            if preparing:
+                proof.accept('preparing', cleanup)
+            proof.accept('prepared', cleanup)
+            with self.assertRaises(GitTransactionError):
+                proof.committed_oid(required=True)
+            proof.accept('committed', cleanup)
+            self.assertEqual(NEW, proof.committed_oid(required=True))
+            self.assertEqual(1, proof.target_count)
+
+    def test_commit_cleanup_wrong_order_creation_other_refs_and_mixed_target_refuse(self):
+        cleanup = updates(old=ZERO, new=ZERO, ref='AUTO_MERGE')
+        for prior in ([], [('preparing', updates(ref='HEAD'))], [('prepared', updates())]):
+            proof = sequence()
+            for phase, raw in prior:
+                proof.accept(phase, raw)
+            with self.subTest(prior=prior), self.assertRaises(GitTransactionError):
+                proof.accept('preparing', cleanup)
+            self.assertTrue(proof.failed)
+        for raw in (updates(old=ZERO, ref='AUTO_MERGE'), updates(new=ZERO, ref='AUTO_MERGE'),
+                    updates(old=ZERO, new=ZERO, ref='CHERRY_PICK_HEAD'),
+                    updates(old=ZERO, new=ZERO, ref='ORIG_HEAD'),
+                    updates(old=ZERO, new=ZERO, ref='refs/heads/other'), cleanup + updates()):
+            proof = sequence()
+            proof.accept('prepared', updates())
+            proof.accept('committed', updates())
+            with self.subTest(raw=raw), self.assertRaises(GitTransactionError):
+                proof.accept('prepared', raw)
+            self.assertTrue(proof.failed)
+
+    def test_commit_cleanup_requires_complete_matching_phases_and_never_rewrites_target(self):
+        cleanup = updates(old=ZERO, new=ZERO, ref='AUTO_MERGE')
+        cases = [[('preparing', cleanup)], [('prepared', cleanup)],
+                 [('committed', cleanup)], [('prepared', cleanup), ('aborted', cleanup)],
+                 [('prepared', cleanup), ('committed', updates(new=ZERO, ref='AUTO_MERGE'))],
+                 [('prepared', cleanup), ('committed', cleanup), ('prepared', updates())]]
+        for phases in cases:
+            proof = sequence()
+            proof.accept('prepared', updates())
+            proof.accept('committed', updates())
+            with self.subTest(phases=phases), self.assertRaises(GitTransactionError):
+                for phase, raw in phases:
+                    proof.accept(phase, raw)
+                proof.committed_oid(required=True)
+            self.assertEqual(NEW, proof.created)
+            self.assertEqual(1, proof.target_count)
+
     def test_abort_complete_reset_is_not_created_commit_proof_and_keeps_partial_unknown(self):
         proof = sequence(kind='abort')
         for raw in (updates(ref='ORIG_HEAD'), updates(old='d' * 40)):

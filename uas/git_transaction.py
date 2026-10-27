@@ -129,6 +129,13 @@ class TransactionSequence:
             if new == ZERO or (self.kind != 'abort' and old != self.expected_old):
                 raise GitTransactionError()
             return ('target', old, new)
+        # Native commit's sequencer cleanup requests AUTO_MERGE deletion with
+        # an unspecified old OID (zero), even when the ref does not exist. This
+        # is not created-object evidence: accept only the exact fixed cleanup
+        # after the one fully committed target, with normal phase pairing.
+        if (self.kind == 'commit' and self.target_count == 1
+                and updates == ((ZERO, ZERO, 'AUTO_MERGE'),)):
+            return ('auxiliary',)
         auxiliary = {'AUTO_MERGE', 'CHERRY_PICK_HEAD'} if self.kind != 'commit' else set()
         if self.kind == 'abort':
             auxiliary.add('ORIG_HEAD')

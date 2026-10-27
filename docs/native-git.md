@@ -145,6 +145,14 @@ identity, expected parent and source attribution. Filenames, terminal output,
 post-command mutable HEAD and caller-reported commit bytes never select evidence.
 Unexpected multiple/partial/aborted transactions or failed post-effect object
 verification retain uncertainty and fence the checkout rather than replay.
+After a complete ordinary commit/amend target transaction, the exact native
+`AUTO_MERGE` cleanup (`zero -> zero`, deletion with unspecified old value) is
+accepted only with its own complete matching phases. It cannot create, replace
+or select attribution evidence. Cleanup before the verified target, another ref,
+nonzero values or incomplete phases still refuse. This follows Git's fixed
+[post-commit cleanup](https://github.com/git/git/blob/v2.55.0/sequencer.c#L2782-L2804),
+and was observed through the authenticated hosted receipt path, not inferred
+from stdout or a later HEAD lookup.
 
 Sources must be anchored in a completed authenticated upload-pack advertisement.
 Historical source support verifies a raw hash/parent chain from one of the 32
