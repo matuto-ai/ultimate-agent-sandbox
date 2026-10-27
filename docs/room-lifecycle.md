@@ -13,14 +13,14 @@ A trusted caller supplies:
 
 `start(spec)`, `stop()`, `destroy()`, `status()`, and `reconcile()` expose the lifecycle. Each result names its persistent instance, desired/observed state, pending managed update, exact unresolved resource names, and `fixture_only: true` / `production_launch: unqualified`. Failure phases carry `START_FAILED`, `STOP_FAILED`, or `DESTROY_FAILED` error codes. Storage-write failure is not a successful acknowledgement; restore storage and reconcile the already persisted intent before any repeat effect.
 
-The trusted caller authenticates human requests before authorizing new intent. A client cannot turn `human: true` or a profile instruction into authority. Callback implementations cannot come from request payloads. The fixture issues no Hub, Forge, Git, or Participant capabilities; its integration revoker verifies that empty set. The callback seam is **not** a production revocation implementation. A false or uncertain verification blocks the relevant effects. A future authority service must also deny new issuance for persisted stopping/destroying intent.
+The trusted caller authenticates human requests before authorizing new intent. A client cannot turn `human: true` or a profile instruction into authority. Callback implementations cannot come from request payloads. The original empty-authority fixture uses that callback; the persistent nonempty control-plane composition below requires concrete service owners and verifies their exit/endpoints independently. The callback alone cannot certify an existing control-plane registry. A false or uncertain verification blocks the relevant effects. A future authority service must also deny new issuance for persisted stopping/destroying intent.
 
 The supervisor's lifecycle manifest is host control state, distinct from the Room Hub's application ledger. It uses a per-Room advisory lock, atomic replacement, file/directory synchronization, and durable intent before external effects. Restore validates the complete versioned manifest, canonical stored/pending specs, phase/intent pairing, timestamps, bounded leftovers, and duplicate/unknown fields before any backend observation or effect; malformed state returns `INVALID_STORE`. Fixture mount paths containing commas or control characters are rejected before even persisting intent. No second agent-execution engine or generalized event system is added. The control directory must be private trusted host state, not a Workstation mount. These mechanisms do not claim #62's complete ownership/mode, endpoint, or hostile-process protections.
 
 ## Lifecycle and reconciliation
 
 - **Start** persists the new instance identity and desired state before creating resources. It creates/resumes exactly one named volume and one canonical fixture container. Repeated Start/reconcile retains those identities.
-- **Stop** first verifies Participant-authority revocation, then stops only the Workstation container. It retains the volume and control data. The supervisor remains available for status and later Start. No Hub/Broker process is killed by this backend; actual persistent Hub/Broker processes are not implemented in this fixture.
+- **Stop** first verifies Participant-authority revocation, then stops only the Workstation container. It retains the volume and control data. The supervisor remains available for status and later Start. The persistent control-plane composition below keeps its real Hub/Broker owners alive; the Workstation backend never owns those processes.
 - **Destroy** requires a new human authorization for the irreversible intent, verifies all Room authority revoked, and persists that fact **before** stopping/removing resources. It removes only verified exact resources and the exact instance control directory carrying its ownership marker. It never deletes Project roots or performs global Docker cleanup.
 - **Partial Destroy** reports exact leftovers, returns `DESTROY_FAILED`, and blocks Start/recreation. Reconcile retries the persisted authorized intent, inspecting each exact resource first. Confirmed absence skips deletion; uncertainty never means absence.
 - **Completed Destroy** publishes a minimal no-overwrite tombstone outside removable instance data. Tombstones retain Room/instance/Project IDs and lifecycle times, not transcripts, credentials, or project contents. The interface never edits an existing tombstone; mode 0400 is not a tamper-proof guarantee against privileged host access. A later explicit Start can create a new instance while preserving the previous tombstone.
@@ -101,3 +101,55 @@ without Docker/Go/cgroup-v2/default seccomp support must fail this integration,
 not silently substitute mock evidence or relax confinement.
 
 Local contract tests additionally cover authorization/revocation failure, unavailable observations, unowned resource refusal, control-state marker mismatch, symlink non-traversal, tombstone-write failure/retry, and command construction. They do not substitute for the real Docker job. Production isolation, SELinux, public-egress deny routes, host power loss, participant/session behavior, paid providers, Forge, and the later 100-cycle host-capacity proof are not established by this slice.
+
+## Persistent nonempty fixture control plane
+
+`RoomControlPlane` attaches real authenticated `RoomHubClient`,
+`ReadBrokerClient`, and `GitBrokerClient` owners to the Supervisor. The Hub owns a
+real `RoomLedger`/`FixturePeerHub` in a separate unprivileged process; the Forge
+and Git Brokers retain their existing external service protocols and identities.
+The lifecycle status channel does not replace native Participant admission.
+Trusted launchers supply existing endpoint leases; clients never choose paths,
+UIDs, process IDs, callbacks, credentials, or launch recipes.
+
+The persistent owner registry binds the exact instance, kernel process objects,
+endpoint inode/parent identity and one Manager stream ID. Stop revokes
+Participants and stops the Workstation, but leaves the control-plane services,
+ledger and stream identity intact. Existing #75 exporters can open the ledger
+read-only in their own worker, using that stream ID and their fixed credential
+reference resolver; network work must not run on the Hub's ledger thread.
+`attach_manager_worker` records the exact host-minted worker ID before starting
+that real exporter outside the lifecycle lock. Stop retains it; Destroy requests
+nonblocking shutdown and retains resources until the exact worker reports actual
+termination. A replacement worker with the same stream cannot certify the old
+worker's exit. Lost ownership stays an explicit leftover until the retained exact
+worker is recovered.
+
+The narrow human remote Start endpoint is TLS 1.3 mutual authentication with an
+operator-fixed certificate fingerprint bound to a human and a specific Room
+instance. It accepts only an operation ID and observed lifecycle revision, uses
+the already stored specification, and rechecks current Supervisor authorization.
+It records authorized intent before effects and retains idempotent receipts.
+A certificate for another instance, stale observation, payload identity/spec,
+or changed retry is refused. This does not introduce #77's general Manager
+workflow actions or provision any production certificate.
+
+Destroy persists revocation intent and first acquires each actual Broker client operation lock nonblocking. Busy or uncertain provider work retains an exact leftover instead of being killed. The lifecycle owner retains its own kernel descriptor when a failed client closes. It then closes each quiescent real service channel, verifies
+exit through the held kernel object, and removes only exact owned endpoints.
+Verified process-exit proof is persisted before endpoint deletion. Interrupted
+cleanup can therefore resume deletion without adopting a numeric PID. A missing
+process handle before verified exit remains unknown and requires the trusted
+launcher to recover its exact held identity; it cannot be certified by an empty
+callback. Replaced endpoints are preserved and named as service-specific
+leftovers. Workstation removal cannot begin until all service authority is
+verified revoked. Destroy/recreation produces a new stream and instance.
+
+`tests/linux/room_control_smoke.py` is an explicit hosted-only, account-free
+integration: actual distinct-UID Hub/Forge/Git processes, actual owned Unix
+endpoints, real human mTLS Start and receipt replay, retained Hub state across
+Stop/Start, replaced-path refusal, verified service termination, partial Destroy
+and reconstructed targeted cleanup. Its Workstation is a **file-backed
+simulator**, not Docker or native admission. The older actual Docker lifecycle
+proof is complementary; neither test claims production launch, live Forge/SSH
+credentials, or a VM qualification. Local unit tests cover only pure persistence
+and authorization contracts. No production credential is needed for this proof.

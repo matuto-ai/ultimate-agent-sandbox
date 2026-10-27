@@ -408,8 +408,19 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
             **({'review_enabled':True} if broker.reviews is not None else {})}).encode()
         if channel.send(ready) != len(ready): raise OriginDenied('partial Broker bootstrap')
         while alive(supervisor.pidfd):
+            # Persistent idle wait is separate from bounded request framing,
+            # provider work and live authorization exchanges.
+            channel.settimeout(1)
             try:
-                with receive(channel) as record:
+                record = receive(channel)
+            except socket.timeout:
+                continue
+            except (OriginDenied, ValueError):
+                broker.denied('WRONG_PROCESS')
+                raise
+            channel.settimeout(45)
+            try:
+                with record:
                     supervisor.require(record)
                     packet = json.loads(record.data, object_pairs_hook=_unique_object)
                 if type(packet) is dict and set(packet)=={'request_id','index','count','sha256','data'}:
