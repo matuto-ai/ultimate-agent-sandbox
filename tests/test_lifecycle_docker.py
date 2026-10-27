@@ -12,6 +12,7 @@ import unittest
 import uuid
 
 from uas.docker_fixture import DockerFixtureBackend
+from uas.checkout_writers import DockerCheckoutBackend, DockerCheckoutWriters
 from uas.lifecycle import BackendUnknown, FixtureSpec, LifecycleError, Supervisor
 
 IMAGE = os.environ.get("UAS_DOCKER_FIXTURE_IMAGE")
@@ -246,7 +247,7 @@ class DockerLifecycleTests(unittest.TestCase):
         self.assertEqual("destroyed", self.reopen().reconcile()["phase"])
         self.assertEqual("never delete Project data", self.sentinel.read_text())
 
-    def test_allocated_checkout_is_visible_at_exact_host_path_inside_workstation(self):
+    def test_writable_checkout_and_actual_whole_workstation_writer_quiescence(self):
         import hashlib
         import io
         config = json.loads(Path('tests/fixtures/two-rooms.json').read_text())
@@ -273,11 +274,15 @@ class DockerLifecycleTests(unittest.TestCase):
         baseline = 'uas-checkout-fixture-v1\ncommitted baseline\n'
         (repo / filename).write_text(baseline)
         git(repo, 'add', '.'); git(repo, 'commit', '-m', 'synthetic checkout baseline')
+        self.backend = DockerCheckoutBackend(repo, slots)
+        self.supervisor = self.reopen()
         self.spec = replace(self.spec, project_paths=tuple(room['project']['roots'].values()))
         first = self.supervisor.start(self.spec); self.assert_running(first)
         container = first['observed']['container']['id']; self.wait_started(container, 1)
-        # No agent/writer process is launched in this read-only fixture.
-        allocator = self.supervisor.checkouts(io.StringIO(json.dumps(config)), writer_quiescent=lambda *_: True)
+        def reopen_allocator():
+            return self.supervisor.checkouts(io.StringIO(json.dumps(config)),
+                writer_guard=DockerCheckoutWriters(self.supervisor))
+        allocator = reopen_allocator()
         primary = allocator.allocate('fixture-run-1', 'alice')
         secondary = allocator.allocate('fixture-run-2', 'bob')
         path = Path(secondary['path'])
@@ -287,7 +292,9 @@ class DockerLifecycleTests(unittest.TestCase):
         mounts = {entry['Destination']: entry for entry in actual['Mounts']}
         for root in (repo, slots):
             self.assertEqual(str(root), mounts[str(root)]['Source'])
-            self.assertFalse(mounts[str(root)]['RW'])
+            self.assertTrue(mounts[str(root)]['RW'])
+        for root in set(room['project']['roots'].values()) - {str(repo), str(slots)}:
+            self.assertFalse(mounts[root]['RW'])
         def read(root, checkout, expected=None, error=None):
             result = subprocess.run(['docker', 'exec', container, '/fixture', '--read-checkout',
                 str(root), str(checkout)], capture_output=True, text=True, timeout=10)
@@ -311,22 +318,79 @@ class DockerLifecycleTests(unittest.TestCase):
         read(slots, path, error='INVALID_FIXTURE_FILE')
         (path / filename).unlink(); (path / filename).write_text('uas-checkout-fixture-v1\n' + 'x' * 4096)
         read(slots, path, error='INVALID_FIXTURE_CONTENT')
-        changed = 'uas-checkout-fixture-v1\nhost edited concurrent work\n'
-        (path / filename).write_text(changed)
-        read(slots, path, changed)
+        (path / filename).write_text(baseline)
+        def spawn_writer(root, checkout):
+            # Only fixture-owned files are made writable to UID 65532. No host
+            # permission/account changes, no production Project is involved.
+            (checkout / filename).chmod(0o666)
+            result = json.loads(self.backend._run(['exec', container, '/fixture',
+                '--spawn-checkout-writer', str(root), str(checkout)]))
+            self.assertEqual(65532, result['uid'])
+            self.assertGreater(result['child'], 0)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                content = (checkout / filename).read_text()
+                if 'workstation writer uid=65532 tick=' in content:
+                    time.sleep(0.06)
+                    if (checkout / filename).read_text() != content:
+                        return
+                time.sleep(0.025)
+            self.fail('actual orphan writer did not change host-visible checkout')
+        spawn_writer(repo, repo); spawn_writer(slots, path)
+        # Both exec parents already exited; their still-writing children must
+        # block release, even after an authority-revocation callback says True.
+        self.assertTrue(self.supervisor.revoke(first['instance_id'], 'participants'))
+        for run, participant in [('fixture-run-1', 'alice'), ('fixture-run-2', 'bob')]:
+            with self.assertRaises(LifecycleError) as raised: allocator.release(run, participant)
+            self.assertEqual('WRITER_NOT_QUIESCENT', raised.exception.code)
+        self.assertIn(filename, git(path, 'status', '--porcelain'))
         self.assertEqual('stopped', self.supervisor.stop()['phase'])
+        changed = (path / filename).read_text()
+        primary_changed = (repo / filename).read_text()
+        time.sleep(0.08)
         self.assertEqual(changed, (path / filename).read_text())
+        self.assertEqual(primary_changed, (repo / filename).read_text())
+        # Reconstruct from host metadata; no in-memory process handle/empty-set
+        # callback is being used as a quiescence receipt.
+        self.supervisor = self.reopen(); allocator = reopen_allocator()
+        allocator.release('fixture-run-1', 'alice')
+        allocator.release('fixture-run-2', 'bob')
+        retained = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
+        self.assertEqual('DIRTY_OR_UNTRACKED_OR_IGNORED', retained['reason'])
+        self.assertEqual(changed, (path / filename).read_text())
+        git(repo, 'restore', filename)  # Explicit fixture-human repair only.
         resumed = self.supervisor.start(self.spec); self.assert_running(resumed)
         self.assertEqual(first['instance_id'], resumed['instance_id'])
         self.assertEqual(container, resumed['observed']['container']['id'])
         self.wait_started(container, 2); read(slots, path, changed)
-        allocator.release('fixture-run-2', 'bob')
+        with self.assertRaises(LifecycleError) as raised: allocator.allocate('fixture-run-3', 'alice')
+        self.assertEqual('WRITER_NOT_QUIESCENT', raised.exception.code)
+        # New-generation external usage of the same shared slot invalidates any
+        # inference from the original writer's death. Even a clean snapshot is
+        # not removable while a current Workstation can write it.
+        git(path, 'restore', filename)
+        retained = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
+        self.assertEqual('WRITER_NOT_QUIESCENT', retained['reason'])
+        self.assertTrue(path.exists())
+        spawn_writer(slots, path)
+        retained = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
+        self.assertEqual('WRITER_NOT_QUIESCENT', retained['reason'])
+        self.assertEqual('stopped', self.supervisor.stop()['phase'])
         retained = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
         self.assertEqual('DIRTY_OR_UNTRACKED_OR_IGNORED', retained['reason'])
-        read(slots, path, changed)
-        git(path, 'restore', filename)  # Explicit fixture-human repair only.
+        git(path, 'restore', filename)
+        unregistered = slots / 'human-owned'; unregistered.mkdir()
+        (unregistered / 'sentinel').write_text('retain human repair access')
         removed = next(row for row in allocator.reconcile() if row['slot'] == secondary['slot'])
         self.assertEqual('removed', removed['disposition'])
+        self.assertEqual('retain human repair access', (unregistered / 'sentinel').read_text())
+        reserved = allocator.reserve('fixture-run-3', 'alice')
+        self.assertEqual('primary', reserved['slot'])
+        self.assertEqual('ACTIVE', next(row for row in allocator.reconcile() if row['slot'] == 'primary')['reason'])
+        resumed = self.supervisor.start(self.spec); self.assert_running(resumed)
+        self.assertEqual(container, resumed['observed']['container']['id'])
+        self.wait_started(container, 3)
+        self.assertEqual(reserved, allocator.allocate('fixture-run-3', 'alice'))
         read(slots, path, error='FIXTURE_UNAVAILABLE')
         read(repo, repo, baseline)
         self.assertEqual('never delete Project data', self.sentinel.read_text())

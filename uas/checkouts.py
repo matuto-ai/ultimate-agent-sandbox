@@ -13,6 +13,7 @@ import subprocess
 import uuid
 
 from .config import load
+from .checkout_scope import valid_writer_scope
 from .lifecycle import LifecycleError, _canonical, _path, _unique_object
 
 
@@ -35,15 +36,31 @@ def _identity_shape(value):
 
 
 class CheckoutAllocator:
-    def __init__(self, supervisor, source, *, writer_quiescent=None):
+    def __init__(self, supervisor, source, *, writer_quiescent=None, writer_guard=None):
+        # Non-Docker consumers (including inert artifact fixtures) must not
+        # import Engine/launch code just to inspect or allocate host Git slots.
+        guard_factory = getattr(supervisor.backend, 'checkout_writer_guard', None)
+        if guard_factory is not None:
+            if writer_quiescent is not None:
+                raise LifecycleError('INVALID_WRITER_GUARD')
+            if writer_guard is None:
+                writer_guard = guard_factory(supervisor)
         self.supervisor = supervisor
         self.writer_quiescent = writer_quiescent
+        self.writer_guard = writer_guard
+        if writer_guard is not None:
+            from .checkout_writers import DockerCheckoutWriters
+            if (type(writer_guard) is not DockerCheckoutWriters or
+                    writer_guard.supervisor is not supervisor or writer_quiescent is not None):
+                raise LifecycleError('INVALID_WRITER_GUARD')
         config = load(source)
         self.room = next((r for r in config['rooms'] if r['id'] == supervisor.room_id), None)
         if self.room is None:
             raise LifecycleError('ROOM_MISMATCH')
         self.repo = _path(self.room['project']['roots']['repo'])
         self.root = _path(self.room['project']['roots']['checkouts'])
+        if writer_guard is not None and writer_guard.supervisor.backend.writable != {str(self.repo), str(self.root)}:
+            raise LifecycleError('PROJECT_BINDING_CONFLICT')
         if self.room['state_root'] != str(supervisor.directory):
             raise LifecycleError('ROOM_MISMATCH')
         self.manifest = supervisor.directory / 'checkouts.json'
@@ -77,6 +94,8 @@ class CheckoutAllocator:
             self.supervisor._allowed('checkout.' + action, lifecycle)
             if action == 'allocate' and lifecycle['phase'] != 'running':
                 raise LifecycleError('ROOM_NOT_RUNNING')
+            if action == 'reserve' and lifecycle['phase'] != 'stopped':
+                raise LifecycleError('ROOM_NOT_STOPPED')
             if (lifecycle['spec']['project_id'] != self.room['project']['id'] or
                 not {str(self.repo), str(self.root)} <= set(lifecycle['spec']['project_paths'])):
                 raise LifecycleError('PROJECT_BINDING_CONFLICT')
@@ -117,8 +136,12 @@ class CheckoutAllocator:
             for key, slot in state['slots'].items():
                 if not (key == 'primary' or re.fullmatch(r'[0-9a-f]{32}', key)):
                     raise ValueError()
-                if type(slot) is not dict or set(slot) != {'path', 'branch', 'base', 'run', 'participant', 'active', 'phase', 'identity'}:
+                fields = {'path', 'branch', 'base', 'run', 'participant', 'active', 'phase', 'identity'}
+                if type(slot) is not dict or set(slot) not in (fields, fields | {'writer_scope'}):
                     raise ValueError()
+                if 'writer_scope' in slot:
+                    if not valid_writer_scope(slot['writer_scope'], instance):
+                        raise ValueError()
                 expected = str(self.repo if key == 'primary' else self.root / key)
                 if slot['path'] != expected or not all(_identifier(slot[k]) for k in ('run', 'participant')):
                     raise ValueError()
@@ -210,14 +233,45 @@ class CheckoutAllocator:
         with self._locked('status') as state:
             return [self._observe(state, key) for key in state['slots']]
 
+    def _quiescent(self, slot):
+        # Called only under the lifecycle lock, which also serializes Start and
+        # reservations. Revoked authority/parent exit is not writer quiescence.
+        try:
+            if self.writer_guard is not None:
+                return self.writer_guard.quiescent(self.supervisor._read(), slot.get('writer_scope')) is True
+            # A scope captured by the concrete guard can never be downgraded to
+            # an empty-set/custom callback after a controller restart.
+            return ('writer_scope' not in slot and self.writer_quiescent is not None
+                    and self.writer_quiescent(slot['run'], slot['participant']) is True)
+        except Exception:
+            return False
+
     def allocate(self, run, participant):
+        return self._allocate(run, participant, 'allocate')
+
+    def reserve(self, run, participant):
+        """Reserve while stopped; Start never reuses a released slot implicitly.
+
+        The whole-Workstation guard deliberately refuses reuse while *any*
+        current Workstation writer can touch shared Project paths. A trusted
+        supervisor stops, reserves, then starts; no agent badge grants this API.
+        """
+        return self._allocate(run, participant, 'reserve')
+
+    def _allocate(self, run, participant, action):
         if not _identifier(run) or not _identifier(participant):
             raise LifecycleError('INVALID_CHECKOUT_BINDING')
-        with self._locked('allocate') as state:
+        with self._locked(action) as state:
             for key, slot in state['slots'].items():
                 if slot['active'] and slot['run'] == run:
                     if slot['participant'] != participant:
                         raise LifecycleError('CHECKOUT_BINDING_CONFLICT')
+                    if self.writer_guard is not None:
+                        current = self.writer_guard.capture(self.supervisor._read())
+                        prior = slot.get('writer_scope')
+                        if (prior is None or any(current[field] != prior[field]
+                                                for field in ('kind', 'instance', 'container'))):
+                            raise LifecycleError('WRITER_OBSERVATION_UNKNOWN')
                     if slot['phase'] == 'creating':
                         self._recover_creation(state, key)
                     observed = self._observe(state, key)
@@ -228,8 +282,13 @@ class CheckoutAllocator:
                 raise LifecycleError('CHECKOUT_RECONCILIATION_REQUIRED')
             concurrent = any(s['active'] for s in state['slots'].values())
             key = uuid.uuid4().hex if concurrent else 'primary'
-            if not concurrent and 'primary' in state['slots'] and self._observe(state, 'primary')['disposition'] != 'clean':
-                raise LifecycleError('PRIMARY_NOT_RECONCILED')
+            if not concurrent and 'primary' in state['slots']:
+                if not self._quiescent(state['slots']['primary']):
+                    raise LifecycleError('WRITER_NOT_QUIESCENT')
+                # Observe AFTER the writer fence: a final write made while
+                # stopping must not be missed by an earlier clean snapshot.
+                if self._observe(state, 'primary')['disposition'] != 'clean':
+                    raise LifecycleError('PRIMARY_NOT_RECONCILED')
             branch = 'refs/heads/uas-slot/' + key if concurrent else self._git(self.repo, 'symbolic-ref', 'HEAD')
             base = self._git(self.repo, 'rev-parse', 'HEAD')
             path = self.root / key if concurrent else self.repo
@@ -240,6 +299,8 @@ class CheckoutAllocator:
             slot = dict(path=str(path), branch=branch, base=base, run=run, participant=participant,
                         active=True, phase='creating' if concurrent else 'ready',
                         identity=None if concurrent else {'directory': _identity(path), 'git_metadata': _identity(path / '.git')})
+            if self.writer_guard is not None:
+                slot['writer_scope'] = self.writer_guard.capture(self.supervisor._read())
             state['slots'][key] = slot
             self._save(state)  # Intent precedes Git effects.
             if concurrent:
@@ -270,7 +331,7 @@ class CheckoutAllocator:
                         raise LifecycleError('CHECKOUT_BINDING_CONFLICT')
                     if slot['phase'] != 'ready':
                         raise LifecycleError('CHECKOUT_RECONCILIATION_REQUIRED')
-                    if self.writer_quiescent is None or self.writer_quiescent(run, participant) is not True:
+                    if not self._quiescent(slot):
                         raise LifecycleError('WRITER_NOT_QUIESCENT')
                     slot['active'] = False; self._save(state)
                     return self._observe(state, key)
@@ -283,10 +344,13 @@ class CheckoutAllocator:
                 observed = self._observe(state, key)
                 if key == 'primary' or slot['active'] or slot['phase'] == 'removed':
                     results.append(observed); continue
-                if (self.writer_quiescent is None or
-                    self.writer_quiescent(slot['run'], slot['participant']) is not True):
+                if not self._quiescent(slot):
                     results.append({**observed, 'disposition': 'retained', 'reason': 'WRITER_NOT_QUIESCENT'})
                     continue
+                # Git's normal worktree remove may discard ignored files.
+                # Recheck all retention/identity facts only after actual writers
+                # are fenced; a pre-stop clean observation is insufficient.
+                observed = self._observe(state, key)
                 if slot['phase'] == 'removing' and observed['reason'] == 'ABSENT':
                     slot['phase'] = 'removed'; self._save(state)
                 elif observed['disposition'] == 'clean':

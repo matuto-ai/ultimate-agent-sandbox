@@ -317,6 +317,96 @@ else: a.reconcile()
         no_observer = self.supervisor.checkouts(io.StringIO(json.dumps(self.config)))
         self.assertEqual('WRITER_NOT_QUIESCENT', self.secondary(no_observer.reconcile())['reason'])
 
+    def test_primary_reuse_requires_fresh_quiescence_and_stopped_reservation(self):
+        self.allocator.allocate('run-1', 'alice')
+        self.allocator.release('run-1', 'alice')
+        before = self.allocator.manifest.read_bytes()
+        self.quiescent = False
+        self.error('WRITER_NOT_QUIESCENT', lambda: self.allocator.allocate('run-2', 'bob'))
+        self.assertEqual(before, self.allocator.manifest.read_bytes())
+        self.error('ROOM_NOT_STOPPED', lambda: self.allocator.reserve('run-2', 'bob'))
+        self.supervisor.stop()
+        self.error('WRITER_NOT_QUIESCENT', lambda: self.allocator.reserve('run-2', 'bob'))
+        self.quiescent = True
+        reserved = self.allocator.reserve('run-2', 'bob')
+        self.assertEqual('primary', reserved['slot'])
+        self.assertTrue(reserved['active'])
+        self.assertEqual(reserved, self.reopen().reserve('run-2', 'bob'))
+        self.supervisor.start(self.spec)
+        self.assertEqual(reserved, self.reopen().allocate('run-2', 'bob'))
+
+    def test_observer_failure_retains_and_does_not_release(self):
+        _, _, path = self.pair()
+        self.allocator.writer_quiescent = lambda *_: (_ for _ in ()).throw(OSError('unknown'))
+        before = self.allocator.manifest.read_bytes()
+        self.error('WRITER_NOT_QUIESCENT', lambda: self.allocator.release('run-2', 'bob'))
+        self.assertEqual(before, self.allocator.manifest.read_bytes())
+        self.assertTrue(path.exists())
+
+    def test_final_writer_change_before_quiescence_is_reobserved_before_cleanup_or_reuse(self):
+        _, _, path = self.pair()
+        self.allocator.release('run-2', 'bob')
+        def final_write(*_):
+            (path / 'ignored.txt').write_text('last writer data before stopped')
+            return True
+        self.allocator.writer_quiescent = final_write
+        self.assertEqual('DIRTY_OR_UNTRACKED_OR_IGNORED', self.secondary(self.allocator.reconcile())['reason'])
+        self.assertEqual('last writer data before stopped', (path / 'ignored.txt').read_text())
+        self.allocator.writer_quiescent = lambda *_: True
+        self.allocator.release('run-1', 'alice')
+        def final_primary_write(*_):
+            (self.repo / 'ignored.txt').write_text('last primary writer data')
+            return True
+        self.allocator.writer_quiescent = final_primary_write
+        self.error('PRIMARY_NOT_RECONCILED', lambda: self.allocator.allocate('run-3', 'alice'))
+        self.assertEqual('last primary writer data', (self.repo / 'ignored.txt').read_text())
+
+    def test_writable_backend_requires_durable_guard_and_cannot_downgrade_on_restart(self):
+        from uas.checkout_writers import DockerCheckoutBackend, DockerCheckoutWriters
+        backend = DockerCheckoutBackend(self.repo, self.slots)
+        supervisor = Supervisor(self.root / 'control', self.room['id'], backend,
+                                authorize=lambda *_: True, revoke=lambda *_: True)
+        source = lambda: io.StringIO(json.dumps(self.config))
+        self.error('INVALID_WRITER_GUARD', lambda: supervisor.checkouts(source(), writer_quiescent=lambda *_: True))
+        allocator = supervisor.checkouts(source())  # Concrete guard is automatic.
+        self.assertIsInstance(allocator.writer_guard, DockerCheckoutWriters)
+        running = {'Id': 'a' * 64, 'State': {'Running': True, 'Status': 'running', 'Pid': 123,
+            'Paused': False, 'Restarting': False, 'Dead': False,
+            'StartedAt': '2026-10-27T14:00:00Z', 'FinishedAt': '0001-01-01T00:00:00Z'}}
+        with patch.object(backend, 'admit', return_value=running):
+            primary = allocator.allocate('run-1', 'alice')
+            secondary = allocator.allocate('run-2', 'bob')
+            self.assertEqual(primary, allocator.allocate('run-1', 'alice'))
+        self.assertEqual('a' * 64, secondary['writer_scope']['container'])
+        before = allocator.manifest.read_bytes()
+        with patch.object(backend, '_inspect_object', return_value=running):
+            self.error('WRITER_NOT_QUIESCENT', lambda: allocator.release('run-2', 'bob'))
+        self.assertEqual(before, allocator.manifest.read_bytes())
+        changed = deepcopy(running); changed['Id'] = 'b' * 64
+        with patch.object(backend, 'admit', return_value=changed):
+            self.error('WRITER_OBSERVATION_UNKNOWN', lambda: allocator.allocate('run-2', 'bob'))
+        self.assertEqual(before, allocator.manifest.read_bytes())
+        stopped = deepcopy(running)
+        stopped['State'].update(Running=False, Status='exited', Pid=0, FinishedAt='2026-10-27T14:01:00Z')
+        with patch.object(backend, '_inspect_object', return_value=stopped):
+            supervisor.checkouts(source()).release('run-2', 'bob')
+        # Reopening with the old synthetic callback cannot erase the guard.
+        legacy = self.reopen()
+        self.assertEqual('WRITER_NOT_QUIESCENT', self.secondary(legacy.reconcile())['reason'])
+        self.assertTrue(Path(secondary['path']).is_dir())
+        with patch.object(backend, '_inspect_object', return_value=stopped):
+            self.assertEqual('removed', self.secondary(supervisor.checkouts(source()).reconcile())['disposition'])
+
+    def test_guard_does_not_adopt_legacy_unscoped_allocation(self):
+        from uas.checkout_writers import DockerCheckoutBackend
+        self.pair()
+        supervisor = Supervisor(self.root / 'control', self.room['id'], DockerCheckoutBackend(self.repo, self.slots),
+                                authorize=lambda *_: True, revoke=lambda *_: True)
+        allocator = supervisor.checkouts(io.StringIO(json.dumps(self.config)))
+        with patch.object(supervisor.backend, '_inspect_object', side_effect=AssertionError('must not infer ownership')):
+            self.error('WRITER_NOT_QUIESCENT', lambda: allocator.release('run-2', 'bob'))
+        self.assertTrue(self.secondary(allocator.status())['active'])
+
     def test_store_capacity_rejects_before_store_or_git_effects(self):
         self.pair()
         before = self.allocator.manifest.read_bytes()
