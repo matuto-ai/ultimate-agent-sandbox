@@ -355,9 +355,29 @@ class ExternalReadProcessTests(unittest.TestCase):
         finish()
         self.assertEqual({'ok':False,'error':'PROCESS_EXITED'}, response)
         # Provider work already in flight may finish, but cannot regrant authority.
-        self.assertEqual('OK', self.record()['result']['status'])
-        self.error('PROCESS_EXITED', lambda: controller._authority(handle,
-                    (handle.process.pid,os.getuid(),os.getgid())))
+        completed = self.record()
+        self.assertEqual('OK', completed['result']['status'])
+        # The initial response preserves the concrete exit reason. Subsequent
+        # attempts observe the durable revoked incarnation, not a live seat.
+        seat = controller.snapshot()['seats']['alice']
+        self.assertEqual('exited', seat['status'])
+        self.assertEqual('process-exited', seat['reason'])
+        self.assertGreater(seat['epoch'], handle.badge.epoch)
+        self.assertEqual(handle.badge.incarnation_id, seat['incarnation_id'])
+        self.assertEqual(seat, json.loads(controller.path.read_text())['seats']['alice'])
+        credentials = (handle.process.pid, os.getuid(), os.getgid())
+        self.error('AUTHORITY_REVOKED', lambda: controller._authority(handle, credentials))
+        # Neither an exact retry nor a fresh operation can disclose/replay the
+        # completed observation or make a new provider call for this process.
+        for operation in ('read-1', 'after-exit'):
+            with self.supervisor._locked():
+                packet = self.client.prepare({'id':operation, 'kind':'forge-read',
+                    'argv':['repo','view']}, handle.badge.origin(),
+                    authorize=lambda: controller._authority(handle, credentials))
+            self.error('AUTHORITY_REVOKED', lambda: self.client.perform(packet))
+        self.assertEqual(completed, self.record())
+        self.assertIsNone(self.record('after-exit'))
+        self.assertFalse(select.select([self.worker.stdout], [], [], 0)[0])
 
     def test_prepare_then_actual_revoke_blocks_dispatch_before_provider_contact(self):
         self.start_broker()

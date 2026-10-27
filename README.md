@@ -107,3 +107,9 @@ Hub adjudication to the private Supervisor boundary; pure tests are not native
 helper qualification, production enablement, or protected-operation authority.
 
 The [external read Broker](docs/forge-read-service.md) documents the full declared GitHub read vocabulary, process-bound external credential boundary, metadata-only Deployment read audit and completed-job log safeguards.
+
+The [bounded mutation Broker](docs/forge-mutations.md) extends that same external
+owner with Project-pinned issue/PR/comment/work-label/dependency/submitted-review
+routes, per-step authority, durable executed-field receipts and partial/unknown
+fences. Account-free hosted proof is separate from live-account qualification;
+#69 reconciliation/projections and #74 review workflow are not implied.

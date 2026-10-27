@@ -78,6 +78,10 @@ jobs:
         if: steps.changes.outputs.skip_tests != 'true'
         run: timeout --signal=TERM --kill-after=2s 25s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/forge_read_smoke.py
 
+      - name: Check bounded mutation Broker and private credentials
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: timeout --signal=TERM --kill-after=2s 25s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/forge_mutation_smoke.py
+
       - name: Report tests not applicable
         if: steps.changes.outputs.skip_tests == 'true'
         run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; this exemption is not runtime or security evidence.'
