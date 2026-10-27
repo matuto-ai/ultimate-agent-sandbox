@@ -15,6 +15,7 @@ import uuid
 from .config import load
 from .checkout_scope import valid_writer_scope
 from .lifecycle import LifecycleError, _canonical, _path, _unique_object
+from .manager_owner import REVISION_FIELDS, advance_revision, checkout_observations, validate_revision
 
 
 MAX_SLOTS = 1000
@@ -127,8 +128,10 @@ class CheckoutAllocator:
             if self.manifest.is_symlink() or self.manifest.stat().st_size > MAX_STORE_BYTES:
                 raise ValueError()
             state = json.loads(self.manifest.read_text(), object_pairs_hook=_unique_object)
-            if type(state) is not dict or set(state) != set(binding) | {'slots'}:
+            required = set(binding) | {'slots'}
+            if type(state) is not dict or not required <= state.keys() or set(state) - required - REVISION_FIELDS:
                 raise ValueError()
+            validate_revision(state)
             if any(_canonical(state[k]) != _canonical(v) for k, v in binding.items()):
                 raise ValueError()
             if type(state['slots']) is not dict or len(state['slots']) > MAX_SLOTS:
@@ -166,6 +169,10 @@ class CheckoutAllocator:
             raise LifecycleError('INVALID_CHECKOUT_STORE') from error
 
     def _save(self, state):
+        try:
+            advance_revision(state)
+        except ValueError as error:
+            raise LifecycleError('INVALID_CHECKOUT_STORE') from error
         encoded = _canonical(state).encode('utf-8')
         # Reserve the eventual observed device/inode fields before Git add.
         # A valid creating intent must also fit its ready/recovery record.
@@ -232,6 +239,28 @@ class CheckoutAllocator:
     def status(self):
         with self._locked('status') as state:
             return [self._observe(state, key) for key in state['slots']]
+
+    def manager_observations(self):
+        """Passive slot intent, NOT working-tree cleanliness or Git existence.
+
+        Do not enter _locked(), which deliberately runs Git admission probes.
+        Validate the exact Room/Project/instance manifest under its owner lock.
+        """
+        with self.supervisor._locked():
+            lifecycle = self.supervisor._read()
+            if lifecycle is None or lifecycle['spec']['project_id'] != self.room['project']['id']:
+                raise LifecycleError('ROOM_UNAVAILABLE')
+            if not self.manifest.exists():
+                return checkout_observations({'slots': {}})
+            try:
+                if self.manifest.is_symlink() or self.manifest.stat().st_size > MAX_STORE_BYTES:
+                    raise ValueError()
+                stored = json.loads(self.manifest.read_text(), object_pairs_hook=_unique_object)
+                common = _path(stored['common'])
+                state = self._read(lifecycle['instance_id'], str(common))
+            except (ValueError, KeyError, TypeError, OSError) as error:
+                raise LifecycleError('INVALID_CHECKOUT_STORE') from error
+            return checkout_observations(state)
 
     def _quiescent(self, slot):
         # Called only under the lifecycle lock, which also serializes Start and

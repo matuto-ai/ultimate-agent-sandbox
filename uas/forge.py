@@ -34,6 +34,83 @@ class ReadOnlyForgeBroker:
                 raise LedgerError('PROJECT_MISMATCH')
         self.assignments = assignments
 
+    def manager_observations(self, snapshot):
+        """Passive exact Run-referenced dependency receipts, not a fresh read.
+
+        The canonical Run carries the immutable observation operation ID. Use
+        those indexed receipts, never a guessed latest response or an unbounded
+        scan. The owner validates every Project/repository/issue/cut binding.
+        """
+        import sqlite3
+        try:
+            return self._manager_observations(snapshot)
+        except LedgerError:
+            raise
+        except (ValueError, KeyError, TypeError, sqlite3.Error):
+            raise LedgerError('OBSERVATION_UNAVAILABLE') from None
+
+    def _manager_observations(self, snapshot):
+        import json
+        from .github_read import validate_observation
+        from .manager_projection import SourceObservation
+        if (type(snapshot) is not dict or snapshot.get('room_id') != self.binding.room_id
+                or type(snapshot.get('room_seq')) is not int or snapshot['room_seq'] < 0
+                or type(snapshot.get('state')) is not dict):
+            raise LedgerError('ROOM_MISMATCH')
+        runs = snapshot['state'].get('runs')
+        if runs is None:
+            return (SourceObservation('dependencies', 'forge-broker', None, None, None,
+                    status='unavailable', reason='NO_CANONICAL_RUN_SOURCE'),)
+        if type(runs) is not dict or len(runs) > 32:
+            raise LedgerError('INVALID_RUN_SOURCE')
+        rows, version, committed_at = {}, 0, None
+        for run_id, run in sorted(runs.items()):
+            operation = _token(run.get('forge_observation'))
+            key = hashlib.sha256((self.ledger.room_id + '\0' + operation).encode()).hexdigest()
+            stored = self.ledger._connection().execute('SELECT receipt FROM operations WHERE id=?',
+                ('forge-terminal-' + key,)).fetchone()
+            if stored is None:
+                raise LedgerError('OBSERVATION_UNAVAILABLE')
+            receipt = json.loads(stored['receipt'])
+            last_seq = receipt['last_seq']
+            result = receipt['result']
+            if (receipt['room_id'] != self.binding.room_id or type(last_seq) is not int
+                    or not 0 < last_seq <= snapshot['room_seq']
+                    or result.get('operation_id') != operation
+                    or result.get('project_id') != self.binding.project_id
+                    or result.get('repository') != self.binding.repository
+                    or run.get('project_id') != self.binding.project_id
+                    or run.get('repository') != self.binding.repository):
+                raise LedgerError('INVALID_PROVIDER_OBSERVATION')
+            observation = validate_observation(result['observation'])
+            issue = observation['issue']
+            if (issue is None or issue['id'] != run['issue_id'] or issue['number'] != run['issue_number']
+                    or observation['completeness'] != 'complete'):
+                raise LedgerError('OBSERVATION_UNAVAILABLE')
+            record = self.ledger._connection().execute('SELECT event FROM events WHERE seq=?', (last_seq,)).fetchone()
+            if record is None:
+                raise LedgerError('OBSERVATION_UNAVAILABLE')
+            event = json.loads(record['event'])
+            if event['kind'] != 'forge-read-observed' or event['room_id'] != self.binding.room_id:
+                raise LedgerError('INVALID_PROVIDER_OBSERVATION')
+            if last_seq > version:
+                version, committed_at = last_seq, event['timestamp']
+            base = {'run_id': _token(run_id), 'repository': self.binding.repository,
+                    'completeness': observation['completeness'], 'observation_version': last_seq}
+            rows[run_id + ':work-item'] = {**base, 'kind': 'work-item', 'issue_id': issue['id'],
+                'issue_number': issue['number'], 'state': issue['state'],
+                'dependency_count': len(observation['dependencies'])}
+            for dependency in observation['dependencies']:
+                rows[run_id + ':dependency:' + str(dependency['id'])] = {**base, 'kind': 'dependency',
+                    'issue_id': dependency['id'], 'issue_number': dependency['number'],
+                    'state': dependency['state'], 'blocked_issue_id': issue['id'],
+                    'blocked_issue_number': issue['number']}
+            if len(rows) > 1024:
+                return (SourceObservation('dependencies', 'forge-broker', None, None, None,
+                    status='unknown', reason='DEPENDENCY_PROJECTION_LIMIT'),)
+        return (SourceObservation('dependencies', 'forge-broker', version, None, rows,
+                source_committed_at=committed_at),)
+
     def denied(self, code):
         """Controller-only audit of an unauthenticated record; no caller attribution."""
         allowed = {'WRONG_PROCESS', 'AUTHORITY_REVOKED', 'PROCESS_EXITED',
