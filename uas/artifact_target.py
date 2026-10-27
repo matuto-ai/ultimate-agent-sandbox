@@ -20,6 +20,7 @@ import uuid
 
 from .artifact_paths import READABLE_DIRECTORY_FLAGS, open_directory
 from .checkout_scope import valid_writer_scope
+from .manager_owner import REVISION_FIELDS, validate_revision
 from .artifact_protocol import (ArtifactError, MAX_BLOB_BYTES, MAX_DEPTH, MAX_ENTRIES,
     MAX_METADATA_BYTES, MAX_OBJECT_BYTES, MAX_TARGET_BYTES, RESERVATION_BYTES,
     canonical, validate_path, validate_scope, validate_source, validate_target)
@@ -158,9 +159,15 @@ class ArtifactSourceResolver:
                         'repo': str(self.repo), 'root': str(self.root), 'common': str(self.repo / '.git'),
                         'filesystem': {'repo': _identity(os.fstat(repo)), 'root': _identity(os.fstat(root)),
                                        'common': _identity(os.fstat(common))}}
-                    if (type(state) is not dict or set(state) != set(binding) | {'slots'}
+                    required = set(binding) | {'slots'}
+                    if (type(state) is not dict or not required <= state.keys()
+                            or set(state) - required - REVISION_FIELDS
                             or any(state[k] != v for k, v in binding.items())
                             or type(state['slots']) is not dict or len(state['slots']) > 1000):
+                        _fail('INVALID_ARTIFACT_OWNERSHIP')
+                    try:
+                        validate_revision(state)
+                    except ValueError:
                         _fail('INVALID_ARTIFACT_OWNERSHIP')
                     matches = [(key, slot) for key, slot in state['slots'].items()
                                if type(slot) is dict and slot.get('active') is True
