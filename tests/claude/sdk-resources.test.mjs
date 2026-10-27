@@ -125,3 +125,54 @@ test('diagnostic writer bounds even an untrusted lifecycle and cannot escape wri
   assert.doesNotThrow(()=>writeHostDiagnostic({on(){},write(){throw Error(secret);}},
     'startup-failed',2,null,lifecycleDiagnostic({phase:'configuration'})));
 });
+
+import {nativeDeadline, INIT_DEADLINE, CONTROL_DEADLINE} from '../../runtime/claude/sdk-resources.mjs';
+
+test('cold initialization has one bounded 5s timer; ongoing control remains 1500ms', async () => {
+  assert.equal(INIT_DEADLINE,5000); assert.equal(CONTROL_DEADLINE,1500);
+  for (const [reason,budget] of [['native-initialize-timeout',5000],['native-control-timeout',1500]]) {
+    let fire, schedules=0, cancels=0, fences=0, resolve;
+    const request=new Promise(r=>{resolve=r;});
+    const pending=nativeDeadline(request,reason,code=>{assert.equal(code,reason);fences++;}, {
+      schedule(callback,delay){assert.equal(delay,budget);fire=callback;schedules++;return 7;},
+      cancel(id){assert.equal(id,7);cancels++;}
+    });
+    const rejection=assert.rejects(pending,new RegExp(reason));
+    await Promise.resolve();
+    assert.equal(schedules,1); assert.equal(fences,0);
+    fire(); await rejection;
+    resolve('late native answer'); await Promise.resolve();
+    assert.equal(fences,1);assert.equal(cancels,1);assert.equal(schedules,1);
+  }
+});
+
+test('successful initialization cancels once without retry or changing the next control budget', async () => {
+  const budgets=[],cleared=[];
+  const clocks={schedule(fn,ms){budgets.push(ms);return budgets.length;},cancel(id){cleared.push(id);}};
+  const timeout=()=>assert.fail('successful request cannot time out');
+  assert.equal(await nativeDeadline(Promise.resolve('ready'),'native-initialize-timeout',timeout,clocks),'ready');
+  assert.equal(await nativeDeadline(Promise.resolve([]),'native-control-timeout',timeout,clocks) instanceof Array,true);
+  assert.deepEqual(budgets,[5000,1500]); assert.deepEqual(cleared,[1,2]);
+  assert.throws(()=>nativeDeadline(Promise.resolve(),'arbitrary-retry',timeout,clocks),/unsupported-native-deadline/);
+  assert.deepEqual(budgets,[5000,1500]);
+});
+
+test('native rejection clears its only timer and is not retried or transformed into timeout', async () => {
+  let schedules=0,cancels=0;
+  const failure=new Error('fixed source failure');
+  await assert.rejects(nativeDeadline(Promise.reject(failure),'native-initialize-timeout',()=>assert.fail(),{
+    schedule(){schedules++;return 1;},cancel(){cancels++;}
+  }),error=>error===failure);
+  assert.equal(schedules,1);assert.equal(cancels,1);
+});
+
+test('public listing retains the 1500ms default independently of cold startup', async t => {
+  const delays=[];
+  t.mock.method(globalThis,'setTimeout',(_callback,delay)=>{delays.push(delay);return 0;});
+  const p=child(),tracked=new Set();
+  const result=collectListing(p,tracked);
+  p.stdout.end('[]');p.emit('close',0);
+  assert.deepEqual(await result,[]);
+  assert.deepEqual(delays,[1500]);
+  assert.equal(tracked.size,0);
+});
