@@ -1,12 +1,14 @@
-# Workstation Pi transport — native proof, cleanup qualification pending
+# Workstation Pi transport — fixed native fixture qualified
 
 This source advances #62/#63/#70; it does not complete #58, #78 or #81.
-[Run 40453997464](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40453997464)
-established actual two-Pi execution with an outside Hub, Alice → Bob → Alice
-native receipts and the reported confinement/attribution/negative/control gates.
-Overall scenario qualification still failed at guest quota-mount cleanup; the
-explicit connection-close and fail-closed fingerprint corrections below require
-a new exact-tree deliberate run. Production launch remains disabled.
+[Run 40457406583](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40457406583)
+passed all ten fixed native-fixture gates on head `4cdf5896`, tree `a91abf91`,
+including actual two-Pi execution with an outside Hub, Alice → Bob → Alice
+recipient native receipts and complete guest/runner cleanup. This fresh run
+includes the reviewed explicit connection-close and fail-closed fingerprint
+corrections; the earlier nine-gate result was not promoted. Final documentation
+only records that result: executable, Runtime, test, workflow and staged-input
+blobs remain identical to the qualified head. Production launch remains disabled.
 Participants within one Workstation are trusted peers, not mutually
 memory-isolated. A bootstrap
 challenge is launch correlation, never bearer authority; no nonce-secrecy or
@@ -1008,8 +1010,9 @@ unlogged. Diagnostic failures cannot replace the actual cleanup error.
 Container, quota-mount and image/build-scratch cleanup flags are now independent,
 while any cleanup error still fails the scenario. No force/lazy unmount, retry,
 new resource authority, native RPC behavior or deadline change is introduced.
-The correction still requires independently reviewed source, ordinary CI and a
-new sole deliberate VM run before cleanup or full scenario success can be claimed.
+At that point the correction still required independently reviewed source,
+ordinary CI and a new sole deliberate VM run before cleanup or full scenario
+success could be claimed. That subsequent result is recorded below.
 
 Independent accumulated-source review also found that the final rootfs
 fingerprint's `os.walk` lacked an error callback and could silently omit a
@@ -1019,4 +1022,74 @@ raising `onerror` pattern already used by the trust inventory now aborts the
 final fingerprint on root or nested traversal failure. Pure injected permission
 and I/O-error regressions require the original exception and no completed
 manifest; file, mode, link and byte-budget semantics are unchanged. The corrected
-scan and cleanup code must both be present in the next qualified native tree.
+scan and cleanup code were both required in the next qualified native tree.
+
+
+### Full fixed-fixture qualification: run 40457406583
+
+The [fresh deliberate run](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40457406583/job/122033841411)
+completed successfully on **`4cdf58966221c45288df9468a78df4624aeeee24`**, exact tree
+**`a91abf91bd1193e8d9eefc5c8a49b75dc8e852a3`**. All ten checks passed:
+`payload`, `confinement`, `socket_policy`, `hub_startup`, `native_two_seats`,
+`actor_attribution`, `wrong_process`, `control_loss`, `resources` and
+`guest_cleanup`. The report has no failure record. The final documentation-only
+update does not change any executable, Runtime, test, workflow or staged native
+input from that qualified tree; it does not request a redundant heavy run.
+
+Alice and Bob were distinct held tasks `[5,3315]` and `[5,3349]`, with separate
+fresh Pi 1.4.0 contexts. Both native tool-end counts were three. The existing
+RoomLedger ended at sequence 13, with only `native-0` attributed to actor-a and
+`native-1` to actor-b. Each recipient's native receipt was independently matched
+to its fresh session and incarnation and its durable Hub confirmation:
+
+| Direction | Recipient native session | Native entry | Hub confirmation sequence |
+| --- | --- | --- | --- |
+| Alice → Bob | `01a17bf9-097c-76dd-9606-a223418857ff` | `70a921de` | 9 |
+| Bob → Alice | `01a17bf8-d9e4-7353-9cbf-dd95c08fbb09` | `13c2d5dc` | 13 |
+
+Both receipts identify `native-active-branch-and-session-file`. Recomputed exact
+logical-message digests are, respectively,
+`b950f1acb0169bb6c4b7b1d3df203459520d64197761dc32507872e7887a6d5f`
+and `6276b8d2cb81087541fcd427709ec8c9134ee2c348537ea5c9c61ebdd7ac82a1`.
+These are actual account-free native recipient receipts, not tool completion,
+mock observations, or a replacement journal protocol.
+
+Guest cleanup reports **no errors**, all owned containers removed, the quota
+disk unmounted, and the owned image/build scratch removed. The complete guest
+boot/install/scenario/shutdown interval was **885.217 seconds**. Runner cleanup
+removed its temporary disposable-VM directory after **1,170.528 seconds**. This
+passes the previously failing cleanup gate; it does not retroactively supply the
+missing errno from the older failure.
+
+Exact retained inputs/results:
+
+- Imported image:
+  `sha256:12fb6b98b8b635f68e1ea8ec5bbf2aae51bb4f06a6b7eef65013bf405a3a22be`.
+- Rootfs: **24,885 entries / 374,552,713 bytes**, manifest SHA-256
+  `029501150182547058837b08bbf656846df462896bb90641dc46a55c0b740eca`.
+- Runner payload-manifest SHA-256:
+  `c3bec82e2cba28857cc6cc190b143f91019527173f333b955d097a297f3fbd6f`.
+- Complete public job log: **77,123 bytes**, SHA-256
+  `84e5098e0afc8aabd488af45d15390a2c1d3ee1ce6262490479d106bb981a45e`.
+
+The success runner retains the complete final guest report, but does not print
+raw guest serial diagnostic fragments. Its archive digest and startup CPU
+snapshots are therefore **not retained in this success log and are not claimed**;
+those values from previous failed rounds are not reused as final-run evidence.
+
+Exact-head ordinary CI also passed: [validate/Docker](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40457091428)
+ran 976 tests with 866 passed / 110 skipped plus five Docker tests;
+[Pi](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40457091612)
+passed 120 tests (86 prior native/regression cases and 34 pure startup tests);
+[Claude](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40457091724)
+passed 94 tests. The additional independent accumulated-source review covered
+this 252-file tree, including the final cleanup and scan corrections. Local
+filtered discovery passed 856 of 976 tests with 120 explicit skips; the four
+previously denied local listener cases were excluded before execution, not
+retried or counted as local passes.
+
+This qualifies **only the fixed account-free native Workstation/outside-Hub
+fixture**. It does not qualify production launch, a general install/deployment
+flow, quota exhaustion, reset-resource sizing, production capacity, every
+unmeasured SELinux object detail, or whole-product acceptance. Those limits,
+all earlier failed evidence, and the disabled production launcher are retained.
