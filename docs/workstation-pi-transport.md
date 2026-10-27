@@ -559,3 +559,26 @@ a diagnostic fact, never authorization. Escapes, cycles, special files and
 other containment violations still fail immediately. This is bounded diagnosis,
 not a generic dangling-link exception or an assertion that missing executables
 exist. Actual exact image/native qualification remains pending.
+
+### Serial-stall instrumentation after run 40423347331
+
+Run 40423347331 on `63e889f2` ended at the runner's unchanged 300-second serial
+inactivity guard. Last guest facts were the passed rootfs guard and actual
+RPM/DNF identities. No completed rootfs or unresolved-link inventory was emitted;
+the silent phase and underlying cause remain unknown. QEMU termination and
+scratch cleanup completed. This does not establish hidden guest progress.
+
+The previous helper captured DNF output until exit, while native installation
+has a 900-second process deadline. Instrumentation now emits fixed start/complete
+markers for each rootfs phase. Only the fixed native DNF call uses incremental
+bounded stdout/stderr capture, retaining head/tail and first error lines while
+reporting byte counters only after actual received output advances. No timer-only
+heartbeat is emitted. Extraction and fingerprint progress similarly counts real
+verified file bytes and processed entries; phase completion is not printed after
+a failed operation. Native DNF timeout still kills its owned process group,
+reaps the leader and closes all resources, retaining bounded error context.
+The native 900-second process limit, runner 300-second idle limit and global
+manual budget remain unchanged. Default synthetic #98 command behavior is
+unchanged. No arbitrary log, environment or credential collection is introduced.
+These are visibility changes, not proof the previous stall was load-related or
+that any native/container qualification has passed.

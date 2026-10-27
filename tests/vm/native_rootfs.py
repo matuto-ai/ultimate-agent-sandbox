@@ -19,6 +19,8 @@ MAX_FILES = 30000
 MAX_FILE_BYTES = 160 * 1024 * 1024
 MAX_RUNTIME_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 544 * 1024 * 1024
+PROGRESS_FILES = 1024
+PROGRESS_BYTES = 64 * 1024 * 1024
 MAX_ROOT_FILES = 100000
 MAX_ROOT_BYTES = 2 * 1024 * 1024 * 1024
 HEX = re.compile(r'[0-9a-f]{64}\Z')
@@ -126,6 +128,7 @@ def extract_runtime(archive_path, files, root):
     if not stat.S_ISDIR(root.lstat().st_mode) or root.resolve() != root:
         raise ValueError('canonical owned root required')
     seen = set()
+    extracted_bytes, reported_files, reported_bytes = 0, 0, 0
     with tarfile.open(archive_path, 'r:') as archive:
         for entry in archive:
             name = entry.name
@@ -153,6 +156,10 @@ def extract_runtime(archive_path, files, root):
                 os.fchmod(output.fileno(), expected['mode'])
             if hasher.hexdigest() != expected['sha256']:
                 raise ValueError('native file content mismatch')
+            extracted_bytes += expected['bytes']
+            if len(seen) - reported_files >= PROGRESS_FILES or extracted_bytes - reported_bytes >= PROGRESS_BYTES:
+                print('Native extraction progress:', json.dumps({'files': len(seen), 'bytes': extracted_bytes}), flush=True)
+                reported_files, reported_bytes = len(seen), extracted_bytes
         # Tar readers normally ignore anything after the end marker. Reject a
         # concatenated second archive or arbitrary trailing data explicitly.
         archive.fileobj.seek(archive.offset)
@@ -304,6 +311,7 @@ def fingerprint(root, *, debug_indexes=None, unresolved_owner=None):
     entries, total, inodes = [], 0, {}
     unresolved, unresolved_count = [], 0
     inventory_bytes, inventory_full = 0, False
+    reported_entries, reported_bytes = 0, 0
     for base, dirs, names in os.walk(root, followlinks=False):
         for name in sorted(dirs + names):
             path = Path(base) / name
@@ -350,6 +358,9 @@ def fingerprint(root, *, debug_indexes=None, unresolved_owner=None):
             entries.append(item)
             if len(entries) > MAX_ROOT_FILES:
                 raise ValueError('native image file budget exceeded')
+            if len(entries) - reported_entries >= PROGRESS_FILES or total - reported_bytes >= PROGRESS_BYTES:
+                print('Native fingerprint progress:', json.dumps({'entries': len(entries), 'bytes': total}), flush=True)
+                reported_entries, reported_bytes = len(entries), total
     if any(count != expected for count, expected in inodes.values()):
         raise ValueError('rootfs contains external hardlink')
     if unresolved_count:
@@ -492,6 +503,7 @@ def build_rootfs(nonce, manifest, destination, *, run):
     print('Native package tools:', json.dumps(package_tools), flush=True)
     # Payload hashes/signatures and repodata were verified by guest install;
     # only this read-only file repository is made visible to the native solver.
+    print('Native rootfs phase: rpm-transaction start', flush=True)
     run('dnf', '-y', '--installroot=' + str(root), '--releasever=44',
         '--disablerepo=*', '--repofrompath=uas-native,file://' + str(PAYLOAD / 'rpms'),
         '--enablerepo=uas-native', '--setopt=uas-native.gpgcheck=1',
@@ -499,8 +511,14 @@ def build_rootfs(nonce, manifest, destination, *, run):
         '--setopt=localpkg_gpgcheck=True', '--setopt=install_weak_deps=False',
         '--setopt=tsflags=noscripts', '--setopt=plugins=False',
         'install', *ROOTS, timeout=900, native_failure_context=True)
+    print('Native rootfs phase: rpm-transaction complete', flush=True)
+    print('Native rootfs phase: filesystem-metadata start', flush=True)
     filesystem_layout = verify_filesystem_layout(root, run=run)
+    print('Native rootfs phase: filesystem-metadata complete', flush=True)
+    print('Native rootfs phase: runtime-extraction start', flush=True)
     extract_runtime(archive, files, root)
+    print('Native rootfs phase: runtime-extraction complete', flush=True)
+    print('Native rootfs phase: tini-copy start', flush=True)
     source = resolve_inside(root, 'usr/bin/tini')
     ordinary(source)
     target = root / 'opt/uas/bin/tini'
@@ -508,18 +526,25 @@ def build_rootfs(nonce, manifest, destination, *, run):
     with source.open('rb') as input_, target.open('xb') as output:
         shutil.copyfileobj(input_, output)
     target.chmod(0o555)
+    print('Native rootfs phase: tini-copy complete', flush=True)
     # mkdir is umask-sensitive and RPM may adjust the installroot mode. The
     # imported image root must be traversable by both fixed unprivileged UIDs.
     root.chmod(0o755)
+    print('Native rootfs phase: debug-metadata start', flush=True)
     debug_indexes = installed_ncurses_indexes(root, run=run)
     debug_indexes.update(installed_debug_indexes(root, 'coreutils', run=run))
+    print('Native rootfs phase: debug-metadata complete', flush=True)
+    print('Native rootfs phase: fingerprint start', flush=True)
     result = fingerprint(root, debug_indexes=debug_indexes,
                          unresolved_owner=lambda path: installed_link_owner(root, path, run=run))
+    print('Native rootfs phase: fingerprint complete', flush=True)
+    print('Native rootfs phase: manifest-write start', flush=True)
     manifest_path = root.with_name(root.name + '.manifest.json')
     with manifest_path.open('xb') as output:
         output.write(canonical(result.pop('manifest')))
         output.flush(); os.fsync(output.fileno())
     manifest_path.chmod(0o444)
+    print('Native rootfs phase: manifest-write complete', flush=True)
     return {**result, 'rootfs_manifest': str(manifest_path), 'runtime_sha256': manifest['native_runtime']['sha256'],
             'tini_sha256': digest(target), 'rpm_roots': list(ROOTS), 'rpm_scriptlets': False,
             'rpm_automatic_sysusers': True, 'package_tools': package_tools,

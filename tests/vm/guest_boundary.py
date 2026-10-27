@@ -7,6 +7,8 @@ import ipaddress
 import json
 import os
 import re
+import selectors
+import signal
 from pathlib import Path
 import shutil
 import socket
@@ -59,6 +61,126 @@ def failure_context(text):
             'first_error_limit_reached': len(first_errors) == 8, 'output': excerpt}
 
 
+class NativeCapture:
+    """Bounded head/tail plus first error lines while consuming real bytes."""
+    def __init__(self):
+        self.count = 0
+        self.head = bytearray()
+        self.tail = bytearray()
+        self.line = bytearray()
+        self.line_bytes = 0
+        self.line_match = False
+        self.scan_tail = b''
+        self.errors = []
+        self.errors_truncated = False
+
+    def feed(self, data):
+        self.count += len(data)
+        self.head.extend(data[:max(0, 32768 - len(self.head))])
+        self.tail.extend(data)
+        del self.tail[:-32768]
+        parts = data.split(b'\n')
+        for index, part in enumerate(parts):
+            self.line.extend(part[:max(0, 512 - len(self.line))])
+            self.line_bytes += len(part)
+            self.line_match |= bool(re.search(rb'\b(?:error|failed|failure|fatal)\b|cpio:',
+                                               self.scan_tail + part, re.IGNORECASE))
+            self.scan_tail = (self.scan_tail + part)[-16:]
+            if index < len(parts) - 1:
+                self._line_end()
+
+    def _line_end(self):
+        if self.line_match and len(self.errors) < 8:
+            self.errors.append(bytes(self.line).decode('utf-8', errors='ignore'))
+            self.errors_truncated |= self.line_bytes > 512
+        self.line.clear(); self.line_bytes = 0; self.line_match = False; self.scan_tail = b''
+
+    def context(self):
+        if self.line_bytes:
+            self._line_end()
+        if self.count <= 65536:
+            remaining = self.count - len(self.head)
+            raw = bytes(self.head) + (bytes(self.tail[-remaining:]) if remaining else b'')
+            output = raw.decode('utf-8', errors='ignore')
+        else:
+            output = (bytes(self.head).decode('utf-8', errors='ignore')
+                      + '\n[... bounded output omitted ...]\n'
+                      + bytes(self.tail).decode('utf-8', errors='ignore'))
+        return {'bytes': self.count, 'truncated': self.count > 65536, 'output': output,
+                'first_error_lines': list(self.errors), 'first_error_lines_truncated': self.errors_truncated,
+                'first_error_limit_reached': len(self.errors) == 8}
+
+
+def native_command(arguments, *, timeout, pass_fds=()):
+    """Fixed native DNF only: real-output progress, original hard deadline."""
+    started = time.monotonic()
+    deadline = started + timeout
+    process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, pass_fds=pass_fds, start_new_session=True)
+    selector = None
+    captures = {'stdout': NativeCapture(), 'stderr': NativeCapture()}
+    reported, last_report = (0, 0), started
+    reaped = False
+    try:
+        selector = selectors.DefaultSelector()
+        for name in captures:
+            stream = getattr(process, name)
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(arguments, timeout)
+            for key, _ in selector.select(min(1, remaining)):
+                try:
+                    data = os.read(key.fileobj.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if data:
+                    captures[key.data].feed(data)
+                else:
+                    selector.unregister(key.fileobj)
+            counts = tuple(captures[name].count for name in ('stdout', 'stderr'))
+            now = time.monotonic()
+            if counts != reported and (now - last_report >= 30 or not selector.get_map()):
+                print('Native DNF output progress:', json.dumps(dict(zip(('stdout_bytes', 'stderr_bytes'), counts))), flush=True)
+                reported, last_report = counts, now
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(arguments, timeout)
+        code = process.wait(timeout=remaining)
+        reaped = True
+        return code, {name: capture.context() for name, capture in captures.items()}
+    except subprocess.TimeoutExpired:
+        print('Native DNF timeout evidence:', json.dumps({
+            'timeout_seconds': timeout, **{name: capture.context() for name, capture in captures.items()}},
+            ensure_ascii=True), flush=True)
+        raise
+    finally:
+        # The owned new process group is killed before leader reaping on errors;
+        # never signal a PID after wait() could release it for reuse.
+        failures = []
+        if not reaped:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except BaseException as error:
+                failures.append(error)
+            try:
+                process.wait(timeout=5)
+            except BaseException as error:
+                failures.append(error)
+        for resource in (selector, process.stdout, process.stderr):
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as error:
+                    failures.append(error)
+        if failures and sys.exc_info()[0] is None:
+            raise failures[0]
+
+
 def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False):
     if type(native_failure_context) is not bool:
         raise ValueError('invalid native failure diagnostic option')
@@ -67,13 +189,15 @@ def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False):
             or not {'--disablerepo=*', '--enablerepo=uas-native', '--setopt=tsflags=noscripts',
                     '--setopt=uas-native.gpgcheck=1'} <= set(arguments)):
         raise ValueError('native diagnostics require offline noscripts rootfs command')
+    if native_failure_context:
+        code, streams = native_command(arguments, timeout=timeout, pass_fds=pass_fds)
+        if code:
+            context = {'tool': arguments[0], 'returncode': code, **streams}
+            raise RuntimeError('native rootfs command failed: ' + json.dumps(context, ensure_ascii=True))
+        return streams['stdout']['output']
     result = subprocess.run(arguments, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                             timeout=timeout, check=False, pass_fds=pass_fds)
     if result.returncode:
-        if native_failure_context:
-            context = {'tool': arguments[0], 'returncode': result.returncode,
-                       'stderr': failure_context(result.stderr), 'stdout': failure_context(result.stdout)}
-            raise RuntimeError('native rootfs command failed: ' + json.dumps(context, ensure_ascii=True))
         raise RuntimeError(f'{arguments[0]} failed: {result.stderr[-2048:]} {result.stdout[-2048:]}')
     return result.stdout
 

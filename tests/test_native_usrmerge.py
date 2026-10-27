@@ -96,8 +96,9 @@ class NativeUsrmergeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'usrmerge shape'):
                 rootfs.build_rootfs('a' * 32, {'native_runtime': {}}, self.root, run=run)
             extract.assert_not_called()
-            self.assertIn('observed-base-version', output.call_args.args[1])
-            self.assertIn('another-observed-version', output.call_args.args[1])
+            observed = next(call.args[1] for call in output.call_args_list if call.args[0] == 'Native package tools:')
+            self.assertIn('observed-base-version', observed)
+            self.assertIn('another-observed-version', observed)
         self.assertEqual(events, ['rpm', 'dnf'])
 
     def test_diagnostic_queries_installed_tools_and_rejects_oversize_before_dnf(self):

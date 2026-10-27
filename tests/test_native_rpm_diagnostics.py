@@ -73,8 +73,8 @@ class NativeRpmDiagnosticsTests(unittest.TestCase):
     def test_optin_failure_names_streams_and_returncode_without_extra_effects(self):
         stdout = 'progress\n' * 10000 + 'unpack middle failure\n' + 'progress\n' * 10000
         stderr = 'fatal first stderr\n' + 'progress\n' * 10000
-        result = subprocess.CompletedProcess(('dnf',), 9, stdout, stderr)
-        with patch.object(boundary.subprocess, 'run', return_value=result) as execute, \
+        result = (9, {'stdout': boundary.failure_context(stdout), 'stderr': boundary.failure_context(stderr)})
+        with patch.object(boundary, 'native_command', return_value=result) as execute, \
              patch('builtins.open', side_effect=AssertionError('unexpected log read')), \
              patch.object(boundary.os, 'getenv', side_effect=AssertionError('unexpected environment read')):
             with self.assertRaises(RuntimeError) as caught:
@@ -86,27 +86,28 @@ class NativeRpmDiagnosticsTests(unittest.TestCase):
         self.assertEqual((value['tool'], value['returncode']), ('dnf', 9))
         self.assertEqual(value['stdout']['first_error_lines'], ['unpack middle failure\n'])
         self.assertEqual(value['stderr']['first_error_lines'], ['fatal first stderr\n'])
-        execute.assert_called_once_with(OFFLINE_DNF, stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=900, check=False, pass_fds=(7,))
+        execute.assert_called_once_with(OFFLINE_DNF, timeout=900, pass_fds=(7,))
 
     def test_invalid_optin_rejected_before_subprocess_success_unchanged(self):
-        with patch.object(boundary.subprocess, 'run') as execute:
+        with patch.object(boundary.subprocess, 'run') as execute, patch.object(boundary, 'native_command') as native:
             for value in (1, 0, None, 'true'):
                 with self.assertRaises(ValueError): boundary.run('dnf', native_failure_context=value)
-            execute.assert_not_called()
+            execute.assert_not_called(); native.assert_not_called()
         for flag in (True, False):
-            with patch.object(boundary.subprocess, 'run', return_value=subprocess.CompletedProcess(('dnf',), 0, 'ok\n', '')) as execute:
+            with patch.object(boundary.subprocess, 'run', return_value=subprocess.CompletedProcess(('dnf',), 0, 'ok\n', '')) as execute, \
+                 patch.object(boundary, 'native_command', return_value=(0, {'stdout': {'output': 'ok\n'}})) as native:
                 self.assertEqual(boundary.run(*OFFLINE_DNF, native_failure_context=flag), 'ok\n')
-                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(execute.call_count, 0 if flag else 1)
+                self.assertEqual(native.call_count, 1 if flag else 0)
 
     def test_optin_rejects_other_tools_and_missing_offline_flags_before_execution(self):
         invalid = [(), ('cat', '/etc/passwd'), ('sh',) + OFFLINE_DNF[1:]]
         invalid.extend(OFFLINE_DNF[:index] + OFFLINE_DNF[index + 1:] for index in range(1, 6))
-        with patch.object(boundary.subprocess, 'run') as execute:
+        with patch.object(boundary.subprocess, 'run') as execute, patch.object(boundary, 'native_command') as native:
             for arguments in invalid:
                 with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                     boundary.run(*arguments, native_failure_context=True)
-            execute.assert_not_called()
+            execute.assert_not_called(); native.assert_not_called()
 
     def test_only_native_installroot_dnf_opts_in_with_existing_safety_options(self):
         calls = []
