@@ -1,3 +1,5 @@
+> Superseded read-surface boundary: [external read Broker](forge-read-service.md) now supplies the complete declared reads, process separation, canonical Deployment read audit and completed-job logs. The text below records the earlier bounded slice, not the current public surface.
+
 > [Exact PR and review observations](forge-pull-observations.md) now add the
 > read-only `gh pr view NUMBER` prerequisite. These facts do not submit a Run,
 > pass a Gate or infer an independent-review verdict.

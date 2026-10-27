@@ -148,6 +148,7 @@ class FixtureParticipantController:
             raise LedgerError("PROCESS_BINDING_UNAVAILABLE") from error
         self.supervisor, self.hub, self.credentials = supervisor, hub, credentials
         self.forge_broker = None
+        self.read_service = None
         self.handles = {}
         self.fenced = set()
         self.store_failed = False
@@ -759,6 +760,21 @@ class FixtureParticipantController:
             broker.recover_pending(fenced)
             self.forge_broker = broker
 
+    def bind_read_service(self, service):
+        """Attach only a Supervisor-owned external Broker, never a payload client."""
+        from .forge_read_service import ReadBrokerClient
+        if type(service) is not ReadBrokerClient or service.supervisor is not self.supervisor:
+            raise LedgerError('INVALID_READ_BROKER')
+        with self.supervisor._locked():
+            state = self._room()
+            if (service.binding.room_id != self.supervisor.room_id
+                    or service.binding.project_id != self.project_id
+                    or service.room_instance != state['instance_id']):
+                raise LedgerError('PROJECT_MISMATCH')
+            if self.read_service is not None:
+                raise LedgerError('FORGE_ALREADY_BOUND')
+            self.read_service = service
+
     def receive(self, handle):
         """Consume one kernel-authenticated record and dispatch to #65/#60.
 
@@ -769,6 +785,7 @@ class FixtureParticipantController:
         """
         request_id = None
         forge_intent = None
+        read_intent = None
         try:
             data, credentials = self._record(handle.channel)
             with self.supervisor._locked():
@@ -783,7 +800,13 @@ class FixtureParticipantController:
                                 or type(message["envelope"]) is not dict):
                             raise LedgerError("INVALID_NATIVE_FRAME")
                         message = message["envelope"]
-                    if type(message) is dict and message.get('kind') in {'forge-read', 'forge-write'}:
+                    if type(message) is dict and message.get('kind') == 'forge-read' and self.read_service is not None:
+                        from .forge_read_service import reserve_read_operation
+                        reserve_read_operation(self.hub.ledger,self.read_service.binding,message,
+                            handle.badge.origin(),lambda:self._authority(handle,credentials))
+                        read_intent = self.read_service.prepare(message, handle.badge.origin(),
+                            authorize=lambda: self._authority(handle, credentials))
+                    elif type(message) is dict and message.get('kind') in {'forge-read', 'forge-write'}:
                         if self.forge_broker is None:
                             raise LedgerError('FORGE_UNAVAILABLE')
                         forge_intent = self.forge_broker.prepare(message, origin=handle.badge.origin(),
@@ -801,6 +824,10 @@ class FixtureParticipantController:
                                     "exited" if error.code == "PROCESS_EXITED" else "disabled",
                                     "process-exited" if error.code == "PROCESS_EXITED" else "missing-credential")
                     raise
+            if read_intent is not None:
+                receipt = self.read_service.perform(read_intent)
+                with self.supervisor._locked():
+                    self._authority(handle, credentials)
             if forge_intent is not None:
                 # Network/subprocess I/O must not hold Stop/revoke hostage.
                 outcome = self.forge_broker.perform(forge_intent)
@@ -810,6 +837,11 @@ class FixtureParticipantController:
             result = {"ok": True, "receipt": receipt}
         except LedgerError as error:
             code = error.code
+            if self.read_service is not None:
+                try:
+                    self.read_service.denied(code)
+                except (LedgerError, OSError):
+                    code = 'AUDIT_UNAVAILABLE'
             if self.forge_broker is not None:
                 try:
                     if forge_intent is not None and code in {
@@ -824,7 +856,14 @@ class FixtureParticipantController:
         if handle.protocol == "pi":
             result = {"request_id": request_id, **result}
         try:
-            handle.channel.send(_json(result).encode())
+            encoded = _json(result).encode()
+            if len(encoded) <= MAX_PACKET:
+                handle.channel.send(encoded)
+            elif handle.protocol == 'pi' and read_intent is not None:
+                from .forge_read_service import send_result
+                send_result(handle.channel, request_id, result)
+            else:
+                raise LedgerError('OUTPUT_LIMIT')
         except OSError as error:
             if error.errno not in {errno.EPIPE, errno.ECONNRESET, errno.EBADF}:
                 raise

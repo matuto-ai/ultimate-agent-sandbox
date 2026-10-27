@@ -5,7 +5,7 @@ const channel = seqpacketChannel(Number(fd), { timeoutMs: 250 });
 let ticks = 0;
 const timer = setInterval(() => ticks++, 5);
 try {
-  const envelope = mode === 'size' ? { data: 'x'.repeat(Number(argument)) } : { test: mode };
+  const envelope = mode === 'read-chunks' ? { kind: 'forge-read', id: 'chunk-test', argv: ['repo','view'] } : mode === 'size' ? { data: 'x'.repeat(Number(argument)) } : { test: mode };
   if (mode === 'queue') {
     const results = await Promise.allSettled(Array.from({ length: 5 }, () => channel.request(envelope)));
     process.stdout.write(JSON.stringify({ results, ticks, fenced: channel.fenced }) + '\n');
