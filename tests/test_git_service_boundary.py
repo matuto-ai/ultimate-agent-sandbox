@@ -145,7 +145,8 @@ class BrokerBoundaryTests(unittest.TestCase):
         client.closed=False;client.binding=self.binding;client.scope=self.broker.scope()
         terminal={'kind':'exit','code':0,'status':'OK','repository':'owner/repo','advertised':[]}
         client.channel=Channel([{'kind':'ready'},terminal]);client.worker=SimpleNamespace(require=Mock())
-        caller=Channel();authority=SimpleNamespace(current=Mock(return_value=True),origin=self.origin)
+        caller=Channel([{'kind':'stream-finished'}])
+        authority=SimpleNamespace(current=Mock(return_value=True),require=Mock(),origin=self.origin)
         with patch.object(service,'receive',side_effect=receive), \
              patch.object(service.selectors,'DefaultSelector',return_value=Poll([[('broker',1)],[('caller',2)]])):
             result=client._relay(caller,authority,operation_id='second',
@@ -153,4 +154,6 @@ class BrokerBoundaryTests(unittest.TestCase):
         self.assertEqual(terminal,result)
         self.assertEqual(['ready','exit'],[f['kind'] for f in caller.sent])
         self.assertEqual(2,client.worker.require.call_count)
+        authority.require.assert_called_once()
+        self.assertEqual([],caller.incoming)
         self.assertGreaterEqual(authority.current.call_count,5)
