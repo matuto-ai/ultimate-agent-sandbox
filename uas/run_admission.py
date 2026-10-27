@@ -1,10 +1,12 @@
 """Restricted canonical first-Run admission over existing account-free seams.
 
 Trusted human authority callback is NOT a Manager authentication implementation.
-Already-exact assignment or opt-in audited self-assignment is eligible. No lifecycle projection,
-completion, automatic intake or recovery scheduler exists here. Explicit repeats
-reconcile the same durable intent and owned checkout; they never consume another
-human grant. This does not satisfy #69 or complete #72.
+Already-exact assignment or opt-in audited self-assignment is eligible.
+Canonical transitions enqueue lifecycle projections atomically; projection failure
+never rewrites Run truth. No completion, automatic intake or recovery scheduler
+exists here. Explicit repeats reconcile the same durable intent and owned checkout;
+they never consume another human grant. This remains restricted admission, not
+complete #72 Run management.
 """
 from copy import deepcopy
 import hashlib
@@ -14,6 +16,7 @@ import select
 import time
 
 from .config import load
+from .forge_projections import enqueue_run_projection
 from .context import MAX_RUNS, MAX_CONTEXT_GENERATION
 from .ledger import Command, Event, LedgerError, Origin, Transition, _json, _token
 from .peer import FixturePeerHub, Readiness, _now, _text
@@ -112,10 +115,13 @@ class RunAdmission:
                        control_reason=reason)
             # Admission remains consumed/ACTIVE; canonical Run alone controls
             # traffic. No native ACK, request, context or checkout is rewritten.
+            projection = (enqueue_run_projection(state, self.ledger.room_id, run_id)
+                if 'issue_id' in row else None)  # Unbound source-only fixtures have no Forge target.
             FixturePeerHub._reserve_capacity(state)
             result = {'run_id': run_id, 'generation': generation, 'status': target,
                       'control_revision': revision + 1, 'reason': reason}
-            return Transition(state, (Event('run.paused' if target == 'PAUSED' else 'run.resumed', result),), result)
+            events = (Event('run.paused' if target == 'PAUSED' else 'run.resumed', result),)
+            return Transition(state, events + ((projection,) if projection else ()), result)
         # Ledger authorizes every retry inside its transaction, then looks up
         # the exact immutable receipt before evaluating current revision/state.
         return self._apply(command, human, decide)['result']
@@ -457,15 +463,16 @@ class RunAdmission:
                     'context_generation': 1, 'implementation_request': request_id,
                     'forge_observation': receipt['operation_id'], 'human_operation': command.id,
                     'authorization_consumed': True, 'control_revision': 0, 'control_reason': None,
-                    'projection': 'unavailable-no-write-support',
+                    'projection': 'pending',
                     'assignment_audit': assignment_audit}
                 current.pop('reservation')
                 current.update(status='ACTIVE', authorization_consumed=True, attention=None)
                 state['runs'][run] = row
                 state['peer_traffic']['traffic'][request_id] = record
+                projection = enqueue_run_projection(state, self.ledger.room_id, run)
                 FixturePeerHub._reserve_capacity(state)
                 return Transition(state, (Event('run.activated', row),
-                    Event('peer.submitted', {'traffic_id': request_id, 'recipients': [participant_id]})), row)
+                    Event('peer.submitted', {'traffic_id': request_id, 'recipients': [participant_id]}), projection), row)
             result = self._apply(terminal, human, activate)
         if result['result'].get('status') == 'HELD':
             raise LedgerError(result['result']['reason'])

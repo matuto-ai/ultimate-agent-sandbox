@@ -102,7 +102,9 @@ class RunAdmissionTests(unittest.TestCase):
         self.assertEqual('ACTIVE', row['status'])
         self.assertTrue(row['authorization_consumed'])
         self.assertEqual('bounded', row['delivery_class'])
-        self.assertEqual('unavailable-no-write-support', row['projection'])
+        self.assertEqual('pending', row['projection'])
+        self.assertEqual(['lifecycle:active', 'run:active'],
+            self.ledger.snapshot()['state']['forge_projections'][row['run_id']]['desired']['labels'])
         self.assertEqual(str(self.repo), row['checkout']['path'])
         handle = self.controller.handles['builder']
         self.assertEqual(self.repo, Path('/proc', str(handle.process.pid), 'cwd').resolve())

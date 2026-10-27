@@ -38,6 +38,8 @@ class MutationFrameTests(unittest.TestCase):
         self.assertFalse(self.controller._external_forge({'kind':'forge-write'}))
         self.controller.read_service.write_enabled=True
         self.assertTrue(self.controller._external_forge({'kind':'forge-write'}))
+        self.assertTrue(self.controller._external_forge({'kind':'forge-reconcile'}))
+        self.assertFalse(self.controller._external_forge({'kind':'forge-projection'}))
         self.assertFalse(self.controller._external_forge({'kind':'message'}))
         self.controller.read_service=None
         self.assertFalse(self.controller._external_forge({'kind':'forge-write'}))
@@ -57,6 +59,12 @@ class MutationFrameTests(unittest.TestCase):
             self.assertLess(len(raw),MAX_REQUEST)
             self.assertEqual(raw,self.assemble(frames)[0])
             self.assertEqual(json.loads(raw),json.loads(request_json(json.loads(raw))))
+
+    def test_reconciliation_uses_authenticated_large_body_channel_but_projection_does_not(self):
+        frames,raw=self.frames(kind='forge-reconcile')
+        self.assertEqual(raw,self.assemble(frames)[0])
+        frames,_=self.frames(kind='forge-projection')
+        with self.assertRaisesRegex(LedgerError,'INVALID_NATIVE_FRAME'):self.assemble(frames)
 
     def test_changed_process_mid_body_never_assembles(self):
         frames,_=self.frames()

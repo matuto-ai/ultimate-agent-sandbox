@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from uas.forge import ForgeBinding
-from uas.forge_read_service import reserve_read_operation
+from uas.forge_read_service import reserve_read_operation, reserve_forge_operation
 from uas.ledger import Command, Event, LedgerError, Origin, RoomLedger, Transition, _json
 
 
@@ -209,6 +209,27 @@ class ReadReservationTests(unittest.TestCase):
     def test_closed_store_is_audit_unavailable_not_success(self):
         self.ledger.close()
         self.assert_code('AUDIT_UNAVAILABLE', lambda: self.reserve(authorize=lambda: True))
+
+    def test_reconciliation_reserves_metadata_only_and_both_capabilities(self):
+        origin=replace(self.origin,capabilities=('forge-read','forge-write'))
+        original={'id':'old-write','kind':'forge-write','argv':['issue','comment','1','--body-file','-'],
+            'body':'private-body-not-in-room'}
+        request={'id':'reconcile','kind':'forge-reconcile','audit_reference':'mutation-reference','mutation':original}
+        reserve=lambda r=request,o=origin:reserve_forge_operation(self.ledger,self.binding,r,o,self.authorize)
+        first=reserve();self.assertEqual(first,reserve())
+        stored='\n'.join(self.ledger._connection().iterdump())
+        self.assertNotIn('private-body-not-in-room',stored)
+        changed={**request,'mutation':{**original,'body':'changed'}}
+        self.assert_code('ID_CONFLICT',lambda:reserve(changed))
+        for capabilities in (('forge-read',),('forge-write',),()):
+            self.assert_code('FORBIDDEN',lambda capabilities=capabilities:reserve(request,replace(origin,capabilities=capabilities)))
+        self.assertEqual(1,self.ledger.snapshot()['room_seq'])
+
+    def test_participant_reservation_rejects_trusted_projection_envelope(self):
+        request={'id':'not-hub','kind':'forge-projection','action':'observe','intent':{}}
+        self.assert_code('INVALID_FORGE_ENVELOPE',lambda:reserve_forge_operation(
+            self.ledger,self.binding,request,self.origin,self.authorize))
+        self.assert_empty()
 
 
 if __name__ == '__main__':

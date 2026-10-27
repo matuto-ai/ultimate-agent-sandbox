@@ -35,16 +35,19 @@ export default function (pi) {
     name: 'gh', label: 'Bounded GitHub',
     description: 'Bounded native gh argument vector through the authenticated Room Broker. '
       + 'Use --help for the approved issue, PR, code, CI and completed-job reads; bounded Project issue/PR/comment/label/dependency/submitted-review writes when write-enabled. No shell, endpoint or identity selection. '
-      + 'Stable operation id is required for exact retries. Observations never admit a Run.',
+      + 'Stable operation id is required for exact retries. For uncertain writes, use reconcile with the original operation id, audit reference and unchanged argv/body; this reads only. Observations never admit a Run.',
     parameters: { type: 'object', additionalProperties: false,
       required: ['id', 'argv'], properties: { id: { type: 'string' },
+        reconcile: { type: 'object', additionalProperties: false, required: ['operation_id','audit_reference'], properties: { operation_id: { type: 'string' }, audit_reference: { type: 'string' } } },
         argv: { type: 'array', items: { type: 'string' }, maxItems: 64 }, body: { type: 'string', description: 'stdin for --body-file -; at most 512 KiB UTF-8' } } },
     async execute(_toolCallId, input, signal) {
       const args = input.argv[0] === 'gh' ? input.argv.slice(1) : input.argv;
       const kind = ['issue','pr'].includes(args[0]) && ['create','edit','close','reopen','comment','reply','review','dependency'].includes(args[1]) ? 'forge-write' : 'forge-read';
-      const reply = await channel.request({ id: input.id, kind, argv: input.argv, ...(input.body === undefined ? {} : { body: input.body }) }, { signal, timeoutMs: 45000 });
+      const original = { id: input.reconcile?.operation_id ?? input.id, kind, argv: input.argv, ...(input.body === undefined ? {} : { body: input.body }) };
+      const envelope = input.reconcile ? { id: input.id, kind: 'forge-reconcile', audit_reference: input.reconcile.audit_reference, mutation: original } : original;
+      const reply = await channel.request(envelope, { signal, timeoutMs: 45000 });
       return { content: [{ type: 'text', text: JSON.stringify(reply) }], details: reply,
-        isError: !reply.ok || (kind === 'forge-write'
+        isError: !reply.ok || (input.reconcile ? !['MATCHED','ABSENT'].includes(reply.receipt?.reconciliation?.status) : kind === 'forge-write'
           ? !(reply.receipt?.mutation?.status === 'OK' || ['ASSIGNED', 'ALREADY_ASSIGNED'].includes(reply.receipt?.assignment?.status))
           : reply.receipt?.observation?.completeness !== 'complete') };
     },

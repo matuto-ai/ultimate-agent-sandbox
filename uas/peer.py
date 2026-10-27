@@ -460,8 +460,21 @@ class FixturePeerHub:
                 raise LedgerError("CAPACITY_EXHAUSTED")
         request.update(status=target, reason=payload["reason"],
                        attention="BLOCKED" if target == "BLOCKED" else None)
-        return self._transition(state, "peer.request.changed", {"request_id": request["id"], "status": target},
+        transition = self._transition(state, "peer.request.changed", {"request_id": request["id"], "status": target},
                                 {"command_status": "APPLIED", "request_id": request["id"], "status": target})
+        return self._project_request(state, request, transition)
+
+    def _project_request(self, state, request, transition):
+        # Only actual Forge-bound product Runs have lifecycle projection intent.
+        # Synthetic context Runs and ordinary peer messages acquire no Forge authority.
+        if request['run_id'] not in state.get('forge_projections', {}):
+            return transition
+        from .forge_projections import enqueue_run_projection
+        event = enqueue_run_projection(state, self.ledger.room_id, request['run_id'])
+        self._reserve_capacity(state)
+        if event is None:
+            return transition
+        return Transition(state, transition.events + (event,), transition.result)
 
     def cancel(self, operation_id, request_id, reason):
         """Trusted fixture-control cancellation; peers cannot issue force-stop."""
@@ -474,8 +487,9 @@ class FixturePeerHub:
             if request["status"] in TERMINAL:
                 raise LedgerError("INVALID_TRANSITION")
             request.update(status="CANCELLED", reason=reason, attention=None)
-            return self._transition(state, "peer.request.changed", {"request_id": request_id, "status": "CANCELLED"},
+            transition = self._transition(state, "peer.request.changed", {"request_id": request_id, "status": "CANCELLED"},
                                     {"command_status": "APPLIED", "status": "CANCELLED"})
+            return self._project_request(state, request, transition)
         return self._control(operation_id, "cancel", {"request_id": request_id, "reason": reason}, decide)
 
     def _pending(self, connection):

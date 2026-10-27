@@ -250,7 +250,7 @@ class ForgeReadAuditTests(unittest.TestCase):
             old = metadata()
             db.execute('INSERT INTO starts VALUES(?,?,?,?)', ('old', 'scope', json.dumps(old), '2026-10-27T00:00:00+00:00'))
         with ForgeAudit(path, 'deployment-a') as migrated:
-            self.assertEqual(3, migrated._db.execute('SELECT version FROM deployment').fetchone()[0])
+            self.assertEqual(4, migrated._db.execute('SELECT version FROM deployment').fetchone()[0])
             self.assertEqual(old, migrated.get('old')['metadata'])
             self.assertTrue(migrated.begin_read('new', metadata())['started'])
         with ForgeAudit(path, 'deployment-a') as reopened:

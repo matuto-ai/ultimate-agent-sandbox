@@ -102,9 +102,10 @@ it never repeats a POST/PATCH/DELETE. Pending and uncertain records fence furthe
 writes for the same Room/Project, including a new Actor/epoch and legacy assignment
 routes. A fenced replacement owner can terminalize interrupted work without
 provider contact. Definitively rejected steps recover their known partial/failure
-receipt. A prepared-but-unconfirmed step remains unknown. Read-side resolution,
-ordinary-write reconciliation, outbox/label projection repair and un-fencing are
-#69, not this issue. Review-loop authority is #74.
+receipt. A prepared-but-unconfirmed step remains unknown. The [#69 reconciliation layer](forge-reconciliation.md) now supplies read-side
+resolution, ordinary-write reconciliation, outbox/label projection repair and
+uncertainty un-fencing, without changing these immutable receipts. Review-loop
+authority remains #74.
 
 ## Evidence and limits
 

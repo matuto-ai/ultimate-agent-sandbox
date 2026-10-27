@@ -112,4 +112,9 @@ The [bounded mutation Broker](docs/forge-mutations.md) extends that same externa
 owner with Project-pinned issue/PR/comment/work-label/dependency/submitted-review
 routes, per-step authority, durable executed-field receipts and partial/unknown
 fences. Account-free hosted proof is separate from live-account qualification;
-#69 reconciliation/projections and #74 review workflow are not implied.
+#74 review workflow is not implied.
+
+[Forge reconciliation](docs/forge-reconciliation.md) resolves ordinary uncertain
+writes with read-only, identity-bound observations and connects the same external
+Broker to the [Hub projection outbox](docs/forge-projections.md). Run state remains
+authoritative when labels drift or provider/audit responses are lost.
