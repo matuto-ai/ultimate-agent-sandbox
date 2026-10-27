@@ -15,6 +15,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -150,18 +151,39 @@ def create(image,name,paths,nonce,*,hub=False,foreign=None):
 def inspect(identifier):return json.loads(run('docker','inspect',identifier))[0]
 
 
+def publish_boot_marker(nonce):
+    """Read access only after root-only assembly; retain exact FD for reset."""
+    expect(os.geteuid()==0 and type(nonce) is str and len(nonce)==32
+        and all(c in '0123456789abcdef' for c in nonce),'exact root boot marker publication')
+    descriptor=os.open('/run/uas-vm-fixture',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    attempted=False
+    try:
+        node=os.fstat(descriptor)
+        expect(stat.S_ISREG(node.st_mode) and node.st_uid==0 and node.st_nlink==1
+            and stat.S_IMODE(node.st_mode)==0o600,'root-only ordinary boot marker required')
+        expect(os.read(descriptor,65).decode().strip()==nonce,'exact disposable boot marker')
+        # This nonce is an accidental-use guard, not a secret or authority.
+        attempted=True
+        os.fchmod(descriptor,0o444)
+        return descriptor
+    except BaseException:
+        try:
+            if attempted:os.fchmod(descriptor,0o600)
+        finally:os.close(descriptor)
+        raise
+
+
+def reset_boot_marker(descriptor):
+    try:os.fchmod(descriptor,0o600)
+    finally:os.close(descriptor)
+
+
 def scenario(nonce,manifest,checks):
     sys.path[:0]=[str(ROOT),str(ROOT/'tests/vm')]
     from native_rootfs import build_rootfs
     from guest_workstation import import_image,engine_profile,NATIVE_PACKAGE_PROFILE
-    owned=[];listeners=[];image=None;ownership={};children=[]
+    owned=[];listeners=[];image=None;ownership={};children=[];marker_descriptor=None
     try:
-        # This boot nonce is an accidental-use guard, never a secret/authority.
-        # Publish only this already root-validated fixed marker to mapped child.
-        marker=Path('/run/uas-vm-fixture')
-        expect(os.geteuid()==0 and marker.lstat().st_uid==0 and not marker.is_symlink()
-            and marker.read_text().strip()==nonce,'exact disposable boot marker')
-        marker.chmod(0o444)
         # Host trusted Git is signature-checked, offline, installed only in VM.
         run('dnf','-y','--setopt=reposdir=/run/uas-repositories','--disable-repo=*','--enable-repo=uas-offline',
             '--setopt=localpkg_gpgcheck=True','--setopt=install_weak_deps=False','install','git-core','util-linux',timeout=120)
@@ -199,6 +221,9 @@ def scenario(nonce,manifest,checks):
         cross=json.loads(run('docker','exec','--user','65532:65532',containers['beta']['workstation'],
             '/usr/bin/python3','/opt/uas/tests/vm/artifact_room_probe.py','cross-room'))
         expect(cross.get('denied') is True and cross.get('errno') in (errno.EACCES,errno.EPERM),'actual cross-Room MCS access not denied')
+        # build_rootfs/guest_guard above require0600. Quota probes only stat the
+        # marker; publish its nonsecret contents only for mapped Supervisors.
+        marker_descriptor=publish_boot_marker(nonce)
         reports={};supervisors={}
         for room,paths in rooms.items():
             facts=json.loads(run('docker','exec','--user','65532:65532',containers[room]['workstation'],
@@ -303,6 +328,8 @@ def scenario(nonce,manifest,checks):
                     try:child.wait(timeout=5)
                     except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
             cleanup('owned-Supervisor',stop_child)
+        if marker_descriptor is not None:
+            cleanup('boot-marker-reset',lambda:reset_boot_marker(marker_descriptor))
         for listener in listeners:cleanup('listener',listener.close)
         for identifier in reversed(owned):
             def remove():

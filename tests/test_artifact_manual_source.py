@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ try:
     import prepare_payload as payload
     import native_rootfs as rootfs
     import artifact_supervisor as supervisor
+    import guest_artifacts as guest
 finally:sys.path.remove(str(VM))
 
 
@@ -124,13 +126,57 @@ class ArtifactManualSourceTests(unittest.TestCase):
         self.assertIn('(165533,165533)',quota)
         self.assertIn('tests/vm/artifact_quota_probe.py',run.SOURCES)
 
-    def test_root_validates_and_publishes_only_boot_nonce_before_nonroot_children(self):
+    def test_marker_stays_private_through_root_guard_and_resets_after_supervisors(self):
         source=(VM/'guest_artifacts.py').read_text()
         block=source[source.index('def scenario('):source.index('def main(')]
-        self.assertLess(block.index('marker.read_text().strip()==nonce'),block.index('marker.chmod(0o444)'))
-        self.assertLess(block.index('marker.chmod(0o444)'),block.index('subprocess.run('))
-        self.assertLess(block.index('marker.chmod(0o444)'),block.index('subprocess.Popen('))
-        self.assertIn('os.geteuid()==0 and marker.lstat().st_uid==0 and not marker.is_symlink()',block)
+        transition=block.index('marker_descriptor=publish_boot_marker(nonce)')
+        self.assertLess(block.index('rootfs=build_rootfs('),transition)
+        self.assertLess(block.index('subprocess.run('),transition)  # Quota probe only stats it.
+        self.assertLess(transition,block.index('subprocess.Popen('))
+        self.assertNotIn('build_rootfs(',block[transition:])
+        self.assertNotIn('guest_guard(',block[transition:])
+        self.assertLess(block.index("cleanup('owned-Supervisor',stop_child)"),
+                        block.index("cleanup('boot-marker-reset'"))
+        self.assertIn('stat.S_IMODE(info.st_mode) != 0o600',(VM/'native_rootfs.py').read_text())
+
+    def marker_mocks(self, mode=0o600, uid=0):
+        values={'geteuid':0,'open':77,'fstat':Mock(st_mode=stat.S_IFREG|mode,st_uid=uid,st_nlink=1),
+                'read':b'a'*32,'fchmod':None,'close':None}
+        return {name:self.enterContext(patch.object(guest.os,name,Mock(return_value=value)))
+                for name,value in values.items()}
+
+    def test_marker_publication_is_exact_nofollow_and_reset_uses_held_fd(self):
+        calls=self.marker_mocks()
+        descriptor=guest.publish_boot_marker('a'*32)
+        self.assertEqual(descriptor,77)
+        calls['open'].assert_called_once_with('/run/uas-vm-fixture',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        calls['read'].assert_called_once_with(77,65)
+        calls['fchmod'].assert_called_once_with(77,0o444)
+        calls['close'].assert_not_called()
+        guest.reset_boot_marker(descriptor)
+        self.assertEqual(calls['fchmod'].call_args_list,[unittest.mock.call(77,0o444),unittest.mock.call(77,0o600)])
+        calls['close'].assert_called_once_with(77)
+
+    def test_marker_rejects_already_public_mode_without_changing_it(self):
+        calls=self.marker_mocks(mode=0o444)
+        with self.assertRaises(AssertionError):guest.publish_boot_marker('a'*32)
+        calls['fchmod'].assert_not_called();calls['close'].assert_called_once_with(77)
+
+    def test_marker_rejects_nonroot_owner_and_closes(self):
+        calls=self.marker_mocks(uid=165533)
+        with self.assertRaises(AssertionError):guest.publish_boot_marker('a'*32)
+        calls['fchmod'].assert_not_called();calls['close'].assert_called_once_with(77)
+
+    def test_marker_failed_publication_attempt_restores_private_mode_and_closes(self):
+        calls=self.marker_mocks();calls['fchmod'].side_effect=[OSError('publish failed'),None]
+        with self.assertRaisesRegex(OSError,'publish failed'):guest.publish_boot_marker('a'*32)
+        self.assertEqual(calls['fchmod'].call_args_list,[unittest.mock.call(77,0o444),unittest.mock.call(77,0o600)])
+        calls['close'].assert_called_once_with(77)
+
+    def test_marker_failed_reset_still_closes_and_propagates_cleanup_failure(self):
+        calls=self.marker_mocks();calls['fchmod'].side_effect=OSError('reset failed')
+        with self.assertRaisesRegex(OSError,'reset failed'):guest.reset_boot_marker(77)
+        calls['close'].assert_called_once_with(77)
 
     def test_real_listener_uid_is_set_before_listen_not_inferred_from_chown(self):
         source=(VM/'guest_artifacts.py').read_text()
