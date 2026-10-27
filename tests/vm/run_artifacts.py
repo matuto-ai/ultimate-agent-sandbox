@@ -30,7 +30,7 @@ SOURCES = (
     'uas/lifecycle.py',
     'uas/launch.py',
     'uas/peer.py',
-    'uas/participant.py',
+    'uas/participant.py', 'uas/participant_recovery.py',
     'uas/checkouts.py',
     'uas/checkout_scope.py',
     'uas/artifact_protocol.py',

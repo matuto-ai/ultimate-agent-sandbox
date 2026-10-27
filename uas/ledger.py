@@ -330,6 +330,34 @@ class RoomLedger:
             db.rollback()
             raise
 
+    def matched_receipt(self, operation_id, origin, *, authorize, matches):
+        """Trusted owner read: authorize stored command and match exact request.
+
+        Callbacks are fixed owner code, never browser-selected predicates. This
+        reserves nothing and cannot turn an absent receipt into permission to
+        retry. No stored command or unrelated receipt is disclosed on mismatch.
+        """
+        _token(operation_id)
+        if type(origin) is not Origin or not callable(authorize) or not callable(matches):
+            raise LedgerError('INVALID_COMMAND')
+        db = self._connection()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT canonical, receipt FROM operations WHERE id=?', (operation_id,)).fetchone()
+            if row is None:
+                if authorize(origin, None) is not True: raise LedgerError('FORBIDDEN')
+                return None
+            canonical = json.loads(row['canonical'])
+            command = Command(**canonical['command'])
+            if authorize(origin, command) is not True: raise LedgerError('FORBIDDEN')
+            if canonical['origin'] != origin.canonical() or matches(command) is not True:
+                raise LedgerError('ID_CONFLICT')
+            return json.loads(row['receipt'])
+        except sqlite3.Error as error:
+            raise LedgerError('STORAGE_ERROR') from error
+        finally:
+            db.rollback()
+
     def operation_receipt(self, operation_id, origin, *, authorize):
         """Trusted read-side reconciliation, not a client operation-ID endpoint.
 

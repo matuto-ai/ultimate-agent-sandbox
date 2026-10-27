@@ -117,14 +117,84 @@ async function ownershipContract(){
 
 }
 
+async function actionContract(){
+  const ui=boot('C','run'), sent=[];
+  const current={run_id:run,generation:1,observed_version:'a'.repeat(64)};
+  let eligible=true, action='pause', fail=false, defer=null;
+  const binding={inspect:async packet=>({operation_id:packet.operation_id,outcome:'unknown'}),view:async()=>({status:'available',scope:{deployment_id:'deployment',room_id:'alpha',instance_id:'instance-alpha'},current,actions:[{action,object_id:run,eligible,reason:eligible?null:'FORBIDDEN'}]}), lifecycle:async()=>({status:'unavailable',reason:'FORBIDDEN'}),replacement:async()=>({status:'unavailable',reason:'FORBIDDEN'}),execute:async packet=>{sent.push(packet);if(defer)await defer;if(fail)throw Error('lost');return {operation_id:packet.operation_id,outcome:'confirmed',reason:null,current};}};
+  let serial=0;ui.context.crypto={randomUUID:()=>`op-${++serial}`};
+  ui.context.installActionHost(project,binding);
+  await ui.context.openActionPanel(project,'run',run);
+  ui.get('action-reason').value='Human requested pause';
+  let release; defer=new Promise(resolve=>{release=resolve;});
+  const pending=ui.context.submitHumanAction('pause');
+  await ui.context.submitHumanAction('pause'); assert.equal(sent.length,1,'double click must not duplicate');
+  ui.context.closeItem();release();await pending;defer=null;
+  assert(!ui.get('item-dialog').open,'late receipt must not reopen dialog');
+  assert.deepEqual(JSON.parse(JSON.stringify(sent[0])),{version:1,operation_id:'op-1',action:'pause',deployment_id:'deployment',room_id:'alpha',instance_id:'instance-alpha',run_id:run,generation:1,object_id:run,observed_version:'a'.repeat(64),payload:{reason:'human-pause'}});
+  eligible=false;await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction('pause');assert.equal(sent.length,1);
+  eligible=true;fail=true;await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction('pause');assert.equal(sent.length,2);assert(ui.get('item-body').innerHTML.includes('unknown'));
+  await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction('pause');assert.equal(sent.length,2,'unknown must not create replacement mutation');
+  action='open-github';fail=true;await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction(action);assert.equal(sent.length,3);
+  action='pause';await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction(action);assert.equal(sent.length,3,'read-only link must not erase unresolved mutation');
+  action='reconcile-changes';await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction(action);assert.equal(sent.length,4);
+  binding.execute=async packet=>{sent.push(packet);return {operation_id:packet.operation_id,outcome:'confirmed',reason:null,current,receipt:{operation_id:'op-2',status:'confirmed'}};};
+  action='reconcile-changes';fail=false;await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction(action);assert.equal(sent.length,5);assert.deepEqual(JSON.parse(JSON.stringify(sent[4].payload)),{});
+  for(const name of ['resume','request-changes','add-rounds','waive-cap','override-review','open-github']){
+    action=name;await ui.context.openActionPanel(project,'run',run);ui.get('action-reason').value='Review explanation';ui.get('action-rounds').value='2';await ui.context.submitHumanAction(name);
+    const payload=JSON.parse(JSON.stringify(sent.at(-1).payload));
+    assert.deepEqual(payload,name==='resume'?{reason:'human-resume'}:name==='request-changes'?{body:'Review explanation'}:name==='open-github'?{}:{reason:'Review explanation',rounds:name==='add-rounds'?2:null});
+  }
+  binding.lifecycle=async()=>({status:'available',scope:{deployment_id:'deployment',room_id:'alpha',instance_id:'instance-alpha'},current:{instance_id:'instance-alpha',observed_version:'b'.repeat(64)},actions:[{action:'start',object_id:'instance-alpha',eligible:true}]});
+  await ui.context.openActionPanel(project,'lifecycle');await ui.context.submitHumanAction('start');
+  assert.equal(sent.at(-1).run_id,null);assert.equal(sent.at(-1).generation,null);assert.equal(sent.at(-1).object_id,'instance-alpha');assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1).payload)),{});
+  binding.replacement=async()=>({status:'available',scope:{deployment_id:'deployment',room_id:'alpha',instance_id:'instance-alpha'},current:null,actions:[],replacement:{participant_id:'failed-seat',run_id:run,generation:1,observed_version:'c'.repeat(64),eligible:true,candidates:[{participant_id:'next-seat'}],selection:null}});
+  await ui.context.openActionPanel(project,'replacement','failed-seat');ui.get('action-replacement').value='next-seat';await ui.context.submitHumanAction('select-replacement');
+  assert.equal(sent.at(-1).object_id,'failed-seat');assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1).payload)),{participant_id:'next-seat'});
+  action='pause';binding.execute=async packet=>{sent.push(packet);throw Error('lost local reply');};
+  await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction(action);const original=sent.at(-1),beforeInspection=sent.length;let inspected;
+  binding.inspect=async packet=>{inspected=packet;return {operation_id:packet.operation_id,outcome:'confirmed',receipt:{operation_id:packet.operation_id,status:'confirmed',read_only:true}};};
+  await ui.context.openActionPanel(project,'run',run);await ui.context.inspectHumanOutcome();assert.equal(inspected,original);assert.equal(sent.length,beforeInspection,'inspection cannot execute another mutation');
+  action='resume';binding.execute=async packet=>{sent.push(packet);return {operation_id:packet.operation_id,outcome:'confirmed'};};
+  await ui.context.openActionPanel(project,'run',run);await ui.context.submitHumanAction(action);assert.equal(sent.length,beforeInspection+1,'confirmed owner inspection permits fresh eligible action');
+  ui.context.installActionHost(project,null);await ui.context.openActionPanel(project,'run',run);assert(!ui.get('item-dialog').open);
+  const late=boot('C','run');let resolveView;binding.view=()=>new Promise(resolve=>{resolveView=resolve;});late.context.installActionHost(project,binding);
+  const reading=late.context.openActionPanel(project,'run',run);late.context.closeItem();resolveView({status:'available',scope:{deployment_id:'deployment',room_id:'alpha'},current,actions:[]});await reading;assert(!late.get('item-dialog').open);
+  for(const invalid of [undefined,'accepted','pending']){
+    const malformed=boot('C','run');let writes=0,sequence=0;
+    malformed.context.crypto={randomUUID:()=>`malformed-${++sequence}`};
+    malformed.context.installActionHost(project,{...binding,view:async()=>({status:'available',scope:{deployment_id:'deployment',room_id:'alpha',instance_id:'instance-alpha'},current,actions:[{action:'pause',object_id:run,eligible:true}]}),execute:async packet=>{writes++;return {operation_id:packet.operation_id,outcome:invalid};}});
+    await malformed.context.openActionPanel(project,'run',run);await malformed.context.submitHumanAction('pause');
+    assert(malformed.get('item-body').innerHTML.includes('unknown'));
+    await malformed.context.openActionPanel(project,'run',run);await malformed.context.submitHumanAction('pause');assert.equal(writes,1,'malformed outcome must retain unresolved original mutation');
+  }
+  console.log('Manager actions: typed scope, owner denial, duplicate click, unknown preservation and late response contracts passed');
+}
+
+// Only the first read-only startup probe receives the cold-start allowance.
+// Injected timers keep this contract testable without a browser or real waits.
+function commandTimer({first,method,reject,onTimeout,set=setTimeout,clear=clearTimeout}){
+  const milliseconds=first&&method==='Browser.getVersion'?10000:5000;
+  const timer=set(()=>{onTimeout();reject(Error('CDP timeout: '+method));},milliseconds);
+  return {milliseconds,cancel:()=>clear(timer)};
+}
+function timerContract(){
+  for(const [first,method,expected] of [[true,'Browser.getVersion',10000],[false,'Browser.getVersion',5000],[true,'Target.createTarget',5000],[false,'Runtime.evaluate',5000]]){
+    let callback,delay,cleared=false,timedOut=false,error;
+    const timer=commandTimer({first,method,reject:value=>{error=value;},onTimeout:()=>{timedOut=true;},set:(fn,ms)=>{callback=fn;delay=ms;return 7;},clear:id=>{assert.equal(id,7);cleared=true;}});
+    assert.equal(delay,expected);assert.equal(timer.milliseconds,expected);callback();assert(timedOut&&error.message==='CDP timeout: '+method);timer.cancel();assert(cleared);
+  }
+}
+
 async function browserCheck(){
   if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Linux'||process.env.UAS_MANAGER_BROWSER_TEST!=='1')throw Error('Explicit hosted Linux browser guard required');
   const os=require('node:os'),{spawn}=require('node:child_process');
   const chrome=['/usr/bin/google-chrome','/usr/bin/chromium'].find(file=>fs.existsSync(file));
   if(!chrome)throw Error('Preinstalled Chrome unavailable; download and sandbox bypass forbidden');
   const output=path.join(root,'browser-proof'),pending=new Map();
+  const started=Date.now();let phase='spawn',failurePhase=null,failureElapsed=null;
   let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='',graceful=null,failure=null;
-  const rejectPending=error=>{for(const item of pending.values()){clearTimeout(item.timer);item.reject(error);}pending.clear();};
+  const rejectPending=error=>{for(const item of pending.values()){item.timer.cancel();item.reject(error);}pending.clear();};
   try{
     fs.mkdirSync(output);
     profile=fs.mkdtempSync(path.join(os.tmpdir(),'uas-manager-chrome-'));
@@ -138,10 +208,11 @@ async function browserCheck(){
   child.stdio[4].on('data',chunk=>{
     buffer+=chunk.toString();if(buffer.length>16*1024*1024){child.kill('SIGKILL');return;}
     let boundary;while((boundary=buffer.indexOf('\0'))>=0){const raw=buffer.slice(0,boundary);buffer=buffer.slice(boundary+1);if(!raw)continue;
-      const message=JSON.parse(raw),item=pending.get(message.id);if(item){pending.delete(message.id);clearTimeout(item.timer);message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}}
+      const message=JSON.parse(raw),item=pending.get(message.id);if(item){pending.delete(message.id);item.timer.cancel();message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}}
   });
   const command=(method,params={},sessionId)=>new Promise((resolve,reject)=>{
-    if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const id=++serial,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method));},5000);
+    if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const first=serial===0,id=++serial;phase=method;
+    const timer=commandTimer({first,method,reject,onTimeout:()=>pending.delete(id)});
     pending.set(id,{resolve,reject,timer});child.stdio[3].write(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0');
   });
     graceful=()=>command('Browser.close');
@@ -176,9 +247,23 @@ async function browserCheck(){
     await evaluate(`installDocument(${JSON.stringify(dataFor(documents.reconnected))})`);assert(await evaluate(`document.querySelector('.run-journey').textContent.includes('run.resumed')`));
     await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'mobile Run overflow');
     const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-run-mobile.png'),Buffer.from(shot.data,'base64'));screenshots.push('D-run-mobile.png');
-    proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout'],screenshots,pixel_review:'pending independent inspection'};
+    await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+    await evaluate(`globalThis.actionProof={sent:[],finish:null};installActionHost(${JSON.stringify(project)},{inspect:async packet=>({operation_id:packet.operation_id,outcome:'unknown'}),view:async()=>({status:'available',scope:{deployment_id:'deployment',room_id:'alpha',instance_id:'instance-alpha'},current:{run_id:${JSON.stringify(run)},generation:1,observed_version:'a'.repeat(64)},actions:[{action:'pause',object_id:${JSON.stringify(run)},eligible:true,reason:null}]}),lifecycle:async()=>({status:'unavailable',reason:'FORBIDDEN'}),replacement:async()=>({status:'unavailable',reason:'FORBIDDEN'}),execute:packet=>{actionProof.sent.push(packet);return new Promise((resolve,reject)=>{actionProof.finish=()=>reject(Error('response lost'))})}});document.querySelector('[data-action-panel]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);
+    assert(await evaluate(`document.getElementById('item-dialog').open&&document.activeElement.id==='item-title'&&!document.querySelector('[data-human-action="pause"]').disabled`));
+    const actionShot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-human-controls.png'),Buffer.from(actionShot.data,'base64'));screenshots.push('D-human-controls.png');
+    await evaluate(`{const button=document.querySelector('[data-human-action="pause"]');button.click();button.click();}new Promise(resolve=>requestAnimationFrame(resolve))`);
+    assert(await evaluate(`actionProof.sent.length===1&&actionProof.sent[0].payload.reason==='human-pause'&&actionProof.sent[0].room_id==='alpha'`));
+    await evaluate(`actionProof.finish();new Promise(resolve=>requestAnimationFrame(resolve))`);
+    assert(await evaluate(`document.getElementById('item-body').textContent.includes('unknown')`));
+    await evaluate(`document.querySelector('#item-actions [data-action-panel]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);
+    await evaluate(`document.querySelector('[data-human-action="pause"]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);
+    assert(await evaluate(`actionProof.sent.length===1&&document.getElementById('item-body').textContent.includes('Previous outcome unknown')`));
+    await evaluate(`installDocument(${JSON.stringify(dataFor(documents.disconnected))})`);
+    assert(await evaluate(`!document.getElementById('item-dialog').open&&document.querySelector('[data-action-panel]').disabled`));
+    await evaluate(`installActionHost(${JSON.stringify(project)},null)`);
+    proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
-    failure=error;
+    failure=error;failurePhase=phase;failureElapsed=Math.max(0,Date.now()-started);
   }finally{
     clearTimeout(deadline);
     try { await closeOwnedBrowser(child,lifetime,graceful,profile); }
@@ -187,14 +272,15 @@ async function browserCheck(){
       else failure=cleanupError;
     }
     rejectPending(Error('Browser session closed'));
-    for(const item of pending.values())clearTimeout(item.timer);
+    for(const item of pending.values())item.timer.cancel();
   }
   if(failure){
-    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',error:failure.message,stderr:errors},null,2));
+    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',phase:failurePhase||'cleanup',elapsed_ms:failureElapsed===null?Math.max(0,Date.now()-started):failureElapsed,error:failure.message.slice(0,4096),stderr:errors},null,2));
     throw failure;
   }
   // Never publish a success receipt before actual child termination/cleanup.
   fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed'},null,2));
   console.log(`manager real-browser proof: ${proof.routes.length} routes; ${proof.browser.product}; ${output}/receipt.json`);
 }
-ownershipContract().then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
+timerContract();
+ownershipContract().then(actionContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});

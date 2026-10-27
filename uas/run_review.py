@@ -98,7 +98,12 @@ class RunReview:
         return _digest({k: run.get(k) for k in ('run_id', 'generation', 'status', 'actor_id',
             'participant_id', 'policy', 'checkout', 'gate_target', 'gate_target_binding', 'control_pending', 'control_revision')})
 
-    def _apply(self, command, origin, authorize, decide):
+    def _apply(self, command, origin, authorize, decide, *, _manager_fence=None):
+        if _manager_fence is not None:
+            with _manager_fence.guard():
+                _manager_fence.before(command)
+                return self.ledger.apply(command, origin, authorize=lambda *_: authorize() is True,
+                                         decide=decide)['result']
         return self.ledger.apply(command, origin, authorize=lambda *_: authorize() is True,
                                  decide=decide)['result']
 
@@ -365,7 +370,70 @@ class RunReview:
         return (type(origin) is Origin and 'human-control-run' in origin.capabilities
                 and authorize() is True and self.authorize_human(origin) is True)
 
-    def control(self, operation_id, run_id, generation, payload, *, human, authorize, admission_operation):
+    def manager_eligibility(self, action, run_id, *, session, admission_operation, supervisor):
+        """Local owning-module eligibility; never a provider read or authority grant."""
+        with self._fence(admission_operation), supervisor._locked():
+            room = supervisor._read()
+            if not room or room['instance_id'] != session.instance_id: raise LedgerError('ROOM_REPLACED')
+            if room['phase'] != 'running' or room['desired'] != 'running': raise LedgerError('ROOM_NOT_RUNNING')
+            if not self._human(session.human, lambda: session.allowed(action)): raise LedgerError('FORBIDDEN')
+            state = self.ledger.snapshot()['state']; run = state.get('runs', {}).get(run_id)
+            if run is None: raise LedgerError('UNKNOWN_RUN')
+            if action == 'reconcile-changes':
+                pending = [item for item in state.get('review_comments', {}).values()
+                    if item['run_id'] == run_id and item['generation'] == run['generation']
+                    and item['status'] in {'pending', 'unknown', 'confirmed-awaiting-target'}]
+                if len(pending) != 1: raise LedgerError('RECONCILIATION_TARGET_REQUIRED')
+                return
+            self._run(state, run_id, run['generation'], paused=action != 'request-changes')
+            review = state.get('run_reviews', {}).get(run_id); row = review and review['current']
+            if not row: raise LedgerError('REVIEW_CONTROL_STALE')
+            self._target(run, row['target'])
+            if row['generation'] != run['generation']: raise LedgerError('REVIEW_CONTROL_STALE')
+            if action == 'request-changes':
+                if row['stage'] != 'READY_FOR_HUMAN': raise LedgerError('HUMAN_CHANGES_STALE')
+                if len(state.get('review_comments', {})) >= MAX_ATTEMPTS: raise LedgerError('REVIEW_COMMENT_CAPACITY')
+            else:
+                if row['stage'] not in {'ATTENTION', 'READY_FOR_HUMAN'}: raise LedgerError('REVIEW_CONTROL_STALE')
+                if len(review['overrides']) >= MAX_ATTEMPTS: raise LedgerError('REVIEW_CAPACITY')
+                if run.get('native_stop') and not run['native_stop'].get('restored', False): raise LedgerError('NATIVE_RESTORE_REQUIRED')
+                if action == 'add-rounds' and review['cap'] is None: raise LedgerError('REVIEW_CAP_ALREADY_WAIVED')
+
+    def manager_action(self, value, *, session, admission_operation, audit, repository, supervisor):
+        """Authenticated exact-version Manager entry; ordinary methods remain owners."""
+        from .manager_actions import OwnerFence, REVIEW_ACTIONS
+        fence = OwnerFence(self.ledger, session, value, REVIEW_ACTIONS,
+            audit=audit, repository=repository, supervisor=supervisor)
+        value = fence.value
+        state = self.ledger.snapshot()['state']
+        if value['action'] == 'reconcile-changes':
+            item = state.get('review_comments', {}).get(value['object_id'])
+            if (value['payload'] or not item or item['run_id'] != value['run_id']
+                    or item['generation'] != value['generation']):
+                raise LedgerError('MANAGER_TARGET_MISMATCH')
+            if item['status'] not in {'pending', 'unknown', 'confirmed-awaiting-target'}:
+                raise LedgerError('MANAGER_ACTION_INELIGIBLE')
+            return self.reconcile_changes(value['object_id'], human=session.human,
+                authorize=fence.authorize, admission_operation=admission_operation,
+                reconciliation_id=value['operation_id'], _manager_fence=fence)
+        row = state.get('run_reviews', {}).get(value['run_id'], {}).get('current')
+        if row is None or row['submission_id'] != value['object_id']:
+            raise LedgerError('MANAGER_TARGET_MISMATCH')
+        payload = value['payload']
+        if value['action'] == 'request-changes':
+            if set(payload) != {'body'}: raise LedgerError('INVALID_MANAGER_ACTION')
+            return self.request_changes(value['operation_id'], value['run_id'], value['generation'],
+                {'submission_id': value['object_id'], 'target': deepcopy(row['target']), 'body': payload['body']},
+                human=session.human, authorize=fence.authorize, admission_operation=admission_operation,
+                _manager_fence=fence)
+        if set(payload) != {'reason', 'rounds'}: raise LedgerError('INVALID_MANAGER_ACTION')
+        return self.control(value['operation_id'], value['run_id'], value['generation'],
+            {'submission_id': value['object_id'], 'target': deepcopy(row['target']),
+             'action': value['action'], **payload}, human=session.human, authorize=fence.authorize,
+            admission_operation=admission_operation, _manager_fence=fence)
+
+    def control(self, operation_id, run_id, generation, payload, *, human, authorize, admission_operation,
+                _manager_fence=None):
         """Explicit bounded policy changes, with exact subject and durable audit.
 
         An override is never recorded as independent review or fabricated Gate
@@ -379,9 +447,14 @@ class RunReview:
                 or (payload['action'] != 'add-rounds' and payload['rounds'] is not None)):
             raise LedgerError('INVALID_REVIEW_CONTROL')
         command = Command(operation_id, 'review.human-control', run_id, generation, deepcopy(payload))
+        if _manager_fence is not None: command = _manager_fence.command(command)
         auth = lambda: self._human(human, authorize)
         with self._fence(admission_operation):
+            if _manager_fence is not None:
+                if not auth(): raise LedgerError('FORBIDDEN')
+                _manager_fence.before(command)
             def decide(state, _):
+                if _manager_fence is not None: _manager_fence.check(state)
                 run = self._run(state, run_id, generation, paused=True)
                 self._target(run, payload['target'])
                 review = state.get('run_reviews', {}).get(run_id); row = review and review['current']
@@ -406,6 +479,7 @@ class RunReview:
                 run['control_revision'] = run.get('control_revision', 0) + 1
                 audit = {**deepcopy(payload), 'operation_id': operation_id, 'generation': generation,
                          'human_origin': human.canonical()}
+                if _manager_fence is not None: audit['manager'] = _manager_fence.metadata()
                 review['overrides'].append(audit)
                 events = ()
                 if row['stage'] == 'IMPLEMENTING':
@@ -413,7 +487,7 @@ class RunReview:
                         'Resume implementation for exact review subject: ' + _json(payload['target']), human.actor_id)
                     row['implementation_request'] = request; events = (event,)
                 return self._finish(state, run, 'review.human-control', {'audit': audit, 'review': row}, events)
-            return self._apply(command, human, auth, decide)
+            return self._apply(command, human, auth, decide, _manager_fence=_manager_fence)
 
     def complete(self, operation_id, run_id, generation, submission_id, *, origin, authorize, admission_operation, observation_id=None):
         """Observe an already performed human GitHub merge; never merge here."""
@@ -495,14 +569,19 @@ class RunReview:
             return self._finish(state, run, 'review.merge-observed', row)
         return self._apply(command, origin, authorize, decide)
 
-    def request_changes(self, operation_id, run_id, generation, payload, *, human, authorize, admission_operation, observation_id=None):
+    def request_changes(self, operation_id, run_id, generation, payload, *, human, authorize, admission_operation,
+                        observation_id=None, _manager_fence=None):
         """One ordinary comment, then implementation; unknown writes need reconcile."""
         if (type(payload) is not dict or set(payload) != {'submission_id', 'target', 'body'}
                 or type(payload['body']) is not str or not 1 <= len(payload['body']) <= 8192):
             raise LedgerError('INVALID_HUMAN_CHANGES')
         command = Command(operation_id, 'review.human-changes', run_id, generation, deepcopy(payload))
+        if _manager_fence is not None: command = _manager_fence.command(command)
         auth = lambda: self._human(human, authorize)
         with self._fence(admission_operation):
+            if _manager_fence is not None:
+                if not auth(): raise LedgerError('FORBIDDEN')
+                _manager_fence.before(command)
             cached = self._receipt(command, human, auth)
             if cached is not None:
                 return deepcopy(self.ledger.snapshot()['state']['review_comments'][operation_id])
@@ -514,6 +593,7 @@ class RunReview:
             observation = self._observe(command, human, auth, target, attempt=observation_id)
             self._observed(observation, target)
             def prepare(state, _):
+                if _manager_fence is not None: _manager_fence.check(state)
                 current = self._run(state, run_id, generation)
                 if self._scope(current) != scope or state['run_reviews'][run_id]['current'] != row:
                     raise LedgerError('HUMAN_CHANGES_STALE')
@@ -522,13 +602,15 @@ class RunReview:
                 item = {'operation_id': operation_id, 'run_id': run_id, 'generation': generation,
                     **deepcopy(payload), 'scope': scope, 'human_origin': human.canonical(),
                     'status': 'pending', 'receipt': None, 'observation_audit': observation['audit_reference']}
+                if _manager_fence is not None: item['manager'] = _manager_fence.metadata()
                 comments[operation_id] = item
                 return self._finish(state, current, 'review.comment-requested', item)
-            self._apply(command, human, auth, prepare)
+            self._apply(command, human, auth, prepare, _manager_fence=_manager_fence)
             receipt = self.broker.comment(target, payload['body'], operation_id, authorize=auth)
             return self._settle_comment(operation_id, receipt, human, auth)
 
-    def reconcile_changes(self, operation_id, *, human, authorize, admission_operation, reconciliation_id=None):
+    def reconcile_changes(self, operation_id, *, human, authorize, admission_operation, reconciliation_id=None,
+                          _manager_fence=None):
         auth = lambda: self._human(human, authorize)
         with self._fence(admission_operation):
             if not auth(): raise LedgerError('FORBIDDEN')
@@ -536,23 +618,27 @@ class RunReview:
             if not row: raise LedgerError('UNKNOWN_REVIEW_COMMENT')
             if row['status'] not in {'pending', 'unknown', 'confirmed-awaiting-target'}: return deepcopy(row)
             attempt = reconciliation_id or _id('review-reconcile-', operation_id)
-            if self._reserve_comment_attempt(operation_id, attempt, 'reconcile', human, auth):
+            if self._reserve_comment_attempt(operation_id, attempt, 'reconcile', human, auth, _manager_fence=_manager_fence):
                 return deepcopy(self.ledger.snapshot()['state']['review_comments'][operation_id])
             receipt = (row['receipt'] if row['status'] == 'confirmed-awaiting-target' else
                        self.broker.reconcile_comment(row['target'], row['body'], operation_id, authorize=auth, reconciliation_id=attempt))
             return self._settle_comment(operation_id, receipt, human, auth, attempt=attempt)
 
-    def _reserve_comment_attempt(self, operation_id, attempt, kind, human, authorize):
+    def _reserve_comment_attempt(self, operation_id, attempt, kind, human, authorize, *, _manager_fence=None):
         _token(attempt)
         row = self.ledger.snapshot()['state']['review_comments'][operation_id]
         command = Command(attempt, 'review.comment-attempt', row['run_id'], row['generation'],
                           {'operation_id': operation_id, 'kind': kind})
+        if _manager_fence is not None:
+            command = _manager_fence.command(command)
+            _manager_fence.before(command)
         def decide(state, _):
+            if _manager_fence is not None: _manager_fence.check(state, uncertainty=False)
             attempts = state['review_comments'][operation_id].setdefault('attempts', {})
             if len(attempts) >= MAX_ATTEMPTS: raise LedgerError('REVIEW_COMMENT_CAPACITY')
             attempts[attempt] = {'kind': kind, 'receipt': None}
             return Transition(state, (Event('review.comment-attempt', command.payload),), {'attempt': attempt})
-        self._apply(command, human, authorize, decide)
+        self._apply(command, human, authorize, decide, _manager_fence=_manager_fence)
         return self.ledger.snapshot()['state']['review_comments'][operation_id]['attempts'][attempt]['receipt'] is not None
 
     def retry_changes_preflight(self, operation_id, preflight_id, *, human, authorize, admission_operation):

@@ -34,7 +34,7 @@ SOURCES = (
     'uas/launch.py',
     'uas/peer.py',
     'uas/pi_runtime.py',
-    'uas/participant.py',
+    'uas/participant.py', 'uas/participant_recovery.py',
     'uas/docker_fixture.py',
     'uas/guest_fixture.py',
     'uas/docker_exec_api.py',

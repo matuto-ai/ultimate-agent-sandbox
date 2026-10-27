@@ -5,6 +5,7 @@ file belongs outside Rooms/Workstations. This store does not establish that OS
 boundary. A committed start is permission to attempt once, never to replay.
 """
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -441,6 +442,63 @@ class ForgeAudit:
         if self._db is not None:
             self._db.close()
             self._db = None
+
+    def _manager_action_state(self, db, room_id, repository):
+        """Owner-computed write uncertainty, including ordinary Participant writes."""
+        _token(room_id)
+        if type(repository) is not str or not _REPOSITORY.fullmatch(repository):
+            raise LedgerError('INVALID_FORGE_AUDIT')
+        rows = db.execute('SELECT id FROM mutation_starts WHERE room_id=? AND repository=? ORDER BY rowid LIMIT 4097',
+                          (room_id, repository.lower())).fetchall()
+        legacy = db.execute("SELECT id FROM starts WHERE json_extract(metadata,'$.room_id')=? "
+            "AND lower(json_extract(metadata,'$.repository'))=? ORDER BY rowid LIMIT 4097", (room_id, repository.lower())).fetchall()
+        if len(rows) + len(legacy) > 4096: raise LedgerError('FORGE_RECOVERY_CAPACITY')
+        versions, blocked, partial = [], self._mutation_failed or self._read_failed, False
+        for row in rows:
+            record = self._mutation_get(db, row['id']); result = record['result']
+            observations = record['reconciliations']
+            latest = observations[-1]['observation'] if observations else None
+            unknown = (result is None or result['status'] == 'UNKNOWN_OUTCOME'
+                or any(step['fields'] is None and step['error_code'] is None for step in record['steps']))
+            is_partial = result is not None and result['status'] == 'PARTIAL_MUTATION'
+            reconciled = (result is not None and latest is not None and latest['status'] != 'UNKNOWN'
+                and not any(field['status'] == 'UNKNOWN' for field in latest['fields']))
+            blocked = blocked or ((unknown or is_partial) and not reconciled)
+            partial = partial or is_partial
+            versions.append([row['id'], record['started_at'], record['finished_at'], record['steps'],
+                             result, [(o['id'], o['timestamp'], o['observation']) for o in observations]])
+        for row in legacy:
+            record = self._get(db, row['id']); result = record['result']; observations = record['reconciliations']
+            latest = observations[-1]['observation'] if observations else None
+            blocked = blocked or result is None or (result['status'] == 'UNKNOWN_OUTCOME'
+                                  and (latest is None or latest['status'] == 'UNKNOWN'))
+            versions.append([row['id'], result, observations])
+        return {'version': hashlib.sha256(_json([versions, bool(blocked), bool(partial),
+                            self._mutation_failed, self._read_failed]).encode()).hexdigest(),
+                'blocked': bool(blocked), 'partial': bool(partial),
+                'reason': 'AUDIT_UNAVAILABLE' if self._mutation_failed or self._read_failed else
+                          'FORGE_RECONCILIATION_REQUIRED' if blocked else None}
+
+    @contextmanager
+    def manager_action_guard(self, room_id, repository):
+        """Short owner fence held only through a consuming local Hub transaction.
+
+        Never hold this around a Broker/provider call. SQLite prevents a new
+        ordinary mutation from starting between the audit check and Hub commit.
+        """
+        db = self._connection()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            yield self._manager_action_state(db, room_id, repository)
+        except sqlite3.Error as error:
+            self._mutation_failed = True
+            raise LedgerError('AUDIT_UNAVAILABLE') from error
+        finally:
+            db.rollback()
+
+    def manager_action_state(self, room_id, repository):
+        with self.manager_action_guard(room_id, repository) as value:
+            return value
 
     def manager_observations(self, room_id):
         """Bounded passive diagnostic export from this Broker-owned audit cut.
