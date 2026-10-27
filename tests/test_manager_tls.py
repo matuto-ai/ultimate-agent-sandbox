@@ -8,6 +8,19 @@ import os
 import unittest
 
 
+def initialize_receiver_model(path, ready, startup_errors):
+    """One receiver owns initial WAL/schema setup before observers may open it."""
+    from uas.manager_stream import ManagerReadModel
+    try:
+        model = ManagerReadModel(path)
+    except Exception as error:
+        startup_errors.append(getattr(error, 'code', type(error).__name__))
+        ready.set()
+        return None
+    ready.set()
+    return model
+
+
 @unittest.skipUnless(os.environ.get('UAS_MANAGER_TLS_TEST') == '1'
                      and os.environ.get('GITHUB_ACTIONS') == 'true'
                      and os.environ.get('RUNNER_OS') == 'Linux',
@@ -67,11 +80,15 @@ class HostedManagerTLSTests(unittest.TestCase):
         self.listener.bind(('127.0.0.1', 0)); self.listener.listen(8); self.listener.settimeout(.1)
         self.port = self.listener.getsockname()[1]
         self.stop = threading.Event()
+        self.ready = threading.Event()
+        self.startup_errors = []
         self.channel_lock = threading.Lock()
         self.active_channels, self.connection_count = set(), 0
 
         def server():
-            model = ManagerReadModel(self.root / 'manager.sqlite3')
+            model = initialize_receiver_model(self.root / 'manager.sqlite3', self.ready, self.startup_errors)
+            if model is None:
+                return
             try:
                 while not self.stop.is_set():
                     try:
@@ -105,6 +122,8 @@ class HostedManagerTLSTests(unittest.TestCase):
         self.thread = threading.Thread(target=server, daemon=True)
         self.thread.start()
         self.addCleanup(self.shutdown)
+        self.assertTrue(self.ready.wait(3), 'Manager receiver initialization timed out')
+        self.assertFalse(self.startup_errors, 'Manager receiver initialization failed: ' + repr(self.startup_errors))
 
     def shutdown(self):
         self.stop.set()
