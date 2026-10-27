@@ -22,7 +22,9 @@ def case(identifier):
 class CIPartitionTests(unittest.TestCase):
     def test_fixed_measured_modules_and_every_future_module_default_to_remainder(self):
         self.assertEqual(ci.SLOW_MODULES, {'test_peer', 'test_checkouts', 'test_forge_capacity',
-                                          'test_gate_evaluation', 'test_forge_mutations'})
+                                          'test_gate_evaluation', 'test_forge_mutations',
+                                          'test_context', 'test_artifact_manual_source',
+                                          'test_run_review', 'test_staged_source_closure'})
         for module in ci.SLOW_MODULES:
             self.assertEqual('slow', ci.partition_for(module + '.Case.test_one'))
         for name in ('test_new_future.Case.test_one', 'test_git_new.Case.test_one',
@@ -35,6 +37,19 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual([slow, future], cases)
         self.assertEqual({'slow': [slow], 'remainder': [future]}, groups)
         slow.run.assert_not_called(); future.run.assert_not_called()
+
+    def test_rebalanced_modules_each_run_once_without_changing_total_inventory(self):
+        identifiers = [module + '.Case.test_one' for module in sorted(ci.SLOW_MODULES)]
+        identifiers += ['test_future.Case.test_one', 'test_ci_partitions.Case.test_one']
+        selected = [case(identifier) for identifier in identifiers]
+        cases, groups = ci.partition_suite(unittest.TestSuite(selected))
+        self.assertEqual([item.id() for item in cases], identifiers)
+        self.assertEqual(len(groups['slow']), 9)
+        self.assertEqual(len(groups['remainder']), 2)
+        self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
+                         sorted(identifiers))
+        for item in selected:
+            item.run.assert_not_called()
 
     def test_duplicate_ids_are_rejected_even_for_different_case_objects(self):
         with self.assertRaises(ValueError):
