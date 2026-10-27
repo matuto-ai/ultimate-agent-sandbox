@@ -65,12 +65,38 @@ console.log(`manager Field Notes: ${count} light/dark routes and live interactio
 // Pure ownership bookkeeping: an error without a PID is a terminal failed
 // spawn; an error from an existing child never pretends the child has exited.
 function trackChild(child,onFailure){
-  let ended=false,resolveStop;
+  let ended=false,closed=false,resolveStop,resolveClose;
   const stopped=new Promise(resolve=>{resolveStop=resolve;});
+  const closedPromise=new Promise(resolve=>{resolveClose=resolve;});
   const terminal=()=>{if(!ended){ended=true;resolveStop();}};
+  const close=()=>{terminal();if(!closed){closed=true;resolveClose();}};
   child.once('exit',(code,signal)=>{terminal();onFailure(Error(`Chrome exited ${code}/${signal}`));});
-  child.on('error',error=>{if(!child.pid)terminal();onFailure(error);});
-  return {get ended(){return ended;},stopped};
+  child.once('close',close);
+  child.on('error',error=>{if(!child.pid)close();onFailure(error);});
+  return {get ended(){return ended;},get closed(){return closed;},stopped,closedPromise};
+}
+// CDP's key string/code alone is not a complete native keyboard gesture.
+// Supply Escape's virtual key and release it, including across successive dialogs.
+async function pressEscape(send){
+  const key={key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27,modifiers:0};
+  try { await send('Input.dispatchKeyEvent',{...key,type:'keyDown'}); }
+  finally { await send('Input.dispatchKeyEvent',{...key,type:'keyUp'}); }
+}
+function boundedWait(promise,milliseconds){
+  let timer;
+  return Promise.race([promise,new Promise(resolve=>{timer=setTimeout(resolve,milliseconds);})]).finally(()=>clearTimeout(timer));
+}
+async function closeOwnedBrowser(child,lifetime,graceful,profile,{wait=boundedWait,remove=path=>fs.rmSync(path,{recursive:true,force:true,maxRetries:3,retryDelay:100})}={}){
+  if(child&&lifetime&&!lifetime.closed){
+    // Browser.close lets Chrome own its descendant shutdown and profile flush.
+    // A closed pipe during the request is expected; termination is checked next.
+    if(graceful&&!lifetime.ended){try{await wait(graceful().catch(()=>{}),500);}catch(_){}}
+    await wait(lifetime.closedPromise,1000);
+    if(!lifetime.ended){child.kill('SIGTERM');await wait(lifetime.closedPromise,500);}
+    if(!lifetime.ended){child.kill('SIGKILL');await wait(lifetime.closedPromise,500);}
+    if(!lifetime.closed)throw Error('Owned Chrome close unconfirmed; profile retained');
+  }
+  if(profile)remove(profile);
 }
 async function ownershipContract(){
   function fake(pid){const listeners=new Map();return {pid,on(name,fn){listeners.set(name,fn);},once(name,fn){listeners.set(name,fn);},emit(name,...args){listeners.get(name)(...args);}};}
@@ -78,6 +104,17 @@ async function ownershipContract(){
   const missing=trackChild(failed,error=>failures.push(error.message));failed.emit('error',Error('EACCES'));await missing.stopped;
   assert(missing.ended&&failures.includes('EACCES'));
   const running=fake(17),owned=trackChild(running,()=>{});running.emit('error',Error('temporary error'));assert(!owned.ended);running.emit('exit',0,null);await owned.stopped;assert(owned.ended);
+  assert(!owned.closed,'exit alone does not close inherited pipes');running.emit('close');await owned.closedPromise;assert(owned.closed);
+  const events=[];await pressEscape(async(method,value)=>events.push([method,value]));
+  assert.deepEqual(events.map(item=>item[1].type),['keyDown','keyUp']);assert(events.every(item=>item[1].windowsVirtualKeyCode===27&&item[1].nativeVirtualKeyCode===27));
+  const failedKeys=[];await assert.rejects(pressEscape(async(_,value)=>{failedKeys.push(value.type);if(value.type==='keyDown')throw Error('input failed');}),/input failed/);assert.deepEqual(failedKeys,['keyDown','keyUp']);
+  const trace=[],browser=fake(21),state=trackChild(browser,()=>{});browser.kill=signal=>{trace.push(signal);browser.emit('close');};
+  await closeOwnedBrowser(browser,state,async()=>{trace.push('Browser.close');browser.emit('exit',0,null);browser.emit('close');},'/owned',{wait:async promise=>promise,remove:path=>trace.push('remove '+path)});
+  assert.deepEqual(trace,['Browser.close','remove /owned']);
+  const stuck=fake(22),stuckState=trackChild(stuck,()=>{}),signals=[];stuck.kill=signal=>signals.push(signal);
+  await assert.rejects(closeOwnedBrowser(stuck,stuckState,async()=>{throw Error('broken pipe');},'/owned',{wait:async()=>{},remove:()=>{throw Error('must not remove live profile');}}),/close unconfirmed/);assert.deepEqual(signals,['SIGTERM','SIGKILL']);
+  await assert.rejects(closeOwnedBrowser(null,null,null,'/owned',{remove:()=>{throw Error('ENOTEMPTY');}}),/ENOTEMPTY/);
+
 }
 
 async function browserCheck(){
@@ -86,7 +123,7 @@ async function browserCheck(){
   const chrome=['/usr/bin/google-chrome','/usr/bin/chromium'].find(file=>fs.existsSync(file));
   if(!chrome)throw Error('Preinstalled Chrome unavailable; download and sandbox bypass forbidden');
   const output=path.join(root,'browser-proof'),pending=new Map();
-  let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='';
+  let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='',graceful=null,failure=null;
   const rejectPending=error=>{for(const item of pending.values()){clearTimeout(item.timer);item.reject(error);}pending.clear();};
   try{
     fs.mkdirSync(output);
@@ -107,6 +144,7 @@ async function browserCheck(){
     if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const id=++serial,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method));},5000);
     pending.set(id,{resolve,reject,timer});child.stdio[3].write(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0');
   });
+    graceful=()=>command('Browser.close');
     const version=await command('Browser.getVersion'),target=await command('Target.createTarget',{url:'about:blank'});
     const {sessionId}=await command('Target.attachToTarget',{targetId:target.targetId,flatten:true});
     const send=(method,params)=>command(method,params,sessionId);
@@ -129,9 +167,9 @@ async function browserCheck(){
     }
     await evaluate(`document.querySelector('[data-gate-index]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);
     assert(await evaluate(`!document.getElementById('drawer').hidden&&document.activeElement.id==='drawer-title'`));
-    await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await evaluate(`new Promise(resolve=>requestAnimationFrame(resolve))`);assert(await evaluate(`document.getElementById('drawer').hidden`));
+    await pressEscape(send);await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+500;function check(){if(document.getElementById('drawer').hidden)resolve(true);else if(Date.now()>end)reject(Error('Escape did not close drawer'));else requestAnimationFrame(check)}check()})`);assert(await evaluate(`document.getElementById('drawer').hidden`));
     await evaluate(`document.querySelector('[data-attention]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);assert(await evaluate(`document.getElementById('item-dialog').open&&document.activeElement.id==='item-title'`));
-    await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await evaluate(`new Promise(resolve=>requestAnimationFrame(resolve))`);assert(await evaluate(`!document.getElementById('item-dialog').open`));
+    await pressEscape(send);await evaluate(`new Promise((resolve,reject)=>{const end=Date.now()+500;function check(){if(!document.getElementById('item-dialog').open)resolve(true);else if(Date.now()>end)reject(Error('Escape did not close dialog'));else requestAnimationFrame(check)}check()})`);assert(await evaluate(`!document.getElementById('item-dialog').open`));
     await evaluate(`document.querySelector('a[data-nav][href*="page=health"]').click()`);assert.equal(await evaluate(`new URLSearchParams(location.search).get('page')`),'health');
     await evaluate(`history.back();new Promise(resolve=>setTimeout(resolve,80))`);assert.equal(await evaluate(`new URLSearchParams(location.search).get('page')`),'run');
     await evaluate(`installDocument(${JSON.stringify(dataFor(documents.disconnected))})`);assert(await evaluate(`!!document.querySelector('[data-status="disconnected"]')`));
@@ -140,15 +178,20 @@ async function browserCheck(){
     const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-run-mobile.png'),Buffer.from(shot.data,'base64'));screenshots.push('D-run-mobile.png');
     proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout'],screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
-    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',error:error.message,stderr:errors},null,2));
-    throw error;
+    failure=error;
   }finally{
     clearTimeout(deadline);
+    try { await closeOwnedBrowser(child,lifetime,graceful,profile); }
+    catch(cleanupError){
+      if(failure)failure=new Error(failure.message+'; cleanup: '+cleanupError.message,{cause:failure});
+      else failure=cleanupError;
+    }
+    rejectPending(Error('Browser session closed'));
     for(const item of pending.values())clearTimeout(item.timer);
-    if(child&&lifetime&&!lifetime.ended){child.kill('SIGTERM');await Promise.race([lifetime.stopped,new Promise(resolve=>setTimeout(resolve,1000))]);}
-    if(child&&lifetime&&!lifetime.ended){child.kill('SIGKILL');await Promise.race([lifetime.stopped,new Promise(resolve=>setTimeout(resolve,1000))]);}
-    if(child&&lifetime&&!lifetime.ended)throw Error('Owned Chrome termination unconfirmed; temporary profile retained: '+profile);
-    if(profile)fs.rmSync(profile,{recursive:true,force:true});
+  }
+  if(failure){
+    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',error:failure.message,stderr:errors},null,2));
+    throw failure;
   }
   // Never publish a success receipt before actual child termination/cleanup.
   fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed'},null,2));
