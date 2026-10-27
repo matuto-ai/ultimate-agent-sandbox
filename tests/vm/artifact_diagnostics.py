@@ -5,6 +5,7 @@ helpers add no production executor and do not establish successful confinement.
 Capture/output/timeout acceptance limits stay with their fixed source callers.
 """
 import json
+import hashlib
 import os
 import stat
 import subprocess
@@ -113,6 +114,142 @@ MAX_SUPERVISOR_RECORDS=8
 MAX_SUPERVISOR_RECORD_BYTES=512
 MAX_SUPERVISOR_STREAM_BYTES=1<<20
 MAX_EXCEPTION_CHAIN=8
+
+MOUNT_PREFIX=b'UAS_ARTIFACT_MOUNTS:'
+MAX_MOUNT_RECORD_BYTES=4096
+MOUNT_PATHS=frozenset(('/tmp','/uas/gate','/uas/gate-targets','/uas/project','/uas/foreign',
+    '/uas/hub','/uas/control','/run/docker.sock'))
+MOUNT_TYPES=frozenset(('bind','tmpfs','volume','image','other'))
+MOUNT_PROPAGATION=frozenset(('private','rprivate','shared','rshared','slave','rslave','other'))
+MOUNT_SECURITY=('readonly_rootfs','privileged','network_none','cap_drop_all','nnp',
+    'seccomp_unconfined','label_disabled')
+TMP_NUMERIC=frozenset(('mount_id','parent_mount_id','device_major','device_minor','size_bytes',
+    'allocation_unit','uid','gid','mode','device','inode'))
+TMP_FLAGS=frozenset(('readonly','nosuid','nodev','noexec'))
+
+
+def _mount_path(value):
+    if type(value) is str and value in MOUNT_PATHS:return {'path':value,'path_digest':None}
+    digest=hashlib.sha256(value.encode('utf-8',errors='replace')).hexdigest() if type(value) is str and len(value)<=4096 else None
+    return {'path':'other','path_digest':digest}
+
+
+def _runtime_mount(value):
+    if type(value) is not dict:return None
+    result={'version':value.get('version') if type(value.get('version')) is int and value['version']==1 else None,
+        'filesystem':value.get('filesystem') if value.get('filesystem') in ('tmpfs','other') else 'other'}
+    for key in TMP_NUMERIC:
+        number=value.get(key);result[key]=number if type(number) is int and 0<=number<1<<64 else None
+    for key in ('mount_flags','statvfs_flags'):
+        flags=value.get(key);result[key]={name:(flags.get(name) if type(flags.get(name)) is bool else None)
+            for name in sorted(TMP_FLAGS)} if type(flags) is dict else {name:None for name in sorted(TMP_FLAGS)}
+    return result
+
+
+def mount_failure(phase,info,expected,options,runtime=None):
+    """Bounded typed mount facts, not configuration-as-runtime evidence.
+
+    Only fixed fixture destinations are printed. Unknown paths are hashed;
+    sources/options/labels/env/contents are never printed or parsed as authority.
+    """
+    if phase not in ('inspect-mounts','runtime-tmpfs'):raise ValueError('fixed mount phase required')
+    if type(info) is not dict:info={}
+    host=info.get('HostConfig');host=host if type(host) is dict else {}
+    raw=info.get('Mounts');entries=[]
+    if type(raw) is list:
+        for item in raw[:8]:
+            item=item if type(item) is dict else {};destination=item.get('Destination')
+            source=expected.get(destination) if type(destination) is str else None
+            kind=item.get('Type');propagation=item.get('Propagation')
+            entries.append({**_mount_path(destination),'type':kind if type(kind) is str and kind in MOUNT_TYPES else 'other',
+                'readonly':not item['RW'] if type(item.get('RW')) is bool else None,
+                'source_matches':item.get('Source')==source[0] if source else None,
+                'propagation':propagation if type(propagation) is str and propagation in MOUNT_PROPAGATION else 'other'})
+    mounts={'kind':'list' if type(raw) is list else 'invalid','count':min(len(raw),1000000) if type(raw) is list else None,
+        'entries':entries,'truncated':type(raw) is list and len(raw)>8}
+    raw=host.get('Tmpfs');entries=[]
+    if type(raw) is dict:
+        for key,value in list(raw.items())[:4]:
+            match=(len(value.split(','))==8 and len(set(value.split(',')))==8
+                and set(value.split(','))==set(options.split(','))) if type(value) is str and len(value)<=512 else False
+            entries.append({**_mount_path(key),'profile_options':match})
+    tmpfs={'kind':'dict' if type(raw) is dict else 'invalid','count':min(len(raw),1000000) if type(raw) is dict else None,
+        'entries':entries,'truncated':type(raw) is dict and len(raw)>4}
+    security_options=host.get('SecurityOpt')
+    valid_security=type(security_options) is list and all(type(v) is str for v in security_options)
+    capabilities=host.get('CapDrop');valid_caps=type(capabilities) is list and all(type(v) is str for v in capabilities)
+    security={'readonly_rootfs':host.get('ReadonlyRootfs') if type(host.get('ReadonlyRootfs')) is bool else None,
+        'privileged':host.get('Privileged') if type(host.get('Privileged')) is bool else None,
+        'network_none':host.get('NetworkMode')=='none' if type(host.get('NetworkMode')) is str else None,
+        'cap_drop_all':capabilities==['ALL'] if valid_caps else None,
+        'nnp':any(v in security_options for v in ('no-new-privileges','no-new-privileges=true')) if valid_security else None,
+        'seccomp_unconfined':'seccomp=unconfined' in security_options if valid_security else None,
+        'label_disabled':'label=disable' in security_options if valid_security else None}
+    result={'version':1,'phase':phase,'mounts':mounts,'tmpfs_configuration':tmpfs,
+        'security':security,'runtime_tmpfs':_runtime_mount(runtime)}
+    if len(json.dumps(result,separators=(',',':')).encode())>MAX_MOUNT_RECORD_BYTES:raise ValueError('mount diagnostic bound')
+    return result
+
+
+def _valid_mount_record(value):
+    if (type(value) is not dict or set(value)!={'version','phase','mounts','tmpfs_configuration','security','runtime_tmpfs'}
+            or type(value['version']) is not int or value['version']!=1
+            or type(value['phase']) is not str or value['phase'] not in ('inspect-mounts','runtime-tmpfs')):return False
+    for field,kind,limit in (('mounts','list',8),('tmpfs_configuration','dict',4)):
+        group=value[field]
+        if (type(group) is not dict or set(group)!={'kind','count','entries','truncated'}
+                or type(group['kind']) is not str or group['kind'] not in (kind,'invalid')
+                or not (group['count'] is None or type(group['count']) is int and 0<=group['count']<=1000000)
+                or type(group['entries']) is not list or len(group['entries'])>limit
+                or type(group['truncated']) is not bool):return False
+        for item in group['entries']:
+            extra={'type','readonly','source_matches','propagation'} if field=='mounts' else {'profile_options'}
+            if (type(item) is not dict or set(item)!={'path','path_digest'}|extra
+                    or type(item['path']) is not str or item['path'] not in MOUNT_PATHS|{'other'}
+                    or not (item['path_digest'] is None or type(item['path_digest']) is str
+                        and len(item['path_digest'])==64 and all(c in '0123456789abcdef' for c in item['path_digest']))):return False
+            if field=='mounts':
+                if (type(item['type']) is not str or item['type'] not in MOUNT_TYPES
+                        or type(item['propagation']) is not str or item['propagation'] not in MOUNT_PROPAGATION
+                        or any(item[k] is not None and type(item[k]) is not bool for k in ('readonly','source_matches'))):return False
+            elif type(item['profile_options']) is not bool:return False
+    security=value['security']
+    if type(security) is not dict or set(security)!=set(MOUNT_SECURITY) or any(v is not None and type(v) is not bool for v in security.values()):return False
+    runtime=value['runtime_tmpfs']
+    if runtime is not None:
+        if type(runtime) is not dict or set(runtime)!=TMP_NUMERIC|{'version','filesystem','mount_flags','statvfs_flags'}:return False
+        if runtime['version'] is not None and (type(runtime['version']) is not int or runtime['version']!=1):return False
+        if type(runtime['filesystem']) is not str or runtime['filesystem'] not in ('tmpfs','other'):return False
+        if any(runtime[k] is not None and (type(runtime[k]) is not int or not 0<=runtime[k]<1<<64) for k in TMP_NUMERIC):return False
+        for field in ('mount_flags','statvfs_flags'):
+            flags=runtime[field]
+            if type(flags) is not dict or set(flags)!=TMP_FLAGS or any(v is not None and type(v) is not bool for v in flags.values()):return False
+    return True
+
+
+def mount_observation(data):
+    """Retain one bounded typed failure record before head/tail sampling."""
+    if type(data) is not bytes or len(data)>MAX_SUPERVISOR_STREAM_BYTES:return {'parse_status':'unavailable'}
+    records=[];matched=rejected=unretained=0
+    def unique(pairs):
+        value={}
+        for key,item in pairs:
+            if key in value:raise ValueError('duplicate mount diagnostic field')
+            value[key]=item
+        return value
+    for line in data.splitlines():
+        if not line.startswith(MOUNT_PREFIX):continue
+        matched+=1
+        if records:unretained+=1;continue
+        raw=line[len(MOUNT_PREFIX):]
+        if len(raw)>MAX_MOUNT_RECORD_BYTES:rejected+=1;continue
+        try:value=json.loads(raw.decode('ascii'),object_pairs_hook=unique)
+        except (ValueError,UnicodeError,RecursionError):rejected+=1;continue
+        if not _valid_mount_record(value):rejected+=1;continue
+        records.append(value)
+    if not matched:return {'parse_status':'unavailable'}
+    return {'parse_status':'partial' if rejected or unretained else 'parsed','records':records,
+        'matched_records':matched,'rejected_records':rejected,'unretained_records':unretained}
 
 
 def supervisor_failure(phase,error,artifact_error_type):
@@ -242,6 +379,7 @@ def file_facts(path,*,supervisor=False):
             data=b''.join(chunks)
             observation=supervisor_observation(data)  # Before head/tail sampling.
             value=stream_facts(data);value['supervisor_observation']=observation
+            value['mount_observation']=mount_observation(data)
             return value
         if node.st_size<=SAMPLE_BYTES:return stream_facts(os.read(descriptor,SAMPLE_BYTES))
         head=os.read(descriptor,SAMPLE_BYTES//2)
@@ -249,7 +387,9 @@ def file_facts(path,*,supervisor=False):
         tail=os.read(descriptor,SAMPLE_BYTES//2)
         value={'bytes':node.st_size,'retained_bytes':len(head)+len(tail),'truncated':True,
             'head':head.decode('utf-8',errors='replace'),'tail':tail.decode('utf-8',errors='replace')}
-        if supervisor:value['supervisor_observation']={'parse_status':'unavailable','reason':'oversized'}
+        if supervisor:
+            value['supervisor_observation']={'parse_status':'unavailable','reason':'oversized'}
+            value['mount_observation']={'parse_status':'unavailable'}
         return value
     finally:os.close(descriptor)
 

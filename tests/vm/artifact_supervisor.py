@@ -31,7 +31,8 @@ from uas.docker_exec_api import DockerExecAPI
 from uas.kernel_origin import HeldOrigin, OriginDenied, _identity, alive, enable, probe, receive
 from uas.lifecycle import Supervisor, FixtureSpec
 from artifact_hub import RELEASE, DONE_ACK
-from artifact_diagnostics import captured, decoded_json, supervisor_failure, SUPERVISOR_PREFIX
+from artifact_diagnostics import (captured, decoded_json, supervisor_failure, SUPERVISOR_PREFIX,
+    mount_failure, MOUNT_PREFIX)
 
 UID=165533
 HELPER=165530
@@ -74,6 +75,72 @@ def target_labels(level):
         if library.setfscreatecon(None)!=0:raise OSError(ctypes.get_errno(),'target creation label reset denied')
 
 
+TMPFS_OPTIONS='rw,nosuid,nodev,noexec,size=8m,mode=0700,uid=65532,gid=65532'
+
+
+def expected_bind_mounts(config):
+    result={'/uas/gate':(config['gate'],False),'/uas/gate-targets':(config['scratch'],False),
+        '/uas/project':(config['repo'],True)}
+    if config.get('foreign_scratch'):result['/uas/foreign']=(config['foreign_scratch'],False)
+    return result
+
+
+def require_mount_configuration(info,config):
+    """Exact Engine inspect binds + separate legacy --tmpfs configuration.
+
+    HostConfig.Tmpfs is configured intent, not an observed runtime mount. The
+    fixed in-container probe independently checks the actual /tmp mount below.
+    No additional mount representation or destination is silently admitted.
+    """
+    expected=expected_bind_mounts(config);mounts=info.get('Mounts')
+    expect(type(mounts) is list and len(mounts)==len(expected),'mount set cardinality')
+    seen=set()
+    for item in mounts:
+        expect(type(item) is dict and type(item.get('Destination')) is str,'mount record shape')
+        destination=item['Destination']
+        expect(destination in expected and destination not in seen,'unexpected or duplicate mount')
+        seen.add(destination);source,writable=expected[destination]
+        expect(item.get('Type')=='bind' and item.get('Source')==source
+            and type(item.get('RW')) is bool and item['RW'] is writable
+            and item.get('Propagation')=='rprivate','exact bind mount profile')
+    expect(seen==set(expected),'missing bind mount')
+    tmpfs=info['HostConfig'].get('Tmpfs')
+    expect(type(tmpfs) is dict and set(tmpfs)=={'/tmp'} and type(tmpfs['/tmp']) is str,
+        'exact singleton tmpfs configuration')
+    options=tmpfs['/tmp'].split(',')
+    expect(len(options)==8 and len(set(options))==8 and set(options)==set(TMPFS_OPTIONS.split(',')),
+        'exact bounded tmpfs options')
+
+
+def require_runtime_tmpfs(value):
+    """Independent observed mount/held-FD facts, never configured=observed."""
+    numeric={'mount_id','parent_mount_id','device_major','device_minor','size_bytes',
+        'allocation_unit','uid','gid','mode','device','inode'}
+    expect(type(value) is dict and set(value)==numeric|{'version','filesystem','mount_flags','statvfs_flags'},
+        'actual tmpfs observation shape')
+    expect(type(value['version']) is int and value['version']==1 and value['filesystem']=='tmpfs',
+        'actual tmpfs filesystem')
+    expect(all(type(value[k]) is int and 0<=value[k]<1<<64 for k in numeric),'actual tmpfs numeric facts')
+    expected_flags={'readonly':False,'nosuid':True,'nodev':True,'noexec':True}
+    for field in ('mount_flags','statvfs_flags'):
+        expect(type(value[field]) is dict and set(value[field])==set(expected_flags)
+            and all(type(v) is bool for v in value[field].values()) and value[field]==expected_flags,
+            'actual tmpfs restrictive flags')
+    expect(value['mount_id']>0 and value['parent_mount_id']>0 and value['inode']>0
+        and value['allocation_unit'] in (512,1024,2048,4096)
+        and value['size_bytes']==8<<20 and value['uid']==65532 and value['gid']==65532
+        and value['mode']==0o700 and os.major(value['device'])==value['device_major']
+        and os.minor(value['device'])==value['device_minor'],'actual tmpfs identity and resource profile')
+
+
+def report_mount_failure(phase,info,config,runtime=None):
+    try:
+        value=mount_failure(phase,info,expected_bind_mounts(config),TMPFS_OPTIONS,runtime)
+        print(MOUNT_PREFIX.decode()+json.dumps(value,sort_keys=True,separators=(',',':')),flush=True)
+    except BaseException:
+        pass  # Diagnostics must never replace the actual admission failure.
+
+
 class NativeAdmission:
     """Fresh actual Engine + kernel/image observations; never a true stub."""
     def __init__(self,engine,config):
@@ -90,20 +157,18 @@ class NativeAdmission:
         expect(host['Memory']==256<<20 and host['MemorySwap']==256<<20 and host['PidsLimit']==64 and host['NanoCpus']==500000000,'admitted Room resource ceiling')
         expect(configuration['User']=='65532:65532' and configuration['Entrypoint']==['/opt/uas/bin/tini'],'fixed Workstation profile')
         expect(info['ProcessLabel'].endswith(':'+c['level']) and ':container_t:' in info['ProcessLabel'],'stock MCS process label')
-        mounts={item['Destination']:item for item in info['Mounts']}
-        expected_mounts={'/tmp','/uas/gate','/uas/gate-targets','/uas/project'}
-        if c.get('foreign_scratch'):
-            expected_mounts.add('/uas/foreign')
-            expect(mounts.get('/uas/foreign',{}).get('Source')==c['foreign_scratch']
-                and mounts['/uas/foreign']['RW'] is False,'fixed negative-only foreign mount')
-        expect(set(mounts)==expected_mounts,'unadmitted mount present')
-        for target,source in (('/uas/gate-targets',c['scratch']),('/uas/gate',c['gate'])):
-            expect(target in mounts and mounts[target]['RW'] is False and mounts[target]['Source']==source,'exact readonly target/rendezvous mount')
-        expect(not any('docker.sock' in name or name in ('/uas/hub','/uas/control') for name in mounts),'private authority unmounted')
+        try:require_mount_configuration(info,c)
+        except BaseException:
+            report_mount_failure('inspect-mounts',info,c)
+            raise
         facts=command('docker','exec','--user','65532:65532',workstation.container_id,
             '/usr/bin/python3','/opt/uas/tests/vm/artifact_room_probe.py','facts')
         expect(facts['uid']==65532 and facts['gid']==65532 and facts['kernel_status']=={
             'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'},'actual outer process boundary')
+        try:require_runtime_tmpfs(facts.get('tmp_mount'))
+        except BaseException:
+            report_mount_failure('runtime-tmpfs',info,c,facts.get('tmp_mount'))
+            raise
         mapping={key:facts[key] for key in ('uid_map','gid_map','overflow_uid','overflow_gid')}
         expect(' '.join(mapping['uid_map'].split())=='0 100000 65536' and ' '.join(mapping['gid_map'].split())=='0 100000 65536'
             and mapping['overflow_uid']==65534 and mapping['overflow_gid']==65534,'actual dedicated mapping')
@@ -117,6 +182,7 @@ class NativeAdmission:
                 label=os.getxattr(node,'security.selinux',follow_symlinks=False).decode().rstrip('\0')
                 expect(label.endswith(':'+c['level']) and ':container_file_t:' in label,'actual target MCS label before release')
         self.observations.append({'kernel_status':facts['kernel_status'],'mapping_digest':workstation.mapping_digest,
+            'tmp_mount':facts['tmp_mount'],
             'outer_socket_creation':True,'label':facts['label'],'helper_sha256':facts['helper_sha256']})
         return True
 
