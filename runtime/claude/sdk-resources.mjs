@@ -1,6 +1,21 @@
 // Resource guards for the fixed SDK fixture host, independently fault-testable.
 import {MAX_FRAME} from './sdk-policy.mjs';
 
+// Cold initialization is independent of ongoing liveness. Neither budget is
+// renewed by traffic, and expiration remains a terminal host fence.
+export const INIT_DEADLINE = 5000;
+export const CONTROL_DEADLINE = 1500;
+export function nativeDeadline(promise, reason, onTimeout,
+  {schedule = setTimeout, cancel = clearTimeout} = {}) {
+  const timeout = reason === 'native-initialize-timeout' ? INIT_DEADLINE
+    : reason === 'native-control-timeout' ? CONTROL_DEADLINE : null;
+  if (timeout === null) throw new Error('unsupported-native-deadline');
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => {
+    timer = schedule(() => { onTimeout(reason); reject(new Error(reason)); }, timeout);
+  })]).finally(() => cancel(timer));
+}
+
 export function validateLoopback(devices, ipv4, ipv6) {
   // /proc/net follows this process's network namespace. /sys/class/net can
   // still reflect a sysfs mount created before unshare --net.
@@ -32,7 +47,7 @@ export function closeOwned({input, queries, query, child, finish, schedule = set
   return timer;
 }
 
-export function collectListing(process, tracked, timeout = 1500) {
+export function collectListing(process, tracked, timeout = CONTROL_DEADLINE) {
   tracked.add(process);
   let size = 0; const chunks = [];
   return new Promise((resolve, reject) => {

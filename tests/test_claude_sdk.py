@@ -122,7 +122,9 @@ class ClaudeSDKNativeTests(unittest.TestCase):
         self.readers = [threading.Thread(target=read, daemon=True), threading.Thread(target=errors, daemon=True)]
         for thread in self.readers:
             thread.start()
-        ready = self.wait(lambda e: e.get('type') == 'host-ready')
+        # Cold initialization (5s) plus owned cleanup (2.2s) must fit here,
+        # including a failed startup's final typed diagnostic. Probe waits stay unchanged.
+        ready = self.wait(lambda e: e.get('type') == 'host-ready', timeout=8)
         self.native_pid = ready['native_pid']
         self.native_pidfd = _sdk_native_pidfd(self.native_pid, self.process.pid, ready['native_start'])
         self.assertNotEqual(self.native_pid, self.process.pid, 'SDK host is not native process authority')
