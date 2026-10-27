@@ -173,6 +173,9 @@ class WorkerBridge:
 
     def _loop(self):
         shim = None
+        terminal = False
+        shim_eof = False
+        shim_bytes = 0
         try:
             with selectors.DefaultSelector() as poll:
                 poll.register(self.shim_channel, selectors.EVENT_READ, 'shim')
@@ -194,9 +197,38 @@ class WorkerBridge:
                                         _fail()
                                     shim = HeldOrigin(record)
                                     self._active = True
+                                    terminal = shim_eof = False
+                                    shim_bytes = 0
                                 else:
                                     shim.require(record)
-                                    parse_frame(record.data)
+                                    if terminal and value == {'kind': 'shim-finished'}:
+                                        if not self.current():
+                                            _fail('GIT_WORKER_CANCELLED')
+                                        send(self.shim_channel, {'kind': 'shim-finish-ack'})
+                                        shim.close()
+                                        shim = None
+                                        self._active = False
+                                        terminal = False
+                                        continue
+                                    frame_kind, payload = parse_frame(record.data)
+                                    if frame_kind == 'eof':
+                                        if shim_eof:
+                                            _fail()
+                                        shim_eof = True
+                                    elif frame_kind == 'data':
+                                        if shim_eof:
+                                            _fail()
+                                        shim_bytes += len(payload)
+                                        if shim_bytes > MAX_BYTES:
+                                            _fail('GIT_SHIM_INPUT_LIMIT')
+                                    elif terminal:
+                                        _fail()
+                                    # Terminal response and shim input may cross.
+                                    # Drain only this live bound sender until its
+                                    # explicit FIFO finish barrier; never relay
+                                    # post-terminal input to another operation.
+                                    if terminal:
+                                        continue
                                 if not self.current():
                                     _fail('GIT_WORKER_CANCELLED')
                                 send(self.channel, value)
@@ -204,14 +236,12 @@ class WorkerBridge:
                             value = _supervisor_value(self.channel, self.supervisor)
                             if value == {'kind': 'cancel'}:
                                 _fail('GIT_WORKER_CANCELLED')
-                            if not self._active:
+                            if not self._active or terminal:
                                 _fail()
                             kind = _server_frame(value)
                             send(self.shim_channel, value)
                             if kind in {'exit', 'refused'}:
-                                shim.close()
-                                shim = None
-                                self._active = False
+                                terminal = True
         except BaseException:
             self.failure = 'GIT_WORKER_BRIDGE_FAILED'
             self.cancelled.set()
@@ -477,6 +507,8 @@ def _shim_reply(channel, worker):
     with receive(channel) as record:
         worker.require(record)
         value = decode(record.data)
+    if value == {'kind': 'shim-finish-ack'}:
+        return 'shim-finish-ack', value
     return _server_frame(value), value
 
 
@@ -486,6 +518,7 @@ def shim_stream(channel, worker, *, stdin=0, stdout=1, timeout=30):
     input_bytes = output_bytes = queued_input = 0
     eof = False
     exit_code = None
+    finish_sent = finish_ack = False
     deadline = time.monotonic() + timeout
     channel.setblocking(False)
     os.set_blocking(stdin, False)
@@ -506,9 +539,11 @@ def shim_stream(channel, worker, *, stdin=0, stdout=1, timeout=30):
         while True:
             if worker.revoked or not alive(worker.pidfd) or time.monotonic() >= deadline:
                 _fail('GIT_SHIM_INTERRUPTED')
-            if exit_code is not None and not pending_out:
+            if finish_ack and not pending_out:
                 return exit_code
-            channel_events = selectors.EVENT_READ if len(pending_out) <= MAX_QUEUE - MAX_DATA and exit_code is None else 0
+            channel_events = selectors.EVENT_READ if (exit_code is None and len(pending_out) <= MAX_QUEUE - MAX_DATA) or finish_sent else 0
+            if exit_code is not None and not pending_out and not finish_sent:
+                channel_events |= selectors.EVENT_WRITE
             if pending_in and exit_code is None:
                 channel_events |= selectors.EVENT_WRITE
             watch(channel.fileno(), channel_events, 'channel')
@@ -543,7 +578,11 @@ def shim_stream(channel, worker, *, stdin=0, stdout=1, timeout=30):
                             kind, value = _shim_reply(channel, worker)
                         except BlockingIOError:
                             continue
-                        if kind == 'data':
+                        if exit_code is not None:
+                            if not finish_sent or kind != 'shim-finish-ack':
+                                _fail()
+                            finish_ack = True
+                        elif kind == 'data':
                             from .ledger import _json
                             _, data = parse_frame(_json(value).encode())
                             output_bytes += len(data)
@@ -556,6 +595,15 @@ def shim_stream(channel, worker, *, stdin=0, stdout=1, timeout=30):
                             exit_code = 128
                         else:
                             _fail()
+                    if mask & selectors.EVENT_WRITE and exit_code is not None and not pending_out and not finish_sent:
+                        packet = b'{"kind":"shim-finished"}'
+                        try:
+                            sent = channel.send(packet)
+                        except BlockingIOError:
+                            continue
+                        if sent != len(packet):
+                            _fail('GIT_SHIM_INPUT_FAILED')
+                        finish_sent = True
                     if mask & selectors.EVENT_WRITE and pending_in and exit_code is None:
                         packet, count = pending_in[0]
                         try:

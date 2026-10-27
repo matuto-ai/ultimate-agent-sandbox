@@ -93,3 +93,41 @@ The separate hosted external-Broker smoke uses real processes and a private
 fixture-only credential, but no live account. Repository helper confinement and
 the complete Run/review/merge workflow require their own explicit qualification;
 ordinary green CI is not a substitute for those observations.
+
+## Canonical known-contribution adapter
+
+`ContributionOwner` records only positive, authenticated reports on the existing
+Room ledger. The admitted peer dispatcher derives Actor and epoch from the current
+process admission; packets cannot supply an Actor, clean flag, withdrawal, or
+capability. A direct-edit report immediately retains that Actor. A patch offer
+retains its authenticated source and exact content digest, but only adoption of
+that exact report taints source and adopter. Merely offering an unused patch is
+not contribution to the candidate. Metadata is bounded and no patch contents are
+stored. Reports survive process resets, sibling seats, and later Run generations.
+
+`AdmittedGateIdentity` combines this ledger with an atomic `GitProvenance` known
+history snapshot, including controlled mutations and anchored commit lineage.
+Unknown commit objects and failed reads are unavailable, never clean. The adapter
+matches the submission's exact admission epoch and capabilities; it cannot borrow
+a sibling seat's stronger profile. The host retains the admission fence through
+the consuming Gate transaction. Human authority is a separate authenticated host
+integration, not a synthetic Participant or fallback identity.
+
+The contract uses `history_status: read` plus a content version, not an omniscient
+`complete` claim. This follows the accepted trusted-peer boundary: unobservable
+raw writes are not prevented or magically attributed. Positive declarations are
+not mechanical proof of authorship; known positive history and controlled Git
+records disqualify an independent reviewer. A new session never cleans that
+history. Pure tests exercise actual routing, canonical persistence, exact retries,
+known-history union, and an actual Gate submission/projection turning stale after
+a later known edit. They do not constitute new kernel-admission qualification.
+
+For protected transitions, the host holds `identity.operation_fence(admission_id)`
+across `operation_gates()` and the consuming `RoomLedger.apply()`. Lock order is
+admission, controlled-Git history, then Room ledger. The Git write transaction
+pins the history cut: other connections cannot write, and same-owner mutation
+attempts fail without releasing the fence. The consuming pure guard also compares
+a digest of canonical positive reports, so a newly committed report between the
+read and transition rejects the old view. Calling `operation_gates()` with this
+adapter outside the required fence fails closed. No evaluator or Git subprocess
+is launched by these reads.

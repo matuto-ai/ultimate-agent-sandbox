@@ -433,13 +433,13 @@ class BridgeTests(unittest.TestCase):
     def test_bridge_authenticates_each_supervisor_record_and_never_accepts_actor_from_shim(self):
         records = [Record(json.dumps(value).encode(), (100, 65530, 65532), -1) for value in (
             {'kind': 'ssh-open', 'argv': ['git@github.com', "git-upload-pack 'owner/repo.git'"]},
-            {'kind': 'data', 'data': 'eA=='})]
+            {'kind': 'data', 'data': 'eA=='}, {'kind': 'shim-finished'})]
         selector = Mock()
         selector.__enter__ = Mock(return_value=selector)
         selector.__exit__ = Mock(return_value=False)
         step = [0]
         def select(_):
-            sequence = ['shim', 'supervisor', 'shim', 'supervisor']
+            sequence = ['shim', 'supervisor', 'shim', 'supervisor', 'shim']
             if step[0] == len(sequence):
                 self.bridge.stopping.set()
                 return []
@@ -458,9 +458,70 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(self.bridge.failure)
         self.assertEqual(2, received.call_count)
         self.assertTrue(all(call.args == (self.channel, self.supervisor) for call in received.call_args_list))
-        held.return_value.require.assert_called_once()
+        self.assertEqual(2, held.return_value.require.call_count)
         held.return_value.close.assert_called_once()
-        self.assertEqual(['ssh-open', 'ready', 'data', 'exit'], [value['kind'] for _, value in sent])
+        self.assertEqual(['ssh-open', 'ready', 'data', 'exit', 'shim-finish-ack'], [value['kind'] for _, value in sent])
+
+    def terminal_sequence(self, tail, *, terminal=None, authority_error=False, stop_before_finish=False):
+        opened = {'kind': 'ssh-open', 'argv': ['git@github.com', "git-upload-pack 'owner/repo.git'"]}
+        records = [Record(json.dumps(value).encode(), (100, 65530, 65532), -1)
+                   for value in [opened, *tail]]
+        selector = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
+        selector.__enter__.return_value = selector
+        labels = iter(['shim', 'supervisor', *(['shim'] * len(tail))])
+        def select(_):
+            label = next(labels, None)
+            if label is None:
+                self.bridge.stopping.set()
+                return []
+            return [(SimpleNamespace(data=label), 1)]
+        selector.select.side_effect = select
+        sent = []
+        with patch('uas.git_worker_native.selectors.DefaultSelector', return_value=selector), \
+             patch('uas.git_worker_native.receive', side_effect=records), \
+             patch('uas.git_worker_native.HeldOrigin') as held, \
+             patch('uas.git_worker_native._supervisor_value', return_value=terminal or {'kind':'exit','code':0,'status':'OK'}), \
+             patch('uas.git_worker_native.send', side_effect=lambda channel, value: sent.append((channel,value))):
+            if authority_error:
+                held.return_value.require.side_effect = OriginDenied('wrong or dead shim')
+            self.bridge._loop()
+        return sent, held
+
+    def test_terminal_crossed_input_is_authenticated_drained_and_never_forwarded(self):
+        sent, held = self.terminal_sequence([{'kind':'data','data':'eA=='}, {'kind':'eof'}, {'kind':'shim-finished'}])
+        self.assertIsNone(self.bridge.failure)
+        self.assertFalse(self.bridge._active)
+        self.assertEqual(3, held.return_value.require.call_count)
+        held.return_value.close.assert_called_once()
+        self.assertEqual([{'kind':'ssh-open','argv':['git@github.com', "git-upload-pack 'owner/repo.git'"]}],
+                         [value for channel,value in sent if channel is self.channel])
+        self.assertEqual(['exit','shim-finish-ack'], [value['kind'] for channel,value in sent if channel is self.local])
+
+    def test_terminal_drain_rejects_duplicate_eof_data_after_eof_and_unknown_frame(self):
+        for tail in ([{'kind':'eof'},{'kind':'eof'}],
+                     [{'kind':'eof'},{'kind':'data','data':'eA=='}],
+                     [{'kind':'cancel'}], [{'kind':'ssh-open','argv':['x']}],
+                     [{'kind':'shim-finished','extra':True}]):
+            with self.subTest(tail=tail):
+                self.bridge = WorkerBridge(self.channel,self.supervisor,self.local)
+                self.terminal_sequence(tail)
+                self.assertEqual('GIT_WORKER_BRIDGE_FAILED',self.bridge.failure)
+                self.assertTrue(self.bridge.cancelled.is_set())
+
+    def test_terminal_drain_keeps_live_identity_and_byte_bound(self):
+        self.terminal_sequence([{'kind':'eof'}], authority_error=True)
+        self.assertEqual('GIT_WORKER_BRIDGE_FAILED',self.bridge.failure)
+        self.bridge = WorkerBridge(self.channel,self.supervisor,self.local)
+        with patch('uas.git_worker_native.MAX_BYTES',0):
+            self.terminal_sequence([{'kind':'data','data':'eA=='}])
+        self.assertEqual('GIT_WORKER_BRIDGE_FAILED',self.bridge.failure)
+
+    def test_terminal_without_finish_is_incomplete_and_refusal_requires_same_barrier(self):
+        self.terminal_sequence([])
+        self.assertEqual('GIT_WORKER_BRIDGE_INCOMPLETE',self.bridge.failure)
+        self.bridge = WorkerBridge(self.channel,self.supervisor,self.local)
+        self.terminal_sequence([{'kind':'shim-finished'}],terminal={'kind':'refused','error':'DENIED','record':None})
+        self.assertIsNone(self.bridge.failure)
 
     def test_supervisor_authentication_failure_cancels_and_fences_bridge(self):
         selector = Mock()
@@ -538,14 +599,14 @@ class ShimPumpTests(unittest.TestCase):
             writes.append(bytes(data[:count]))
             return count
         result = self.pump([[('stdin', 1)], [('channel', 2), ('stdin', 1)],
-            [('channel', 3)], [('stdout', 2), ('channel', 1)], [('stdout', 2)]],
+            [('channel', 3)], [('stdout', 2), ('channel', 1)], [('stdout', 2)], [('channel',2)], [('channel',1)]],
             frames=[{'kind': 'data', 'data': base64.b64encode(b'abcd').decode()},
-                    {'kind': 'exit', 'code': 0, 'status': 'OK'}], reads=[b'input', b''], writes=write)
+                    {'kind': 'exit', 'code': 0, 'status': 'OK'}, {'kind':'shim-finish-ack'}], reads=[b'input', b''], writes=write)
         self.assertEqual(0, result)
         self.assertEqual(b'abcd', b''.join(writes))
-        self.assertEqual(['data', 'eof'], [frame['kind'] for frame in self.channel.sent])
+        self.assertEqual(['data', 'eof', 'shim-finished'], [frame['kind'] for frame in self.channel.sent])
         self.assertEqual(b'input', base64.b64decode(self.channel.sent[0]['data']))
-        self.assertEqual(2, self.worker.require.call_count)
+        self.assertEqual(3, self.worker.require.call_count)
         self.assertTrue(all(type(call.args[0]) is Record for call in self.worker.require.call_args_list))
 
     def test_input_and_output_limits_refuse_before_unbounded_forwarding(self):
@@ -569,9 +630,23 @@ class ShimPumpTests(unittest.TestCase):
             self.pump([[('channel', 1)]], frames=[{'kind': 'exit', 'code': 0, 'status': 'OK'}])
 
     def test_refusal_is_literal_nonzero_not_a_new_transport_attempt(self):
-        result = self.pump([[('channel', 1)]], frames=[{'kind': 'refused', 'error': 'FORBIDDEN', 'record': None}])
+        result = self.pump([[('channel', 1)], [('channel',2)], [('channel',1)]], frames=[{'kind': 'refused', 'error': 'FORBIDDEN', 'record': None}, {'kind':'shim-finish-ack'}])
         self.assertEqual(128, result)
-        self.assertFalse(self.channel.sent)
+        self.assertEqual([{'kind':'shim-finished'}],self.channel.sent)
+    def test_terminal_discards_unsent_input_and_waits_for_authenticated_finish_ack(self):
+        result = self.pump([[('stdin',1)],[('channel',1)],[('channel',2)],[('channel',1)]],
+            frames=[{'kind':'exit','code':0,'status':'OK'},{'kind':'shim-finish-ack'}],reads=[b'unsent'])
+        self.assertEqual(0,result)
+        self.assertEqual([{'kind':'shim-finished'}],self.channel.sent)
+        self.assertEqual(2,self.worker.require.call_count)
+
+    def test_early_or_wrong_finish_ack_fences(self):
+        with self.assertRaises(GitWorkerError):
+            self.pump([[('channel',1)]],frames=[{'kind':'shim-finish-ack'}])
+        with self.assertRaises(GitWorkerError):
+            self.pump([[('channel',1)],[('channel',2)],[('channel',1)]],
+                frames=[{'kind':'exit','code':0,'status':'OK'},{'kind':'data','data':'eA=='}])
+
 
 
 if __name__ == '__main__':

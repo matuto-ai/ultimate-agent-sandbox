@@ -12,14 +12,14 @@ from .ledger import Command, Event, LedgerError, Origin, Transition, _token, _js
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _AUTHORITY_KEYS = {'actor_id', 'kind', 'active', 'authority_epoch', 'capabilities',
-                   'contributors', 'contribution_version', 'complete'}
+                   'contributors', 'contribution_version', 'history_status'}
 _NOT_READ = object()
 
 
 def identity_fact(value, actor_id):
     if (type(value) is not dict or set(value) != _AUTHORITY_KEYS
             or value['actor_id'] != actor_id or value['kind'] not in ('human', 'participant')
-            or type(value['active']) is not bool or value['complete'] is not True
+            or type(value['active']) is not bool or value['history_status'] != 'read'
             or type(value['capabilities']) is not list or len(value['capabilities']) > 32
             or type(value['contributors']) is not list or len(value['contributors']) > 128):
         raise LedgerError('GATE_IDENTITY_UNVERIFIABLE')
@@ -567,10 +567,13 @@ class GateHub(ArtifactGateHub):
             scope['head_sha'] = source['head_sha']
         return scope
 
-    def _identity(self, run, actor_id, scope):
+    def _identity(self, run, actor_id, scope, authority_version=None):
         if self.identity is None:
             raise LedgerError('GATE_IDENTITY_UNAVAILABLE')
-        return identity_fact(self.identity(deepcopy(run), actor_id, scope.get('head_sha')), actor_id)
+        reader = getattr(self.identity, 'read_identity', None)
+        value = (reader(deepcopy(run), actor_id, scope.get('head_sha'), authority_version)
+                 if reader is not None else self.identity(deepcopy(run), actor_id, scope.get('head_sha')))
+        return identity_fact(value, actor_id)
 
     @staticmethod
     def _submission(payload):
@@ -639,7 +642,7 @@ class GateHub(ArtifactGateHub):
         if not created: return self._view(self._row(evaluation_id))
         fact, admitted, error, changed = None, False, None, []
         try:
-            fact = self._identity(run, origin.actor_id, captured)
+            fact = self._identity(run, origin.actor_id, captured, origin.authority_version)
             admitted = fact['authority_epoch'] == origin.authority_version and eligible(gate, run, fact)
         except Exception as invalid:
             error = self._error_code(invalid)
@@ -705,7 +708,7 @@ class GateHub(ArtifactGateHub):
             result = row['result']
             if result is not None and gate['config']['continuing_authority'] and not changed:
                 try:
-                    fresh = self._identity(run, actor, current)
+                    fresh = self._identity(run, actor, current, row['origin']['authority_version'])
                     old = row['source']['authority']
                     if (old is None or fresh['authority_epoch'] != old['authority_epoch']
                             or not eligible(gate, run, fresh)):
@@ -768,6 +771,8 @@ class GateHub(ArtifactGateHub):
         No evaluator is launched implicitly by a protected-operation request.
         """
         self._require_owner()
+        fence = getattr(self.identity, 'require_operation_fence', None)
+        if fence is not None: fence()
         state = self.ledger.snapshot()['state']
         run = state.get('runs', {}).get(run_id)
         if run is None: raise LedgerError('UNKNOWN_RUN')
@@ -781,7 +786,8 @@ class GateHub(ArtifactGateHub):
         blockers = [projection for projection in projections if projection['state'] != 'passed']
         return {'operation': operation, 'run_id': run_id, 'generation': generation,
                 'gates_satisfied': not blockers, 'blockers': blockers, 'gates': projections,
-                'policy_digest': _digest(run['policy']), 'run_dependency_digest': _run_dependency_digest(run)}
+                'policy_digest': _digest(run['policy']), 'run_dependency_digest': _run_dependency_digest(run),
+                'contribution_digest': _contribution_digest(state, run_id)}
 
 
 def require_operation_gates(state, view):
@@ -792,13 +798,14 @@ def require_operation_gates(state, view):
     This function performs no I/O or implicit evaluation and cannot close a Run.
     """
     if type(view) is not dict or set(view) != {'operation', 'run_id', 'generation',
-            'gates_satisfied', 'blockers', 'gates', 'policy_digest', 'run_dependency_digest'}:
+            'gates_satisfied', 'blockers', 'gates', 'policy_digest', 'run_dependency_digest', 'contribution_digest'}:
         raise LedgerError('INVALID_GATE_OPERATION_VIEW')
     run = state.get('runs', {}).get(view['run_id'])
     if run is None or run['generation'] != view['generation'] or run['status'] != 'ACTIVE':
         raise LedgerError('GATE_OPERATION_STALE')
     if (_digest(run['policy']) != view['policy_digest']
-            or _run_dependency_digest(run) != view['run_dependency_digest']):
+            or _run_dependency_digest(run) != view['run_dependency_digest']
+            or _contribution_digest(state, view['run_id']) != view['contribution_digest']):
         raise LedgerError('GATE_OPERATION_STALE')
     required = run['policy'].get('protected_operations', {}).get(view['operation'])
     if (not required or [item.get('gate_id') for item in view['gates']] != required
@@ -834,3 +841,9 @@ def _run_dependency_digest(run):
         'status': run['status'], 'policy': run['policy'],
         'checkout': ArtifactGateHub._checkout_digest(run), 'gate_target': run.get('gate_target'),
         'target_binding': run.get('gate_target_binding'), 'declarations': run.get('gate_declarations')})
+
+
+def _contribution_digest(state, run_id):
+    records = state.get('contribution_reports', {})
+    if type(records) is not dict: raise LedgerError('CONTRIBUTION_UNAVAILABLE')
+    return _digest({key: row for key, row in records.items() if row['run_id'] == run_id})

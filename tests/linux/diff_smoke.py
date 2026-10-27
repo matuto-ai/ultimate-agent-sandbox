@@ -34,6 +34,7 @@ EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 
 # Fixed transitive Python/native closure; no runtime repository discovery.
 SOURCES = (
+    'tests/linux/mapped_namespace.py',
     'uas/__init__.py',
     'uas/artifact_helper.py',
     'uas/artifact_paths.py',
@@ -408,6 +409,7 @@ def make_rootfs(path,installed):
 
 
 def main():
+    from mapped_namespace import mapped_popen
     if len(sys.argv)==4 and sys.argv[1]=='--supervisor':
         expect(sys.argv[3] in CASES,'unknown native case')
         supervisor_case(sys.argv[2],sys.argv[3]);return
@@ -441,9 +443,7 @@ def main():
             prepared=json.loads(first);helper=None
             if prepared['stage']=='prepared':
                 rootfs=root/('rootfs-'+str(index));make_rootfs(rootfs,installed)
-                helper=subprocess.Popen(['/usr/bin/unshare','--user','--map-users=0:100000:65536',
-                    '--map-groups=0:100000:65536','--setuid=0','--setgid=0','--mount','--fork','--kill-child=KILL','--',
-                    '/usr/bin/python3',str(script),'--namespace-helper',str(rootfs),prepared['targets'],prepared['endpoint']],
+                helper=mapped_popen(['/usr/bin/python3',str(script),'--namespace-helper',str(rootfs),prepared['targets'],prepared['endpoint']],
                     stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,env=env,cwd=payload)
                 processes.append(helper);helper.stdin.write(bytes.fromhex(prepared['challenge']));helper.stdin.close()
                 terminal=owner.stdout.readline()

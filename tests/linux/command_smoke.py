@@ -322,6 +322,7 @@ def kill_owned_tree(record):
 
 
 def isolated():
+    from mapped_namespace import mapped_popen
     expect(os.getpid()==1 and os.getppid()==0,'private PID-namespace init required')
     mount('--make-rprivate','/')
     started=time.monotonic();root=Path(tempfile.mkdtemp(prefix='uas-command-',dir='/tmp'));root.chmod(0o711)
@@ -349,9 +350,7 @@ def isolated():
             prepared=json.loads(owner.stdout.readline())
             expect(prepared['stage']=='prepared','missing prepared target')
             rootfs=root/('rootfs-'+str(index));image_digest=make_rootfs(rootfs,installed)
-            helper=subprocess.Popen(['/usr/bin/unshare','--user','--map-users=0:100000:65536',
-                '--map-groups=0:100000:65536','--setuid=0','--setgid=0','--mount','--fork','--kill-child=KILL','--',
-                '/usr/bin/python3',str(script),'--namespace-helper',str(rootfs),prepared['targets'],
+            helper=mapped_popen(['/usr/bin/python3',str(script),'--namespace-helper',str(rootfs),prepared['targets'],
                 prepared['endpoint'],prepared['work'],case],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,env=ENV,cwd=payload)
             processes.append(helper);helper.stdin.write(bytes.fromhex(prepared['challenge']));helper.stdin.close()

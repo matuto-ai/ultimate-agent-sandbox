@@ -186,6 +186,7 @@ def rootfs(path,installed):
 
 
 def main():
+    from mapped_namespace import mapped_popen
     if len(sys.argv)==4 and sys.argv[1]=='--supervisor':
         expect(sys.argv[3] in GATE_CASES or sys.argv[3] in EXPECTED_EXIT,'fixed case required')
         supervisor_case(sys.argv[2],sys.argv[3]);return
@@ -215,9 +216,7 @@ def main():
                 emit({'stage':'failure','case':case,'diagnostic':owner.stderr.read(8192)})
                 raise AssertionError('artifact materialization failed')
             prepared=json.loads(first);image=root/('rootfs-'+str(index));rootfs(image,installed)
-            helper=subprocess.Popen(['/usr/bin/unshare','--user','--map-users=0:100000:65536',
-                '--map-groups=0:100000:65536','--setuid=0','--setgid=0','--mount','--fork','--kill-child=KILL','--',
-                '/usr/bin/python3',str(script),'--namespace-helper',str(image),prepared['targets'],prepared['endpoint'],case],
+            helper=mapped_popen(['/usr/bin/python3',str(script),'--namespace-helper',str(image),prepared['targets'],prepared['endpoint'],case],
                 stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,env=ENV,cwd=payload)
             processes.append(helper);helper.stdin.write(bytes.fromhex(prepared['challenge']));helper.stdin.close()
             result=None

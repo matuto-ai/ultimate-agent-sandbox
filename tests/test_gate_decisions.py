@@ -41,7 +41,7 @@ class GateDecisionTests(unittest.TestCase):
         self.control = FakeControl()
         self.authorities = {actor: {'actor_id': actor, 'kind': 'participant', 'active': True,
             'authority_epoch': 'epoch-1', 'capabilities': ['review'], 'contributors': ['implementer'],
-            'contribution_version': 'contributions-1', 'complete': True}
+            'contribution_version': 'contributions-1', 'history_status': 'read'}
             for actor in ('reviewer', 'other-reviewer')}
         self.identity_calls = []
         self.construct()
@@ -113,7 +113,7 @@ class GateDecisionTests(unittest.TestCase):
         self.assertEqual('failed', self.submit('submit-two')['result']['verdict'])
 
     def test_unverifiable_authority_produces_error(self):
-        self.authorities['reviewer']['complete'] = False
+        self.authorities['reviewer']['history_status'] = 'unavailable'
         result = self.submit()['result']
         self.assertEqual('error', result['verdict'])
         self.assertEqual('GATE_IDENTITY_UNVERIFIABLE', result['reason'])

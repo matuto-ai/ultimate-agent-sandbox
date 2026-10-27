@@ -158,7 +158,7 @@ class DiffSmokeSourceTests(unittest.TestCase):
 
     def test_mapping_and_real_pair_materialization_are_not_profile_monkeypatches(self):
         for fragment in ('HOST_SUPERVISOR=165533','HOST_HELPER=165530',
-            "'--map-users=0:100000:65536'","'--map-groups=0:100000:65536'",
+            "mapped_popen([","['0','100000','65536']",
             'DiffSourceResolver(ArtifactSourceResolver(supervisor,allocator))',
             'targets.prepare(scope,source)', 'lease.mark_launch_possible()',
             'origin=HeldOrigin(record)', 'offer.acknowledge_final(final);offer.confirm_exit()',

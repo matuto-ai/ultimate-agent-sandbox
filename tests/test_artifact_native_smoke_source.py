@@ -60,7 +60,8 @@ class ArtifactNativeSmokeSourceTests(unittest.TestCase):
         self.assertEqual(self.source.count('cwd=payload'),2)
         self.assertIn("str(payload/source)",self.source)
         self.assertNotIn('str(Path(__file__).resolve())',self.source)
-        self.assertIn("'--map-users=0:100000:65536'",self.source)
+        self.assertIn('mapped_popen([',self.source)
+        self.assertIn("['0','100000','65536']",self.source)
         self.assertIn("'remount,bind,ro,nodev,nosuid,noexec'",self.source)
         self.assertIn("os.execve(binary,[binary],{})",self.source)
 
