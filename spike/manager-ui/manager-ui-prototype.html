@@ -150,6 +150,9 @@
     .dialog-foot { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; padding:14px 22px; border-top:1px solid var(--line); background:color-mix(in srgb,var(--text) 3%,var(--surface)); }
     .dialog-section { padding:14px 0; border-bottom:1px solid var(--line); }
     .field { display:grid; gap:7px; margin-top:15px; font-size:.8rem; font-weight:720; }
+    #item-body label { display:block; margin-top:16px; margin-bottom:6px; font-weight:600; }
+    #item-body textarea, #item-body input, #item-body select { max-width:100%; padding:8px; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+    #item-body textarea { width:100%; }
     .field textarea { width:100%; padding:10px 11px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--text); font-weight:450; }
     .check { display:flex; align-items:flex-start; gap:9px; margin-top:14px; color:var(--muted); font-size:.79rem; line-height:1.4; }
     .check input { width:18px; height:18px; }
@@ -684,7 +687,7 @@
     }
     function snapshot(project) {
       const view = project.view, captured = view.projection?.captured_at;
-      return `<div class="snapshot ${stale(project) ? "" : "live-current"}" role="status"><strong>${status(view.status)} ${view.catching_up ? status("catching-up") : ""} ${status(stale(project) ? "stale" : "current")}</strong><br>${view.projection ? `Last complete Hub cut ${esc(view.projection.room_seq)} · captured ${esc(captured)}.` : "No accepted snapshot available."} Source observation freshness is separate. Controls remain disabled.</div>`;
+      return `<div class="snapshot ${stale(project) ? "" : "live-current"}" role="status"><strong>${status(view.status)} ${view.catching_up ? status("catching-up") : ""} ${status(stale(project) ? "stale" : "current")}</strong><br>${view.projection ? `Last complete Hub cut ${esc(view.projection.room_seq)} · captured ${esc(captured)}.` : "No accepted snapshot available."} Source observation freshness is separate. Human controls require a separately authorized host and current owner eligibility.</div>`;
     }
     function signals(project) {
       const values = new Set();
@@ -697,7 +700,97 @@
       }
       return [...values].map(status).join(" ") || status("unknown");
     }
-    function controls(scope = "run") { return `<div class="action-line"><button class="btn" disabled aria-describedby="action-boundary-${scope}">Request changes</button><button class="btn" disabled aria-describedby="action-boundary-${scope}">Pause Run</button></div><p id="action-boundary-${scope}" class="small muted">Preview only — typed action eligibility and authenticated human requests are not connected (#77). No command is sent.</p>`; }
+    // A trusted containing host installs callbacks. JSON never supplies identity,
+    // credentials, a URL, or an executable transport. Owners revalidate every call.
+    const actionHosts = new Map(), actionReceipts = new Map(), actionHistory = new Map(), unresolvedActions = new Map();
+    let actionEpoch = 0, actionView = null, actionBusy = false;
+    const actionNames = {pause:'Pause Run',resume:'Resume Run','request-changes':'Request changes','add-rounds':'Add review rounds','waive-cap':'Waive round cap','override-review':'Override review','reconcile-changes':'Reconcile changes',start:'Start Room',stop:'Stop Room','select-replacement':'Select replacement','open-github':'Open in GitHub'};
+    function installActionHost(key, binding) {
+      if (binding === null) actionHosts.delete(key);
+      else {
+        if (!object(binding) || !['view','lifecycle','replacement','execute','inspect'].every(name => typeof binding[name] === 'function')) throw Error('Trusted action host required');
+        actionHosts.set(key,binding);
+      }
+      actionEpoch++; actionView = null; closeItem(false); render();
+    }
+    function actionLauncher(key, kind, subject='') {
+      const enabled = actionHosts.has(key) && !stale(stateFor(key).project);
+      return `<button class="btn" data-action-panel="${esc(kind)}" data-project="${esc(key)}" data-subject="${esc(subject)}" ${enabled?'':'disabled'}>Human controls</button>`;
+    }
+    function invalidateActionPanel() { actionEpoch++; actionView = null; }
+    function actionMessage(message) { document.getElementById('item-actions').innerHTML = '<button class="btn" data-close-item>Close</button>'; document.getElementById('item-body').innerHTML = `<p role="status">${esc(message)}</p>`; }
+    async function openActionPanel(key, kind, subject='') {
+      const binding = actionHosts.get(key), project = stateFor(key).project;
+      if (!binding || !project || stale(project) || !['run','lifecycle','replacement'].includes(kind)) return;
+      closeDrawer(false); closeItem(false); const epoch = ++actionEpoch;
+      actionView = null; lastTrigger = document.activeElement;
+      document.getElementById('item-title').textContent = 'Human controls';
+      actionMessage('Reading current owner eligibility…'); document.getElementById('item-dialog').showModal();
+      let reply;
+      try { reply = await (kind === 'run' ? binding.view(subject) : kind === 'lifecycle' ? binding.lifecycle() : binding.replacement(subject)); }
+      catch (_) { reply = {status:'unavailable',reason:'OWNER_UNAVAILABLE'}; }
+      if (epoch !== actionEpoch || !document.getElementById('item-dialog').open || binding !== actionHosts.get(key)) return;
+      if (reply?.status !== 'available' || !object(reply.scope) || !object(kind==='replacement'?reply.replacement:reply.current)) return actionMessage(reply?.reason || 'Owner unavailable. No action sent.');
+      if (reply.scope.deployment_id !== project.view.identity.deployment_id || reply.scope.room_id !== project.view.identity.room_id) return actionMessage('Owner scope mismatch. No action sent.');
+      const current = kind==='replacement'?reply.replacement:reply.current;
+      const actions = kind === 'replacement' ? [{action:'select-replacement',object_id:current.participant_id,eligible:current.eligible === true,reason:current.reason}] : reply.actions;
+      if (!Array.isArray(actions)) return actionMessage('Invalid owner eligibility. No action sent.');
+      actionView = {key,kind,subject,binding,scope:reply.scope,current,actions,epoch};
+      const receipt = actionReceipts.get(key+':'+kind+':'+subject);
+      document.getElementById('item-body').innerHTML = `<p>Exact owner state. The owner checks permission and version again when you send.</p>${fields(current)}${receipt?`<h3>Last request</h3>${fields(receipt.result)}<p>Operation ${esc(receipt.packet.operation_id)}. An unknown result is not retried automatically.</p>`:''}<label for="action-reason">Review reason / requested changes (not needed for Pause, Resume, Start or Stop)</label><textarea id="action-reason" maxlength="2048" rows="3"></textarea><label for="action-rounds">Additional rounds (only for Add review rounds)</label><input id="action-rounds" type="number" min="1" max="20" value="1">${kind==='replacement'?`<label for="action-replacement">Replacement participant</label><select id="action-replacement">${(current.candidates||[]).map(candidate=>`<option value="${esc(candidate.participant_id)}">${esc(candidate.participant_id)}</option>`).join('')}</select><p>Selection records intent only; it does not launch a process.</p>`:''}<p id="action-result" role="status"></p>`;
+      document.getElementById('item-actions').innerHTML = actions.filter(item => own(actionNames,item.action)).map((item,index)=>`<button class="btn" data-human-action="${esc(item.action)}" ${item.eligible===true?'':'disabled'} title="${esc(item.reason||'Owner eligible')}">${esc(actionNames[item.action])}</button>`).join('') + '<button class="btn ghost" data-close-item>Close</button>';
+      if (unresolvedActions.has(key+':'+kind+':'+subject)) document.getElementById('item-actions').innerHTML += '<button class="btn" data-inspect-outcome>Inspect original outcome (read-only)</button>';
+      document.getElementById('item-title').focus();
+    }
+    async function inspectHumanOutcome() {
+      const view=actionView, key=view&&view.key+':'+view.kind+':'+view.subject, entry=unresolvedActions.get(key);
+      if (!view || !entry || actionBusy || view.epoch!==actionEpoch || view.binding!==actionHosts.get(view.key)) return;
+      actionBusy=true;actionView=null;actionMessage('Reading the original owner receipt. No action is retried.');
+      let result;
+      try { result=await view.binding.inspect(entry.packet); }
+      catch (_) { result=null; }
+      finally { actionBusy=false; }
+      if (object(result) && result.operation_id===entry.packet.operation_id && result.outcome==='confirmed' && result.receipt?.read_only===true && result.receipt?.operation_id===entry.packet.operation_id && result.receipt?.status==='confirmed') {
+        entry.result=result;unresolvedActions.delete(key);actionReceipts.set(key,entry);
+      } else result={operation_id:entry.packet.operation_id,outcome:'unknown',reason:'OWNER_OUTCOME_UNCONFIRMED'};
+      if (view.epoch!==actionEpoch || !document.getElementById('item-dialog').open) return;
+      document.getElementById('item-body').innerHTML=`<h3>Read-only owner inspection</h3>${fields(result)}<p>The original action was not repeated.</p>`;
+      document.getElementById('item-actions').innerHTML=`<button class="btn" data-action-panel="${esc(view.kind)}" data-project="${esc(view.key)}" data-subject="${esc(view.subject)}">Refresh owner state</button><button class="btn" data-close-item>Close</button>`;
+    }
+    async function submitHumanAction(action) {
+      const view = actionView, selected = view?.actions.find(item=>item.action===action);
+      if (!view || actionBusy || selected?.eligible !== true || view.epoch !== actionEpoch || view.binding !== actionHosts.get(view.key) || !document.getElementById('item-dialog').open) return;
+      const reason = document.getElementById('action-reason').value || '';
+      let payload = {};
+      if (['pause','resume'].includes(action)) payload = {reason:action==='pause'?'human-pause':'human-resume'};
+      if (action === 'request-changes') payload = {body:reason};
+      if (['add-rounds','waive-cap','override-review'].includes(action)) payload = {reason,rounds:action==='add-rounds'?Number(document.getElementById('action-rounds').value):null};
+      if (action === 'select-replacement') payload = {participant_id:document.getElementById('action-replacement').value};
+      if ((own(payload,'body') || ['add-rounds','waive-cap','override-review'].includes(action)) && !reason.trim()) { document.getElementById('action-result').textContent = 'Enter a reason or requested changes.'; return; }
+      if (action === 'add-rounds' && (!Number.isInteger(payload.rounds) || payload.rounds<1 || payload.rounds>20)) { document.getElementById('action-result').textContent='Choose 1–20 additional rounds.'; return; }
+      if (!globalThis.crypto?.randomUUID) return actionMessage('Secure operation identity unavailable. No action sent.');
+      const packet = {version:1,operation_id:globalThis.crypto.randomUUID(),action,deployment_id:view.scope.deployment_id,room_id:view.scope.room_id,instance_id:view.scope.instance_id,run_id:view.kind==='lifecycle'?null:view.current.run_id,generation:view.kind==='lifecycle'?null:view.current.generation,object_id:selected.object_id,observed_version:view.current.observed_version,payload};
+      const receiptKey=view.key+':'+view.kind+':'+view.subject;
+      const previous=unresolvedActions.get(receiptKey);
+      if (previous?.result.outcome === 'unknown' && !['reconcile-changes','open-github'].includes(action)) return actionMessage('Previous outcome unknown. Refresh owner state and reconcile before another mutation.');
+      actionBusy=true; actionView=null;
+      const entry={packet,result:{operation_id:packet.operation_id,outcome:'pending',reason:null}}; actionReceipts.set(receiptKey,entry); actionHistory.set(packet.operation_id,entry);
+      actionMessage('Request pending. Closing this dialog does not cancel or repeat it.');
+      try { entry.result=await view.binding.execute(packet); if (!object(entry.result) || entry.result.operation_id !== packet.operation_id || !['confirmed','denied','partial','selected','link','unknown'].includes(entry.result.outcome)) entry.result={operation_id:packet.operation_id,outcome:'unknown',reason:'INVALID_OWNER_RESPONSE'}; }
+      catch (_) { entry.result={operation_id:packet.operation_id,outcome:'unknown',reason:'RESPONSE_UNAVAILABLE'}; }
+      finally { actionBusy=false; }
+      if (entry.result.outcome === 'unknown' && !['open-github','reconcile-changes'].includes(action)) unresolvedActions.set(receiptKey,entry);
+      else if (action === 'reconcile-changes' && previous && entry.result.receipt?.operation_id === previous.packet.operation_id && entry.result.receipt?.status === 'confirmed') unresolvedActions.delete(receiptKey);
+      if (view.epoch !== actionEpoch || !document.getElementById('item-dialog').open) return;
+      const link=entry.result.outcome==='link' && /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(entry.result.url||'') ? `<a class="btn" href="${esc(entry.result.url)}" target="_blank" rel="noopener noreferrer">Open in GitHub</a>` : '';
+      document.getElementById('item-body').innerHTML=`<h3>Owner result</h3>${fields(entry.result)}${link}<p>Operation ${esc(packet.operation_id)}. No automatic retry.</p>`;
+      document.getElementById('item-actions').innerHTML=`<button class="btn" data-action-panel="${esc(view.kind)}" data-project="${esc(view.key)}" data-subject="${esc(view.subject)}">Refresh owner state</button><button class="btn" data-close-item>Close</button>`;
+    }
+
+    function controls(scope = "run") {
+      const state=stateFor(), bound=state.project&&actionHosts.has(state.project.key);
+      return `<div class="action-line">${bound&&state.run?actionLauncher(state.project.key,'run',state.runId):`<button class="btn" disabled aria-describedby="action-boundary-${scope}">Request changes</button><button class="btn" disabled aria-describedby="action-boundary-${scope}">Pause Run</button>`}</div><p id="action-boundary-${scope}" class="small muted">${bound?'Open Human controls to read current owner eligibility.':'Read-only. An authenticated host action binding is not installed.'}</p>`;
+    }
     function navigation(state) {
       const p = page();
       return `<header class="s-top"><div class="s-brand">Manager / ${esc(variants[variant()])}</div><nav class="global-nav" aria-label="Global areas">${["projects", "inbox", "health"].map(target => `<a href="${href(target)}" data-nav ${target === p || target === "projects" && ["project", "room", "run"].includes(p) ? 'aria-current="page"' : ""}>${target[0].toUpperCase() + target.slice(1)}</a>`).join("")}</nav></header><div class="s-frame"><aside class="s-project-index"><div class="s-index-head"><strong>Projects</strong></div><nav aria-label="Project and Run hierarchy"><ul class="s-project-tree">${state.projects.map(project => `<li class="s-project-item ${project.key === state.project?.key ? "selected" : ""}"><span class="s-project-dot" aria-hidden="true"></span><a class="s-project-link" href="${href("project", project.key)}" data-nav ${project.key === state.project?.key && p === "project" ? 'aria-current="page"' : ""}><strong>${esc(project.name)}</strong><small>${esc(project.view.status)}</small></a>${project.key === state.project?.key ? `<ul class="s-index-runs">${rows(project, "runs").map(([id, run]) => `<li><a href="${href("run", project.key, id)}" data-nav ${state.runId === id && p === "run" ? 'aria-current="page"' : ""}>${esc(id)}<br><small>${esc(run.status)}</small></a></li>`).join("")}</ul>` : ""}</li>`).join("")}</ul></nav></aside>`;
@@ -730,14 +823,14 @@
     }
     function projectBody(state, roomOnly = false) {
       const project = state.project;
-      if (roomOnly) return `${sectionDetails(project, "room_lifecycle", null, true)}${["image_profile_drift", "checkout_slots", "capabilities", "processes", "adapter_connections", "readiness", "context_binding", "last_observation"].map(section => sectionDetails(project, section)).join("")}`;
+      if (roomOnly) return `${actionLauncher(project.key,"lifecycle")}${sectionDetails(project, "room_lifecycle", null, true)}${["image_profile_drift", "checkout_slots", "capabilities", "processes", "adapter_connections", "readiness", "context_binding", "last_observation"].map(section => sectionDetails(project, section)).join("")}`;
       return `<div class="folio-project-layout"><div><section class="folio-section"><h2>Runs</h2>${runLinks(project)}</section><section class="folio-section"><h2>Participants</h2><p class="small muted">Persisted process authority, adapter attachment, and readiness are independent observations.</p><div class="folio-people">${participants(project)}</div></section></div><aside class="folio-side-note"><h2>Project note</h2>${signals(project)}<p class="small">Room ${esc(project.view.identity.room_id)} · Deployment ${esc(project.view.identity.deployment_id)}</p><a class="btn" href="${href("room", project.key)}" data-nav>Room details</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Source and binding</button><button class="btn ghost" data-health-project="${esc(project.key)}">Health details</button></aside></div>`;
     }
     function cases(state) { return `<div class="folio-case-list">${state.attention.map(item => `<button class="folio-case" data-attention="${esc(item.key)}"><span class="folio-case-code">${esc(item.quality.toUpperCase())}</span><span><strong>${esc(item.title)}</strong><span class="attention-summary">${esc(item.project.name)} · ${esc(item.runId)}</span></span><span>${status(item.quality)}</span></button>`).join("") || '<p class="empty">No human-attention rows recorded in available snapshots. Unavailable sources do not establish absence.</p>'}</div>`; }
     function render(focus = false) {
       const state = stateFor(), p = page(); let content;
       if (p === "projects") content = `${folioHead("P", "Project field notes", "Projects lead; Runs remain beneath their Project. All facts retain their own source and time.")}${currentDecision(state)}<div class="folio-projects">${state.projects.map((project, index) => `<article class="folio-project-card ${index === 0 ? "feature" : ""}"><div class="folio-card-number">${index + 1}</div><h2><a class="text-link" href="${href("project", project.key)}" data-nav>${esc(project.name)}</a></h2>${snapshot(project)}${signals(project)}<div class="folio-card-actions"><a class="btn primary" href="${href("project", project.key)}" data-nav>Open Project</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Quick view</button></div></article>`).join("") || '<p class="empty">Disconnected — no authorized Room snapshots supplied.</p>'}</div>`;
-      else if (p === "inbox") content = `${folioHead("I", "Attention casebook", "Source-recorded human attention, with context and evidence. Controls are previews only.")}${currentDecision(state)}${cases(state)}`;
+      else if (p === "inbox") content = `${folioHead("I", "Attention casebook", "Source-recorded human attention, with context and evidence. Human controls require a trusted host and current owner eligibility.")}${currentDecision(state)}${cases(state)}`;
       else if (p === "health") content = `${folioHead("H", "Runtime field checks", "Connection, freshness, provider validity, inference, quota, partial outcomes and drift are separate facts.")}<div class="folio-health-grid">${state.projects.map(project => `<article class="folio-health-card"><h2>${esc(project.name)}</h2>${snapshot(project)}${signals(project)}<button class="btn" data-health-project="${esc(project.key)}">Open health sheet</button></article>`).join("")}</div>`;
       else if (!state.project) content = folioHead("P", "Choose a Project", "This context is not present in the authorized snapshot. Choose a Project from the index.");
       else if (p === "project" || p === "room") content = `${trail(state)}${folioHead(p === "room" ? "RM" : "P", p === "room" ? `${state.project.name} / Room` : state.project.name, "Runs and technical Room facts stay inside this Project context.")}${snapshot(state.project)}${currentDecision(state)}${projectBody(state, p === "room")}`;
@@ -750,9 +843,9 @@
     }
     function openDrawer(title, body) { closeItem(false); lastTrigger = document.activeElement; document.getElementById("drawer-title").textContent = title; document.getElementById("drawer-body").innerHTML = body; document.getElementById("drawer").hidden = false; requestAnimationFrame(() => document.getElementById("drawer-title").focus()); }
     function closeDrawer(restore = true) { document.getElementById("drawer").hidden = true; if (restore && lastTrigger?.isConnected) lastTrigger.focus(); }
-    function closeItem(restore = true) { const dialog = document.getElementById("item-dialog"); if (dialog.open) dialog.close(); if (restore && lastTrigger?.isConnected) lastTrigger.focus(); }
+    function closeItem(restore = true) { invalidateActionPanel(); const dialog = document.getElementById("item-dialog"); if (dialog.open) dialog.close(); if (restore && lastTrigger?.isConnected) lastTrigger.focus(); }
     function projectDetail(key) { const {project} = stateFor(key); if (!project) return; openDrawer(project.name, `${snapshot(project)}<a class="btn" href="${href("project", key)}" data-nav>Open Project</a><h3>Configured Project binding</h3><p class="small">Configuration metadata; not a live process or provider observation.</p>${fields(project.metadata)}${sourceLine(project, "runs")}<a class="btn" href="${href("room", key)}" data-nav>Room details</a>`); }
-    function personDetail(id, key = getParam("project")) { const {project} = stateFor(key); if (!project) return; openDrawer(id, `<p>Seat, persisted process, adapter attachment, readiness and inference do not imply each other. Capability declarations are not action eligibility.</p>${["seats", "processes", "adapter_connections", "readiness", "context_binding", "last_observation", "capabilities", "provider_configuration", "inference", "quota", "context_observations"].map(section => sectionDetails(project, section, (key, value) => key === id || value.participant_id === id)).join("")}`); }
+    function personDetail(id, key = getParam("project")) { const {project} = stateFor(key); if (!project) return; openDrawer(id, `${actionLauncher(key,"replacement",id)}<p>Seat, persisted process, adapter attachment, readiness and inference do not imply each other. Capability declarations are not action eligibility.</p>${["seats", "processes", "adapter_connections", "readiness", "context_binding", "last_observation", "capabilities", "provider_configuration", "inference", "quota", "context_observations"].map(section => sectionDetails(project, section, (key, value) => key === id || value.participant_id === id)).join("")}`); }
     function healthProject(key) { const {project} = stateFor(key); if (!project) return; openDrawer(`${project.name} health`, `${snapshot(project)}<p>Interpretation: no connected socket, percentage or persisted authority proves healthy inference or process liveness. Pending CI is an owner checkpoint, not a remote run assertion.</p>${["room_lifecycle", "provider_configuration", "inference", "quota", "context_observations", "image_profile_drift", "lifecycle_label_drift", "forge_diagnostics", "pending_ci", "dependencies", "checkout_slots", "capabilities"].map(section => sectionDetails(project, section)).join("")}`); }
     function gateDetail(index, key, runId) { const state = stateFor(key, runId), entry = gates(state)[Number(index)]; if (!entry) return; const [id, gate] = entry; openDrawer(gate.gate_id || id, `${status(gateState(state.project, fact(state.project, "gate_truth"), gate))}<p>This is one independent check. The chronological Run journey cannot establish a Gate pass. Observed state remains historical until the owner confirms current truth.</p>${sourceLine(state.project, "gate_truth")}${fields(gate)}${sectionDetails(state.project, "gate_history", (_, value) => value.scope?.run_id === runId)}`); }
     function evidenceDetail() { const state = stateFor(); if (!state.project || !state.run) return; openDrawer("Candidate and evidence", `<p>Evidence references and immutable results are observations, not approval or merge authority. Raw logs are not fetched by this UI.</p>${["runs", "candidate", "review", "pending_ci", "work_requests", "dependencies"].map(section => sectionDetails(state.project, section, (key, value) => key === state.runId || value.run_id === state.runId)).join("")}${sectionDetails(state.project, "gate_history", (_, value) => value.scope?.run_id === state.runId)}${githubLink(state.project, state.runId)}`); }
@@ -762,7 +855,10 @@
       live = value; closeDrawer(false); closeItem(false); render();
     }
     document.addEventListener("click", event => {
+      if (event.target.closest('[data-inspect-outcome]')) { event.preventDefault(); inspectHumanOutcome(); return; }
       const target = event.target;
+      const human = target.closest('[data-human-action]'); if (human) return submitHumanAction(human.dataset.humanAction);
+      const panel = target.closest('[data-action-panel]'); if (panel) return openActionPanel(panel.dataset.project,panel.dataset.actionPanel,panel.dataset.subject);
       const nav = target.closest("a[data-nav]"); if (nav) { event.preventDefault(); closeDrawer(false); closeItem(false); history.pushState({}, "", nav.href); render(true); return; }
       const theme = target.closest("[data-variant]"); if (theme) { const url = new URL(location.href); url.searchParams.set("variant", theme.dataset.variant); history.replaceState({}, "", url); render(); return; }
       const item = target.closest("[data-attention]"); if (item) return openAttention(item.dataset.attention);

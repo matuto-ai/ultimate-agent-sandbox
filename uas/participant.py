@@ -27,6 +27,7 @@ from .forge_wire import request_json, MAX_REQUEST
 from .lifecycle import _canonical, _unique_object
 from .peer import Readiness
 from .manager_owner import REVISION_FIELDS, advance_revision, participant_observations, validate_revision
+from .participant_recovery import ParticipantRecovery
 
 MAX_PACKET = 65_536
 MAX_SEATS = 32
@@ -138,7 +139,7 @@ class ProcessHandle:
     cleanup_verified: bool = False
 
 
-class FixtureParticipantController:
+class FixtureParticipantController(ParticipantRecovery):
     def __init__(self, supervisor, hub, credentials):
         if sys.platform != "linux" or not hasattr(os, "pidfd_open"):
             raise LedgerError("PROCESS_BINDING_UNAVAILABLE")
@@ -366,7 +367,14 @@ class FixtureParticipantController:
 
     def restore_claude(self, seat, recipe):
         from .claude_participant import restore
-        return restore(self, seat, recipe)
+        from .claude_runtime import ClaudeUnavailable
+        try:
+            return restore(self, seat, recipe)
+        except (LedgerError, ClaudeUnavailable, OSError) as error:
+            if not isinstance(error, LedgerError) or error.code in {
+                    'NATIVE_CONTEXT_RESTORE_UNVERIFIED', 'NATIVE_SESSION_MISMATCH', 'NATIVE_STOP_UNVERIFIED'}:
+                self._record_restore_failure(seat.participant_id, 'NATIVE_RESTORE_FAILED')
+            raise
 
     def reset_claude(self, operation_id, seat, recipe, *, expected_context_generation, target_run):
         from .claude_participant import reset
@@ -642,6 +650,16 @@ class FixtureParticipantController:
         return dict(target_scope)
 
     def restore_pi(self, seat, recipe):
+        from .pi_runtime import NativeUnavailable
+        try:
+            return self._restore_pi(seat, recipe)
+        except (LedgerError, NativeUnavailable, OSError) as error:
+            if not isinstance(error, LedgerError) or error.code in {
+                    'NATIVE_CONTEXT_RESTORE_UNVERIFIED', 'NATIVE_SESSION_MISMATCH', 'NATIVE_STOP_UNVERIFIED'}:
+                self._record_restore_failure(seat.participant_id, 'NATIVE_RESTORE_FAILED')
+            raise
+
+    def _restore_pi(self, seat, recipe):
         """Restore only this ledger-approved context, never an older generation.
 
         A reset may succeed before Pi first creates its session file. Fresh

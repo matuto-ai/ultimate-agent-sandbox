@@ -95,15 +95,52 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         return self._control_run(operation_id, run_id, generation, expected_revision,
                                  reason, human, 'PAUSED', 'ACTIVE')
 
+    def manager_live(self, session):
+        state = self.supervisor._read()
+        if not state or state['instance_id'] != session.instance_id: raise LedgerError('ROOM_REPLACED')
+        if state['phase'] != 'running' or state['desired'] != 'running': raise LedgerError('ROOM_NOT_RUNNING')
+
+    def manager_eligibility(self, action, run_id, *, session):
+        with self.supervisor._locked():
+            self.manager_live(session)
+            run = self.ledger.snapshot()['state'].get('runs', {}).get(run_id)
+            if run is None: raise LedgerError('UNKNOWN_RUN')
+            command = Command('manager-eligibility', 'run.human-' + action, run_id, run['generation'], {})
+            if not session.allowed(action) or not self._human(session.human, command): raise LedgerError('FORBIDDEN')
+            if run.get('control_pending') is not None: raise LedgerError('RUN_CONTROL_PENDING')
+            if run['status'] != ('ACTIVE' if action == 'pause' else 'PAUSED'): raise LedgerError('INVALID_RUN_TRANSITION')
+            if run.get('native_stop') and not run['native_stop'].get('restored', False): raise LedgerError('NATIVE_RESTORE_REQUIRED')
+            if run.get('control_revision', 0) >= MAX_CONTEXT_GENERATION: raise LedgerError('RUN_CONTROL_REVISION_EXHAUSTED')
+
+    def manager_action(self, value, *, session, audit):
+        """Manager cannot invoke restoration, native stop, migration or runtime APIs."""
+        from .manager_actions import OwnerFence, RUN_ACTIONS
+        fence = OwnerFence(self.ledger, session, value, RUN_ACTIONS, audit=audit,
+            repository=self.broker.binding.repository, supervisor=self.supervisor)
+        value = fence.value
+        if value['object_id'] != value['run_id'] or set(value['payload']) != {'reason'}:
+            raise LedgerError('INVALID_MANAGER_ACTION')
+        state = self.ledger.snapshot()['state']
+        run = state.get('runs', {}).get(value['run_id'])
+        if run is None: raise LedgerError('UNKNOWN_RUN')
+        if run.get('native_stop') and not run['native_stop'].get('restored', False):
+            raise LedgerError('NATIVE_RESTORE_REQUIRED')
+        preceding, target = ('ACTIVE', 'PAUSED') if value['action'] == 'pause' else ('PAUSED', 'ACTIVE')
+        return self._control_run(value['operation_id'], value['run_id'], value['generation'],
+            run.get('control_revision', 0), value['payload']['reason'], session.human,
+            preceding, target, _manager_fence=fence)
+
     def _control_run(self, operation_id, run_id, generation, expected_revision,
-                     reason, human, preceding, target):
+                     reason, human, preceding, target, *, _manager_fence=None):
         if (type(generation) is not int or not 1 <= generation <= MAX_CONTEXT_GENERATION
                 or type(expected_revision) is not int
                 or not 0 <= expected_revision <= MAX_CONTEXT_GENERATION):
             raise LedgerError('INVALID_RUN_CONTROL')
         command = Command(operation_id, 'run.human-' + ('pause' if target == 'PAUSED' else 'resume'),
             _token(run_id), generation, {'expected_revision': expected_revision, 'reason': _token(reason)})
+        if _manager_fence is not None: command = _manager_fence.command(command)
         def decide(state, _):
+            if _manager_fence is not None: _manager_fence.check(state)
             row = state.get('runs', {}).get(run_id)
             if row is None:
                 raise LedgerError('UNKNOWN_RUN')
@@ -148,7 +185,14 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         # Ledger authorizes every retry inside its transaction, then looks up
         # the exact immutable receipt before evaluating current revision/state.
         with self.supervisor._locked():
-            return self._apply(command, human, decide)['result']
+            if _manager_fence is not None:
+                if not self._human(human, command): raise LedgerError('FORBIDDEN')
+                with _manager_fence.guard(lifecycle_locked=True):
+                    _manager_fence.before(command)
+                    return self._apply(command, human, decide,
+                        authorize=lambda o, c: self._human(o, c) and _manager_fence.authorize())['result']
+            auth = None if _manager_fence is None else lambda o, c: self._human(o, c) and _manager_fence.authorize()
+            return self._apply(command, human, decide, authorize=auth)['result']
 
     def _pending(self, run):
         return self.ledger.snapshot()['state'].get('run_admissions', {}).get(run)

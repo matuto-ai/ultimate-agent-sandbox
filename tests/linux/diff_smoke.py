@@ -85,7 +85,7 @@ SOURCES = (
     'uas/launch.py',
     'uas/ledger.py',
     'uas/lifecycle.py',
-    'uas/participant.py',
+    'uas/participant.py', 'uas/participant_recovery.py',
     'uas/peer.py',
     'uas/pi_fixture.py',
     'uas/pi_runtime.py',
