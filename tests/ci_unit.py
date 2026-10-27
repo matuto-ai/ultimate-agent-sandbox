@@ -1,6 +1,6 @@
 """Standard discovery, two complete/disjoint unit partitions, no test exclusions.
 
-The five measured slow modules take about half the aggregate wall time. Every
+Measured modules share work between the existing parallel unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
 errors fail either invocation; imported tests are never run merely to select IDs.
 """
@@ -12,7 +12,10 @@ import unittest
 
 
 SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_forge_capacity',
-                          'test_gate_evaluation', 'test_forge_mutations'})
+                          'test_gate_evaluation', 'test_forge_mutations',
+                          # Post-77 hosted log: approximately 16 seconds together.
+                          'test_context', 'test_artifact_manual_source',
+                          'test_run_review', 'test_staged_source_closure'})
 PARTITIONS = ('slow', 'remainder')
 
 
