@@ -425,7 +425,7 @@ def exact_install_roots(manifest, exact_roots=None):
     """
     if exact_roots is None:
         return REQUIRED_PACKAGES
-    expect(manifest.get('profile') in ('native-pi-v1', 'artifacts-v1-source') and type(exact_roots) is dict
+    expect(manifest.get('profile') in ('native-pi-v1', 'artifacts-v1-source', 'room-launch-ipv4-v1') and type(exact_roots) is dict
            and bool(exact_roots) and set(exact_roots) <= set(REQUIRED_PACKAGES),
            'exact package roots require explicit native profile')
     selected = {}

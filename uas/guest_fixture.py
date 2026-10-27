@@ -108,13 +108,21 @@ def project_attributes(path):
         os.close(descriptor)
 
 
-def prepare_storage(nonce):
+def prepare_storage(nonce, *, limits=None):
     """Provision only fresh fixture trees on the harness's disposable XFS disk.
 
     Project roots intentionally survive Supervisor Destroy. The harness removes
     the entire *VM*, not arbitrary files or mounts on an operator's machine.
     """
     guard(nonce)
+    if limits is None:
+        limits = {room: (BLOCK_KIB, INODES) for room in ROOMS}
+    if (type(limits) is not dict or set(limits) != set(ROOMS)
+            or any(type(value) is not tuple or len(value) != 2
+                or any(type(item) is not int for item in value)
+                or not 8192 <= value[0] <= 262144 or not 128 <= value[1] <= 8192
+                for value in limits.values())):
+        raise LifecycleError("GUEST_INVALID_QUOTA_SELECTION")
     if command("stat", "-f", "-c", "%T", str(STORAGE)).strip() != "xfs":
         raise LifecycleError("GUEST_XFS_REQUIRED")
     CONTROL.mkdir(mode=0o700, exist_ok=True)
@@ -131,10 +139,12 @@ def prepare_storage(nonce):
                 os.chown(path, WORKSTATION_HOST_UID, WORKSTATION_HOST_UID)
             paths[name] = identity(path)
         command("xfs_quota", "-x", "-c", f"project -s -p {root} {project}", str(STORAGE))
-        command("xfs_quota", "-x", "-c", f"limit -p bhard={BLOCK_KIB}k ihard={INODES} {project}", str(STORAGE))
+        blocks, inodes = limits[room]
+        command("xfs_quota", "-x", "-c", f"limit -p bhard={blocks}k ihard={inodes} {project}", str(STORAGE))
         command("chcon", "-R", "-t", "container_file_t", "-l", level, str(root))
         publish(CONTROL / (room + ".json"), {"nonce": nonce, "room": room,
-                "root": identity(root), "paths": paths, "project": project})
+                "root": identity(root), "paths": paths, "project": project,
+                "quota": list(limits[room])})
 
 
 def network_names(state):
@@ -204,7 +214,8 @@ class GuestBoundaryBackend(DockerFixtureBackend):
                 raise OwnershipConflict()
             manifest = json.loads(path.read_text())
             if (manifest["nonce"] != self.nonce or manifest["room"] != self.room
-                    or manifest["project"] != self.project or manifest["root"] != identity(self.root)):
+                    or manifest["project"] != self.project or manifest["root"] != identity(self.root)
+                    or manifest["quota"] != list(self._quota_limits())):
                 raise OwnershipConflict()
             for name, expected in manifest["paths"].items():
                 if name not in {"repository", "workspace", "checkouts", "references", "runtime"}:
@@ -217,12 +228,16 @@ class GuestBoundaryBackend(DockerFixtureBackend):
             raise OwnershipConflict() from error
         return manifest
 
+    def _quota_limits(self):
+        return BLOCK_KIB, INODES
+
     def _quota(self):
         self._storage()
         state = command("xfs_quota", "-x", "-c", "state -p", str(STORAGE))
         if "Accounting: ON" not in state or "Enforcement: ON" not in state:
             raise LifecycleError("GUEST_QUOTA_DISABLED")
-        for flag, limit in (("b", BLOCK_KIB), ("i", INODES)):
+        blocks, inodes = self._quota_limits()
+        for flag, limit in (("b", blocks), ("i", inodes)):
             report = command("xfs_quota", "-x", "-c", f"report -p -{flag} -n -N", str(STORAGE))
             rows = [line.split() for line in report.splitlines() if line.split() and line.split()[0] == "#" + str(self.project)]
             if len(rows) != 1 or len(rows[0]) < 4 or rows[0][3] != str(limit):

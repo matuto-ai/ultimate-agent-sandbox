@@ -34,3 +34,5 @@ image="$(cat "$build/image-id")"
 [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]]
 export UAS_DOCKER_FIXTURE_IMAGE="$image"
 python3 -m unittest discover -s tests -p test_lifecycle_docker.py -v
+# Bounded actual endpoint-mount/resource hook proof; no native Broker claim.
+python3 -m unittest discover -s tests -p test_room_fixture_docker.py -v
