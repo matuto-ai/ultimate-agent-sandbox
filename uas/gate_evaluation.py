@@ -1,4 +1,4 @@
-"""Hub-owned artifacts adjudication over the private Supervisor control seam.
+"""Hub-owned repository adjudication over the private Supervisor control seam.
 
 No filesystem/Git, Engine, Participant tool, protected-operation advancement or
 helper launch authority lives here. The control adapter supplies authenticated
@@ -14,7 +14,7 @@ import threading
 from .gate_policy import compile_policy
 from .ledger import Command, Event, LedgerError, Origin, Transition, _json, _token
 from .artifact_protocol import (RESERVATION_BYTES, MAX_OUTPUT_BYTES, MAX_BLOB_BYTES,
-    PROFILE_ID, scope_digest, expected_header, path_digest, validate_scope,
+    PROFILE_ID, scope_digest, profile_scope_digest, expected_header, path_digest, validate_scope,
     validate_source, validate_target)
 
 
@@ -73,6 +73,8 @@ class ArtifactGateHub:
     authority check, evaluated on every request/retry and before acceptance.
     Neither an Origin nor these dependencies is accepted from request payloads.
     """
+    scratch_bytes = SCRATCH_BYTES
+
     def __init__(self, ledger, binding, control, *, authorize):
         if (type(binding) is not GateRoomBinding or binding.room_id != ledger.room_id
                 or not callable(authorize)):
@@ -182,6 +184,8 @@ class ArtifactGateHub:
                 row['observations'] = deepcopy(payload['observations'])
             elif phase == 'SOURCE_BOUND':
                 row['helper_source'] = deepcopy(payload['helper_source'])
+            elif phase == 'SUBJECT_VERIFIED':
+                row['subject_observation'] = deepcopy(payload)
             # Padding was reserved before effects. Transfer space rather than
             # requiring newly available ledger capacity after the helper ran.
             padding = row['reservation'].get('projection', '')
@@ -202,9 +206,16 @@ class ArtifactGateHub:
         if receipt is not None:
             return self._view(self._row(receipt['result']['evaluation_id']))
         run, policy, gate = self._definition(self.ledger.snapshot()['state'], command)
+        if gate.get('evaluator') not in ('artifacts', 'command', 'diff-claims'):
+            raise LedgerError('UNSUPPORTED_REPOSITORY_GATE')
+        expected_profile = {'artifacts': PROFILE_ID, 'command': 'command-v1-source',
+                            'diff-claims': 'diff-claims-v1-source'}[gate['evaluator']]
+        if getattr(self.control, 'profile', PROFILE_ID) != expected_profile:
+            raise LedgerError('GATE_PROFILE_UNAVAILABLE')
         # This is an inert bounded ownership/ref read, not source Git execution.
-        source = self._source(self.control.resolve(run_id, run['participant_id'],
-                                                  self.binding.room_instance), run)
+        source = self._source(self.control.resolve(run_id, run['participant_id'], self.binding.room_instance,
+                            run['gate_target']) if gate['evaluator'] == 'diff-claims' else
+                            self.control.resolve(run_id, run['participant_id'], self.binding.room_instance), run)
         scope = self._scope(command, run, policy, gate)
         checkout_digest = self._checkout_digest(run)
         created = False
@@ -223,7 +234,7 @@ class ArtifactGateHub:
             outstanding = [r for r in evaluations.values()
                            if r['reservation']['scratch_bytes']]
             if (len(outstanding) >= MAX_OUTSTANDING
-                    or sum(r['reservation']['scratch_bytes'] for r in outstanding) + SCRATCH_BYTES
+                    or sum(r['reservation']['scratch_bytes'] for r in outstanding) + self.scratch_bytes
                     > self.binding.disk_bytes):
                 raise LedgerError('GATE_RESOURCE_CAPACITY')
             if any(r['result'] is None and r['scope']['run_id'] == run_id
@@ -232,19 +243,22 @@ class ArtifactGateHub:
                 raise LedgerError('GATE_EVALUATION_IN_FLIGHT')
             row = {'evaluation_id': scope['evaluation_id'], 'scope': scope, 'source': source,
                 'checkout_digest': checkout_digest,
-                'items': deepcopy(gate['config']['items']), 'target': None, 'phase': 'STARTED',
+                'items': deepcopy(gate['config'].get('items', [])),
+                'evaluator': gate['evaluator'], 'config': deepcopy(gate['config']),
+                'declaration': deepcopy(run.get('gate_declarations', {}).get(gate_id)) if gate['evaluator'] == 'diff-claims' else None,
+                'target': None, 'phase': 'STARTED',
                 'started': {'sequence': self.ledger.snapshot()['room_seq'] + 1, 'time': _now()},
                 'origin': origin.canonical(), 'command': command.canonical(), 'result': None,
                 'observations': None, 'helper_source': None,
                 'operational': {'cleanup': False, 'quarantine_ref': None,
                                                      'attention': None},
-                'reservation': {'scratch_bytes': SCRATCH_BYTES,
+                'reservation': {'scratch_bytes': self.scratch_bytes,
                                 'projection': 'x' * PROJECTION_RESERVATION}}
             evaluations[scope['evaluation_id']] = row
             _capacity(state)
             created = True
             return Transition(state, (Event('gate.started', {k: row[k] for k in
-                ('evaluation_id', 'scope', 'source', 'checkout_digest', 'items', 'started')}),),
+                ('evaluation_id', 'scope', 'source', 'checkout_digest', 'items', 'evaluator', 'config', 'declaration', 'started')}),),
                 {'evaluation_id': scope['evaluation_id']})
         receipt = self.ledger.apply(command, origin, authorize=self.authorize, decide=reserve)
         if not created:
@@ -277,9 +291,11 @@ class ArtifactGateHub:
                 if self._checkout_digest(run) != persisted['checkout_digest']:
                     raise LedgerError('GATE_SOURCE_MISMATCH')
             self._progress(evaluation_id, 'LAUNCH_RESERVED', {}, validate=validate_launch)
-            offer = self.control.start(row['scope'], target, [i['path'] for i in row['items']])
+            offer = self.control.start(row['scope'], target, row['config'] if row.get('evaluator') in ('command', 'diff-claims')
+                                       else [i['path'] for i in row['items']])
             helper_source = offer.document()
-            self._validate_helper_source(helper_source, row['scope'], target)
+            self._validate_helper_source(helper_source, row['scope'], target,
+                profile={'command': 'command-v1-source', 'diff-claims': 'diff-claims-v1-source'}.get(row.get('evaluator'), PROFILE_ID))
             self._progress(evaluation_id, 'SOURCE_BOUND', {'helper_source': helper_source})
             observations, final = self._observations(offer, row, target)
             self._progress(evaluation_id, 'OBSERVED', {'observations': observations})
@@ -340,18 +356,18 @@ class ArtifactGateHub:
                 raise LedgerError('INVALID_GATE_TARGET')
 
     @staticmethod
-    def _validate_helper_source(value, scope, target):
+    def _validate_helper_source(value, scope, target, *, profile=PROFILE_ID):
         if (type(value) is not dict or set(value) != {'source', 'provenance', 'profile',
                 'profile_digest', 'binding_digest', 'scope_digest'}
                 or value['source'] != 'supervisor-one-shot-helper'
-                or value['provenance'] != PROVENANCE or value['profile'] != PROFILE_ID
-                or value['scope_digest'] != scope_digest(scope, target)
+                or value['provenance'] != PROVENANCE or value['profile'] != profile
+                or value['scope_digest'] != profile_scope_digest(profile, scope, target)
                 or any(type(value[k]) is not str or not _HEX64.fullmatch(value[k])
                        for k in ('profile_digest', 'binding_digest'))):
             raise LedgerError('GATE_HELPER_BINDING_MISMATCH')
 
     @staticmethod
-    def _validate_cleanup(proof):
+    def _validate_cleanup(proof, *, target_validator=validate_target):
         if (type(proof) is not dict or set(proof) != {'post_target', 'cleanup',
                 'quarantine_ref', 'exit_confirmed', 'launch_state'}
                 or type(proof['cleanup']) is not bool or type(proof['exit_confirmed']) is not bool
@@ -367,9 +383,18 @@ class ArtifactGateHub:
         if proof['cleanup'] is True and reference is not None:
             raise LedgerError('INVALID_GATE_CLEANUP')
         if proof['post_target'] is not None:
-            validate_target(proof['post_target'])
+            target_validator(proof['post_target'])
 
     def _observations(self, offer, row, target):
+        if row.get('evaluator') == 'command':
+            from .gate_repository import command_observations
+            records, size = [], 0
+            for record in offer.records():
+                size += len(_json(record).encode('utf-8'))
+                if len(records) >= 9 or size > MAX_OBSERVATION_BYTES:
+                    raise LedgerError('GATE_EVIDENCE_LIMIT')
+                records.append(deepcopy(record))
+            return command_observations(records, row['scope'], target, row['config'])
         # The offer checks the exact held kernel sender for every packet. This
         # independent reducer still rejects malformed facts, wrong correlation,
         # missing/duplicate/out-of-order/extra items and helper verdict claims.
@@ -450,6 +475,8 @@ class ArtifactGateHub:
                     'state': 'unknown' if fresh is None else 'stale' if changed else 'current',
                     'changed_dependencies': sorted(set(changed))},
                 'cleanup': deepcopy(cleanup)}
+            if 'subject_observation' in row:
+                result['subject_observation'] = deepcopy(row['subject_observation'])
             row['result'], row['phase'] = result, 'TERMINAL'
             row['operational'] = {'cleanup': cleanup['cleanup'],
                 'quarantine_ref': cleanup.get('quarantine_ref'),
@@ -464,6 +491,23 @@ class ArtifactGateHub:
 
     @staticmethod
     def _checks(row, observations, error):
+        if row.get('evaluator') == 'command':
+            fact = observations.get('exit') if type(observations) is dict else None
+            if error is not None or fact is None:
+                note, verdict = 'verification-incomplete', 'error'
+            elif (fact['exit_code'] == 0 and fact['signal'] == 0 and not fact['timed_out']
+                    and not fact['output_limited'] and not fact['descendants_terminated']):
+                note, verdict = 'command-exit-zero', 'passed'
+            else:
+                note = ('command-timeout' if fact['timed_out'] else
+                        'command-output-limit' if fact['output_limited'] else
+                        'command-descendants-survived' if fact['descendants_terminated'] else
+                        'command-signal' if fact['signal'] else 'command-nonzero-exit')
+                verdict = 'failed'
+            return [{'item': {'argv_digest': _digest(row['config']['argv']), 'cwd': row['config']['cwd']},
+                'ok': verdict == 'passed', 'note': note,
+                'evidence_refs': [row['evaluation_id'] + '/' + key for key in ('stdout', 'stderr', 'exit')]
+                                 if observations is not None else []}], verdict
         checks, failed, errored = [], False, error is not None
         for index, item in enumerate(row['items']):
             fact = observations[index] if observations is not None else None

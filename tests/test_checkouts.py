@@ -107,6 +107,22 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(6, len({r['path'] for r in results}))
         self.assertEqual(6, len(self.allocator.status()))
 
+    def test_retained_manager_probe_uses_real_git_and_survives_owner_restart(self):
+        self.allocator.allocate('run-1', 'alice')
+        self.assertFalse(self.allocator.refresh_observation('primary')['observed_dirty'])
+        (self.repo / 'ignored.txt').write_text('preserve ignored human bytes')
+        self.assertTrue(self.reopen().refresh_observation('primary')['observed_dirty'])
+        reopened = self.reopen()
+        with patch.object(reopened, '_git', side_effect=AssertionError('passive Manager export invoked Git')):
+            fact = reopened.manager_observations()[0].document()
+        self.assertEqual('dirty', fact['value']['primary']['working_tree_state'])
+        self.assertEqual('unknown', fact['freshness'])
+        self.assertIsNone(fact['observed_at'])
+        self.assertNotIn('ignored.txt', json.dumps(fact))
+        self.assertEqual('preserve ignored human bytes', (self.repo / 'ignored.txt').read_text())
+        self.allowed = False
+        self.error('FORBIDDEN', lambda: self.reopen().refresh_observation('primary'))
+
     def test_dirty_untracked_and_ignored_paths_survive(self):
         _, _, path = self.pair()
         self.allocator.release('run-2', 'bob')

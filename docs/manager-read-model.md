@@ -7,7 +7,8 @@ mutation command. Export failures and a disconnected Manager do not stop a Hub.
 
 ## Source and ownership map
 
-The implementation baseline is `8fd9ae0c2d7a9c664ec4be67317b1768f0253d85`.
+The implementation began at `8fd9ae0c2d7a9c664ec4be67317b1768f0253d85` and
+includes the non-destructive #73 main union at `cfd0e39c571bc1bad607a16a9790bab9c403b72d`.
 The installed Bruno workflow, #75/#74, source reconciliation, and actual owners
 were read before implementation. Gate schema ownership was coordinated with
 the #73 owner; neither Gate files nor the Room ledger are changed here.
@@ -19,7 +20,7 @@ the #73 owner; neither Gate files nor the Room ledger are changed here.
 | Seat / process | Supervisor Participant controller | Stable seat, incarnation/epoch and **persisted** authority status remain separate. No PID or fresh liveness claim. |
 | Adapter / readiness | Hub's recorded connection/observation state | Attachment, readiness and last observation ID are separate facts; freshness remains unknown without a fresh adapter observation. |
 | Lifecycle / profile | Supervisor lifecycle store | Persisted desired/phase/authority, expected image/profile and staged update. Actual image/profile remains explicitly unknown. No Engine inspect. |
-| Checkout | Supervisor checkout manifest | Exact host path, branch, Run, Participant, intent and phase; working-tree state explicitly unknown, never inferred clean. `manager_observations()` does not enter the Git-probing `status()`/`_locked()` path. |
+| Checkout | Supervisor checkout manifest | Exact host path, branch, Run, Participant, intent and phase; retained owner-probed working-tree state and its own observation time, or explicitly unknown. `manager_observations()` never enters the Git-probing path. |
 | Forge diagnostics | `ForgeAudit` | One read transaction, Room-filtered metadata, committed outcome/contact/completeness. No provider access, payload, stdout, body, signed URL or credential. |
 | Dependencies | `ReadOnlyForgeBroker` | Exact immutable Broker receipt referenced by the canonical Run, fenced to the Hub cut and checked against Project/repository/issue identity. Existing observation, not a fresh provider query. |
 | Gate | Hub Gate owner | Immutable saved results are history, **not current pass**. Current Gate truth needs the Gate owner's separately versioned refresh observation. |
@@ -44,6 +45,19 @@ interpreted as revision 1.
 unrelated field does not refresh process liveness, adapter readiness, provider
 health, working-tree state, or actual image identity. Passive persisted facts
 keep freshness unknown; no probes are hidden in serialization.
+
+The trusted host can explicitly call `CheckoutAllocator.refresh_observation(slot)`
+for one owned slot. This reuses the existing authorized, Room-locked Git
+admission and `_observe()` path, including ignored/untracked files. Only a
+dirty/clean/unknown result, finite reason and its actual observation timestamp
+are retained in `checkouts.json`; file names, content, raw output and errors are
+never exported. This is a historical observation, not a current filesystem
+lease or cleanup authorization. Every ordinary slot owner save invalidates
+retained probes; the next refresh must inspect the new binding. Read failures
+are unavailable, and an unsuccessful probe replaces an earlier clean result
+with unknown. Manager reads and responses cannot request a probe. Host
+scheduling stays outside the Hub thread and is bounded to one slot per call;
+this adds no scanner daemon or network action.
 
 ## Snapshot and replay contract
 
@@ -118,14 +132,26 @@ not install certificates, modify a trust store, or manage account permissions.
 connection ID. Replacing a source store/Room epoch is an explicit integration
 decision; a new connection cannot silently reset an existing Manager cursor.
 
-## Host integration still required
+## Host integration
 
 `export_once()` composes one real client cursor/snapshot/replay/ack iteration;
 it reports ordinary outages without controlling the Hub. The modules provide a
-real client and accepted-session service, not a deployed Manager listener or an
-automatic Hub startup hook. Current configuration supplies credential reference
-IDs/kinds, not a host credential resolver. Persistent control-plane launch and
-that trusted resolver are still explicit host/#61 integration seams. The host must:
+real client and accepted-session service, not a deployed Manager listener.
+`RoomManagerExport.from_configuration(source, configuration_file, resolve_tls)`
+validates the existing deployment/Room and resolves its existing client/trust
+reference IDs through the trusted host callback once. That callback returns a
+configured TLS context; no credential store or secrets protocol is added.
+`step(now=monotonic_time, captured_at=utc_timestamp)` performs one eligible
+transfer and returns the next deadline. Success uses the configured snapshot
+interval; failure uses capped exponential backoff. It launches no thread and
+has no sleep/retry loop. `close()` is terminal. Workstation Stop is not a reason
+to stop exporting; Destroy/replacement ends the host-owned source epoch.
+
+`RoomLedger.open_reader(path, room_id)` gives the exporter a separate SQLite
+`mode=ro`/`query_only` connection to the existing exact Room store, without
+creating schemas or changing journal mode. Construct/use it on the exporter
+thread rather than sharing the Hub connection. The trusted host still owns
+launch, service lifetime and the actual credential resolver. The host must:
 
 - resolve the existing Manager credential/trust references outside Project
   space and bind each Room certificate to its exact identity;
@@ -162,8 +188,17 @@ existing three-minute critical-path budget. Source is independently reviewed
 before publication/execution. Merely
 adding this file, skipping it, or passing pure checks is not TLS evidence.
 
-Full #75 acceptance still requires reviewed hosted transport results, host
-startup/reconnect wiring, real source-owner integration for remaining required
+The real HTTPS/mTLS fixture passed on PR #128 head `4f368ac9` (job
+`122461101827`); the subsequent metadata-compatibility candidate `aed246e`
+passed the complete automatic CI path in 148 seconds. Those receipts do not
+substitute for running a newer candidate. The checkout observation integration
+has guarded filesystem/controlled-Git-response coverage plus a focused real-Git
+test in `test_checkouts.py`, reserved for hosted CI. `test_manager_host.py`
+covers the actual separate SQLite reader, inert protocol transfer, scheduling,
+outage backoff and fixed reference resolution without sockets or threads.
+
+Full #75 acceptance still requires host startup/reconnect wiring, real
+source-owner integration for remaining required
 facts, and exact-candidate independent Standards/Specification/Runtime review.
 Missing #73/#74 work is not a blocker to implementing this read-side transport,
 but unavailable placeholders are not evidence that those integrations passed.

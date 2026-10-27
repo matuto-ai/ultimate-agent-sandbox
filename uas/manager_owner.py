@@ -10,6 +10,35 @@ from .manager_projection import ProjectionError, SourceObservation, timestamp
 
 
 REVISION_FIELDS = frozenset({'observation_revision', 'observation_committed_at'})
+CHECKOUT_OBSERVATION_FIELDS = frozenset({'working_tree_observations'})
+
+
+def validate_checkout_observations(state):
+    """Optional retained probes belong to this exact owner snapshot, not Git truth."""
+    if 'working_tree_observations' not in state:
+        return
+    validate_revision(state)
+    if 'observation_revision' not in state:
+        raise ValueError('unversioned checkout observations')
+    rows = state['working_tree_observations']
+    if (type(rows) is not dict or type(state.get('slots')) is not dict
+            or not rows.keys() <= state['slots'].keys()):
+        raise ValueError('invalid checkout observations')
+    for row in rows.values():
+        if (type(row) is not dict or set(row) != {'observed_dirty', 'observed_at', 'reason'}
+                or row['observed_dirty'] is not None and type(row['observed_dirty']) is not bool
+                or type(row['reason']) is not str
+                or row['reason'] not in {'UNVERIFIABLE', 'ABSENT', 'FILESYSTEM_IDENTITY_MISMATCH',
+                    'METADATA_MISMATCH', 'DIRTY_OR_UNTRACKED_OR_IGNORED', 'ACTIVE', 'UNMERGED', 'RECONCILED'}):
+            raise ValueError('invalid checkout observation')
+        try:
+            timestamp(row['observed_at'])
+        except ProjectionError:
+            raise ValueError('invalid checkout observation timestamp') from None
+        expected = (True if row['reason'] == 'DIRTY_OR_UNTRACKED_OR_IGNORED' else
+                    False if row['reason'] in {'ACTIVE', 'UNMERGED', 'RECONCILED'} else None)
+        if row['observed_dirty'] is not expected:
+            raise ValueError('conflicting checkout observation')
 
 
 def validate_revision(state):
@@ -80,8 +109,13 @@ def participant_observations(state):
 
 
 def checkout_observations(state):
+    validate_checkout_observations(state)
     rows = {key: {'slot': key, 'run_id': row['run'], 'participant_id': row['participant'],
                    'branch': row['branch'], 'path': row['path'], 'state': row['phase'],
                    'working_tree_state': 'unknown', 'reason': 'WORKING_TREE_NOT_OBSERVED'}
             for key, row in state['slots'].items()}
+    for key, observation in state.get('working_tree_observations', {}).items():
+        dirty = observation['observed_dirty']
+        rows[key].update(working_tree_state='unknown' if dirty is None else 'dirty' if dirty else 'clean',
+                         working_tree_observed_at=observation['observed_at'], reason=observation['reason'])
     return (_owned('checkout_slots', state, rows),)

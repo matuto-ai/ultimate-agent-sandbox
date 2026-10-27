@@ -119,6 +119,89 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(original, self.resolve())
         self.resolver.recheck(original)
 
+    def checkout_observer(self, dirty=''):
+        from uas.checkouts import CheckoutAllocator
+        from uas.lifecycle import Supervisor
+        allocator = CheckoutAllocator.__new__(CheckoutAllocator)
+        for field in ('supervisor', 'room', 'repo', 'root', 'manifest'):
+            setattr(allocator, field, getattr(self.allocator, field))
+        self.supervisor._allowed = lambda *_: None
+        self.supervisor._sync_directory = lambda path: Supervisor._sync_directory(self.supervisor, path)
+        def git(path, *args, **kwargs):
+            outputs = {('rev-parse', '--path-format=absolute', '--git-common-dir'): str(self.common),
+                       ('rev-parse', '--show-toplevel'): str(self.repo),
+                       ('config', '--get-regexp', r'^filter\.'): '',
+                       ('worktree', 'list', '--porcelain', '-z'):
+                           'worktree ' + str(self.repo) + '\0branch refs/heads/main\0\0',
+                       ('status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'): dirty,
+                       ('rev-parse', 'HEAD'): self.head}
+            self.assertIn(args, outputs)
+            return outputs[args]
+        allocator._git = Mock(side_effect=git)
+        return allocator
+
+    def test_checkout_probe_is_retained_durable_sanitized_and_resolver_inert(self):
+        original = self.resolve()
+        allocator = self.checkout_observer('?? SECRET_FILENAME\0')
+        observed = allocator.refresh_observation('primary')
+        self.assertTrue(observed['observed_dirty'])
+        self.assertEqual('DIRTY_OR_UNTRACKED_OR_IGNORED', observed['reason'])
+        saved = json.loads(allocator.manifest.read_text())
+        self.assertEqual(observed, saved['working_tree_observations']['primary'])
+        self.assertNotIn('SECRET_FILENAME', allocator.manifest.read_text())
+        allocator._git = Mock(side_effect=AssertionError('passive read ran Git'))
+        fact = allocator.manager_observations()[0].document()
+        self.assertEqual('dirty', fact['value']['primary']['working_tree_state'])
+        self.assertEqual(observed['observed_at'], fact['value']['primary']['working_tree_observed_at'])
+        self.assertIsNone(fact['observed_at'])
+        self.assertEqual('unknown', fact['freshness'])
+        self.assertEqual(original, self.resolve())
+        self.resolver.recheck(original)
+
+    def test_checkout_clean_probe_is_invalidated_by_any_ordinary_owner_save(self):
+        allocator = self.checkout_observer()
+        observed = allocator.refresh_observation('primary')
+        self.assertFalse(observed['observed_dirty'])
+        state = allocator._read(self.lifecycle['instance_id'], str(self.common))
+        self.assertEqual('clean', allocator.manager_observations()[0].document()['value']['primary']['working_tree_state'])
+        old_revision = state['observation_revision']
+        state['slots']['primary']['participant'] = 'bob'
+        allocator._save(state)
+        self.assertGreater(state['observation_revision'], old_revision)
+        self.assertNotIn('working_tree_observations', state)
+        fact = allocator.manager_observations()[0].document()
+        self.assertEqual('unknown', fact['value']['primary']['working_tree_state'])
+        self.assertNotIn('working_tree_observed_at', fact['value']['primary'])
+
+    def test_checkout_failed_probe_replaces_previous_clean_without_fabricating_dirty(self):
+        allocator = self.checkout_observer()
+        allocator.refresh_observation('primary')
+        with patch.object(allocator, '_registered', side_effect=OSError('PRIVATE_ERROR')):
+            observed = allocator.refresh_observation('primary')
+        self.assertIsNone(observed['observed_dirty'])
+        self.assertEqual('UNVERIFIABLE', observed['reason'])
+        self.assertNotIn('PRIVATE_ERROR', allocator.manifest.read_text())
+        self.assertEqual('unknown', allocator.manager_observations()[0].document()['value']['primary']['working_tree_state'])
+
+    def test_checkout_probe_metadata_is_exact_validated_in_both_readers(self):
+        allocator = self.checkout_observer()
+        allocator.refresh_observation('primary')
+        good = json.loads(allocator.manifest.read_text())
+        bads = []
+        for change in ({'extra': True}, {'reason': []}, {'observed_dirty': 0},
+                       {'observed_at': 'not-a-time'}, {'reason': 'RECONCILED', 'observed_dirty': True}):
+            state = deepcopy(good); state['working_tree_observations']['primary'].update(change); bads.append(state)
+        state = deepcopy(good); state['working_tree_observations']['other'] = state['working_tree_observations']['primary']; bads.append(state)
+        state = deepcopy(good); del state['observation_revision']; del state['observation_committed_at']; bads.append(state)
+        from uas.lifecycle import LifecycleError
+        for state in bads:
+            with self.subTest(state=state):
+                allocator.manifest.write_text(json.dumps(state))
+                with self.assertRaises(LifecycleError):
+                    allocator._read(self.lifecycle['instance_id'], str(self.common))
+                with self.assertRaises(ArtifactError):
+                    self.resolve()
+
     def test_partial_invalid_or_extra_owner_metadata_is_not_ignored(self):
         valid = {'observation_revision': 1,
                  'observation_committed_at': '2026-10-27T20:00:00+00:00'}

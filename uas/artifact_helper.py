@@ -24,12 +24,15 @@ import uuid
 
 from .artifact_paths import open_directory
 from .artifact_protocol import (ArtifactError, PROFILE_ID, HELPER_UID, HELPER_GID, MAX_OUTPUT_BYTES,
-    canonical, validate_scope, validate_target, validate_paths, scope_digest,
+    canonical, validate_scope, validate_target, validate_paths, scope_digest, profile_scope_digest,
     encode_request, decode_observation, encode_final_ack)
 from .kernel_origin import (HeldOrigin, Record, ReceiverIdentity, OriginDenied,
     OriginUnavailable, SCM_PIDFD, _identity, alive, enable, receive)
 
 BOOTSTRAP = '/opt/uas/bin/artifact-bootstrap'
+COMMAND_PROFILE = 'command-v1-source'
+DIFF_PROFILE = 'diff-claims-v1-source'
+BOOTSTRAPS = {PROFILE_ID: BOOTSTRAP, COMMAND_PROFILE: '/opt/uas/bin/command-bootstrap', DIFF_PROFILE: '/opt/uas/bin/diff-bootstrap'}
 HELPER_HOST_UID = HELPER_HOST_GID = 165530
 WALL_SECONDS = 15
 CONTROL_LIMIT = 16384
@@ -37,6 +40,25 @@ MAX_EVALUATIONS = 16  # lifetime source-profile records; no pruning or automatic
 _HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
+
+
+def _profile_target(profile, value):
+    if profile == COMMAND_PROFILE:
+        from .gate_repository import validate_command_target
+        return validate_command_target(value)
+    if profile == DIFF_PROFILE:
+        from .diff_protocol import validate_diff_target
+        return validate_diff_target(value)
+    return validate_target(value)
+
+
+def _profile_request(profile, value):
+    if profile in (COMMAND_PROFILE, DIFF_PROFILE):
+        from .gate_repository import compile_repository_config
+        return compile_repository_config('command' if profile == COMMAND_PROFILE else 'diff-claims', value, 'gate')
+    if profile != PROFILE_ID:
+        raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
+    return validate_paths(value)
 
 
 def _copy(value):
@@ -88,8 +110,11 @@ class GateWorkstation:
     evaluator_digest: str
     mapping_digest: str
     receiver_context: str
+    profile: str = PROFILE_ID
 
     def __post_init__(self):
+        if self.profile not in BOOTSTRAPS:
+            raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
         if (any(type(v) is not str or not _TOKEN.fullmatch(v)
                 for v in (self.room_id, self.room_instance, self.receiver_context))
                 or any(type(v) is not str or not _HEX64.fullmatch(v) for v in
@@ -202,7 +227,7 @@ class GateHelperLaunch:
         if type(workstation) is not GateWorkstation or type(endpoint) is not GateEndpointLease:
             raise ArtifactError('TRUSTED_GATE_LAUNCH_REQUIRED')
         self.scope = validate_scope(scope)
-        self.target = validate_target(target_lease.document())
+        self.target = _profile_target(workstation.profile, target_lease.document())
         if (self.scope['room_id'] != workstation.room_id
                 or self.scope['room_instance'] != workstation.room_instance):
             raise ArtifactError('GATE_ROOM_BINDING_MISMATCH')
@@ -212,14 +237,16 @@ class GateHelperLaunch:
         self.origin = self.channel = self.transport = None
         self.exec_id = self.deadline = None
         self.state = 'new'
+        self.tree_exit_confirmed = False
         self.incarnation = uuid.uuid4().hex
         self.binding = None
 
     def _save(self, state, error_code=None):
         self.state = state
         self.journal.append({'version': 1, 'state': state, 'incarnation': self.incarnation,
-            'scope_digest': scope_digest(self.scope, self.target),
-            'evaluation_id': self.scope['evaluation_id'], 'target_id': self.target['target_id'],
+            'scope_digest': profile_scope_digest(self.workstation.profile, self.scope, self.target),
+            'evaluation_id': self.scope['evaluation_id'], 'target_id': (self.target['head']['target_id']
+                if self.workstation.profile == DIFF_PROFILE else self.target['target_id']),
             'container_id': self.workstation.container_id, 'exec_id': self.exec_id,
             'profile_digest': self.workstation.profile_digest, 'error_code': error_code})
 
@@ -258,7 +285,7 @@ class GateHelperLaunch:
             self.exec_id = self.engine.create(self.workstation.container_id, {
                 'AttachStdin': True, 'AttachStdout': False, 'AttachStderr': False,
                 'Tty': False, 'Privileged': False, 'User': '65530:65530',
-                'WorkingDir': '/', 'Cmd': [BOOTSTRAP], 'Env': []})
+                'WorkingDir': '/', 'Cmd': [BOOTSTRAPS[self.workstation.profile]], 'Env': []})
             # Env [] does NOT scrub inherited environment; static bootstrap does.
             if type(self.exec_id) is not str or not _HEX64.fullmatch(self.exec_id):
                 raise ArtifactError('INVALID_GATE_EXEC_ID')
@@ -280,7 +307,8 @@ class GateHelperLaunch:
             if (self.admission.require(self.workstation) is not True
                     or self.target_lease.recheck() is not True):
                 raise ArtifactError('GATE_RELEASE_DEPENDENCY_CHANGED')
-            release = b'AGR1' + self.target['target_id'].encode('ascii')
+            release = (b'DGR1' + self.target['base']['target_id'].encode('ascii') + self.target['head']['target_id'].encode('ascii')
+                       if self.workstation.profile == DIFF_PROFILE else b'AGR1' + self.target['target_id'].encode('ascii'))
             if self.channel.send(release) != len(release):
                 raise ArtifactError('GATE_RELEASE_UNKNOWN')
             self._save('bound')
@@ -344,19 +372,26 @@ class GateHelperLaunch:
     def finish(self, *, final_digest):
         """Called only by authenticated GATE_FINISH dispatch, never public JSON."""
         if (self.state != 'running' or self.binding is None
-                or final_digest != scope_digest(self.scope, self.target)):
+                or final_digest != profile_scope_digest(self.workstation.profile, self.scope, self.target)):
             raise ArtifactError('GATE_COMPLETION_NOT_CORRELATED')
         if not self._exit():
             return self._quarantine('helper-exit-unconfirmed')
         self._save('exited')
         try:
-            self.target_lease.mark_exit_confirmed()
+            # Command helper exit alone proves no descendant state. Its trusted
+            # success path exits zero only after independently guarded whole-tree
+            # exhaustion; a failed/lost helper keeps both resources quarantined.
+            if self.workstation.profile != COMMAND_PROFILE:
+                self.target_lease.mark_exit_confirmed()
             terminal = self.engine.inspect(self.exec_id)
             if (type(terminal) is not dict or terminal.get('ID') != self.exec_id
                     or terminal.get('ContainerID') != self.workstation.container_id
                     or terminal.get('Running') is not False
                     or type(terminal.get('ExitCode')) is not int or terminal['ExitCode'] != 0):
                 raise ArtifactError('ARTIFACT_HELPER_EXIT_ERROR')
+            if self.workstation.profile == COMMAND_PROFILE:
+                self.tree_exit_confirmed = True
+                self.target_lease.mark_exit_confirmed()
             if canonical(self.target_lease.postverify()) != canonical(self.target):
                 raise ArtifactError('ARTIFACT_POST_TARGET_MISMATCH')
             if self.target_lease.recheck_binding() is not True:
@@ -373,6 +408,9 @@ class GateHelperLaunch:
             return result
 
     def abort(self):
+        if (self.workstation.profile == COMMAND_PROFILE and self.state not in ('cleaned', 'cleaned-error')
+                and not getattr(self, 'tree_exit_confirmed', False)):
+            return self._quarantine('command-tree-proof-unavailable')
         if self.state in ('cleaned', 'cleaned-error'):
             return {'exit_confirmed': True, 'post_target': _copy(self.target) if self.state == 'cleaned' else None, 'cleanup': True,
                     'quarantine_ref': None, 'launch_state': 'exited'}
@@ -412,7 +450,7 @@ def _binding_document(launch, exchange_id, controller):
         raise ArtifactError('INVALID_GATE_CONTROL_CORRELATION')
     document = {'version': 1, 'kind': 'GATE_BIND', 'exchange_id': exchange_id,
         'controller': controller, 'scope': launch.scope, 'target': launch.target,
-        'profile': PROFILE_ID, 'profile_digest': launch.workstation.profile_digest,
+        'profile': launch.workstation.profile, 'profile_digest': launch.workstation.profile_digest,
         'mapping_digest': launch.workstation.mapping_digest,
         'receiver_context': launch.workstation.receiver_context,
         'origin_identity': list(launch.origin.identity)}
@@ -427,7 +465,18 @@ class GateOffer:
         self._document = _copy(document)
         self.scope, self.target = self._document['scope'], self._document['target']
         self.channel, self.origin = channel, origin
-        self.paths = tuple(paths); validate_paths(self.paths)
+        self.profile = self._document['profile']
+        if self.profile in (COMMAND_PROFILE, DIFF_PROFILE):
+            self.config = _profile_request(self.profile, paths)
+            self.paths = ()
+            if self.profile == COMMAND_PROFILE:
+                from .gate_repository import command_correlation
+                self.correlation = command_correlation(self.scope, self.target, self.config)
+            else:
+                from .diff_protocol import diff_correlation
+                self.correlation = diff_correlation(self.scope, self.target, self.config)
+        else:
+            self.paths = tuple(paths); validate_paths(self.paths)
         self.state = 'bound'
         self.deadline = time.monotonic() + WALL_SECONDS
         self.final = None
@@ -436,9 +485,9 @@ class GateOffer:
     def document(self):
         return {'source': 'supervisor-one-shot-helper',
             'provenance': 'workstation-local / tamper-evident',
-            'profile': PROFILE_ID, 'profile_digest': self._document['profile_digest'],
+            'profile': self.profile, 'profile_digest': self._document['profile_digest'],
             'binding_digest': hashlib.sha256(canonical(self._document)).hexdigest(),
-            'scope_digest': scope_digest(self.scope, self.target)}
+            'scope_digest': profile_scope_digest(self.profile, self.scope, self.target)}
 
     def _current(self):
         if self.origin.revoked or not alive(self.origin.pidfd):
@@ -449,6 +498,12 @@ class GateOffer:
         self.channel.settimeout(remaining)
 
     def records(self):
+        if self.profile == DIFF_PROFILE:
+            yield from self._diff_records()
+            return
+        if self.profile == COMMAND_PROFILE:
+            yield from self._command_records()
+            return
         if self.state != 'bound':
             raise ArtifactError('ARTIFACT_REQUEST_ALREADY_SENT')
         self.state = 'reading'  # uncertainty after any send cannot be replayed
@@ -475,6 +530,66 @@ class GateOffer:
             self.state = 'error'; self.origin.revoke()
             raise
 
+    def _command_records(self):
+        from .gate_repository import command_request, command_observation
+        if self.state != 'bound':
+            raise ArtifactError('ARTIFACT_REQUEST_ALREADY_SENT')
+        self.state = 'reading'
+        try:
+            self._current()
+            packet = command_request(self.scope, self.target, self.config)
+            if self.channel.send(packet) != len(packet):
+                raise ArtifactError('COMMAND_REQUEST_UNKNOWN')
+            for index in range(10):
+                self._current()
+                with receive(self.channel) as record:
+                    self.origin.require(record)
+                    self._bytes += len(record.data)
+                    if self._bytes > MAX_OUTPUT_BYTES:
+                        raise ArtifactError('COMMAND_OUTPUT_LIMIT')
+                    value = command_observation(record.data, self.correlation)
+                if index == 0 and value['kind'] != 'header':
+                    raise ArtifactError('COMMAND_RECORD_ORDER')
+                if value['kind'] == 'final':
+                    self.final = value; self.state = 'final'
+                    yield value
+                    return
+                yield value
+            raise ArtifactError('COMMAND_RECORD_LIMIT')
+        except BaseException:
+            self.state = 'error'; self.origin.revoke()
+            raise
+
+    def _diff_records(self):
+        from .diff_protocol import diff_request, diff_observation
+        if self.state != 'bound':
+            raise ArtifactError('ARTIFACT_REQUEST_ALREADY_SENT')
+        self.state = 'reading'
+        try:
+            self._current()
+            packet = diff_request(self.scope, self.target, self.config)
+            if self.channel.send(packet) != len(packet):
+                raise ArtifactError('DIFF_REQUEST_UNKNOWN')
+            for index in range(130):
+                self._current()
+                with receive(self.channel) as record:
+                    self.origin.require(record)
+                    self._bytes += len(record.data)
+                    if self._bytes > MAX_OUTPUT_BYTES:
+                        raise ArtifactError('DIFF_OUTPUT_LIMIT')
+                    value = diff_observation(record.data, self.correlation)
+                if index == 0 and value['kind'] != 'header':
+                    raise ArtifactError('DIFF_RECORD_ORDER')
+                if value['kind'] == 'final':
+                    self.final = value; self.state = 'final'
+                    yield value
+                    return
+                yield value
+            raise ArtifactError('DIFF_RECORD_LIMIT')
+        except BaseException:
+            self.state = 'error'; self.origin.revoke()
+            raise
+
     def acknowledge_final(self, validated_final):
         if self.state != 'final' or canonical(validated_final) != canonical(self.final):
             raise ArtifactError('ARTIFACT_FINAL_NOT_VALIDATED')
@@ -485,7 +600,9 @@ class GateOffer:
             # closes ancillary FDs even when the record is malicious.
             with receive(self.channel):
                 raise ArtifactError('ARTIFACT_EXTRA_OUTPUT')
-        packet = encode_final_ack(self.scope, self.target)
+        packet = (b'CGA1' + bytes.fromhex(self.correlation) if self.profile == COMMAND_PROFILE
+                  else b'DGA1' + bytes.fromhex(self.correlation) if self.profile == DIFF_PROFILE
+                  else encode_final_ack(self.scope, self.target))
         self.state = 'ack-unknown'
         if self.channel.send(packet) != len(packet):
             self.origin.revoke()
@@ -519,9 +636,9 @@ class GateOffer:
 
 
 def receive_gate_bind(control, supervisor, *, scope, target, paths, receiver,
-                      profile_digest, exchange_id, controller):
+                      profile_digest, exchange_id, controller, profile=PROFILE_ID):
     """Only on the already-authenticated private Supervisor–Hub connection."""
-    validate_scope(scope); validate_target(target); validate_paths(paths)
+    validate_scope(scope); _profile_target(profile, target); _profile_request(profile, paths)
     if (type(supervisor) is not HeldOrigin or type(receiver) is not ReceiverIdentity
             or receiver.uid != HELPER_UID or receiver.gid != HELPER_GID
             or supervisor.revoked or not alive(supervisor.pidfd)):
@@ -558,7 +675,7 @@ def receive_gate_bind(control, supervisor, *, scope, target, paths, receiver,
         if len(rights) != 2:
             raise ArtifactError('INVALID_GATE_BIND_DESCRIPTOR_COUNT')
         expected = {'version': 1, 'kind': 'GATE_BIND', 'exchange_id': exchange_id,
-            'controller': controller, 'scope': scope, 'target': target, 'profile': PROFILE_ID,
+            'controller': controller, 'scope': scope, 'target': target, 'profile': profile,
             'profile_digest': profile_digest, 'mapping_digest': receiver.mapping_digest,
             'receiver_context': receiver.context,
             'origin_identity': list(_identity(rights[1]))}
@@ -606,7 +723,10 @@ class GateControlClient:
     No timeout, lost reply or restart resends a mutation automatically.
     """
     def __init__(self, control, *, supervisor, receiver, profile_digest,
-                 controller, control_lock):
+                 controller, control_lock, profile=PROFILE_ID):
+        if profile not in BOOTSTRAPS:
+            raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
+        self.profile = profile
         if (type(supervisor) is not HeldOrigin or type(receiver) is not ReceiverIdentity
                 or receiver.uid != HELPER_UID or receiver.gid != HELPER_GID
                 or type(profile_digest) is not str or not _HEX64.fullmatch(profile_digest)
@@ -646,19 +766,23 @@ class GateControlClient:
         with self._io:
             return self._reply(self._send(command, payload))
 
-    def resolve(self, run_id, participant_id, room_instance):
-        return self._call('resolve', {'run_id': run_id, 'participant_id': participant_id,
-                                     'room_instance': room_instance})
+    def resolve(self, run_id, participant_id, room_instance, subject=None):
+        payload = {'run_id': run_id, 'participant_id': participant_id, 'room_instance': room_instance}
+        if self.profile == DIFF_PROFILE:
+            payload['subject'] = subject
+        elif subject is not None:
+            raise ArtifactError('UNSUPPORTED_GATE_SUBJECT')
+        return self._call('resolve', payload)
 
     def current(self, source):
         return self._call('current', {'source': source})
 
     def prepare(self, scope, source):
         validate_scope(scope)
-        return validate_target(self._call('prepare', {'scope': scope, 'source': source}))
+        return _profile_target(self.profile, self._call('prepare', {'scope': scope, 'source': source}))
 
     def start(self, scope, target, paths):
-        validate_scope(scope); validate_target(target); validate_paths(paths)
+        validate_scope(scope); _profile_target(self.profile, target); _profile_request(self.profile, paths)
         evaluation = scope['evaluation_id']
         if evaluation in self._offers or len(self._offers) >= MAX_EVALUATIONS:
             raise ArtifactError('GATE_START_ALREADY_ATTEMPTED')
@@ -670,7 +794,7 @@ class GateControlClient:
             offer = receive_gate_bind(self.control, self.supervisor, scope=scope,
                 target=target, paths=paths, receiver=self.receiver,
                 profile_digest=self.profile_digest, exchange_id=exchange,
-                controller=self.controller)
+                controller=self.controller, profile=self.profile)
         self._offers[evaluation] = offer
         return offer
 
@@ -680,7 +804,7 @@ class GateControlClient:
                 or self._offers.get(offer.scope['evaluation_id']) is not offer):
             raise ArtifactError('GATE_EXITED_OFFER_REQUIRED')
         return self._call('finish', {'evaluation_id': offer.scope['evaluation_id'],
-            'target': target, 'final_digest': scope_digest(offer.scope, target)})
+            'target': target, 'final_digest': profile_scope_digest(self.profile, offer.scope, target)})
 
     def abort(self, evaluation_id, target=None, offer=None):
         if offer is not None and (type(offer) is not GateOffer
@@ -699,7 +823,10 @@ class GateSupervisorService:
     at Room construction and must return GateHelperLaunch, never a caller argv.
     An in-memory owner cannot be reconstructed from a PID or journal after loss.
     """
-    def __init__(self, resolver, targets, *, launch_factory, listener):
+    def __init__(self, resolver, targets, *, launch_factory, listener, profile=PROFILE_ID):
+        if profile not in BOOTSTRAPS:
+            raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
+        self.profile = profile
         self.resolver, self.targets = resolver, targets
         self.launch_factory, self.listener = launch_factory, listener
         self._prepared, self._launches, self._attempted = {}, {}, set()
@@ -709,7 +836,8 @@ class GateSupervisorService:
         with self._lock:
             if type(payload) is not dict:
                 raise ArtifactError('INVALID_GATE_CONTROL_PAYLOAD')
-            if command == 'resolve' and set(payload) == {'run_id', 'participant_id', 'room_instance'}:
+            if command == 'resolve' and set(payload) == ({'run_id', 'participant_id', 'room_instance', 'subject'}
+                    if self.profile == DIFF_PROFILE else {'run_id', 'participant_id', 'room_instance'}):
                 return self.resolver.resolve(**payload)
             if command == 'current' and set(payload) == {'source'}:
                 return self.resolver.current(payload['source'])
@@ -720,18 +848,18 @@ class GateSupervisorService:
                         or len(self._prepared) >= MAX_EVALUATIONS):
                     raise ArtifactError('ARTIFACT_PREPARATION_ALREADY_ATTEMPTED')
                 self._prepared[evaluation] = None  # intent also covers partial preparation
-                target = validate_target(self.targets.prepare(scope, payload['source']))
+                target = _profile_target(self.profile, self.targets.prepare(scope, payload['source']))
                 self._prepared[evaluation] = (scope, target)
                 return target
             if command == 'start' and set(payload) == {'scope', 'target'}:
-                scope, target = validate_scope(payload['scope']), validate_target(payload['target'])
+                scope, target = validate_scope(payload['scope']), _profile_target(self.profile, payload['target'])
                 evaluation = scope['evaluation_id']
                 if (evaluation in self._attempted or self._prepared.get(evaluation) is None
                         or canonical(self._prepared[evaluation]) != canonical((scope, target))):
                     raise ArtifactError('GATE_START_BINDING_OR_REPLAY')
                 self._attempted.add(evaluation)  # before constructing or starting launch
                 launch = self.launch_factory(scope, target, self.targets.lease(target))
-                if type(launch) is not GateHelperLaunch:
+                if type(launch) is not GateHelperLaunch or launch.workstation.profile != self.profile:
                     raise ArtifactError('TRUSTED_GATE_LAUNCH_REQUIRED')
                 self._launches[evaluation] = launch
                 return launch.start(self.listener)

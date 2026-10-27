@@ -78,6 +78,8 @@ def _fields(row, fields):
                     or '..' in value.split('/') or any(ord(c) < 32 or ord(c) == 127 for c in value)):
                 raise ProjectionError('INVALID_CHECKOUT_PATH')
             result[key] = value
+        elif key == 'working_tree_observed_at':
+            result[key] = timestamp(row[key])
         else:
             result[key] = _scalar(row[key])
     return result
@@ -119,7 +121,7 @@ EXTERNAL_FIELDS = {
     'seats': ('supervisor', ('participant_id', 'actor_id', 'profile_id', 'runtime', 'enabled')),
     'processes': ('supervisor', ('participant_id', 'incarnation_id', 'epoch', 'state', 'reason')),
     'checkout_slots': ('supervisor', ('slot', 'run_id', 'participant_id', 'branch', 'path',
-                                     'state', 'working_tree_state', 'reason')),
+                                     'state', 'working_tree_state', 'working_tree_observed_at', 'reason')),
     'capabilities': ('supervisor', ('participant_id', 'implement', 'review', 'forge_read', 'forge_write')),
     'image_profile_drift': ('supervisor', ('expected_image_digest', 'expected_profile_digest',
         'actual_image_digest', 'actual_profile_digest', 'pending_image_digest',
