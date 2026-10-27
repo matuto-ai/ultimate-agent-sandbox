@@ -113,6 +113,7 @@ class Supervisor:
         self.directory = self.root / room_id
         self._manifest = self.directory / "lifecycle.json"
         self._participant_controller = None
+        self._control_plane = None
 
     @contextmanager
     def _locked(self):
@@ -139,10 +140,18 @@ class Supervisor:
             document = json.loads(self._manifest.read_text(), object_pairs_hook=_unique_object)
             required = {"version", "room_id", "instance_id", "spec", "phase", "desired",
                         "created_at", "pending_spec", "authority"}
-            optional = {"leftovers", "destroy_requested_at", "destroyed_at"} | REVISION_FIELDS
+            optional = {"leftovers", "destroy_requested_at", "destroyed_at", "remote_start", "control_plane_required"} | REVISION_FIELDS
             if type(document) is not dict or not required <= document.keys() or document.keys() - required - optional:
                 raise ValueError("manifest fields")
             validate_revision(document)
+            if "control_plane_required" in document and document["control_plane_required"] is not True:
+                raise ValueError("control plane requirement")
+            if "remote_start" in document:
+                marker = document["remote_start"]
+                if (type(marker) is not dict or set(marker) != {"operation_id", "human_id", "request_digest"}
+                        or any(type(marker[k]) is not str or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", marker[k]) for k in ("operation_id", "human_id"))
+                        or type(marker["request_digest"]) is not str or not re.fullmatch(r"[0-9a-f]{64}", marker["request_digest"])):
+                    raise ValueError("remote Start marker")
             if type(document["version"]) is not int or document["version"] != 1 or document["room_id"] != self.room_id:
                 raise ValueError("manifest version/room")
             if type(document["instance_id"]) is not str or not re.fullmatch(r"[0-9a-f]{32}", document["instance_id"]):
@@ -338,6 +347,7 @@ class Supervisor:
                 state["pending_spec"] = requested if requested != state["spec"] else None
                 state["phase"] = "starting"
             else:
+                self._control_plane = None
                 state = {"version": 1, "room_id": self.room_id, "instance_id": uuid.uuid4().hex,
                          "spec": requested, "phase": "creating", "created_at": _now(),
                          "pending_spec": None, "authority": "not-issued"}
@@ -348,6 +358,11 @@ class Supervisor:
     def _converge_running(self, state):
         self._ensure_owned_directory(state)
         try:
+            control_store = self._owned_directory(state) / "control-plane.json"
+            if state.get("control_plane_required") or control_store.exists() or control_store.is_symlink():
+                if self._control_plane is None or self._control_plane.instance != state["instance_id"]:
+                    raise LifecycleError("CONTROL_PLANE_NOT_READY")
+                self._control_plane.require_ready_locked()
             for kind in ("volume", "container"):
                 resource = self.backend.inspect(state, kind)
                 if resource is None:
@@ -393,6 +408,8 @@ class Supervisor:
 
     def _revoked(self, state, scope):
         try:
+            if scope == "all" and state.get("control_plane_required") and state["desired"] == "destroyed" and state["authority"] == "all-revoked" and not self._owned_directory(state).exists():
+                return True  # Durable revocation proof survives removed instance data.
             if self._participant_controller is not None:
                 if not self._participant_controller._revoke_all_locked(state):
                     return False
@@ -400,8 +417,15 @@ class Supervisor:
                 # A reconstructed supervisor must reconnect the actual
                 # controller; a legacy/vacuous callback cannot vouch for seats.
                 return False
+            control_store = self._owned_directory(state) / "control-plane.json"
+            if self._control_plane is not None:
+                if not self._control_plane.revoke_locked(state, scope):
+                    return False
+            elif state.get("control_plane_required") or control_store.exists() or control_store.is_symlink():
+                # Persisted nonempty services cannot be certified by a callback.
+                return False
             return self.revoke(state["instance_id"], scope) is True
-        except BackendUnknown:
+        except (BackendUnknown, LifecycleError):
             return False
 
     def _converge_stopped(self, state):
@@ -444,7 +468,8 @@ class Supervisor:
         # Mandatory verified revocation comes before any stop/remove operation.
         if not self._revoked(state, "all"):
             state["phase"] = "destroy_failed"
-            state["leftovers"] = [{"kind": "authority", "name": state["instance_id"], "reason": "REVOCATION_UNVERIFIED"}]
+            state["leftovers"] = (self._control_plane.leftovers if self._control_plane is not None and self._control_plane.leftovers else
+                                  [{"kind": "authority", "name": state["instance_id"], "reason": "REVOCATION_UNVERIFIED"}])
             self._save(state)
             return self._result(state)
         state["authority"] = "all-revoked"
