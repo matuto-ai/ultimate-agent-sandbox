@@ -17,11 +17,16 @@
 #define AG_SUPERVISOR_UID 65533
 #define AG_ENDPOINT "/uas/gate/gate.sock"
 #define AG_TARGETS "uas/gate-targets"
+#ifndef AG_EVALUATOR
 #ifdef UAS_ARTIFACT_PROBE
 /* Explicit disposable-VM test binary only, never selected by GateHelperLaunch. */
 #define AG_EVALUATOR "/opt/uas/bin/artifact-confinement-probe"
 #else
 #define AG_EVALUATOR "/opt/uas/bin/artifact-evaluator"
+#endif
+#endif
+#ifndef AG_NPROC
+#define AG_NPROC 1U
 #endif
 #define AG_HEADER_BYTES 104U
 #define AG_ITEM_BYTES 60U

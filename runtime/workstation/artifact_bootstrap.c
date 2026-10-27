@@ -76,7 +76,7 @@ int main(int argc,char **argv) {
     identity();
     lower(RLIMIT_AS,AG_MEMORY_BYTES);lower(RLIMIT_CPU,AG_CPU_SECONDS);
     lower(RLIMIT_NOFILE,AG_MAX_FDS);lower(RLIMIT_CORE,0);lower(RLIMIT_FSIZE,0);
-    lower(RLIMIT_NPROC,1);lower(RLIMIT_STACK,8U*1024U*1024U);
+    lower(RLIMIT_NPROC,AG_NPROC);lower(RLIMIT_STACK,8U*1024U*1024U);
     if(close_range(3,~0U,0))fail();
     struct stat before_dir,before_node,after_dir,after_node;
     endpoint_identity(&before_dir,&before_node);
