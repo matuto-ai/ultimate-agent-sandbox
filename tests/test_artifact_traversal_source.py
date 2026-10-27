@@ -8,6 +8,8 @@ from unittest.mock import Mock, call, patch
 
 from uas.artifact_protocol import ArtifactError
 from uas import artifact_target as target
+from uas import artifact_helper as helper
+from uas import artifact_paths as paths
 
 
 class ArtifactTraversalTests(unittest.TestCase):
@@ -158,6 +160,89 @@ class ArtifactDirectoryConsumerCleanupTests(unittest.TestCase):
                     patch.object(target.os, 'close', side_effect=[failure, None]) as closed:
                 with self.assertRaises(type(failure)): target.copy_objects('/common', Mock(), 1)
                 self.assertEqual(closed.call_args_list, [call(42), call(41)])
+
+
+class ConnectedGateTraversalTests(unittest.TestCase):
+    def test_target_and_helper_wrappers_use_the_same_primitive(self):
+        self.assertIs(target.open_directory, paths.open_directory)
+        self.assertIs(helper.open_directory, paths.open_directory)
+        for module, name, invalid, unavailable in ((target, '_open_dir', 'UNSAFE_ARTIFACT_PATH',
+                'ARTIFACT_PATH_TRAVERSAL_UNAVAILABLE'), (helper, '_directory',
+                'INVALID_GATE_RESOURCE_PATH', 'GATE_PATH_TRAVERSAL_UNAVAILABLE')):
+            with self.subTest(caller=name), patch.object(module, 'open_directory', return_value=41) as opened:
+                self.assertEqual(getattr(module, name)('/owned/leaf'), 41)
+                opened.assert_called_once_with('/owned/leaf', invalid_code=invalid, unsupported_code=unavailable)
+
+    def test_helper_searches_nonce_ancestor_but_returns_readable_leaf(self):
+        search = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        with patch.object(paths.os, 'open', side_effect=[41, 42, 43, 44, 45]) as opened, \
+                patch.object(paths.os, 'close') as closed:
+            self.assertEqual(helper._directory('/var/lib/nonce/gate'), 45)
+        self.assertEqual(opened.call_args_list, [call('/', search), call('var', search, dir_fd=41),
+            call('lib', search, dir_fd=42), call('nonce', search, dir_fd=43),
+            call('gate', target._DIR, dir_fd=44)])
+        self.assertEqual(closed.call_args_list, [call(41), call(42), call(43), call(44)])
+
+    def test_helper_root_and_missing_search_support_fail_closed(self):
+        for value in ('/', '//', '//.', '/.', 'relative', '/one/../two'):
+            with self.subTest(path=value), patch.object(paths.os, 'open') as opened:
+                with self.assertRaisesRegex(ArtifactError, 'INVALID_GATE_RESOURCE_PATH'):
+                    helper._directory(value)
+                opened.assert_not_called()
+        with patch.object(paths.os, 'O_PATH', None), patch.object(paths.os, 'open') as opened:
+            with self.assertRaisesRegex(ArtifactError, 'GATE_PATH_TRAVERSAL_UNAVAILABLE'):
+                helper._directory('/owned/leaf')
+            opened.assert_not_called()
+
+    def test_helper_acquisition_errors_and_interruption_close_owned_fds_once(self):
+        for number in (errno.EACCES, errno.ENOTDIR, errno.ELOOP):
+            for fail_at in range(4):
+                with self.subTest(errno=number, fail_at=fail_at), \
+                        patch.object(paths.os, 'open', side_effect=list(range(41,41+fail_at))+[OSError(number,'denied')]), \
+                        patch.object(paths.os, 'close') as closed:
+                    with self.assertRaises(OSError): helper._directory('/nonce/gate/leaf')
+                    self.assertEqual(closed.call_args_list,[call(fd) for fd in range(41,41+fail_at)])
+        with patch.object(paths.os, 'open', side_effect=[41,42]), \
+                patch.object(paths.os, 'close', side_effect=[KeyboardInterrupt(),None]) as closed:
+            with self.assertRaises(KeyboardInterrupt): helper._directory('/nonce/gate')
+            self.assertEqual(closed.call_args_list,[call(41),call(42)])
+
+    def test_relative_ref_walk_close_failure_releases_new_child_without_retry(self):
+        for failure in (OSError(errno.EIO, 'close'), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), patch.object(target.os, 'dup', return_value=41), \
+                    patch.object(target.os, 'open', return_value=42), \
+                    patch.object(target.os, 'close', side_effect=[failure,None]) as closed, \
+                    patch.object(target, '_read_at') as read:
+                with self.assertRaises(type(failure)): target._read_path(40,'refs/heads/main')
+                self.assertEqual(closed.call_args_list,[call(41),call(42)])
+                read.assert_not_called()
+
+    def test_trusted_binary_walk_close_failure_releases_new_child_without_retry(self):
+        for failure in (OSError(errno.EIO, 'close'), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(target.os, 'open', side_effect=[41,42]), \
+                    patch.object(target.os, 'fstat', return_value=SimpleNamespace(st_uid=0,st_mode=0o40755)), \
+                    patch.object(target.os, 'close', side_effect=[failure,None]) as closed:
+                with self.assertRaises(type(failure)): target._trusted_executable('/usr/bin/git')
+                self.assertEqual(closed.call_args_list,[call(41),call(42)])
+
+    def test_launch_journal_close_attempts_both_descriptors_once_on_failure(self):
+        for failure in (OSError(errno.EIO, 'close'), KeyboardInterrupt(), SystemExit()):
+            journal=object.__new__(helper._LaunchJournal);journal.fd=41;journal.parent=42
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(helper.os,'close',side_effect=[failure,None]) as closed:
+                with self.assertRaises(type(failure)): journal.close()
+                self.assertEqual((journal.fd,journal.parent),(-1,-1))
+                journal.close()
+                self.assertEqual(closed.call_args_list,[call(41),call(42)])
+
+    def test_launch_journal_parent_close_error_is_not_retried(self):
+        journal=object.__new__(helper._LaunchJournal);journal.fd=41;journal.parent=42
+        with patch.object(helper.os,'close',side_effect=[None,OSError(errno.EIO,'close')]) as closed:
+            with self.assertRaises(OSError):journal.close()
+            journal.close()
+            self.assertEqual((journal.fd,journal.parent),(-1,-1))
+            self.assertEqual(closed.call_args_list,[call(41),call(42)])
 
 
 if __name__ == '__main__': unittest.main()

@@ -18,11 +18,12 @@ import threading
 import time
 import uuid
 
+from .artifact_paths import READABLE_DIRECTORY_FLAGS, open_directory
 from .artifact_protocol import (ArtifactError, MAX_BLOB_BYTES, MAX_DEPTH, MAX_ENTRIES,
     MAX_METADATA_BYTES, MAX_OBJECT_BYTES, MAX_TARGET_BYTES, RESERVATION_BYTES,
     canonical, validate_path, validate_scope, validate_source, validate_target)
 
-_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_DIR = READABLE_DIRECTORY_FLAGS
 _FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _OID = re.compile(r'[0-9a-f]{40}\Z')
 _BRANCH = re.compile(r'refs/heads/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*\Z')
@@ -61,35 +62,9 @@ def _parts(path):
 
 
 def _open_dir(path):
-    """Search held ancestors without requiring permission to list them.
-
-    Linux O_PATH descriptors support relative open/fstat but not directory
-    reads. Every returned leaf therefore retains _DIR (O_RDONLY), including
-    its no-follow/directory/CLOEXEC constraints. No consumer receives O_PATH.
-    Root itself is not an admitted leaf; reject every root anchor before open.
-    """
-    parts = _parts(path)
-    if not parts:  # POSIX double-slash anchors also have no directory leaf.
-        _fail('UNSAFE_ARTIFACT_PATH')
-    search = getattr(os, 'O_PATH', None)
-    if type(search) is not int or search <= 0:
-        _fail('ARTIFACT_PATH_TRAVERSAL_UNAVAILABLE')
-    search |= os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = None
-    try:
-        fd = os.open('/', search)
-        for index, part in enumerate(parts):
-            child = os.open(part, _DIR if index == len(parts) - 1 else search, dir_fd=fd)
-            previous, fd = fd, child
-            # Transfer ownership first so a failed close still releases child.
-            # Never retry close(previous): on Linux a failed close may have
-            # already released its number for reuse by another thread.
-            os.close(previous)
-        result, fd = fd, None
-        return result
-    finally:
-        if fd is not None:
-            os.close(fd)
+    """Shared Gate traversal; every returned leaf remains readable."""
+    return open_directory(path, invalid_code='UNSAFE_ARTIFACT_PATH',
+                          unsupported_code='ARTIFACT_PATH_TRAVERSAL_UNAVAILABLE')
 
 
 def _names(directory, limit):
@@ -132,7 +107,9 @@ def _read_path(directory, relative, limit=MAX_TEXT):
     fd = os.dup(directory)
     try:
         for part in parts[:-1]:
-            child = os.open(part, _DIR, dir_fd=fd); os.close(fd); fd = child
+            child = os.open(part, _DIR, dir_fd=fd)
+            previous, fd = fd, child
+            os.close(previous)
         return _read_at(fd, parts[-1], limit)
     finally:
         os.close(fd)
@@ -412,7 +389,8 @@ def _trusted_executable(path):
             if parent.st_uid != 0 or parent.st_mode & 0o022:
                 _fail('ARTIFACT_GIT_UNTRUSTED')
             child = os.open(component, _DIR, dir_fd=descriptor)
-            os.close(descriptor); descriptor = child
+            previous, descriptor = descriptor, child
+            os.close(previous)
         parent = os.fstat(descriptor)
         if parent.st_uid != 0 or parent.st_mode & 0o022:
             _fail('ARTIFACT_GIT_UNTRUSTED')

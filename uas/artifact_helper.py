@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from .artifact_paths import open_directory
 from .artifact_protocol import (ArtifactError, PROFILE_ID, HELPER_UID, HELPER_GID, MAX_OUTPUT_BYTES,
     canonical, validate_scope, validate_target, validate_paths, scope_digest,
     encode_request, decode_observation, encode_final_ack)
@@ -70,20 +71,9 @@ def _send(channel, value):
 
 
 def _directory(path):
-    """Hold every no-follow ancestor; never resolve then follow a changed path."""
-    path = Path(path)
-    if not path.is_absolute() or any(p in ('.', '..') for p in path.parts):
-        raise ArtifactError('INVALID_GATE_RESOURCE_PATH')
-    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        for part in path.parts[1:]:
-            following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                                dir_fd=fd)
-            os.close(fd); fd = following
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+    """Shared search-only ancestors and readable leaf; no path resolution."""
+    return open_directory(path, invalid_code='INVALID_GATE_RESOURCE_PATH',
+                          unsupported_code='GATE_PATH_TRAVERSAL_UNAVAILABLE')
 
 
 @dataclass(frozen=True)
@@ -178,11 +168,16 @@ class _LaunchJournal:
         os.fsync(self.fd); self.bytes += count
 
     def close(self):
-        for name in ('fd', 'parent'):
-            fd = getattr(self, name, -1)
-            setattr(self, name, -1)
+        # Retire each number before one close attempt, including interruption.
+        # A failed file close must not skip the independently owned parent.
+        try:
+            fd, self.fd = getattr(self, 'fd', -1), -1
             if fd >= 0:
                 os.close(fd)
+        finally:
+            parent, self.parent = getattr(self, 'parent', -1), -1
+            if parent >= 0:
+                os.close(parent)
 
 
 def _identity_of_stat(info):

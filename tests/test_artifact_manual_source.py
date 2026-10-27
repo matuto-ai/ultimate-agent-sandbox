@@ -29,7 +29,7 @@ class ArtifactManualSourceTests(unittest.TestCase):
     def test_explicit_allowlist_is_complete_bounded_and_all_source_files_are_ordinary(self):
         selected=payload.source_files(ROOT,run.SOURCES)
         self.assertEqual(len(selected),len(run.SOURCES));self.assertLessEqual(len(selected),64)
-        for needed in ('uas/artifact_target.py','uas/artifact_helper.py','uas/gate_evaluation.py',
+        for needed in ('uas/artifact_paths.py','uas/artifact_target.py','uas/artifact_helper.py','uas/gate_evaluation.py',
                        'tests/vm/artifact_hub.py','tests/vm/artifact_supervisor.py',
                        'runtime/workstation/artifact_protocol.h'):
             self.assertIn(needed,run.SOURCES)

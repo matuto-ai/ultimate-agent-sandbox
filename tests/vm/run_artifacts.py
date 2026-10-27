@@ -22,7 +22,7 @@ REQUIRED={'payload','confinement','committed_source','hub_adjudication','native_
 SOURCES=(
     'uas/__init__.py','uas/config.py','uas/gate_policy.py','uas/context.py','uas/forge.py','uas/ledger.py',
     'uas/lifecycle.py','uas/launch.py','uas/peer.py','uas/participant.py','uas/checkouts.py',
-    'uas/artifact_protocol.py','uas/artifact_target.py','uas/artifact_helper.py','uas/gate_evaluation.py',
+    'uas/artifact_protocol.py','uas/artifact_paths.py','uas/artifact_target.py','uas/artifact_helper.py','uas/gate_evaluation.py',
     'uas/docker_exec_api.py','uas/kernel_origin.py','uas/workstation_exec.py','uas/workstation_probe.py',
     'uas/forge_audit.py','uas/run_admission.py','uas/forge_assignment.py','uas/github_assignment.py',
     'uas/github_read.py','uas/github_pr.py',
