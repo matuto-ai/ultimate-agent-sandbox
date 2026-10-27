@@ -1,10 +1,12 @@
 > The later [audited self-assignment slice](forge-assignment.md) adds an opt-in
 > path for currently unassigned issues, preserving the original no-write default
-> and all remaining admission/projection limits described below.
+> and all remaining admission limits described below. The later
+> [Hub projection outbox](forge-projections.md) atomically queues lifecycle labels
+> without making projection success an admission prerequisite.
 
 # Restricted canonical Run-admission foundation
 
-This is an account-free, source-level vertical slice of [#72](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/72), **not complete or generally usable Run management**. #72's formal dependency on #69 remains unsatisfied. No production human authentication, external credential authority, Forge write/projection, human merge, deployment/image, or hostile-Hub qualification is claimed.
+This is an account-free, source-level vertical slice of [#72](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/72), **not complete or generally usable Run management**. The projection outbox is described separately in [Hub projections](forge-projections.md). No production human authentication, live credential/account qualification, human merge, deployment/image, or hostile-Hub qualification is claimed.
 
 ## Connected path
 
@@ -17,7 +19,7 @@ The command names one positive issue number and one configured Pi implementer in
 3. Only an unused first native context is admitted. A fresh official Pi process starts in the actual owned checkout, with the existing fixed account-free recipe and process-bound authority. An already-used or live preceding Run is not relabelled. Native empty-session proof, immutable scope, PID-owned working directory, safe-point evidence and fresh authority must agree. A dead exact pending child can be replaced; unverified live retired PIDs block replacement.
 4. The trusted controller requests an audited Broker read under its owned process authority. This is not a claim that the human request originated as a Pi `gh` tool call. The same provider reads the exact issue, all bounded native blocker pages and all bounded label pages. Eligibility requires an open issue, complete all-closed blockers, exactly the configured implementer's GitHub ID as sole assignee, and one known delivery class. Missing assignment, external conflict, permissions, missing/conflicting labels and incomplete reads hold with durable attention. No assignment is created or overwritten.
 5. Git is reobserved after provider I/O. The final observation must be at most five seconds old; the provider traversal itself is bounded to thirty seconds. This is a bounded observation interval, **not an atomic GitHub snapshot or assignment lock**.
-6. One transaction commits the canonical `ACTIVE` Run, policy/issue/slot/context binding, exactly one `QUEUED` implementation request, and authorization consumption. Existing safe-point delivery then advances the request; timing starts only after the native receipt. Work-request completion or `FixtureContextHub.close_run` cannot complete the canonical Run.
+6. One transaction commits the canonical `ACTIVE` Run, policy/issue/slot/context binding, exactly one `QUEUED` implementation request, authorization consumption, and a derived `pending` lifecycle projection outbox item. Existing safe-point delivery then advances the request; timing starts only after the native receipt. Work-request completion or `FixtureContextHub.close_run` cannot complete the canonical Run.
 
 The checkout/process are prepared before the final eligibility read because this restricted Broker seam needs owned process authority. An ineligible issue may therefore retain a clean owned checkout and an unused native context, but receives no implementation request and no canonical ACTIVE Run.
 
@@ -55,7 +57,7 @@ process stop**. Work already handed to Pi may continue, including Project-file
 changes. New Run-scoped submissions, offers and confirmations are fenced by
 the existing canonical Run scope gate. An in-flight native receipt arriving
 after pause leaves its durable Hub offer UNCONFIRMED; neither control changes
-that unknown into success, cancellation or failure. Resume does not contact the
+that unknown into success, cancellation or failure. Resume atomically enqueues a new projection intent but does not contact the
 provider, relaunch, reset, automatically deliver, or inject another request.
 Normal safe-point delivery may subsequently reconcile the same native receipt
 without reinjection; an unresolved native intent remains unknown. Policy
@@ -77,9 +79,9 @@ inspection/explicit same-root refresh. No new orphan or cleanup state is added.
 
 ## Exact specification boundary
 
-The frozen #58/#72 contracts require fresh facts, exact human authority, unique non-closed work-item ownership, policy/checkout/context binding, conflict attention, and no authorization consumption on capacity failure. This restricted path implements those source invariants for an **already correctly assigned issue**; the protocol explicitly calls Forge lifecycle labels projections, not locks. No accepted sentence makes successful assignment-write/label projection a precondition for a correctly preassigned issue, so no-write source admission can be exercised without inventing #68/#69 behavior. Nevertheless, the formal dependency graph is unchanged and this is not #72 acceptance.
+The frozen #58/#72 contracts require fresh facts, exact human authority, unique non-closed work-item ownership, policy/checkout/context binding, conflict attention, and no authorization consumption on capacity failure. This restricted path implements those source invariants for an **already correctly assigned issue**; the protocol explicitly calls Forge lifecycle labels projections, not locks. No accepted sentence makes successful assignment-write/label projection a precondition for a correctly preassigned issue, so admission may remain authoritative while its separately committed lifecycle projection is pending or failed. The formal dependency graph is unchanged and this is not #72 acceptance.
 
-Canonical Run rows explicitly report `projection: unavailable-no-write-support`. This does not mean a projection succeeded, is absent, or was reconciled. #68/#69 still own audited mutations, uncertain-write reconciliation and the idempotent projection outbox. The existing RoomLedger read audit is not the required Deployment-level Forge audit service.
+Canonical activation now reports `projection: pending`. Its transaction enqueues the derived Hub lifecycle/Run-status labels; pause/resume and blocked Work Request transitions update that intent atomically. The [projection outbox](forge-projections.md) synchronizes through the external audited Broker separately. Unavailable credentials, drift or failed synchronization never rewrite canonical Run truth. The Hub ledger owns intent and view history; the existing Deployment ForgeAudit remains the single owner of provider execution evidence.
 
 **Deliberately unavailable:** admission withdrawal/retargeting, Participant Run Requests/proposal approval, policy migration, coordinator changes, force-stop/terminal stop, canonical Run completion and later cross-Run admission. A held intent retains its issue/Participant/checkout; another issue cannot take that seat. Explicit same-root refresh can resolve repaired facts, but changing one's mind requires later withdrawal/native-reset work. Do not advertise this as general operational Run management or bypass these limitations with fixture close/reset calls. No production CLI/Manager action is exposed.
 

@@ -29,12 +29,22 @@ def reserve_forge_operation(ledger, binding, envelope, origin, authorize):
             or type(origin) is not Origin
             or authorize() is not True):
         raise LedgerError('FORBIDDEN')
-    if (type(envelope) is not dict or set(envelope) not in ({'id','kind','argv'},{'id','kind','argv','body'})
-            or envelope['kind'] not in {'forge-read','forge-write'}
-            or (envelope['kind']=='forge-read' and 'body' in envelope)):
-        raise LedgerError('INVALID_FORGE_ENVELOPE')
-    if envelope['kind'] not in origin.capabilities: raise LedgerError('FORBIDDEN')
-    metadata = {'request_digest':hashlib.sha256((request_json(envelope) if envelope['kind']=='forge-write' else _json(envelope)).encode()).hexdigest(),
+    if type(envelope) is not dict: raise LedgerError('INVALID_FORGE_ENVELOPE')
+    kind=envelope.get('kind')
+    if kind=='forge-reconcile':
+        if (set(envelope)!={'id','kind','audit_reference','mutation'}
+                or type(envelope['mutation']) is not dict
+                or set(envelope['mutation']) not in ({'id','kind','argv'},{'id','kind','argv','body'})
+                or envelope['mutation']['kind']!='forge-write'):
+            raise LedgerError('INVALID_FORGE_ENVELOPE')
+        if not {'forge-read','forge-write'} <= set(origin.capabilities): raise LedgerError('FORBIDDEN')
+    else:
+        if (set(envelope) not in ({'id','kind','argv'},{'id','kind','argv','body'})
+                or kind not in {'forge-read','forge-write'}
+                or (kind=='forge-read' and 'body' in envelope)):
+            raise LedgerError('INVALID_FORGE_ENVELOPE')
+        if kind not in origin.capabilities: raise LedgerError('FORBIDDEN')
+    metadata = {'request_digest':hashlib.sha256((request_json(envelope) if kind!='forge-read' else _json(envelope)).encode()).hexdigest(),
         'host':binding.host,'repository':binding.repository}
     command = Command(envelope['id'],envelope['kind']+'-external',binding.project_id,None,metadata)
     try:
@@ -47,7 +57,7 @@ def reserve_forge_operation(ledger, binding, envelope, origin, authorize):
 
 
 def reserve_read_operation(ledger,binding,envelope,origin,authorize):
-    if type(envelope) is dict and envelope.get('kind')=='forge-write':
+    if type(envelope) is dict and envelope.get('kind') in {'forge-write','forge-reconcile'}:
         raise LedgerError('INVALID_FORGE_ENVELOPE')
     return reserve_forge_operation(ledger,binding,envelope,origin,authorize)
 
@@ -138,15 +148,21 @@ class ReadBrokerClient:
                 raise OriginDenied('unexpected Broker identity')
             ready = json.loads(record.data)
             expected = {'kind': 'READ_BROKER_READY', 'nonce': nonce, 'binding':scope}
-            self.write_enabled = ready == {**expected,'mutation_enabled':True}
-            if ready != expected and not self.write_enabled:
+            if type(ready) is not dict: raise OriginDenied('invalid Broker bootstrap')
+            self.write_enabled = ready.get('mutation_enabled') is True
+            self.projection_enabled = ready.get('projection_enabled') is True
+            extensions={**({'mutation_enabled':True} if self.write_enabled else {}),
+                **({'projection_enabled':True} if self.projection_enabled else {})}
+            if ready != {**expected,**extensions}:
                 raise OriginDenied('uncorrelated Broker bootstrap')
             self.worker = HeldOrigin(record)
 
     def prepare(self, envelope, origin, *, authorize=None):
         if self.closed or type(origin) is not Origin: raise LedgerError('FORBIDDEN')
-        if type(envelope) is dict and envelope.get('kind')=='forge-write' and not self.write_enabled:
+        if type(envelope) is dict and envelope.get('kind') in {'forge-write','forge-reconcile'} and not self.write_enabled:
             raise LedgerError('FORGE_WRITE_UNAVAILABLE')
+        if type(envelope) is dict and envelope.get('kind')=='forge-projection' and not self.projection_enabled:
+            raise LedgerError('FORGE_PROJECTION_UNAVAILABLE')
         state = self.supervisor._read()  # Caller holds existing lifecycle lock.
         if (not state or state['phase'] != 'running' or state['instance_id'] != self.room_instance
                 or state['spec']['project_id'] != self.binding.project_id):
@@ -196,7 +212,7 @@ class ReadBrokerClient:
                 if guard is not None:
                     with self.supervisor._locked():
                         if guard() is not True: raise LedgerError('FORBIDDEN')
-                return ({'admission':'not-evaluated', **result['observation']} if packet['envelope']['kind']=='forge-write'
+                return ({'admission':'not-evaluated', **result['observation']} if packet['envelope']['kind'] in {'forge-write','forge-reconcile','forge-projection'}
                         else {'admission': 'not-evaluated', 'observation': result['observation']})
             except (OSError, OriginDenied, ValueError):
                 self.close()
@@ -222,6 +238,39 @@ class ReadBrokerClient:
         self.channel.close()
 
 
+class ProjectionBrokerClient:
+    """Trusted Hub adapter over the existing Supervisor-owned private channel.
+
+    No Participant dispatch accepts forge-projection. Every authority challenge
+    rechecks both the Room incarnation and current outbox version before contact.
+    """
+    def __init__(self, client):
+        if type(client) is not ReadBrokerClient or not client.projection_enabled:
+            raise LedgerError('FORGE_PROJECTION_UNAVAILABLE')
+        self.client=client
+
+    def _call(self,action,intent,operation,authorize,observed=None):
+        from .forge_projection_broker import hub_origin
+        envelope={'id':operation,'kind':'forge-projection','action':action,'intent':intent}
+        if observed is not None:envelope['observed']=observed
+        def guard():
+            state=self.client.supervisor._read()
+            return (state is not None and state['phase']=='running'
+                and state['instance_id']==self.client.room_instance and authorize() is True)
+        with self.client.supervisor._locked():
+            if not guard():raise LedgerError('FORBIDDEN')
+            packet=self.client.prepare(envelope,hub_origin(self.client.room_instance),authorize=guard)
+        reply=self.client.perform(packet)
+        reply.pop('admission',None)
+        return reply
+
+    def observe(self,intent,operation_id,*,authorize):
+        return self._call('observe',intent,operation_id,authorize)
+
+    def repair(self,intent,operation_id,observed,*,authorize):
+        return self._call('repair',intent,operation_id,authorize,observed)
+
+
 def serve(channel, broker, *, supervisor_uid, supervisor_gid):
     """Fixed external process entrypoint over an inherited private endpoint."""
     if type(broker) is not ExternalReadBroker: raise LedgerError('INVALID_READ_BROKER')
@@ -239,7 +288,8 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
         supervisor = HeldOrigin(record)
     try:
         ready = _json({'kind':'READ_BROKER_READY','nonce':hello['nonce'],'binding':hello['binding'],
-            **({'mutation_enabled':True} if broker.mutations is not None else {})}).encode()
+            **({'mutation_enabled':True} if broker.mutations is not None else {}),
+            **({'projection_enabled':True} if broker.projections is not None else {})}).encode()
         if channel.send(ready) != len(ready): raise OriginDenied('partial Broker bootstrap')
         while alive(supervisor.pidfd):
             try:
@@ -269,7 +319,7 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
                 origin = Origin(**{**origin_doc, 'capabilities': tuple(origin_doc['capabilities'])})
                 def current_authority():
                     if not alive(supervisor.pidfd): return False
-                    if packet['envelope'].get('kind')!='forge-write': return True
+                    if packet['envelope'].get('kind') not in {'forge-write','forge-reconcile','forge-projection'}: return True
                     nonce = uuid.uuid4().hex
                     send_result(channel,packet['request_id'],{'authorize':nonce})
                     with receive(channel) as record:
@@ -334,7 +384,7 @@ def main():
     config = json.loads(sys.stdin.buffer.readline(16385), object_pairs_hook=_unique_object)
     expected = {'room_id','room_instance','project_id','repository','deployment_id','audit_path',
         'result_root','credential_path','gh_executable','gh_sha256','supervisor_uid','supervisor_gid'}
-    if (type(config) is not dict or set(config) not in (expected,expected|{'mutation_actors','work_labels'})
+    if (type(config) is not dict or set(config) not in (expected,expected|{'mutation_actors','work_labels'},expected|{'mutation_actors','work_labels','projection_actor'})
             or any(type(config[k]) is not int or config[k] <= 0 for k in ('supervisor_uid','supervisor_gid'))
             or config['supervisor_uid'] == os.getuid()):
         raise LedgerError('INVALID_READ_BROKER')
@@ -367,7 +417,16 @@ def main():
             mutations = ExternalMutationBroker(binding,config['room_instance'],audit,config['mutation_actors'],
                 mutation_provider,work_labels=config['work_labels'])
             mutations.recover(lambda _:True)
-        broker = ExternalReadBroker(binding,config['room_instance'],audit,select,config['result_root'],mutations=mutations)
+        projections=None
+        if 'projection_actor' in config:
+            from .forge_projection_broker import ExternalProjectionBroker
+            actor=config['projection_actor']
+            if type(actor) is not str or actor not in config['mutation_actors']:
+                raise LedgerError('INVALID_PROJECTION_OWNER')
+            projections=ExternalProjectionBroker(binding,config['room_instance'],audit,actor,
+                config['mutation_actors'][actor],mutation_provider)
+        broker = ExternalReadBroker(binding,config['room_instance'],audit,select,config['result_root'],
+            mutations=mutations,projections=projections)
         # The exclusive owner lock proves no old process can still complete a
         # pending read. Recovery records unknown, never repeats provider I/O.
         broker.recover(lambda _:True)

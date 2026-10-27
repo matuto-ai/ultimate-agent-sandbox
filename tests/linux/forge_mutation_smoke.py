@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 FAKE_GH = r'''#!/usr/bin/python3
 import hashlib,json,os,pathlib,sys
-from urllib.parse import unquote
+from urllib.parse import unquote,parse_qs
 credentials=pathlib.Path(CREDENTIAL_PATH)
 state_path=pathlib.Path(STATE_PATH)
 late_flag=pathlib.Path(LATE_PATH)
@@ -35,6 +35,7 @@ assert args[:4]==['api','--hostname','github.com','--method']
 method=args[4]
 assert args[5:10]==['--include','-H','Accept: application/vnd.github+json','-H','X-GitHub-Api-Version: 2026-03-10']
 path=args[10]
+bare,_,query=path.partition('?')
 assert args[11:] in ([],['--input','-'])
 raw=sys.stdin.buffer.read(1114113) if args[11:] else b''
 assert len(raw)<=1114112
@@ -49,6 +50,10 @@ web='https://github.com/owner/repo'
 def save():state_path.write_text(json.dumps(state))
 def emit(status,value):
  save()
+ if method!='GET' and type(body) is dict and str(body.get('body','')).startswith('lose-create-comment-review:'):
+  os._exit(13)
+ if method=='POST' and bare.endswith('/labels') and state.get('lose_projection_once'):
+  state['lose_projection_once']=False;save();os._exit(13)
  text=json.dumps(value,separators=(',',':'))
  sys.stdout.write('HTTP/2.0 '+str(status)+' Fixture\nContent-Type: application/json\r\n\r\n'+text)
  sys.exit(0 if status<400 else 1)
@@ -63,7 +68,17 @@ def issue_facade(number):
 if method=='GET':
  if path=='user':emit(200,{'id':41,'login':'fixture-actor'})
  if path=='repos/owner/repo':emit(200,{'id':12,'full_name':'owner/repo','html_url':web,'url':api,'private':True,'default_branch':'main','description':'fixture'})
- bits=path.split('/')
+ bits=bare.split('/')
+ if query:
+  page=int(parse_qs(query)['page'][0])
+  if bare=='repos/owner/repo/issues':values=list(state['issues'].values())
+  elif bare=='repos/owner/repo/pulls':values=list(state['pulls'].values())
+  elif bare.endswith('/labels'):values=[{'id':10000+i,'name':v} for i,v in enumerate(state['labels'].get(bits[4],[]))]
+  elif bare.endswith('/comments'):values=[v for v in state['comments'] if v.get('pull_request_url' if bits[3]=='pulls' else 'issue_url')==api+'/'+bits[3]+'/'+bits[4]]
+  elif bare.endswith('/reviews'):values=[v for v in state['reviews'] if v['pull_request_url']==api+'/pulls/'+bits[4]]
+  elif bare.endswith('/dependencies/blocked_by'):values=[v for v in state['issues'].values() if v['id'] in state['dependencies'].get(bits[4],[])]
+  else:raise AssertionError('unsupported collection')
+  emit(200,values[(page-1)*100:page*100])
  if bits[3]=='issues' and len(bits)==5:emit(200,issue_facade(int(bits[4])))
  if bits[3]=='pulls' and len(bits)==5:emit(200,state['pulls'][bits[4]])
  if bits[3:5]==['pulls','comments'] and len(bits)==6:emit(200,{'id':int(bits[5]),'pull_request_url':api+'/pulls/11'})
@@ -84,6 +99,9 @@ if method=='PATCH' and len(bits)==5:
   if key=='base':current['base']['ref']=value
   else:current[key]=value
  if body.get('title')=='late-revocation':late_flag.write_text('1')
+ if body.get('title')=='external-drift':state['labels'][str(number)]=['type:bug','run:paused']
+ if body.get('title')=='arm-projection-loss':
+  state['labels'][str(number)]=['type:bug','run:paused'];state['lose_projection_once']=True
  if body.get('body','').startswith('lost-after-contact:'):save();os._exit(13)
  emit(200,current)
 if bits[5:] == ['assignees']:
@@ -157,7 +175,7 @@ def status(receipt,expected,fields=None):
  if fields is not None:assert receipt['mutation']['confirmed_fields']==fields,receipt
  return receipt
 lost_argv=['issue','edit','1','--body-file','-']
-lost_body='lost-after-contact:'+('\"'*(512*1024-len('lost-after-contact:')))
+lost_body='lost-after-contact:'+('x'*(512*1024-len('lost-after-contact:')))
 if PHASE=='restart':
  unknown=status(invoke('lost',lost_argv,lost_body),'UNKNOWN_OUTCOME',[])
  try:invoke('fenced-after-restart',['issue','edit','1','--title','must-not-execute'])
@@ -165,6 +183,68 @@ if PHASE=='restart':
  else:raise AssertionError('restart bypassed unknown write fence')
  print(json.dumps({'phase':'restart','unknown_receipt':'retained','duplicate_write':'blocked'}))
  client.close();sys.exit(0)
+
+
+def reconcile(operation,original,receipt):
+ request={'id':operation,'kind':'forge-reconcile','audit_reference':receipt['audit_reference'],'mutation':original}
+ result=client.perform(client.prepare(request,origin,authorize=authority))
+ assert result['reconciliation']['status']=='MATCHED',result
+ assert result['reconciliation']['attribution']=='observed-only'
+ assert client.perform(client.prepare(request,origin,authorize=authority))==result
+ return result
+
+if PHASE=='reconcile':
+ unknown=status(invoke('lost',lost_argv,lost_body),'UNKNOWN_OUTCOME',[])
+ reconcile('resolve-original',envelope('lost',lost_argv,lost_body),unknown)
+ status(invoke('shrink-one',['issue','edit','1','--body','bounded-after-recovery']),'OK')
+ status(invoke('shrink-seven',['issue','edit','7','--body','bounded-after-quota-test']),'OK')
+ lost_commands=[
+  ['issue','create','--title','lost-created-object','--body','lose-create-comment-review:create'],
+  ['issue','comment','1','--body','lose-create-comment-review:comment'],
+  ['pr','review','11','--approve','--commit','a'*40,'--body','lose-create-comment-review:review']]
+ for index,argv in enumerate(lost_commands):
+  operation='lost-object-'+str(index)
+  receipt=status(invoke(operation,argv),'UNKNOWN_OUTCOME',[])
+  reconcile('resolve-object-'+str(index),envelope(operation,argv),receipt)
+  assert invoke(operation,argv)==receipt
+ partial_args=['issue','edit','1','--title','partial-title','--body','lost-after-contact:partial']
+ partial=status(invoke('lost-multifield',partial_args),'UNKNOWN_OUTCOME',['title'])
+ reconcile('resolve-multifield',envelope('lost-multifield',partial_args),partial)
+ status(invoke('assign-hub-target',['issue','edit','1','--add-assignee','@me']),'OK')
+ status(invoke('work-label',['issue','edit','1','--add-label','type:bug']),'OK')
+ from uas.forge_read_service import ProjectionBrokerClient
+ from uas.forge_projections import ProjectionOutbox,enqueue_run_projection
+ from uas.ledger import RoomLedger,Command,Event,Transition
+ from uas.forge_projection_broker import hub_origin
+ ledger=RoomLedger(ROOM_LEDGER,'alpha')
+ hub=hub_origin('instance-1')
+ def seed(state,_):
+  state['runs']={'run-fixture':{'run_id':'run-fixture','status':'ACTIVE','generation':1,'project_id':'project',
+    'repository':'owner/repo','issue_number':1,'issue_id':101,'github_user_id':41}}
+  event=enqueue_run_projection(state,'alpha','run-fixture')
+  return Transition(state,(event,),{})
+ ledger.apply(Command('seed-run','fixture.seed','run-fixture',None,{}),hub,authorize=lambda *_:True,decide=seed)
+ outbox=ProjectionOutbox(ledger,ForgeBinding('alpha','project','owner/repo'),ProjectionBrokerClient(client))
+ first=outbox.advance('initial-sync','run-fixture',origin=hub,authorize=authority)
+ assert first['state']=='repaired',first
+ assert outbox.advance('initial-sync','run-fixture',origin=hub,authorize=authority)==first
+ status(invoke('external-label-drift',['issue','edit','1','--title','external-drift']),'OK')
+ repaired=outbox.advance('drift-sync','run-fixture',origin=hub,authorize=authority)
+ assert repaired['state']=='repaired',repaired
+ status(invoke('arm-label-loss',['issue','edit','1','--title','arm-projection-loss']),'OK')
+ uncertain=outbox.advance('lost-projection','run-fixture',origin=hub,authorize=authority)
+ assert uncertain['state']=='unknown',uncertain
+ assert outbox.advance('lost-projection','run-fixture',origin=hub,authorize=authority)==uncertain
+ ledger.close();ledger=RoomLedger(ROOM_LEDGER,'alpha')
+ outbox=ProjectionOutbox(ledger,ForgeBinding('alpha','project','owner/repo'),ProjectionBrokerClient(client))
+ final=outbox.advance('recover-projection','run-fixture',origin=hub,authorize=authority)
+ assert final['state']=='repaired',final
+ assert ledger.snapshot()['state']['runs']['run-fixture']['status']=='ACTIVE'
+ assert any(e['kind']=='forge.projection-drifted' for e in ledger.replay(0))
+ ledger.close();client.close()
+ print(json.dumps({'phase':'reconcile','lost_create_comment_review_multifield':'MATCHED-observed-only',
+  'duplicate_writes':'none','hub_outbox_restart':'repaired','external_label_drift':'repaired','run_truth':'ACTIVE'}))
+ sys.exit(0)
 
 created_argv=['issue','create','--title','private-issue-title','--body','PRIVATE-CREATE-BODY',
               '--repo','OWNER/REPO','--label','type:bug,type:bug','--assignee','@me']
@@ -188,7 +268,7 @@ assert partial['mutation']['failed_field']=='body',partial
 assert invoke('partial',partial_argv)==partial
 status(invoke('after-definite-rejection',['issue','edit','1','--title','after-403']),'OK',['title'])
 
-large='PRIVATE-LARGE-BODY:'+('x'*(512*1024-len('PRIVATE-LARGE-BODY:')))
+large='PRIVATE-LARGE-BODY:'+('\"'*1024)+('x'*(512*1024-len('PRIVATE-LARGE-BODY:')-1024))
 status(invoke('body-limit',['issue','edit','7','--body-file','-'],large),'OK',['body'])
 rejected=status(invoke('too-large',['issue','edit','1','--body-file','-'],large+'x'),'DENIED',[])
 assert rejected['diagnostic']['code']=='BODY_LIMIT',rejected
@@ -227,7 +307,7 @@ else:raise AssertionError('new operation ID bypassed unknown write fence')
 client.close()
 print(json.dumps({'phase':'initial','external_broker_uid':65531,'supervisor_uid':65533,
  'issue_comment_label_dependency_pull_review':'OK','warning_exit_code':0,'partial':'confirmed-title-only',
- 'body_bytes':512*1024,'escaped_body_bytes':512*1024,'oversize':'DENIED','late_authority':'FORBIDDEN',
+ 'body_bytes':512*1024,'framed_write_body_bytes':512*1024,'oversize':'DENIED','late_authority':'FORBIDDEN',
  'lost_response':'UNKNOWN_OUTCOME','exact_replay':'no-provider-contact','private_credentials':'denied'}))
 '''
 
@@ -306,27 +386,30 @@ def run():
             'result_root': str(private / 'results'), 'credential_path': str(credentials),
             'gh_executable': str(executable), 'gh_sha256': hashlib.sha256(executable.read_bytes()).hexdigest(),
             'supervisor_uid': 65533, 'supervisor_gid': 65533, 'mutation_actors': {'actor-a': 41},
-            'work_labels': ['type:bug']}
+            'work_labels': ['type:bug'], 'projection_actor':'actor-a'}
         outputs = []
         call_count = None
-        for phase in ('initial', 'restart'):
+        room_store=root/'hub';room_store.mkdir(mode=0o700);os.chown(room_store,65533,65533)
+        for phase in ('initial', 'restart', 'reconcile'):
             script = SUPERVISOR.replace('PRIVATE_PATHS', repr([str(credentials), str(state_path), str(private / 'audit.db')]))
-            script = script.replace('LATE_PATH', repr(str(late_path))).replace('PHASE', repr(phase))
+            script = script.replace('LATE_PATH', repr(str(late_path))).replace('PHASE', repr(phase)).replace('ROOM_LEDGER',repr(str(room_store/'room.db')))
             out, err = run_session(code, config, script)
             assert secret not in out and secret not in err
             outputs.append(out.strip())
             current = json.loads(state_path.read_text())
             if phase == 'initial': call_count = len(current['calls'])
-            else: assert len(current['calls']) == call_count, 'restart replay contacted provider'
+            elif phase=='restart': assert len(current['calls']) == call_count, 'restart replay contacted provider'
+            elif phase=='reconcile': assert len(current['calls'])>call_count
         state = json.loads(state_path.read_text())
-        assert state['next_issue'] == 21 and state['next_pull'] == 31
-        assert len(state['comments']) == 2 and len(state['reviews']) == 1
-        assert state['issues']['1']['title'] == 'late-revocation'
+        assert state['next_issue'] == 22 and state['next_pull'] == 31
+        assert len(state['comments']) == 3 and len(state['reviews']) == 2
+        assert state['issues']['1']['title'] == 'arm-projection-loss'
         assert state['issues']['1']['body'].startswith('lost-after-contact:')
-        assert len(state['issues']['1']['body'].encode()) == 512 * 1024
-        assert any(call['body_bytes']>1048576-128 for call in state['calls'])
+        assert state['issues']['1']['body']=='lost-after-contact:partial'
+        assert any(call['body_bytes']>512*1024 for call in state['calls'])
         assert state['issues']['8']['title'] == 'fixture'
-        assert len(state['issues']['7']['body'].encode()) == 512 * 1024
+        assert state['issues']['7']['body']=='bounded-after-quota-test'
+        assert set(state['labels']['1'])=={'type:bug','lifecycle:active','run:active'}
         assert state['dependencies']['1'] == []
         with sqlite3.connect(private / 'audit.db') as db:
             starts = db.execute('SELECT metadata FROM mutation_starts').fetchall()
@@ -338,7 +421,8 @@ def run():
             assert all(json.loads(row[0])['related_id'] == 102 for row in dependency)
             partial = [json.loads(row[0]) for row in terminals if json.loads(row[0])['status'] == 'PARTIAL_MUTATION']
             assert len(partial) == 1 and partial[0]['confirmed_fields'] == ['title']
-            assert sum(json.loads(row[0])['status'] == 'UNKNOWN_OUTCOME' for row in terminals) == 1
+            assert sum(json.loads(row[0])['status'] == 'UNKNOWN_OUTCOME' for row in terminals) == 6
+            assert db.execute('SELECT count(*) FROM mutation_observations').fetchone()[0]>=6
         forbidden = (secret, 'PRIVATE-CREATE-BODY', 'PRIVATE-COMMENT-BODY', 'PRIVATE-PULL-BODY',
                      'PRIVATE-REPLY-BODY', 'PRIVATE-REVIEW-BODY', 'PRIVATE-LARGE-BODY',
                      'PRIVATE-PROVIDER-ERROR', 'private-issue-title', 'private-pull-title', str(root))

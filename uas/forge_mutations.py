@@ -82,6 +82,7 @@ class ExternalMutationBroker:
             'request_digest':digest(envelope),'origin_digest':digest(origin.canonical())}
         possible_contact = False
         durable_fields, durable_objects, durable_steps = [], [], []
+        prepared_intents = {}
         try:
             begun = self.audit.begin_mutation(key,metadata)
             if not begun['started']:
@@ -94,7 +95,8 @@ class ExternalMutationBroker:
                     return True
                 def before(step,target):
                     nonlocal possible_contact
-                    guard();self.audit.mutation_prepared(key,step,target)
+                    guard();self.audit.mutation_prepared(key,step,target,
+                        **({'intent':prepared_intents.pop(step)} if step in prepared_intents else {}))
                     possible_contact = True
                 def confirmed(step,fields,obj):
                     self.audit.mutation_confirmed(key,step,fields,obj)
@@ -113,7 +115,9 @@ class ExternalMutationBroker:
                 else:
                     try:
                         outcome = provider.execute(route,self.actors[origin.actor_id],before_write=before,
-                            confirmed=confirmed,rejected=rejected,authorize=guard)
+                            confirmed=confirmed,rejected=rejected,authorize=guard,
+                            marker=self._marker(key,metadata),
+                            prepared_intent=lambda step,intent:prepared_intents.__setitem__(step,intent))
                     except LedgerError as error:
                         if error.code=='AUDIT_UNAVAILABLE': raise
                         record = self.audit.get_mutation(key)
@@ -156,3 +160,79 @@ class ExternalMutationBroker:
                 if not any(step['error_code'] not in {'AUTHORITY_REVOKED_BEFORE_CONTACT','TIMEOUT_BEFORE_CONTACT'} for step in record['steps']):
                     outcome['contact']='read'
             self.audit.finish_mutation(record['operation_id'],outcome)
+
+    def _marker(self, key, metadata):
+        return '<!-- uas:mutation:' + digest(['uas-mutation-v1',self.audit.deployment_id,
+            key,metadata['request_digest']]) + ' -->'
+
+    @staticmethod
+    def _unknown_reconciliation(code='INTERRUPTED_OBSERVATION'):
+        return {'status':'UNKNOWN','fields':[],'objects':[],'contact':'read',
+            'attribution':'observed-only','error_code':code}
+
+    def reconcile(self, envelope, *, origin, authorize):
+        """Current authenticated Actor resubmits the exact original request.
+
+        Its body remains ephemeral and digest-checked, never journal content.
+        A replacement seat may inspect the same Actor's terminal operation,
+        but cannot adopt an in-flight old owner or change the original intent.
+        """
+        self._authorize(origin,authorize)
+        if 'forge-read' not in origin.capabilities: raise LedgerError('FORBIDDEN')
+        if (type(envelope) is not dict or set(envelope) != {'id','kind','audit_reference','mutation'}
+                or envelope['kind']!='forge-reconcile'
+                or type(envelope['mutation']) is not dict
+                or set(envelope['mutation']) not in ({'id','kind','argv'},{'id','kind','argv','body'})
+                or envelope['mutation']['kind']!='forge-write'):
+            raise LedgerError('INVALID_FORGE_ENVELOPE')
+        key=_token(envelope['audit_reference']);original=envelope['mutation']
+        reconciliation='mutation-reconcile-'+digest([self.binding.room_id,self.room_instance,_token(envelope['id'])])
+        record=self.audit.get_mutation(key)
+        if record is None: raise LedgerError('FORGE_AUDIT_NOT_FOUND')
+        meta=record['metadata']
+        if (meta['room_id']!=self.binding.room_id or meta['project_id']!=self.binding.project_id
+                or meta['repository']!=self.binding.repository or meta['actor_id']!=origin.actor_id
+                or meta['github_user_id']!=self.actors[origin.actor_id]):
+            raise LedgerError('FORBIDDEN')
+        if (meta['request_digest']!=digest(original) or key!='mutation-'+digest(
+                [self.binding.room_id,meta['room_instance'],_token(original['id'])])):
+            raise LedgerError('OPERATION_CONFLICT')
+        route=parse_mutation_route(original['argv'],self.project,body=original.get('body'),work_labels=self.work_labels)
+        if route.kind!=meta['route']: raise LedgerError('OPERATION_CONFLICT')
+        attempt_meta={'room_instance':self.room_instance,'origin_digest':digest(origin.canonical()),
+            'request_digest':digest(envelope)}
+        try:
+            begun=self.audit.begin_mutation_reconciliation(key,reconciliation,attempt_meta)
+            if begun['started']:
+                from .github_reconciliation import GitHubReconciliationProvider
+                def guard():
+                    self._authorize(origin,authorize)
+                    return True
+                guard()
+                try: provider=self.providers(origin.actor_id)
+                except Exception: provider=None
+                if type(provider) is not GitHubMutationProvider or provider.project!=self.project:
+                    observation=self._unknown_reconciliation('CREDENTIAL_UNAVAILABLE')
+                else:
+                    # A legacy v3 start has no marker provenance. Never invent
+                    # a marker and use its absence to declare an old POST absent.
+                    marker=(self._marker(key,meta) if any(step['intent'] is not None
+                        for step in record['steps']) else None)
+                    try:
+                        observation=GitHubReconciliationProvider(self.project,provider.transport).reconcile(
+                            route,meta['github_user_id'],record,marker=marker,authorize=guard)
+                    except LedgerError:
+                        self.audit.observe_mutation(key,reconciliation,self._unknown_reconciliation('AUTHORITY_REVOKED'))
+                        raise
+                record=self.audit.observe_mutation(key,reconciliation,observation)
+            else: record=begun['record']
+            observation=next(row['observation'] for row in record['reconciliations'] if row['id']==reconciliation)
+            if observation is None: observation=self._unknown_reconciliation()
+            self._authorize(origin,authorize)
+            return {'operation_id':envelope['id'],'audit_reference':key,'reconciliation_reference':reconciliation,
+                'repository':self.binding.repository,'project_id':self.binding.project_id,
+                'mutation':record['result'],'reconciliation':observation,
+                'exit_code':0 if observation['status'] in {'MATCHED','ABSENT'} else 1,'warnings':[]}
+        except LedgerError as error:
+            if error.code=='AUDIT_UNAVAILABLE': self.failed=True
+            raise

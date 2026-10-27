@@ -77,9 +77,9 @@ class MutationBrokerTests(unittest.TestCase):
                 self.audit.close()
                 self.setUp()
             allowed=True;original=self.audit.mutation_prepared
-            def checkpoint(operation,step,target):
+            def checkpoint(operation,step,target,**kwargs):
                 nonlocal allowed
-                record=original(operation,step,target)
+                record=original(operation,step,target,**kwargs)
                 if step==fail_step:allowed=False
                 return record
             with patch.object(self.audit,'mutation_prepared',side_effect=checkpoint):

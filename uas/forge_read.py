@@ -25,7 +25,7 @@ def _digest(value):
 
 
 class ExternalReadBroker:
-    def __init__(self, binding, room_instance, audit, provider_for_actor, result_root, *, mutations=None):
+    def __init__(self, binding, room_instance, audit, provider_for_actor, result_root, *, mutations=None, projections=None):
         if (type(binding) is not ForgeBinding or type(audit) is not ForgeAudit
                 or not callable(provider_for_actor)):
             raise LedgerError('INVALID_READ_BROKER')
@@ -40,6 +40,7 @@ class ExternalReadBroker:
             raise LedgerError('INVALID_STORE')
         self.failed = False
         self.mutations = mutations
+        self.projections = projections
 
     def _authorize(self, origin, authorize):
         if self.failed:
@@ -90,11 +91,22 @@ class ExternalReadBroker:
             return {'status': 'RESULT_UNAVAILABLE', 'completeness': 'unknown'}
 
     def execute(self, envelope, *, origin, authorize):
-        if type(envelope) is dict and envelope.get('kind') == 'forge-write':
+        if type(envelope) is dict and envelope.get('kind')=='forge-projection':
+            if self.failed: raise LedgerError('AUDIT_UNAVAILABLE')
+            if self.projections is None: raise LedgerError('FORGE_PROJECTION_UNAVAILABLE')
+            try:
+                result=self.projections.execute(envelope,origin=origin,authorize=authorize)
+                self.failed=self.failed or self.projections.failed
+                return result
+            except LedgerError as error:
+                if error.code=='AUDIT_UNAVAILABLE':self.failed=True
+                raise
+        if type(envelope) is dict and envelope.get('kind') in {'forge-write','forge-reconcile'}:
             if self.failed: raise LedgerError('AUDIT_UNAVAILABLE')
             if self.mutations is None: raise LedgerError('FORGE_WRITE_UNAVAILABLE')
             try:
-                result = self.mutations.execute(envelope,origin=origin,authorize=authorize)
+                result = (self.mutations.reconcile if envelope['kind']=='forge-reconcile' else self.mutations.execute)(
+                    envelope,origin=origin,authorize=authorize)
                 self.failed = self.failed or self.mutations.failed
                 return result
             except LedgerError as error:

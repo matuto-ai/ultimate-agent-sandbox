@@ -36,6 +36,12 @@ _MUTATION_SCHEMA = {
     'mutation_rejected': 'CREATE TABLE mutation_rejected (id TEXT NOT NULL, step INTEGER NOT NULL, error_code TEXT NOT NULL, timestamp TEXT NOT NULL, PRIMARY KEY(id,step), FOREIGN KEY(id,step) REFERENCES mutation_prepared(id,step))',
     'mutation_terminals': 'CREATE TABLE mutation_terminals (id TEXT PRIMARY KEY REFERENCES mutation_starts(id), result TEXT NOT NULL, timestamp TEXT NOT NULL)',
 }
+_RECONCILIATION_SCHEMA = {
+    'projection_plans': 'CREATE TABLE projection_plans (id TEXT PRIMARY KEY REFERENCES mutation_starts(id), plan TEXT NOT NULL)',
+    'mutation_intents': 'CREATE TABLE mutation_intents (id TEXT NOT NULL, step INTEGER NOT NULL, intent TEXT NOT NULL, PRIMARY KEY(id,step), FOREIGN KEY(id,step) REFERENCES mutation_prepared(id,step))',
+    'mutation_reconciliation_starts': 'CREATE TABLE mutation_reconciliation_starts (seq INTEGER PRIMARY KEY, id TEXT NOT NULL REFERENCES mutation_starts(id), reconciliation_id TEXT UNIQUE NOT NULL, metadata TEXT NOT NULL, timestamp TEXT NOT NULL)',
+    'mutation_observations': 'CREATE TABLE mutation_observations (reconciliation_id TEXT PRIMARY KEY REFERENCES mutation_reconciliation_starts(reconciliation_id), observation TEXT NOT NULL, timestamp TEXT NOT NULL)',
+}
 _MUTATION_METADATA = {'room_id', 'room_instance', 'project_id', 'repository',
     'actor_id', 'participant_id', 'incarnation_id', 'authority_version',
     'github_user_id', 'provider_host', 'route', 'request_digest', 'origin_digest'}
@@ -44,7 +50,7 @@ MUTATION_FIELDS = frozenset({'create', 'title', 'body', 'state', 'add-assignee',
     'comment', 'reply', 'review', 'base', 'head', 'draft'})
 _MUTATION_ROUTES = frozenset({'issue-create', 'issue-edit', 'issue-close', 'issue-reopen',
     'issue-comment', 'pr-create', 'pr-edit', 'pr-close', 'pr-reopen', 'pr-comment',
-    'pr-reply', 'pr-review', 'dependency-add', 'dependency-remove', 'denied'})
+    'pr-reply', 'pr-review', 'dependency-add', 'dependency-remove', 'hub-projection', 'denied'})
 _MUTATION_STATUSES = frozenset({'OK', 'PARTIAL_MUTATION', 'UNKNOWN_OUTCOME',
     'NOT_EXECUTED', 'PROVIDER_FAILURE', 'DENIED'})
 _MUTATION_ERRORS = frozenset({'TIMEOUT_BEFORE_CONTACT', 'AUTHORITY_REVOKED_BEFORE_CONTACT', 'INVALID_RESPONSE', 'OUTPUT_LIMIT', 'TIMEOUT',
@@ -318,6 +324,58 @@ def _mutation_stamp(value):
         raise ValueError()
 
 
+def _mutation_intent(value):
+    if (type(value) is not dict or set(value) != {'fields','item_index','preimage_digest'}
+            or (value['item_index'] is not None and (type(value['item_index']) is not int
+                or not 0 <= value['item_index'] < 32))
+            or (value['preimage_digest'] is not None and (type(value['preimage_digest']) is not str
+                or not _SHA256.fullmatch(value['preimage_digest'])))):
+        raise LedgerError('INVALID_FORGE_AUDIT')
+    _mutation_fields(value['fields'])
+    if (value['item_index'] is not None) != (len(value['fields']) == 1 and
+            value['fields'][0] in {'add-label','remove-label'}):
+        raise LedgerError('INVALID_FORGE_AUDIT')
+    return json.loads(_json(value))
+
+
+def _reconciliation_metadata(value):
+    if (type(value) is not dict or set(value) != {'room_instance','origin_digest','request_digest'}
+            or any(type(value[key]) is not str or not _SHA256.fullmatch(value[key])
+                for key in ('origin_digest','request_digest'))):
+        raise LedgerError('INVALID_FORGE_AUDIT')
+    _token(value['room_instance'])
+    return json.loads(_json(value))
+
+
+def _mutation_observation(value):
+    statuses = {'MATCHED','ABSENT','CONFLICT','UNKNOWN'}
+    if (type(value) is not dict or set(value) != {'status','fields','objects','contact','attribution','error_code'}
+            or type(value['status']) is not str or value['status'] not in statuses | {'PARTIAL'}
+            or value['contact'] != 'read' or value['attribution'] != 'observed-only'
+            or type(value['fields']) is not list or len(value['fields']) > 64
+            or type(value['objects']) is not list or len(value['objects']) > 32
+            or (value['error_code'] is not None and (type(value['error_code']) is not str
+                or not re.fullmatch('[A-Z][A-Z0-9_]{0,63}',value['error_code'])))):
+        raise LedgerError('INVALID_FORGE_AUDIT')
+    seen = set()
+    for item in value['fields']:
+        if (type(item) is not dict or set(item) != {'field','item_index','status'}
+                or type(item['field']) is not str or item['field'] not in MUTATION_FIELDS
+                or type(item['status']) is not str or item['status'] not in statuses
+                or (item['item_index'] is not None and (type(item['item_index']) is not int
+                    or not 0 <= item['item_index'] < 32))):
+            raise LedgerError('INVALID_FORGE_AUDIT')
+        key=(item['field'],item['item_index'])
+        if key in seen: raise LedgerError('INVALID_FORGE_AUDIT')
+        seen.add(key)
+    objects = [_mutation_object(item) for item in value['objects']]
+    if len({_json(item) for item in objects}) != len(objects): raise LedgerError('INVALID_FORGE_AUDIT')
+    states = {item['status'] for item in value['fields']}
+    expected = ('UNKNOWN' if not states or 'UNKNOWN' in states else
+                next(iter(states)) if len(states)==1 else 'PARTIAL')
+    if value['status'] != expected: raise LedgerError('INVALID_FORGE_AUDIT')
+    return json.loads(_json(value))
+
 
 class ForgeAudit:
     """Append-only start, terminal and reconciliation facts for one Deployment.
@@ -347,7 +405,7 @@ class ForgeAudit:
                 self._db.execute('CREATE INDEX scope_idx ON starts(scope)')
                 self._db.execute('INSERT INTO deployment VALUES(1, 1, ?)', (deployment_id,))
             row = self._db.execute('SELECT version,id FROM deployment WHERE singleton=1').fetchone()
-            if row is None or row['id'] != deployment_id or row['version'] not in {1, 2, 3}:
+            if row is None or row['id'] != deployment_id or row['version'] not in {1, 2, 3, 4}:
                 raise LedgerError('DEPLOYMENT_MISMATCH')
             if row['version'] == 1:
                 _schema(self._db, _V1_SCHEMA)
@@ -359,7 +417,12 @@ class ForgeAudit:
                 for statement in _MUTATION_SCHEMA.values():
                     self._db.execute(statement)
                 self._db.execute('UPDATE deployment SET version=3 WHERE singleton=1')
-            _schema(self._db, {**_V1_SCHEMA, **_READ_SCHEMA, **_MUTATION_SCHEMA})
+            if row['version'] in {1, 2, 3}:
+                _schema(self._db, {**_V1_SCHEMA, **_READ_SCHEMA, **_MUTATION_SCHEMA})
+                for statement in _RECONCILIATION_SCHEMA.values():
+                    self._db.execute(statement)
+                self._db.execute('UPDATE deployment SET version=4 WHERE singleton=1')
+            _schema(self._db, {**_V1_SCHEMA, **_READ_SCHEMA, **_MUTATION_SCHEMA, **_RECONCILIATION_SCHEMA})
             self._db.commit()
         except (sqlite3.Error, OSError) as error:
             self.close()
@@ -527,6 +590,8 @@ class ForgeAudit:
         db = self._connection()
         try:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM mutation_reconciliation_starts WHERE reconciliation_id=?', (operation_id,)).fetchone():
+                raise LedgerError('ID_CONFLICT')
             if (db.execute('SELECT 1 FROM mutation_starts WHERE id=?', (operation_id,)).fetchone()
                     or db.execute('SELECT 1 FROM starts WHERE id=?', (operation_id,)).fetchone()
                     or db.execute('SELECT 1 FROM reconciliation_starts WHERE reconciliation_id=?',
@@ -605,6 +670,8 @@ class ForgeAudit:
         db = self._connection()
         try:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM mutation_reconciliation_starts WHERE reconciliation_id=?', (operation_id,)).fetchone():
+                raise LedgerError('ID_CONFLICT')
             if (db.execute('SELECT 1 FROM read_starts WHERE id=?', (operation_id,)).fetchone()
                     or db.execute('SELECT 1 FROM mutation_starts WHERE id=?', (operation_id,)).fetchone()):
                 raise LedgerError('ID_CONFLICT')
@@ -703,6 +770,8 @@ class ForgeAudit:
         db = self._connection()
         try:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM mutation_reconciliation_starts WHERE reconciliation_id=?', (reconciliation_id,)).fetchone():
+                raise LedgerError('ID_CONFLICT')
             record = self._get(db, operation_id)
             if record is None:
                 raise LedgerError('FORGE_AUDIT_NOT_FOUND')
@@ -816,7 +885,15 @@ class ForgeAudit:
                     raise ValueError()
                 _mutation_stamp(terminal['timestamp'])
                 _mutation_terminal_valid(result, steps)
+            for step in steps:
+                intent = db.execute('SELECT intent FROM mutation_intents WHERE id=? AND step=?',
+                    (operation_id,step['step'])).fetchone()
+                step['intent'] = None if intent is None else _mutation_intent(json.loads(intent['intent']))
+                if intent is not None and (intent['intent'] != _json(step['intent'])
+                        or (step['fields'] is not None and step['fields'] != step['intent']['fields'])): raise ValueError()
+            reconciliations = self._mutation_observations(db,operation_id)
             return {'operation_id': operation_id, 'deployment_id': self.deployment_id,
+                'reconciliations': reconciliations,
                 'metadata': metadata, 'started_at': row['timestamp'], 'steps': steps,
                 'result': result, 'finished_at': None if terminal is None else terminal['timestamp']}
         except (ValueError, TypeError, KeyError, RecursionError, LedgerError) as error:
@@ -845,18 +922,35 @@ class ForgeAudit:
             raise LedgerError('INVALID_FORGE_AUDIT')
 
     def _mutation_fence(self, db, room_id, repository):
-        rows = db.execute('SELECT s.id FROM mutation_starts s LEFT JOIN mutation_terminals t ON t.id=s.id '
-            "WHERE s.room_id=? AND s.repository=? AND (t.id IS NULL OR json_extract(t.result,'$.status') "
-            "IN ('UNKNOWN_OUTCOME','PARTIAL_MUTATION','PROVIDER_FAILURE')) ORDER BY s.rowid LIMIT 257",
-            (room_id, repository.lower())).fetchall()
-        if len(rows) > 256:
-            raise LedgerError('FORGE_RECOVERY_CAPACITY')
-        for row in rows:
-            record = self._mutation_get(db, row['id'])
-            if (record['result'] is None or record['result']['status'] == 'UNKNOWN_OUTCOME'
-                    or (record['steps'] and record['steps'][-1]['fields'] is None
-                        and record['steps'][-1]['error_code'] is None)):
-                raise LedgerError('FORGE_RECONCILIATION_REQUIRED')
+        # Historical UNKNOWN receipts stay immutable after reconciliation. Page
+        # them rather than consuming the 256 active-recovery inventory, but
+        # validate each record before trusting a known-observation exemption.
+        # A raw SQL status is not canonical audit evidence. Bound the total
+        # examination; exceeding it fails closed rather than dropping history.
+        cursor=examined=0
+        while True:
+            rows = db.execute('SELECT s.id,s.rowid AS ordinal FROM mutation_starts s LEFT JOIN mutation_terminals t ON t.id=s.id '
+                "WHERE s.room_id=? AND s.repository=? AND s.rowid>? AND (t.id IS NULL OR json_extract(t.result,'$.status')='UNKNOWN_OUTCOME' "
+                'OR EXISTS (SELECT 1 FROM mutation_prepared p LEFT JOIN mutation_confirmed c ON c.id=p.id AND c.step=p.step '
+                'LEFT JOIN mutation_rejected r ON r.id=p.id AND r.step=p.step WHERE p.id=s.id AND c.id IS NULL AND r.id IS NULL)) '
+                'ORDER BY s.rowid LIMIT 256', (room_id,repository.lower(),cursor)).fetchall()
+            if not rows:return
+            examined+=len(rows)
+            if examined>4096:raise LedgerError('FORGE_RECOVERY_CAPACITY')
+            for row in rows:
+                record = self._mutation_get(db, row['id'])
+                if (record['result'] is None or record['result']['status'] == 'UNKNOWN_OUTCOME'
+                        or (record['steps'] and record['steps'][-1]['fields'] is None
+                            and record['steps'][-1]['error_code'] is None)):
+                    observations = record['reconciliations']
+                    # A read is not a replay grant. It only lifts this uncertainty
+                    # barrier; a new write still undergoes its ordinary policy.
+                    if (record['result'] is None or not observations
+                            or observations[-1]['observation'] is None
+                            or observations[-1]['observation']['status'] == 'UNKNOWN'
+                            or any(field['status'] == 'UNKNOWN' for field in observations[-1]['observation']['fields'])):
+                        raise LedgerError('FORGE_RECONCILIATION_REQUIRED')
+            cursor=rows[-1]['ordinal']
 
     def _legacy_mutation_fence(self, db, room_id, repository):
         rows = db.execute('SELECT s.id FROM starts s LEFT JOIN terminals t ON t.id=s.id '
@@ -931,6 +1025,8 @@ class ForgeAudit:
         db = self._mutation_write_connection()
         try:
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM mutation_reconciliation_starts WHERE reconciliation_id=?', (operation_id,)).fetchone():
+                raise LedgerError('ID_CONFLICT')
             if (db.execute('SELECT 1 FROM starts WHERE id=?', (operation_id,)).fetchone()
                     or db.execute('SELECT 1 FROM read_starts WHERE id=?', (operation_id,)).fetchone()
                     or db.execute('SELECT 1 FROM reconciliation_starts WHERE reconciliation_id=?',
@@ -961,12 +1057,13 @@ class ForgeAudit:
             db.rollback()
             raise
 
-    def mutation_prepared(self, operation_id, step, target):
+    def mutation_prepared(self, operation_id, step, target, *, intent=None):
         """Commit exact target identity before possible contact for this step."""
         _token(operation_id)
         if type(step) is not int or not 0 <= step < 32:
             raise LedgerError('INVALID_FORGE_AUDIT')
         target = _mutation_object(target, related=True)
+        if intent is not None: intent = _mutation_intent(intent)
         db = self._mutation_write_connection()
         try:
             db.execute('BEGIN IMMEDIATE')
@@ -975,7 +1072,7 @@ class ForgeAudit:
                 raise LedgerError('FORGE_AUDIT_NOT_FOUND')
             self._mutation_target(record['metadata'], target)
             if step < len(record['steps']):
-                if record['steps'][step]['target'] != target:
+                if record['steps'][step]['target'] != target or record['steps'][step]['intent'] != intent:
                     raise LedgerError('OPERATION_CONFLICT')
                 db.rollback()
                 return record
@@ -985,6 +1082,8 @@ class ForgeAudit:
                 raise LedgerError('INVALID_FORGE_AUDIT')
             db.execute('INSERT INTO mutation_prepared VALUES(?,?,?,?)',
                        (operation_id, step, _json(target), self._now()))
+            if intent is not None:
+                db.execute('INSERT INTO mutation_intents VALUES(?,?,?)',(operation_id,step,_json(intent)))
             record = self._mutation_get(db, operation_id)
             self._commit()
             return record
@@ -1012,6 +1111,8 @@ class ForgeAudit:
                 raise LedgerError('INVALID_FORGE_AUDIT')
             prior = record['steps'][step]
             self._mutation_pair(prior['target'], obj)
+            if prior['intent'] is not None and prior['intent']['fields'] != fields:
+                raise LedgerError('INVALID_FORGE_AUDIT')
             if prior['fields'] is not None:
                 if prior['fields'] != fields or prior['object'] != obj:
                     raise LedgerError('OPERATION_CONFLICT')
@@ -1112,3 +1213,83 @@ class ForgeAudit:
         except BaseException:
             db.rollback()
             raise
+
+    def _mutation_observations(self, db, operation_id):
+        rows=db.execute('SELECT s.reconciliation_id,s.metadata,s.timestamp AS started_at,'
+            'o.observation,o.timestamp FROM mutation_reconciliation_starts s '
+            'LEFT JOIN mutation_observations o ON o.reconciliation_id=s.reconciliation_id '
+            'WHERE s.id=? ORDER BY s.seq LIMIT 257',(operation_id,)).fetchall()
+        if len(rows)>256: raise LedgerError('FORGE_RECOVERY_CAPACITY')
+        result=[]
+        for row in rows:
+            meta=_reconciliation_metadata(json.loads(row['metadata']))
+            observation=None if row['observation'] is None else _mutation_observation(json.loads(row['observation']))
+            if row['metadata'] != _json(meta) or (observation is not None and row['observation'] != _json(observation)):
+                raise LedgerError('INVALID_FORGE_AUDIT')
+            _mutation_stamp(row['started_at'])
+            if observation is not None: _mutation_stamp(row['timestamp'])
+            result.append({'id':row['reconciliation_id'],'metadata':meta,'observation':observation,
+                'started_at':row['started_at'],'timestamp':row['timestamp']})
+        return result
+
+    def begin_mutation_reconciliation(self, operation_id, reconciliation_id, metadata):
+        """Commit a read-only attempt; an exact retry cannot repeat even a GET.
+
+        Pending writes must first be terminalized by a fenced replacement owner.
+        An observation is separate from the immutable mutation receipt and never
+        claims that an observed matching value was caused by this invocation.
+        """
+        _token(operation_id);_token(reconciliation_id)
+        metadata=_reconciliation_metadata(metadata)
+        db=self._mutation_write_connection()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            record=self._mutation_get(db,operation_id)
+            if record is None: raise LedgerError('FORGE_AUDIT_NOT_FOUND')
+            if record['result'] is None: raise LedgerError('FORGE_OPERATION_PENDING')
+            prior=db.execute('SELECT id,metadata FROM mutation_reconciliation_starts WHERE reconciliation_id=?',
+                (reconciliation_id,)).fetchone()
+            if prior is not None:
+                if prior['id']!=operation_id or prior['metadata']!=_json(metadata): raise LedgerError('ID_CONFLICT')
+                db.rollback();return {'started':False,'record':record}
+            for table,column in (('starts','id'),('read_starts','id'),('mutation_starts','id'),
+                    ('reconciliation_starts','reconciliation_id')):
+                if db.execute(f'SELECT 1 FROM {table} WHERE {column}=?',(reconciliation_id,)).fetchone():
+                    raise LedgerError('ID_CONFLICT')
+            if len(record['reconciliations'])>=256: raise LedgerError('FORGE_RECOVERY_CAPACITY')
+            db.execute('INSERT INTO mutation_reconciliation_starts(id,reconciliation_id,metadata,timestamp) VALUES(?,?,?,?)',
+                (operation_id,reconciliation_id,_json(metadata),self._now()))
+            record=self._mutation_get(db,operation_id)
+            self._commit();return {'started':True,'record':record}
+        except sqlite3.Error as error:
+            self._mutation_failed=True;db.rollback()
+            raise LedgerError('AUDIT_UNAVAILABLE') from error
+        except BaseException:
+            db.rollback();raise
+
+    def observe_mutation(self, operation_id, reconciliation_id, observation):
+        _token(operation_id);_token(reconciliation_id)
+        observation=_mutation_observation(observation)
+        db=self._mutation_write_connection()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            record=self._mutation_get(db,operation_id)
+            if record is None: raise LedgerError('FORGE_AUDIT_NOT_FOUND')
+            start=db.execute('SELECT id FROM mutation_reconciliation_starts WHERE reconciliation_id=?',
+                (reconciliation_id,)).fetchone()
+            if start is None: raise LedgerError('FORGE_RECONCILIATION_NOT_STARTED')
+            if start['id']!=operation_id: raise LedgerError('ID_CONFLICT')
+            prior=db.execute('SELECT observation FROM mutation_observations WHERE reconciliation_id=?',
+                (reconciliation_id,)).fetchone()
+            if prior is not None:
+                if prior['observation']!=_json(observation): raise LedgerError('ID_CONFLICT')
+                db.rollback();return record
+            db.execute('INSERT INTO mutation_observations VALUES(?,?,?)',
+                (reconciliation_id,_json(observation),self._now()))
+            record=self._mutation_get(db,operation_id)
+            self._commit();return record
+        except sqlite3.Error as error:
+            self._mutation_failed=True;db.rollback()
+            raise LedgerError('AUDIT_UNAVAILABLE') from error
+        except BaseException:
+            db.rollback();raise

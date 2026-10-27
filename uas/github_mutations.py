@@ -34,21 +34,31 @@ class GitHubMutationProvider:
             raise LedgerError('INVALID_PROJECT')
         self.project, self.transport = project, transport
 
-    def execute(self, route, user_id, *, before_write, confirmed, rejected, authorize):
+    def execute(self, route, user_id, *, before_write, confirmed, rejected, authorize,
+                marker=None, prepared_intent=None):
         if route.repository != self.project.repository or not _positive(user_id):
             raise LedgerError('PROJECT_MISMATCH')
         used, deadline, fields, objects = 0, time.monotonic() + 30, [], []
         contact, step, failed_field, possible = 'none', 0, None, False
         transport_entered = False
+        last_headers = {}
         base = 'repos/' + self.project.repository
         api = 'https://api.github.com/' + base
         web = 'https://github.com/' + self.project.repository
         options = dict(route.options)
+        from .github_reconciliation import MARKER_PREFIX, marked_body, preimage_digest
+        if marker is not None:
+            marked_body('', marker)  # Validate even routes without a body.
+            if MARKER_PREFIX in options.get('body', ''): raise LedgerError('INVALID_MUTATION_MARKER')
+            # The marker is Broker-supplied, never selected by Participant argv.
+            if route.kind.endswith(('-create', '-comment')) or route.kind in {'pr-reply', 'pr-review'}:
+                options['body'] = marked_body(options.get('body', ''), marker)
+        intent_counts = {}
         planned = 1 + sum(len(options.get(k,())) for k in ('add-label','remove-label')) + sum(k in options for k in ('title','body','base','add-assignee','remove-assignee'))
         if planned > 32: return result('DENIED',error_code='INVALID_ARGUMENT')
 
         def request(method, path, body=None, statuses=(200,)):
-            nonlocal used, contact, transport_entered
+            nonlocal used, contact, transport_entered, last_headers
             if authorize() is not True: raise LedgerError('FORBIDDEN')
             if time.monotonic() >= deadline: raise MutationFailure('TIMEOUT')
             if method == 'GET' and contact == 'none': contact = 'read'
@@ -57,6 +67,7 @@ class GitHubMutationProvider:
             if (time.monotonic() >= deadline or type(response) is not ProviderResponse
                     or type(response.status) is not int or type(response.body) is not bytes
                     or type(response.headers) is not dict): raise MutationFailure('INVALID_RESPONSE')
+            last_headers = response.headers
             used += len(response.body)
             if used > MAX_OUTPUT: raise MutationFailure('OUTPUT_LIMIT')
             if response.status not in statuses:
@@ -68,6 +79,33 @@ class GitHubMutationProvider:
                 return None
             try: return json.loads(response.body, object_pairs_hook=_unique)
             except (ValueError, UnicodeError, RecursionError): raise MutationFailure('INVALID_RESPONSE') from None
+
+        def collection_preimage(path, query=''):
+            # Markers are editable Markdown. Record only the pre-contact set
+            # of immutable collection IDs so a removed marker cannot establish
+            # false absence. Missing/capped read evidence is not a write retry;
+            # the first authorized write may proceed, but later absence stays
+            # unknown. Authority/time/output failures still stop this attempt.
+            if marker is None or prepared_intent is None: return None
+            ids = set()
+            try:
+                for page in range(1, 11):
+                    values = request('GET', path + '?' + (query + '&' if query else '') + f'per_page=100&page={page}')
+                    if type(values) is not list or len(values) > 100: raise MutationFailure('INVALID_RESPONSE')
+                    for value in values:
+                        if type(value) is not dict or not _positive(value.get('id')) or value['id'] in ids:
+                            raise MutationFailure('INVALID_RESPONSE')
+                        ids.add(value['id'])
+                    links = [v for k, v in last_headers.items() if type(k) is str and k.lower() == 'link']
+                    if any(type(v) is not str for v in links): raise MutationFailure('INVALID_RESPONSE')
+                    if len(values) < 100 and not any(re.search(r'rel\s*=\s*[\"\']?next', v, re.I) for v in links):
+                        return sorted(ids)
+                return None
+            except LedgerError:
+                raise
+            except Exception as error:
+                if getattr(error, 'code', '') in {'TIMEOUT', 'OUTPUT_LIMIT'}: raise
+                return None
 
         def identity(value, kind, number=None):
             if type(value) is not dict or not _positive(value.get('id')):
@@ -97,9 +135,15 @@ class GitHubMutationProvider:
                     raise MutationFailure('INVALID_TARGET')
             return obj
 
-        def do(field_names, method, path, body, expected, validate, bound):
+        def do(field_names, method, path, body, expected, validate, bound, *, preimage=None):
             nonlocal step, contact, failed_field, possible, transport_entered
             failed_field = field_names[0]
+            field = field_names[0] if len(field_names) == 1 else None
+            index = intent_counts.get(field, 0) if field in {'add-label', 'remove-label'} else None
+            if index is not None: intent_counts[field] = index + 1
+            if prepared_intent is not None:
+                prepared_intent(step, {'fields': list(field_names), 'item_index': index,
+                    'preimage_digest': None if preimage is None else preimage_digest(preimage)})
             before_write(step, bound)
             transport_entered = False
             try:
@@ -152,7 +196,9 @@ class GitHubMutationProvider:
                             or value.get('draft') is not body.get('draft',False)):
                         raise MutationFailure('INVALID_RESPONSE')
                     return obj
-                current, bound = do(['create', *body], 'POST', base+'/'+endpoint, body, (201,), created, bound)
+                prior_ids = collection_preimage(base + '/' + endpoint, 'state=all')
+                current, bound = do(['create', *body], 'POST', base+'/'+endpoint, body, (201,), created, bound,
+                                    preimage=prior_ids)
                 number = bound['number']
             else:
                 number = route.number
@@ -182,7 +228,10 @@ class GitHubMutationProvider:
                         if kind=='issue' and field=='state' and response.get('state_reason')!=payload['state_reason']:
                             raise MutationFailure('INVALID_RESPONSE')
                         return obj
-                    current,_ = do([field],'PATCH',path,payload,(200,),edited,bound)
+                    previous = (current.get('base', {}).get('ref') if field == 'base' else
+                                [current.get('state'), current.get('state_reason')] if kind == 'issue' and field == 'state'
+                                else current.get(field))
+                    current,_ = do([field],'PATCH',path,payload,(200,),edited,bound,preimage=previous)
             # GitHub's issue facade and pull object have DIFFERENT immutable
             # IDs. Issue-backed PR operations must bind the facade, not compare
             # its response ID to /pulls/{number}. Same number is not enough.
@@ -209,7 +258,25 @@ class GitHubMutationProvider:
                         raise MutationFailure('INVALID_RESPONSE')
                     return obj
                 do([field],method,issue_path+'/assignees',{'assignees':[user['login']]},
-                   (201,) if method=='POST' else (200,),assignment,issue_bound)
+                   (201,) if method=='POST' else (200,),assignment,issue_bound,
+                   preimage=sorted(v['id'] for v in (facade if kind == 'pull' else current).get('assignees', [])))
+            label_names = set()
+            if any(options.get(field) for field in ('add-label', 'remove-label')):
+                for page in range(1, 11):
+                    values = request('GET', issue_path + f'/labels?per_page=100&page={page}')
+                    if (type(values) is not list or len(values) > 100
+                            or any(type(v) is not dict or type(v.get('name')) is not str for v in values)):
+                        raise MutationFailure('INVALID_RESPONSE')
+                    names = [v['name'] for v in values]
+                    if len(names) != len(set(names)) or label_names.intersection(names):
+                        raise MutationFailure('INVALID_RESPONSE')
+                    label_names.update(names)
+                    # request retains the response headers; provider-selected
+                    # URLs are never followed, only fixed next page numbers.
+                    links = [v for k, v in last_headers.items() if type(k) is str and k.lower() == 'link']
+                    if any(type(v) is not str for v in links): raise MutationFailure('INVALID_RESPONSE')
+                    if len(values) < 100 and not any(re.search(r'rel\s*=\s*[\"\']?next', v, re.I) for v in links): break
+                else: raise MutationFailure('PAGINATION_LIMIT')
             for field in ('add-label','remove-label'):
                 for label in options.get(field,()):
                     def labels(value, label=label, field=field):
@@ -220,7 +287,10 @@ class GitHubMutationProvider:
                         return issue_bound
                     do([field], 'POST' if field=='add-label' else 'DELETE',
                        issue_path+'/labels'+('' if field=='add-label' else '/'+quote(label,safe='')),
-                       {'labels':[label]} if field=='add-label' else None,(200,),labels,issue_bound)
+                       {'labels':[label]} if field=='add-label' else None,(200,),labels,issue_bound,
+                       preimage=label in label_names)
+                    if field == 'add-label': label_names.add(label)
+                    else: label_names.discard(label)
             if route.kind.endswith('-comment') or route.kind == 'pr-reply':
                 comment_path = issue_path+'/comments'
                 comment_target = issue_bound
@@ -239,8 +309,9 @@ class GitHubMutationProvider:
                     if route.kind=='pr-reply' and value.get('in_reply_to_id')!=options['comment-id']:
                         raise MutationFailure('INVALID_RESPONSE')
                     return obj
+                prior_ids = collection_preimage(path + '/comments' if route.kind == 'pr-reply' else comment_path)
                 do(['reply' if route.kind=='pr-reply' else 'comment'],'POST',comment_path,
-                   {'body':options['body']},(201,),comment,comment_target)
+                   {'body':options['body']},(201,),comment,comment_target,preimage=prior_ids)
             if route.kind.startswith('dependency-'):
                 other_number = options['blocked-by']
                 if number == other_number: raise MutationFailure('INVALID_TARGET')
@@ -269,7 +340,8 @@ class GitHubMutationProvider:
                             or value.get('body') != options.get('body','')): raise MutationFailure('INVALID_RESPONSE')
                     return obj
                 do(['review'],'POST',path+'/reviews',{'event':options['event'],
-                    'commit_id':options['commit'],'body':options.get('body','')},(200,),review,bound)
+                    'commit_id':options['commit'],'body':options.get('body','')},(200,),review,bound,
+                    preimage=collection_preimage(path + '/reviews'))
             return result('OK',fields,objects,contact=contact)
         except LedgerError:
             raise  # Authority or durable audit failure is never provider prose.

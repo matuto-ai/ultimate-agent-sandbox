@@ -724,7 +724,7 @@ class FixtureParticipantController:
     def _decode_packet(data):
         try:
             message = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object)
-            write = type(message) is dict and type(message.get('envelope')) is dict and message['envelope'].get('kind')=='forge-write'
+            write = type(message) is dict and type(message.get('envelope')) is dict and message['envelope'].get('kind') in {'forge-write','forge-reconcile'}
             (request_json if write else _json)(message)  # Typed, bounded, finite JSON.
         except (ValueError, UnicodeError, RecursionError) as error:
             raise LedgerError("INVALID_PROCESS_RECORD") from error
@@ -773,7 +773,7 @@ class FixtureParticipantController:
                 packet=self._decode_packet(bytes(raw))
                 if (type(packet) is not dict or packet.get('request_id')!=frame['request_id']
                         or type(packet.get('envelope')) is not dict
-                        or packet['envelope'].get('kind')!='forge-write'): raise LedgerError('INVALID_NATIVE_FRAME')
+                        or packet['envelope'].get('kind') not in {'forge-write','forge-reconcile'}): raise LedgerError('INVALID_NATIVE_FRAME')
                 return bytes(raw),credentials
         raise LedgerError('INVALID_NATIVE_FRAME')
 
@@ -828,7 +828,7 @@ class FixtureParticipantController:
         # Negotiated with the authenticated external owner at bootstrap, never
         # caller-selected. Read-only #66 configurations retain legacy writes.
         return (type(message) is dict and self.read_service is not None
-            and (message.get('kind')=='forge-read' or (message.get('kind')=='forge-write'
+            and (message.get('kind')=='forge-read' or (message.get('kind') in {'forge-write','forge-reconcile'}
                 and self.read_service.write_enabled is True)))
 
     def receive(self, handle):

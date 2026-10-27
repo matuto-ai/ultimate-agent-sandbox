@@ -76,8 +76,9 @@ a mutation receipt never substitutes for admission facts. Unknown effects hold
 the existing intent without consuming authorization or enqueueing work. A new
 explicit human refresh reconciles the same assignment, never resends it, and may
 activate exactly one Run and implementation Work Request after current facts pass.
-External conflicts are preserved. `projection: unavailable-no-write-support`
-continues to refer to **lifecycle-label projections**, which this slice does not add.
+External conflicts are preserved. Lifecycle-label projection is a separate
+[Hub-owned outbox](forge-projections.md), now queued as `pending` alongside
+canonical activation; assignment confirmation does not assert label convergence.
 
 ## Evidence and limits
 

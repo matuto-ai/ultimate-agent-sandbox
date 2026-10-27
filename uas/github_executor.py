@@ -91,8 +91,19 @@ class GhSurfaceTransport:
             raise ProviderFailure('INVALID_RESPONSE')
         try: payload = None if body is None else json.dumps(body,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
         except (ValueError,TypeError,UnicodeError): raise ProviderFailure('INVALID_RESPONSE') from None
-        if body is not None and 'body' in body and (type(body['body']) is not str or len(body['body'].encode('utf-8'))>MAX_BODY):
-            raise ProviderFailure('OUTPUT_LIMIT')
+        if body is not None and 'body' in body:
+            value = body['body']
+            if type(value) is not str: raise ProviderFailure('OUTPUT_LIMIT')
+            if len(value.encode('utf-8')) > MAX_BODY:
+                # The caller quota stays 512 KiB. Only the exact bounded
+                # server marker may extend it; arbitrary extra text cannot.
+                from .github_reconciliation import MARKER_PREFIX, MARKER_OVERHEAD
+                prefix, separator, marker = value.rpartition('\n\n')
+                if (not separator or MARKER_PREFIX in prefix
+                        or not re.fullmatch(r'<!-- uas:mutation:[0-9a-f]{64} -->', marker)
+                        or len(prefix.encode('utf-8')) > MAX_BODY
+                        or len(value.encode('utf-8')) > MAX_BODY + MARKER_OVERHEAD):
+                    raise ProviderFailure('OUTPUT_LIMIT')
         if payload is not None and len(payload) > MAX_REQUEST: raise ProviderFailure('OUTPUT_LIMIT')
         return self._execute(method, path, payload, 'application/vnd.github+json')
 
