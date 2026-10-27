@@ -25,7 +25,7 @@ def _digest(value):
 
 
 class ExternalReadBroker:
-    def __init__(self, binding, room_instance, audit, provider_for_actor, result_root, *, mutations=None, projections=None, gates=None):
+    def __init__(self, binding, room_instance, audit, provider_for_actor, result_root, *, mutations=None, projections=None, gates=None, reviews=None):
         if (type(binding) is not ForgeBinding or type(audit) is not ForgeAudit
                 or not callable(provider_for_actor)):
             raise LedgerError('INVALID_READ_BROKER')
@@ -42,6 +42,7 @@ class ExternalReadBroker:
         self.mutations = mutations
         self.projections = projections
         self.gates = gates
+        self.reviews = reviews
 
     def _authorize(self, origin, authorize):
         if self.failed:
@@ -92,6 +93,16 @@ class ExternalReadBroker:
             return {'status': 'RESULT_UNAVAILABLE', 'completeness': 'unknown'}
 
     def execute(self, envelope, *, origin, authorize):
+        if type(envelope) is dict and envelope.get('kind') in {'review-observe', 'review-comment', 'review-reconcile'}:
+            if self.failed: raise LedgerError('AUDIT_UNAVAILABLE')
+            if self.reviews is None: raise LedgerError('REVIEW_BROKER_UNAVAILABLE')
+            try:
+                result = self.reviews.execute(envelope, origin=origin, authorize=authorize)
+                self.failed = self.failed or self.reviews.failed
+                return result
+            except LedgerError as error:
+                if error.code == 'AUDIT_UNAVAILABLE': self.failed = True
+                raise
         if type(envelope) is dict and envelope.get('kind') in {'gate-forge', 'gate-target'}:
             if self.failed: raise LedgerError('AUDIT_UNAVAILABLE')
             if self.gates is None: raise LedgerError('GATE_FORGE_UNAVAILABLE')
