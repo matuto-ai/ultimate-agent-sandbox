@@ -23,6 +23,7 @@ import tempfile
 import uuid
 
 from .ledger import LedgerError, Origin, _json, _token
+from .forge_wire import request_json, MAX_REQUEST
 from .lifecycle import _canonical, _unique_object
 from .peer import Readiness
 
@@ -723,10 +724,55 @@ class FixtureParticipantController:
     def _decode_packet(data):
         try:
             message = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object)
-            _json(message)  # rejects excessive nesting, nonfinite numbers, etc.
+            write = type(message) is dict and type(message.get('envelope')) is dict and message['envelope'].get('kind')=='forge-write'
+            (request_json if write else _json)(message)  # Typed, bounded, finite JSON.
         except (ValueError, UnicodeError, RecursionError) as error:
             raise LedgerError("INVALID_PROCESS_RECORD") from error
         return message
+
+    def _forge_packet(self, handle, data, credentials):
+        """Bounded write-body assembly; authenticate every kernel record."""
+        import base64
+        import time
+        with self.supervisor._locked():
+            self._authority(handle,credentials)
+            first = self._decode_packet(data)
+        if not (type(first) is dict and set(first)=={'request_id','index','count','sha256','data'}):
+            return data,credentials
+        if handle.protocol != 'pi': raise LedgerError('INVALID_NATIVE_FRAME')
+        raw=bytearray();scope=None;deadline=time.monotonic()+5
+        for index in range(28):
+            if index:
+                remaining=deadline-time.monotonic()
+                if remaining<=0 or not select.select([handle.channel],[],[],remaining)[0]:
+                    raise LedgerError('INVALID_NATIVE_FRAME')
+                data,credentials=self._record(handle.channel)
+                with self.supervisor._locked():
+                    self._authority(handle,credentials)
+                    frame=self._decode_packet(data)
+            else: frame=first
+            if (type(frame) is not dict or set(frame)!={'request_id','index','count','sha256','data'}
+                    or type(frame['request_id']) is not str or not re.fullmatch('[0-9a-f]{32}',frame['request_id'])
+                    or type(frame['index']) is not int or frame['index']!=index
+                    or type(frame['count']) is not int or not 1<=frame['count']<=28
+                    or type(frame['sha256']) is not str or not re.fullmatch('[0-9a-f]{64}',frame['sha256'])
+                    or type(frame['data']) is not str): raise LedgerError('INVALID_NATIVE_FRAME')
+            current=(frame['request_id'],frame['count'],frame['sha256'])
+            if scope is not None and scope!=current: raise LedgerError('INVALID_NATIVE_FRAME')
+            scope=current
+            try: chunk=base64.b64decode(frame['data'],validate=True)
+            except ValueError: raise LedgerError('INVALID_NATIVE_FRAME') from None
+            if len(chunk)>40000 or (index+1<frame['count'] and len(chunk)!=40000): raise LedgerError('INVALID_NATIVE_FRAME')
+            raw.extend(chunk)
+            if len(raw)>MAX_REQUEST: raise LedgerError('INVALID_NATIVE_FRAME')
+            if index+1==frame['count']:
+                if hashlib.sha256(raw).hexdigest()!=frame['sha256']: raise LedgerError('INVALID_NATIVE_FRAME')
+                packet=self._decode_packet(bytes(raw))
+                if (type(packet) is not dict or packet.get('request_id')!=frame['request_id']
+                        or type(packet.get('envelope')) is not dict
+                        or packet['envelope'].get('kind')!='forge-write'): raise LedgerError('INVALID_NATIVE_FRAME')
+                return bytes(raw),credentials
+        raise LedgerError('INVALID_NATIVE_FRAME')
 
     @staticmethod
     def _packet(channel):
@@ -775,6 +821,13 @@ class FixtureParticipantController:
                 raise LedgerError('FORGE_ALREADY_BOUND')
             self.read_service = service
 
+    def _external_forge(self, message):
+        # Negotiated with the authenticated external owner at bootstrap, never
+        # caller-selected. Read-only #66 configurations retain legacy writes.
+        return (type(message) is dict and self.read_service is not None
+            and (message.get('kind')=='forge-read' or (message.get('kind')=='forge-write'
+                and self.read_service.write_enabled is True)))
+
     def receive(self, handle):
         """Consume one kernel-authenticated record and dispatch to #65/#60.
 
@@ -788,6 +841,7 @@ class FixtureParticipantController:
         read_intent = None
         try:
             data, credentials = self._record(handle.channel)
+            data, credentials = self._forge_packet(handle,data,credentials)
             with self.supervisor._locked():
                 try:
                     self._authority(handle, credentials)
@@ -800,9 +854,9 @@ class FixtureParticipantController:
                                 or type(message["envelope"]) is not dict):
                             raise LedgerError("INVALID_NATIVE_FRAME")
                         message = message["envelope"]
-                    if type(message) is dict and message.get('kind') == 'forge-read' and self.read_service is not None:
-                        from .forge_read_service import reserve_read_operation
-                        reserve_read_operation(self.hub.ledger,self.read_service.binding,message,
+                    if self._external_forge(message):
+                        from .forge_read_service import reserve_forge_operation
+                        reserve_forge_operation(self.hub.ledger,self.read_service.binding,message,
                             handle.badge.origin(),lambda:self._authority(handle,credentials))
                         read_intent = self.read_service.prepare(message, handle.badge.origin(),
                             authorize=lambda: self._authority(handle, credentials))

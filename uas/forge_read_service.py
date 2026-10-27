@@ -13,6 +13,7 @@ import socket
 import threading
 import uuid
 
+from .forge_wire import request_json, MAX_REQUEST
 from .forge import ForgeBinding
 from .forge_read import ExternalReadBroker, MAX_RESULT
 from .kernel_origin import HeldOrigin, OriginDenied, alive, enable, receive
@@ -22,25 +23,33 @@ from .lifecycle import _unique_object
 _FRAME = 40000
 
 
-def reserve_read_operation(ledger, binding, envelope, origin, authorize):
+def reserve_forge_operation(ledger, binding, envelope, origin, authorize):
     """Keep the existing Room-wide ID namespace without copying read content."""
     if (type(binding) is not ForgeBinding or binding.room_id != ledger.room_id
-            or type(origin) is not Origin or 'forge-read' not in origin.capabilities
+            or type(origin) is not Origin
             or authorize() is not True):
         raise LedgerError('FORBIDDEN')
-    if (type(envelope) is not dict or set(envelope) != {'id','kind','argv'}
-            or envelope['kind'] != 'forge-read'):
+    if (type(envelope) is not dict or set(envelope) not in ({'id','kind','argv'},{'id','kind','argv','body'})
+            or envelope['kind'] not in {'forge-read','forge-write'}
+            or (envelope['kind']=='forge-read' and 'body' in envelope)):
         raise LedgerError('INVALID_FORGE_ENVELOPE')
-    metadata = {'request_digest':hashlib.sha256(_json(envelope).encode()).hexdigest(),
+    if envelope['kind'] not in origin.capabilities: raise LedgerError('FORBIDDEN')
+    metadata = {'request_digest':hashlib.sha256((request_json(envelope) if envelope['kind']=='forge-write' else _json(envelope)).encode()).hexdigest(),
         'host':binding.host,'repository':binding.repository}
-    command = Command(envelope['id'],'forge-read-external',binding.project_id,None,metadata)
+    command = Command(envelope['id'],envelope['kind']+'-external',binding.project_id,None,metadata)
     try:
         return ledger.apply(command, origin, authorize=lambda *_:authorize(),
-            decide=lambda state,_:Transition(state,(Event('forge-read-reserved',metadata),),{'status':'RESERVED'}))
+            decide=lambda state,_:Transition(state,(Event(envelope['kind']+'-reserved',metadata),),{'status':'RESERVED'}))
     except LedgerError as error:
         if error.code in {'STORAGE_ERROR','CLOSED'}:
             raise LedgerError('AUDIT_UNAVAILABLE') from error
         raise
+
+
+def reserve_read_operation(ledger,binding,envelope,origin,authorize):
+    if type(envelope) is dict and envelope.get('kind')=='forge-write':
+        raise LedgerError('INVALID_FORGE_ENVELOPE')
+    return reserve_forge_operation(ledger,binding,envelope,origin,authorize)
 
 
 class ReadOwner:
@@ -71,9 +80,9 @@ class ReadOwner:
         if self.fd >= 0:os.close(self.fd);self.fd=-1
 
 
-def send_result(channel, request_id, result):
-    raw = _json(result).encode()
-    if len(raw) > 1_048_576: raise LedgerError('OUTPUT_LIMIT')
+def send_result(channel, request_id, result, *, request=False):
+    raw = (request_json(result) if request else _json(result)).encode()
+    if len(raw) > (MAX_REQUEST if request else 1_048_576): raise LedgerError('OUTPUT_LIMIT')
     digest = hashlib.sha256(raw).hexdigest()
     count = max(1, (len(raw) + _FRAME - 1) // _FRAME)
     for index in range(count):
@@ -83,15 +92,18 @@ def send_result(channel, request_id, result):
         if channel.send(packet) != len(packet): raise OriginDenied('partial Broker frame')
 
 
-def receive_result(channel, worker, request_id):
+def receive_result(channel, worker, request_id, *, first=None, request=False):
     raw = bytearray(); expected = None
-    for index in range(27):
-        with receive(channel) as record:
-            worker.require(record)
-            frame = json.loads(record.data, object_pairs_hook=_unique_object)
+    for index in range(28 if request else 27):
+        if index == 0 and first is not None:
+            frame = first
+        else:
+            with receive(channel) as record:
+                worker.require(record)
+                frame = json.loads(record.data, object_pairs_hook=_unique_object)
         if (type(frame) is not dict or set(frame) != {'request_id','index','count','sha256','data'}
                 or frame['request_id'] != request_id or type(frame['index']) is not int or frame['index'] != index
-                or type(frame['count']) is not int or not 1 <= frame['count'] <= 27
+                or type(frame['count']) is not int or not 1 <= frame['count'] <= (28 if request else 27)
                 or type(frame['sha256']) is not str or len(frame['sha256']) != 64
                 or type(frame['data']) is not str):
             raise OriginDenied('invalid Broker frame')
@@ -102,7 +114,7 @@ def receive_result(channel, worker, request_id):
         if len(chunk) > _FRAME or (index + 1 < frame['count'] and len(chunk) != _FRAME):
             raise OriginDenied('invalid Broker chunk size')
         raw.extend(chunk)
-        if len(raw) > 1_048_576: raise OriginDenied('oversized Broker response')
+        if len(raw) > (MAX_REQUEST if request else 1_048_576): raise OriginDenied('oversized Broker response')
         if index + 1 == frame['count']:
             if hashlib.sha256(raw).hexdigest() != frame['sha256']: raise OriginDenied('Broker digest mismatch')
             return json.loads(raw, object_pairs_hook=_unique_object)
@@ -124,12 +136,17 @@ class ReadBrokerClient:
         with receive(channel) as record:
             if record.credentials[1:] != (worker_uid, worker_gid):
                 raise OriginDenied('unexpected Broker identity')
-            if json.loads(record.data) != {'kind': 'READ_BROKER_READY', 'nonce': nonce, 'binding':scope}:
+            ready = json.loads(record.data)
+            expected = {'kind': 'READ_BROKER_READY', 'nonce': nonce, 'binding':scope}
+            self.write_enabled = ready == {**expected,'mutation_enabled':True}
+            if ready != expected and not self.write_enabled:
                 raise OriginDenied('uncorrelated Broker bootstrap')
             self.worker = HeldOrigin(record)
 
     def prepare(self, envelope, origin, *, authorize=None):
         if self.closed or type(origin) is not Origin: raise LedgerError('FORBIDDEN')
+        if type(envelope) is dict and envelope.get('kind')=='forge-write' and not self.write_enabled:
+            raise LedgerError('FORGE_WRITE_UNAVAILABLE')
         state = self.supervisor._read()  # Caller holds existing lifecycle lock.
         if (not state or state['phase'] != 'running' or state['instance_id'] != self.room_instance
                 or state['spec']['project_id'] != self.binding.project_id):
@@ -138,8 +155,8 @@ class ReadBrokerClient:
         if len(self._guards) >= 8: raise LedgerError('READ_CAPACITY')
         packet = {'request_id': request_id, 'room_id': self.binding.room_id,
                 'room_instance': self.room_instance, 'origin': origin.canonical(), 'envelope': envelope}
-        encoded = _json(packet).encode()
-        if len(encoded) > 65536: raise LedgerError('INVALID_FORGE_ENVELOPE')
+        encoded = request_json(packet).encode()
+        if len(encoded) > MAX_REQUEST: raise LedgerError('INVALID_FORGE_ENVELOPE')
         self._guards[request_id] = (hashlib.sha256(encoded).hexdigest(), authorize)
         return packet
 
@@ -148,8 +165,8 @@ class ReadBrokerClient:
             if self.closed or not alive(self.worker.pidfd): raise LedgerError('BROKER_UNAVAILABLE')
             if packet.get('request_id') not in self._guards: raise LedgerError('FORBIDDEN')
             digest, guard = self._guards.pop(packet['request_id'])
-            raw = _json(packet).encode()
-            if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != digest:
+            raw = request_json(packet).encode()
+            if len(raw) > MAX_REQUEST or hashlib.sha256(raw).hexdigest() != digest:
                 raise LedgerError('INVALID_FORGE_ENVELOPE')
             try:
                 # Guard rechecks current process/epoch under the existing Room
@@ -158,18 +175,29 @@ class ReadBrokerClient:
                 if guard is not None:
                     with self.supervisor._locked():
                         if guard() is not True: raise LedgerError('FORBIDDEN')
-                        sent = self.channel.send(raw)
+                        send_result(self.channel,packet['request_id'],packet,request=True)
                 else:
-                    sent = self.channel.send(raw)
-                if sent != len(raw): raise OriginDenied('partial Broker request')
-                result = receive_result(self.channel, self.worker, packet['request_id'])
+                    send_result(self.channel,packet['request_id'],packet,request=True)
+                while True:
+                    result = receive_result(self.channel, self.worker, packet['request_id'])
+                    if type(result) is not dict or set(result) != {'authorize'}: break
+                    nonce = result['authorize']
+                    if type(nonce) is not str or len(nonce)!=32: raise OriginDenied('invalid authority challenge')
+                    allowed = False
+                    if guard is not None:
+                        try:
+                            with self.supervisor._locked(): allowed = guard() is True
+                        except LedgerError: pass
+                    response = _json({'request_id':packet['request_id'],'authorization':nonce,'allowed':allowed}).encode()
+                    if self.channel.send(response)!=len(response): raise OriginDenied('partial authority response')
                 if type(result) is not dict or set(result) not in ({'ok','observation'},{'ok','error'}):
                     raise OriginDenied('invalid Broker result')
                 if result['ok'] is not True: raise LedgerError(result['error'])
                 if guard is not None:
                     with self.supervisor._locked():
                         if guard() is not True: raise LedgerError('FORBIDDEN')
-                return {'admission': 'not-evaluated', 'observation': result['observation']}
+                return ({'admission':'not-evaluated', **result['observation']} if packet['envelope']['kind']=='forge-write'
+                        else {'admission': 'not-evaluated', 'observation': result['observation']})
             except (OSError, OriginDenied, ValueError):
                 self.close()
                 raise LedgerError('BROKER_UNAVAILABLE') from None
@@ -183,7 +211,7 @@ class ReadBrokerClient:
             request_id = uuid.uuid4().hex
             packet = {'request_id':request_id,'room_id':self.binding.room_id,
                 'room_instance':self.room_instance,'denial':code}
-            raw = _json(packet).encode()
+            raw = request_json(packet).encode()
             if self.channel.send(raw) != len(raw): raise LedgerError('AUDIT_UNAVAILABLE')
             reply = receive_result(self.channel, self.worker, request_id)
             if reply != {'ok':True}: raise LedgerError('AUDIT_UNAVAILABLE')
@@ -210,13 +238,16 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
             raise OriginDenied('invalid Broker bootstrap')
         supervisor = HeldOrigin(record)
     try:
-        ready = _json({'kind':'READ_BROKER_READY','nonce':hello['nonce'],'binding':hello['binding']}).encode()
+        ready = _json({'kind':'READ_BROKER_READY','nonce':hello['nonce'],'binding':hello['binding'],
+            **({'mutation_enabled':True} if broker.mutations is not None else {})}).encode()
         if channel.send(ready) != len(ready): raise OriginDenied('partial Broker bootstrap')
         while alive(supervisor.pidfd):
             try:
                 with receive(channel) as record:
                     supervisor.require(record)
                     packet = json.loads(record.data, object_pairs_hook=_unique_object)
+                if type(packet) is dict and set(packet)=={'request_id','index','count','sha256','data'}:
+                    packet = receive_result(channel,supervisor,packet['request_id'],first=packet,request=True)
             except (OriginDenied, ValueError):
                 broker.denied('WRONG_PROCESS')
                 raise
@@ -236,13 +267,25 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
                     raise LedgerError('FORBIDDEN')
                 if type(origin_doc['capabilities']) is not list: raise LedgerError('FORBIDDEN')
                 origin = Origin(**{**origin_doc, 'capabilities': tuple(origin_doc['capabilities'])})
-                result = broker.execute(packet['envelope'], origin=origin,
-                    authorize=lambda: alive(supervisor.pidfd))
+                def current_authority():
+                    if not alive(supervisor.pidfd): return False
+                    if packet['envelope'].get('kind')!='forge-write': return True
+                    nonce = uuid.uuid4().hex
+                    send_result(channel,packet['request_id'],{'authorize':nonce})
+                    with receive(channel) as record:
+                        supervisor.require(record)
+                        answer = json.loads(record.data,object_pairs_hook=_unique_object)
+                    if answer not in ({'request_id':packet['request_id'],'authorization':nonce,'allowed':True},
+                                      {'request_id':packet['request_id'],'authorization':nonce,'allowed':False}):
+                        raise OriginDenied('invalid current authority')
+                    return answer['allowed'] is True
+                result = broker.execute(packet['envelope'], origin=origin,authorize=current_authority)
                 reply = {'ok': True, 'observation': result}
             except LedgerError as error:
                 broker.denied(error.code)
                 reply = {'ok': False, 'error': error.code}
             send_result(channel, packet['request_id'], reply)
+            if broker.failed: break
     finally:
         supervisor.close(); channel.close()
 
@@ -291,7 +334,7 @@ def main():
     config = json.loads(sys.stdin.buffer.readline(16385), object_pairs_hook=_unique_object)
     expected = {'room_id','room_instance','project_id','repository','deployment_id','audit_path',
         'result_root','credential_path','gh_executable','gh_sha256','supervisor_uid','supervisor_gid'}
-    if (type(config) is not dict or set(config) != expected
+    if (type(config) is not dict or set(config) not in (expected,expected|{'mutation_actors','work_labels'})
             or any(type(config[k]) is not int or config[k] <= 0 for k in ('supervisor_uid','supervisor_gid'))
             or config['supervisor_uid'] == os.getuid()):
         raise LedgerError('INVALID_READ_BROKER')
@@ -312,7 +355,19 @@ def main():
                 transports[actor] = BrokerReadProvider(GitHubProject(binding.repository),transport,
                     GitHubJobLogTransport(actor,credentials))
             return transports[actor]
-        broker = ExternalReadBroker(binding,config['room_instance'],audit,select,config['result_root'])
+        mutations = None
+        if 'mutation_actors' in config:
+            from .forge_mutations import ExternalMutationBroker
+            from .github_mutations import GitHubMutationProvider
+            def mutation_provider(actor):
+                transport = select(actor).transport
+                return GitHubMutationProvider(GitHubProject(binding.repository),
+                    lambda method,path,body: transport.get(path) if method=='GET' else
+                    transport.mutate(method,path,body,repository=binding.repository))
+            mutations = ExternalMutationBroker(binding,config['room_instance'],audit,config['mutation_actors'],
+                mutation_provider,work_labels=config['work_labels'])
+            mutations.recover(lambda _:True)
+        broker = ExternalReadBroker(binding,config['room_instance'],audit,select,config['result_root'],mutations=mutations)
         # The exclusive owner lock proves no old process can still complete a
         # pending read. Recovery records unknown, never repeats provider I/O.
         broker.recover(lambda _:True)

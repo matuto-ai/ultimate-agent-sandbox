@@ -25,7 +25,7 @@ def _digest(value):
 
 
 class ExternalReadBroker:
-    def __init__(self, binding, room_instance, audit, provider_for_actor, result_root):
+    def __init__(self, binding, room_instance, audit, provider_for_actor, result_root, *, mutations=None):
         if (type(binding) is not ForgeBinding or type(audit) is not ForgeAudit
                 or not callable(provider_for_actor)):
             raise LedgerError('INVALID_READ_BROKER')
@@ -39,6 +39,7 @@ class ExternalReadBroker:
         if self.root.is_symlink() or self.root.stat().st_mode & 0o077:
             raise LedgerError('INVALID_STORE')
         self.failed = False
+        self.mutations = mutations
 
     def _authorize(self, origin, authorize):
         if self.failed:
@@ -89,6 +90,17 @@ class ExternalReadBroker:
             return {'status': 'RESULT_UNAVAILABLE', 'completeness': 'unknown'}
 
     def execute(self, envelope, *, origin, authorize):
+        if type(envelope) is dict and envelope.get('kind') == 'forge-write':
+            if self.failed: raise LedgerError('AUDIT_UNAVAILABLE')
+            if self.mutations is None: raise LedgerError('FORGE_WRITE_UNAVAILABLE')
+            try:
+                result = self.mutations.execute(envelope,origin=origin,authorize=authorize)
+                self.failed = self.failed or self.mutations.failed
+                return result
+            except LedgerError as error:
+                if error.code == 'AUDIT_UNAVAILABLE': self.failed = True
+                raise
+        if self.mutations is not None and self.mutations.failed: raise LedgerError('AUDIT_UNAVAILABLE')
         self._authorize(origin, authorize)
         if (type(envelope) is not dict or set(envelope) != {'id', 'kind', 'argv'}
                 or envelope['kind'] != 'forge-read'):
@@ -131,7 +143,7 @@ class ExternalReadBroker:
             if denied:
                 result = {'status': denied, 'completeness': 'unknown'}
             elif route.kind == 'help':
-                result = {'status': 'HELP', 'completeness': 'complete', 'text': help_text()}
+                result = {'status': 'HELP', 'completeness': 'complete', 'text': help_text() + ('\n\n' + __import__('uas.github_mutation_routes',fromlist=['help_text']).help_text() if self.mutations is not None else '')}
             else:
                 try:
                     provider = self.providers(origin.actor_id)

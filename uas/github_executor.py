@@ -1,4 +1,4 @@
-"""Pinned external gh read executor. No Workstation token/config inheritance."""
+"""Pinned external gh executor. No Workstation token/config inheritance."""
 import hashlib
 import os
 from pathlib import Path
@@ -15,7 +15,7 @@ from .ledger import LedgerError
 
 # Only internally constructed REST paths for the declared read table. Query
 # names and values are fixed/reduced by the provider, never raw Participant argv.
-_PATH = re.compile(r'repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:/(?:issues(?:/[1-9][0-9]*(?:/(?:comments|labels|dependencies/(?:blocked_by|blocking)))?)?|pulls(?:/[1-9][0-9]*(?:/(?:comments|reviews|files|commits))?)?|labels|contents/[^?#]+|commits/[A-Za-z0-9._%/-]+(?:/(?:check-runs|statuses|status))?|actions/(?:workflows(?:/[1-9][0-9]*)?|runs(?:/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?(?:/jobs)?)?|jobs/[1-9][0-9]*)))?(?:\?[A-Za-z0-9_%.=,&+-]+)?\Z')
+_PATH = re.compile(r'repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+(?:/(?:issues(?:/[1-9][0-9]*(?:/(?:comments|labels|dependencies/(?:blocked_by|blocking)))?)?|pulls(?:/comments/[1-9][0-9]*|/[1-9][0-9]*(?:/(?:comments|reviews|files|commits))?)?|labels|contents/[^?#]+|commits/[A-Za-z0-9._%/-]+(?:/(?:check-runs|statuses|status))?|actions/(?:workflows(?:/[1-9][0-9]*)?|runs(?:/[1-9][0-9]*(?:/attempts/[1-9][0-9]*)?(?:/jobs)?)?|jobs/[1-9][0-9]*)))?(?:\?[A-Za-z0-9_%.=,&+-]+)?\Z')
 _ALLOWED_QUERY = {'per_page', 'page', 'state', 'ref', 'filter', 'status', 'branch', 'head_sha', 'assignee', 'creator', 'mentioned'}
 _ACCEPT = {'application/vnd.github+json', 'application/vnd.github.diff', 'application/vnd.github.raw+json'}
 
@@ -69,6 +69,34 @@ class GhSurfaceTransport:
         query = parse_qsl(path.partition('?')[2], keep_blank_values=True, strict_parsing=True)
         if len({k for k, _ in query}) != len(query) or any(k not in _ALLOWED_QUERY for k, _ in query):
             raise ProviderFailure('INVALID_RESPONSE')
+        return self._execute('GET', path, None, accept)
+
+    def mutate(self, method, path, body, *, repository):
+        # Only typed provider calls reach this API. It is not exposed as gh api.
+        from .github_read import GitHubProject
+        from .github_mutation_routes import MAX_BODY
+        from .forge_wire import MAX_REQUEST
+        import json
+        project = GitHubProject(repository)
+        prefix = 'repos/' + project.repository
+        suffix = path[len(prefix):] if type(path) is str and path.startswith(prefix + '/') else None
+        patterns = {
+            'POST': r'/(?:issues|pulls|issues/[1-9][0-9]*/(?:comments|labels|assignees|dependencies/blocked_by)|pulls/[1-9][0-9]*/(?:reviews|comments/[1-9][0-9]*/replies))',
+            'PATCH': r'/(?:issues|pulls)/[1-9][0-9]*',
+            'DELETE': r'/issues/[1-9][0-9]*/(?:assignees|labels/[A-Za-z0-9._%~-]+|dependencies/blocked_by/[1-9][0-9]*)',
+        }
+        if (method not in patterns or suffix is None or any(part in {'','.', '..'} for part in path.split('/'))
+                or not re.fullmatch(patterns[method], suffix)
+                or (body is not None and type(body) is not dict)):
+            raise ProviderFailure('INVALID_RESPONSE')
+        try: payload = None if body is None else json.dumps(body,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
+        except (ValueError,TypeError,UnicodeError): raise ProviderFailure('INVALID_RESPONSE') from None
+        if body is not None and 'body' in body and (type(body['body']) is not str or len(body['body'].encode('utf-8'))>MAX_BODY):
+            raise ProviderFailure('OUTPUT_LIMIT')
+        if payload is not None and len(payload) > MAX_REQUEST: raise ProviderFailure('OUTPUT_LIMIT')
+        return self._execute(method, path, payload, 'application/vnd.github+json')
+
+    def _execute(self, method, path, payload, accept):
         # This transport belongs to the dedicated single-threaded Broker,
         # the exclusive reaper of its gh children. main resets SIGCHLD to DFL
         # (clearing inherited ignore/no-child-wait semantics) before launch.
@@ -78,13 +106,16 @@ class GhSurfaceTransport:
         secret = self.credentials(self.actor, 'github.com')
         if type(secret) is not dict or set(secret) != {'GH_TOKEN'} or type(secret['GH_TOKEN']) is not str or not secret['GH_TOKEN']:
             raise ProviderFailure('CREDENTIAL_UNAVAILABLE')
-        with tempfile.TemporaryDirectory(prefix='uas-gh-read-') as home:
+        with tempfile.TemporaryDirectory(prefix='uas-gh-') as home, tempfile.TemporaryFile() as input_file:
             env = {'HOME': home, 'GH_CONFIG_DIR': home, 'GH_HOST': 'github.com', 'GH_PROMPT_DISABLED': '1',
                 'GH_NO_UPDATE_NOTIFIER': '1', 'GH_NO_EXTENSION_UPDATE_NOTIFIER': '1', 'GH_PAGER': 'cat',
                 'LC_ALL': 'C', **secret}
-            command = [f'/proc/self/fd/{self.fd}', 'api', '--hostname', 'github.com', '--method', 'GET', '--include',
+            command = [f'/proc/self/fd/{self.fd}', 'api', '--hostname', 'github.com', '--method', method, '--include',
                 '-H', 'Accept: ' + accept, '-H', 'X-GitHub-Api-Version: ' + API_VERSION, path]
-            proc = subprocess.Popen(command, cwd=home, env=env, pass_fds=(self.fd,), stdin=subprocess.DEVNULL,
+            if payload is not None:
+                input_file.write(payload); input_file.seek(0)
+                command += ['--input', '-']
+            proc = subprocess.Popen(command, cwd=home, env=env, pass_fds=(self.fd,), stdin=input_file if payload is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False, start_new_session=True)
             data = bytearray(); deadline = time.monotonic() + self.timeout
             owned = True
@@ -143,7 +174,7 @@ class GhSurfaceTransport:
             status_line=status_line.decode('ascii')
             if not re.fullmatch(r'HTTP/\S+ [1-5][0-9]{2}(?: [^\r\n]*)?',status_line):raise ValueError()
             status=int(status_line.split()[1])
-            if proc.returncode and status==200:raise ValueError()
+            if proc.returncode and 200 <= status < 300:raise ValueError()
             headers={}
             for line in header.decode('ascii').split('\r\n') if header else ():
                 if '\n' in line or '\r' in line:raise ValueError()

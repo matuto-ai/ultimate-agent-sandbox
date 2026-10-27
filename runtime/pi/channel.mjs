@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 
 export const MAX_PACKET = 65536;
 export const MAX_REPLY = 1048576;
+export const MAX_REQUEST = 1114112;
 const retryable = error => ['EAGAIN', 'EWOULDBLOCK', 'EINTR'].includes(error.code);
 
 export function seqpacketChannel(fd, { timeoutMs = 2000, maxQueued = 4 } = {}) {
@@ -25,12 +26,14 @@ export function seqpacketChannel(fd, { timeoutMs = 2000, maxQueued = 4 } = {}) {
     check(deadline, signal);
     const requestId = randomUUID().replaceAll('-', '');
     const packet = Buffer.from(JSON.stringify({ request_id: requestId, envelope }));
-    if (packet.length > MAX_PACKET) throw Error('fixture peer packet too large');
-    for (;;) {
+    if (packet.length > MAX_REQUEST || (packet.length > MAX_PACKET && envelope.kind !== 'forge-write')) throw Error('fixture peer packet too large');
+    const packets = packet.length <= MAX_PACKET ? [packet] : Array.from({ length: Math.ceil(packet.length / 40000) }, (_, index) =>
+      Buffer.from(JSON.stringify({ request_id: requestId, index, count: Math.ceil(packet.length / 40000),
+        sha256: createHash('sha256').update(packet).digest('hex'), data: packet.subarray(index * 40000, (index + 1) * 40000).toString('base64') })));
+    for (const frame of packets) for (;;) {
       check(deadline, signal);
       try {
-        // Exactly one record. Never write a remainder as a second packet.
-        if (writeSync(fd, packet, 0, packet.length, null) !== packet.length) fail('short record write');
+        if (writeSync(fd, frame, 0, frame.length, null) !== frame.length) fail('short record write');
         break;
       } catch (error) {
         if (!retryable(error)) fail(error.message);
@@ -55,7 +58,7 @@ export function seqpacketChannel(fd, { timeoutMs = 2000, maxQueued = 4 } = {}) {
       try { reply = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, count))); }
       catch { fail('invalid reply'); }
       if (reply && typeof reply === 'object' && Object.hasOwn(reply, 'data')) {
-        if (envelope.kind !== 'forge-read' || Object.keys(reply).sort().join(',') !== 'count,data,index,request_id,sha256'
+        if (!['forge-read','forge-write'].includes(envelope.kind) || Object.keys(reply).sort().join(',') !== 'count,data,index,request_id,sha256'
             || reply.request_id !== requestId || !Number.isInteger(reply.index) || reply.index !== chunks.length
             || !Number.isInteger(reply.count) || reply.count < 1 || reply.count > 27
             || typeof reply.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(reply.sha256)
