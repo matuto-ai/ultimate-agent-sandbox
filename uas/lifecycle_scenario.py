@@ -83,6 +83,15 @@ class LifecycleScenario:
             raise LedgerError('SCENARIO_UNBOUNDED_CHANNEL')
         return self.dispatcher.receive(admission_operation)
 
+    def receive_helper_once(self, helper_operation):
+        """Pump the exact admitted fixed MCP helper; Root scopes remain canonical."""
+        self._step(run_scoped=False)
+        channel = self.dispatcher.admissions.helper_channel(_token(helper_operation))
+        timeout = channel.gettimeout()
+        if timeout is None or not 0 < timeout <= 5:
+            raise LedgerError('SCENARIO_UNBOUNDED_CHANNEL')
+        return self.dispatcher.receive_helper(helper_operation)
+
     def deliver_seat_once(self, controller):
         """Pump one seat's queue, which can include other permitted Runs.
 
@@ -90,7 +99,11 @@ class LifecycleScenario:
         Never mark a receipt as belonging to the scenario's selected Run.
         """
         self._step(run_scoped=False)
-        if (type(controller) is not SupervisorAdmission
+        allowed = type(controller) is SupervisorAdmission
+        if not allowed:
+            from .claude_native_admission import NativeClaudeSupervisorAdmission
+            allowed = type(controller) is NativeClaudeSupervisorAdmission
+        if (not allowed
                 or controller.seat.room_id != self.review.ledger.room_id
                 or self.dispatcher.admissions.seats.get(controller.seat.participant_id) != controller.seat
                 or controller.controller != self.dispatcher.admissions.controller):

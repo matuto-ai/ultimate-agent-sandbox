@@ -34,6 +34,19 @@ EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 
 # Fixed transitive Python/native closure; no runtime repository discovery.
 SOURCES = (
+    'uas/claude_native_admission.py',
+    'uas/gate_identity.py',
+    'uas/git_process.py',
+    'uas/git_provenance.py',
+    'uas/git_source_proof.py',
+    'uas/lifecycle_scenario.py',
+    'uas/native_claude_recipe.py',
+    'uas/native_claude_runtime.py',
+    'uas/native_helper.py',
+    'uas/workstation_admission.py',
+    'uas/workstation_control.py',
+    'uas/workstation_peer.py',
+
     'uas/manager_actions.py', 'uas/manager_lifecycle.py',
     'tests/linux/mapped_namespace.py',
     'uas/__init__.py',

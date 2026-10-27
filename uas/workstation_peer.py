@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 
-from .kernel_origin import OriginDenied, OriginUnavailable, receive
+from .kernel_origin import MAX_PACKET, OriginDenied, OriginUnavailable, receive
 from .ledger import LedgerError, Origin, _json
 from .lifecycle import _unique_object
 from .peer import FixtureConnection, FixturePeerHub, Readiness
@@ -27,10 +27,40 @@ class AdmittedPeerDispatcher:
                 raise OriginDenied('canonical contribution owner required')
         self.contributions = contributions
         self.reviews = None
+        self.read_service = None
         self.admissions, self.hub = admissions, hub
         self._connections = {}
         self._delivery_offers = {}
         self._delivery_confirmed = set()
+
+    def attach_read_service(self, client):
+        """Attach the existing trusted Broker client, never a peer-selected URL.
+
+        Lifecycle lock precedes admission lock everywhere this service is used.
+        Provider I/O remains outside both locks, with local guards re-entered
+        by the existing Broker before dispatch, authorization and disclosure.
+        """
+        from .forge_read_service import ReadBrokerClient
+        from .lifecycle import Supervisor
+        if (type(client) is not ReadBrokerClient or type(client.supervisor) is not Supervisor
+                or self.read_service is not None or client.closed
+                or client.binding.room_id != self.hub.ledger.room_id
+                or client.supervisor.room_id != self.hub.ledger.room_id
+                or any(seat.room_id != client.binding.room_id or seat.room_instance != client.room_instance
+                       for seat in self.admissions.seats.values())):
+            raise OriginDenied('canonical same-Room Broker client required')
+        with client.supervisor._locked():
+            self._forge_room_current(client)
+            self.read_service = client
+
+    @staticmethod
+    def _forge_room_current(client):
+        state = client.supervisor._read()
+        if (client.closed or not state or state['phase'] != 'running'
+                or state['instance_id'] != client.room_instance
+                or state['spec']['project_id'] != client.binding.project_id):
+            raise LedgerError('ROOM_NOT_RUNNING')
+        return True
 
     def attach_reviews(self, owner):
         """Trusted host composition after constructing the admitted identity."""
@@ -131,6 +161,10 @@ class AdmittedPeerDispatcher:
 
     @staticmethod
     def _decode(data):
+        # Native admission accepts one bounded request record only. Fragmented
+        # writes are rejected before reservation/effects, not reassembled here.
+        if type(data) is not bytes or len(data) > MAX_PACKET:
+            raise LedgerError('INVALID_NATIVE_FRAME')
         try:
             value = json.loads(data.decode('utf-8'), object_pairs_hook=_unique_object)
             _json(value)
@@ -145,7 +179,10 @@ class AdmittedPeerDispatcher:
     def _origin(self, binding):
         # Same authoritative context controls idempotency and attribution. The
         # packet can supply neither Actor nor capability/namespace identity.
-        context = {'controller': self.admissions.controller, 'binding': asdict(binding)}
+        document = asdict(binding)
+        if document.get('native_payload_digest') is None:
+            document.pop('native_payload_digest', None)  # Preserve legacy authority/idempotency.
+        context = {'controller': self.admissions.controller, 'binding': document}
         authority = 'seat-' + hashlib.sha256(_canonical(context)).hexdigest()
         return Origin(binding.seat.actor_id, binding.seat.participant_id,
                       binding.incarnation, authority, binding.seat.capabilities)
@@ -197,11 +234,11 @@ class AdmittedPeerDispatcher:
         return {'actor_id': actor_id, 'kind': 'participant', 'active': True,
                 'authority_epoch': origin.authority_version, 'capabilities': sorted(origin.capabilities)}
 
-    def _submit(self, operation, record, binding, envelope):
+    def _submit(self, operation, record, binding, envelope, *, helper=None):
         connection = self._connections.get(operation)
         if connection is None or not self.hub._current(connection):
             raise LedgerError('STALE_CONNECTION')
-        authorize = lambda: (self.admissions.recheck(operation, record)
+        authorize = lambda: (self._recheck(operation, record, helper=helper)
                              and self.hub._current(connection))
         origin = self._origin(binding)
         if envelope.get('kind') in {'submit-for-review', 'review-result'}:
@@ -212,34 +249,114 @@ class AdmittedPeerDispatcher:
             return self.contributions.submit(envelope, origin=origin, authorize=authorize)
         return self.hub.submit(connection, envelope, origin=origin, authorize=authorize)
 
+    def _authorize(self, operation, record, *, helper=None):
+        if helper is not None:
+            return self.admissions.authorize_descendant(helper, record)
+        return self.admissions.authorize(operation, record)
+
+    def _recheck(self, operation, record, *, helper=None):
+        if helper is not None:
+            return self.admissions.recheck_descendant(helper, record)
+        return self.admissions.recheck(operation, record)
+
+    def _forge(self, operation, record, envelope, *, helper=None):
+        from .forge_read_service import reserve_forge_operation
+        client = self.read_service
+        if client is None:
+            raise LedgerError('FORGE_UNAVAILABLE')
+        # A helper's root binding is selected by HubAdmission, not by its packet.
+        # Capture that exact Origin once, and re-enter admission for every later
+        # Broker callback. A transaction-only recheck alone has no held depth.
+        with client.supervisor._locked():
+            self._forge_room_current(client)
+            with self._authorize(operation, record, helper=helper) as binding:
+                root_operation = binding.operation_id
+                connection = self._connections.get(root_operation)
+                if connection is None or not self.hub._current(connection):
+                    raise LedgerError('STALE_CONNECTION')
+                if (binding.seat.room_instance != client.room_instance
+                        or binding.seat.room_id != client.binding.room_id):
+                    raise LedgerError('ROOM_MISMATCH')
+                origin = self._origin(binding)
+                def guard():
+                    self._forge_room_current(client)  # Broker holds lifecycle lock.
+                    try:
+                        with self._authorize(root_operation, record, helper=helper) as current:
+                            return (current == binding and self._origin(current) == origin
+                                and self._recheck(root_operation, record, helper=helper)
+                                and self.hub._current(connection))
+                    except (OriginDenied, OriginUnavailable):
+                        return False
+                # RoomLedger callbacks remain pure/local under the already-held
+                # lifecycle/admission fences; no nested filesystem observation.
+                transaction_guard = lambda: (self._recheck(root_operation, record, helper=helper)
+                                              and self.hub._current(connection))
+                reserve_forge_operation(self.hub.ledger, client.binding, envelope, origin, transaction_guard)
+                packet = client.prepare(envelope, origin, authorize=guard)
+        receipt = client.perform(packet)  # Never hold admission/ledger lock over provider I/O.
+        with client.supervisor._locked():
+            if guard() is not True:
+                raise LedgerError('FORBIDDEN')
+        return receipt
+
     def receive(self, operation):
-        channel = self.admissions.peer_channel(operation)
+        return self._receive(operation, self.admissions.peer_channel(operation))
+
+    def receive_helper(self, helper):
+        """Dedicated fixed MCP transport; direct HeldOrigin checks stay intact."""
+        return self._receive(None, self.admissions.helper_channel(helper), helper=helper)
+
+    def _receive(self, operation, channel, *, helper=None):
         request_id = None
+        envelope = None
         try:
-            # Potentially blocking I/O happens before acquiring authority lock.
+            # Blocking reads and provider calls are outside admission locks.
+            # Keep the received kernel pidfd alive through all Broker rechecks.
             with receive(channel) as record:
-                with self.admissions.authorize(operation, record) as binding:
+                with self._authorize(operation, record, helper=helper):
                     frame = self._decode(record.data)
                     request_id = frame['request_id']
-                    if frame['envelope'].get('kind') == 'forge-read':
-                        raise LedgerError('FORGE_UNAVAILABLE')
-                    receipt = self._submit(operation, record, binding, frame['envelope'])
+                envelope = frame['envelope']
+                if envelope.get('kind') in {'forge-read','forge-write','forge-reconcile'}:
+                    receipt = self._forge(operation, record, envelope, helper=helper)
+                else:
+                    with self._authorize(operation, record, helper=helper) as binding:
+                        receipt = self._submit(binding.operation_id, record, binding,
+                                               envelope, helper=helper)
             result = {'request_id': request_id, 'ok': True, 'receipt': receipt}
         except LedgerError as error:
             result = {'request_id': request_id, 'ok': False, 'error': error.code}
         except (OriginDenied, OriginUnavailable, OSError):
-            # Any consuming RoomLedger transaction has already rolled back.
-            # Fencing belongs here, never in the transaction's pure recheck.
-            self.admissions.revoke(operation)
+            # Transaction locks have unwound before any authority is fenced.
+            if helper is None:
+                self.admissions.revoke(operation)
+            else:
+                self.admissions.revoke_helper(helper)
             result = {'request_id': request_id, 'ok': False, 'error': 'AUTHORITY_REVOKED'}
-        # Reply loss never retracts a committed ledger receipt. No provider I/O
-        # or socket backpressure may hold the admission/revocation lock.
+        return self._reply(channel, result, forge=(envelope is not None
+            and envelope.get('kind') in {'forge-read','forge-write','forge-reconcile'}))
+
+    @staticmethod
+    def _reply(channel, result, *, forge=False):
+        # Reuse the established digest/index/count protocol understood by the
+        # fixed Pi/Claude channel. This adds no framing/recovery store. Only
+        # Forge replies may be chunked; all requests remain a single record.
+        from .forge_read_service import send_result
         try:
             data = _json(result).encode()
-            if channel.send(data) != len(data):
+        except LedgerError:
+            result = {'request_id':result['request_id'],'ok':False,'error':'OUTPUT_LIMIT'}
+            data = _json(result).encode()
+        if len(data) > 1_048_576 or (len(data) > MAX_PACKET and not forge):
+            result = {'request_id':result['request_id'],'ok':False,'error':'OUTPUT_LIMIT'}
+            data = _json(result).encode()
+        try:
+            if len(data) > MAX_PACKET:
+                send_result(channel, result['request_id'], result)
+            elif channel.send(data) != len(data):
                 raise OSError('incomplete peer reply')
-        except OSError:
-            pass  # Existing operation ID provides durable retry reconciliation.
+        except (OriginDenied, OSError):
+            pass  # Reply loss never retracts the canonical committed receipt.
         return result
 
 

@@ -83,3 +83,8 @@ The next source slice adds an [opt-in native Pi exact-exec recipe](native-pi-rec
 consumed by the existing Supervisor launch owner. It does not change this
 harness's live preflight classification; selected-image/provider execution,
 Claude native-child/MCP composition and full lifecycle qualification remain.
+
+The opt-in Claude host/native/helper composition is described in
+[the runtime boundary](claude-native-admission.md) and
+[the shared admission contract](native-claude-admission.md). It remains preparation
+for #78, not real-provider or isolated-Hub qualification.

@@ -110,7 +110,7 @@ class ExecLaunch:
         self.native_receiver = None
         self.admission = None
 
-    def _save(self, *, first=False):
+    def _journal_document(self):
         document = {'version': 1, 'room_id': self.seat.room_id,
                     'room_instance': self.seat.room_instance,
                     'participant_id': self.seat.participant_id, 'actor_id': self.seat.actor_id,
@@ -119,6 +119,10 @@ class ExecLaunch:
                     'native_readiness': self._native_readiness, 'admission': self.admission}
         if getattr(self, 'native_recipe', None) is not None:
             document['native_recipe'] = self.native_recipe.identity
+        return document
+
+    def _save(self, *, first=False):
+        document = self._journal_document()
         # No challenge, credential or replayable process authority is persisted.
         data = json.dumps(document, sort_keys=True, allow_nan=False).encode()
         if len(data) > 16384 or (self.admission is not None and type(self.admission) is not dict):
