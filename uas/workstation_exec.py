@@ -168,6 +168,12 @@ class ExecLaunch:
             raise ExecUnavailable('exact exec identity not verified')
         self._remaining()
 
+    def _create_spec(self):
+        """Fixed Pi recipe; only trusted fixed helper subclasses may differ."""
+        return {'AttachStdin': True, 'AttachStdout': True, 'AttachStderr': True,
+                'Tty': False, 'Privileged': False, 'User': '65532:65532',
+                'WorkingDir': '/uas/workspace', 'Cmd': [CONNECTOR, self.seat.slot], 'Env': []}
+
     def launch(self, listener):
         if self.state != 'new':
             raise ExecUnavailable('launch is one-shot; reconcile before replacement')
@@ -177,11 +183,7 @@ class ExecLaunch:
         self._save(first=True)
         self.deadline = time.monotonic() + self.timeout
         try:
-            self.exec_id = self.engine.create(self.seat.container_id, {
-                'AttachStdin': True, 'AttachStdout': True, 'AttachStderr': True,
-                'Tty': False, 'Privileged': False, 'User': '65532:65532',
-                'WorkingDir': '/uas/workspace', 'Cmd': [CONNECTOR, self.seat.slot],
-                'Env': []})
+            self.exec_id = self.engine.create(self.seat.container_id, self._create_spec())
             if type(self.exec_id) is not str or not ID.fullmatch(self.exec_id):
                 raise ExecUnavailable('invalid exec-create result')
             self.state = 'starting'; self._save()

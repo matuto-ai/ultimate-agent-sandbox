@@ -262,11 +262,26 @@ def _normalize(config, available_credentials):
     credential(manager["server_trust_ref"], "$.deployment.manager.server_trust_ref", "manager-trust")
     actors = _named(d["actors"], "$.deployment.actors")
     for a, p in actors.values():
-        _object(a, p, ("id",), ("git_credential_ref", "forge_credential_ref", "github_user_id"))
+        _object(a, p, ("id",), ("git_credential_ref", "forge_credential_ref", "github_user_id", "git_identity"))
         # Operator-declared immutable assignment mapping, not proof of credential
         # identity, native account access, or authority to admit a Run.
         if "github_user_id" in a:
             _integer(a["github_user_id"], p + ".github_user_id", maximum=2**63 - 1)
+        # Optional for backwards-compatible admission. Native Git mutations
+        # require this trusted canonical identity at their operation seam;
+        # credential presence alone never invents a name or email.
+        if "git_identity" in a:
+            from .git_policy import GitIdentity, GitPolicyError
+            identity = _object(a["git_identity"], p + ".git_identity", ("name", "email"))
+            for field, limit in (("name", 256), ("email", 254)):
+                value = _text(identity[field], p + ".git_identity." + field, limit)
+                try:
+                    # One identity contract for offline config and launcher;
+                    # probe each field separately for an exact sanitized error.
+                    GitIdentity(a['id'], value if field == 'name' else 'Validation',
+                                value if field == 'email' else 'validation@example.invalid')
+                except GitPolicyError:
+                    raise ConfigError(p + ".git_identity." + field, "expected canonical Git identity text") from None
         for kind in ("git", "forge"):
             key = kind + "_credential_ref"
             if key in a:

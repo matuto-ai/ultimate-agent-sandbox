@@ -118,3 +118,11 @@ fences. Account-free hosted proof is separate from live-account qualification;
 writes with read-only, identity-bound observations and connects the same external
 Broker to the [Hub projection outbox](docs/forge-projections.md). Run state remains
 authoritative when labels drift or provider/audit responses are lost.
+
+### Controlled native Git
+
+[Native Git mediation and attribution](docs/native-git.md) adds a public typed
+launcher, fixed credential-free worker, external SSH-compatible byte Broker,
+canonical commit/source receipts and Run-scoped contribution history. Short
+account-free hosted seams are separate from the deferred real GitHub SSH and
+exact-image qualification; #67 is not closed by source tests alone.

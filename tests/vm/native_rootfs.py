@@ -121,7 +121,41 @@ def verify_runtime(payload, native):
             item = files.get('opt/uas/bin/' + name)
             if item is None or item['sha256'] != expected or item['mode'] != 0o555:
                 raise ValueError('artifacts immutable binary manifest differs')
+    git_runtime = native.get('git_runtime')
+    if git_runtime is not None:
+        if (artifact or type(git_runtime) is not dict or set(git_runtime) != {'version', 'entries', 'launcher_sha256', 'connector_sha256'}
+                or type(git_runtime['version']) is not int or git_runtime['version'] != 1
+                or type(git_runtime['entries']) is not list or not 1 <= len(git_runtime['entries']) <= 128
+                or any(type(name) is not str or not re.fullmatch(r'(?:git(?:-[a-z0-9-]+)?|scalar)', name) for name in git_runtime['entries'])
+                or git_runtime['entries'] != sorted(set(git_runtime['entries'])) or 'git' not in git_runtime['entries']):
+            raise ValueError('invalid controlled Git image descriptor')
+        for name, key in (('git', 'launcher_sha256'), ('git-worker-connector', 'connector_sha256')):
+            entry = files.get('opt/uas/bin/' + name)
+            if entry is None or entry['mode'] != 0o555 or entry['sha256'] != git_runtime[key]:
+                raise ValueError('controlled Git fixed executable differs')
     return archive, files
+
+
+def install_git_entries(root, descriptor):
+    """Fresh offline image only, before fingerprint; never a host installer."""
+    if descriptor is None: return
+    launcher = root / 'opt/uas/bin/git'; ordinary(launcher)
+    if digest(launcher) != descriptor['launcher_sha256']: raise ValueError('Git launcher differs')
+    for prefix in (('usr', 'bin'), ('usr', 'libexec', 'git-core'), ('usr', 'lib', 'git-core')):
+        directory = _directory(root, prefix)
+        for name in descriptor['entries']:
+            target = directory / name
+            # Exclusive creates preserve any pre-existing native/human file.
+            with launcher.open('rb') as source, target.open('xb') as output:
+                shutil.copyfileobj(source, output)
+            target.chmod(0o555)
+    hooks = root / 'opt/uas/git-hooks'
+    if not stat.S_ISDIR(hooks.lstat().st_mode) or sorted(path.name for path in hooks.iterdir()) != ['reference-transaction']:
+        raise ValueError('fixed Git hook directory differs')
+    ordinary(hooks / 'reference-transaction')
+    os.chown(hooks, 65530, 65532)  # New immutable image metadata, not a host account.
+    hooks.chmod(0o500)
+    _directory(root, ('opt', 'uas', 'git-views'))
 
 
 def _directory(root, parts):
@@ -536,6 +570,7 @@ def build_rootfs(nonce, manifest, destination, *, run):
     print('Native rootfs phase: trust-generation complete', flush=True)
     print('Native rootfs phase: runtime-extraction start', flush=True)
     extract_runtime(archive, files, root)
+    install_git_entries(root, manifest['native_runtime'].get('git_runtime'))
     print('Native rootfs phase: runtime-extraction complete', flush=True)
     print('Native rootfs phase: tini-copy start', flush=True)
     source = resolve_inside(root, 'usr/bin/tini')

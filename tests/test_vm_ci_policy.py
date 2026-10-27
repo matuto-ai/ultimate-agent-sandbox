@@ -7,7 +7,7 @@ import unittest
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 1, 1, 2], 'claude-native.yml': [2],
+        budgets = {'validate.yml': [1, 1, 1, 1, 2, 1], 'claude-native.yml': [2],
                    'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
@@ -20,7 +20,7 @@ class VMCITriggerTests(unittest.TestCase):
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
-                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle'}
+                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams'}
                     roots = {'validate', 'unit-slow'}
                     self.assertEqual(set(jobs), roots | integrations)
                     for root in roots:
