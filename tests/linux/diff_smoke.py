@@ -96,6 +96,7 @@ SOURCES = (
     'uas/run_coordination.py',
     'uas/run_requests.py',
     'uas/workstation_exec.py',
+    'uas/native_pi_recipe.py',
     'tests/linux/diff_smoke.py',
     'runtime/workstation/diff_bootstrap.c',
     'runtime/workstation/diff_evaluator.c',

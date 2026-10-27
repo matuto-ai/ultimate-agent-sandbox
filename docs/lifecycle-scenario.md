@@ -78,3 +78,8 @@ See the [canonical review owner](architecture/run-review-owner.md),
 [admitted Workstation transport](workstation-pi-transport.md), and
 [accepted reconciliation](architecture/source-reconciliation.md). No additional
 VM or target-host execution is launched by this harness.
+
+The next source slice adds an [opt-in native Pi exact-exec recipe](native-pi-recipe.md)
+consumed by the existing Supervisor launch owner. It does not change this
+harness's live preflight classification; selected-image/provider execution,
+Claude native-child/MCP composition and full lifecycle qualification remain.

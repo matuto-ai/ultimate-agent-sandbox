@@ -87,9 +87,15 @@ class ExecLaunch:
     The one-use challenge correlates the trusted fixed bootstrap's exec stdin
     to a kernel record; it is not a badge or post-launch bearer credential.
     """
-    def __init__(self, engine, seat, endpoint, journal, *, timeout=10):
+    def __init__(self, engine, seat, endpoint, journal, *, timeout=10, native_recipe=None):
         if type(seat) is not ExecSeat or not 0 < timeout <= 10:
             raise ExecUnavailable('invalid launch')
+        if native_recipe is not None:
+            from .native_pi_recipe import NativePiRecipe
+            if (type(self) is not ExecLaunch or type(native_recipe) is not NativePiRecipe
+                    or native_recipe.seat != seat or native_recipe.endpoint != str(endpoint.path)):
+                raise ExecUnavailable('native recipe must match canonical launch seat/endpoint')
+        self.native_recipe = native_recipe
         self.engine, self.seat, self.endpoint = engine, seat, endpoint
         self.journal = Path(journal)
         self.timeout = timeout
@@ -111,6 +117,8 @@ class ExecLaunch:
                     'container_id': self.seat.container_id, 'exec_id': self.exec_id,
                     'incarnation': self.incarnation, 'state': self.state,
                     'native_readiness': self._native_readiness, 'admission': self.admission}
+        if getattr(self, 'native_recipe', None) is not None:
+            document['native_recipe'] = self.native_recipe.identity
         # No challenge, credential or replayable process authority is persisted.
         data = json.dumps(document, sort_keys=True, allow_nan=False).encode()
         if len(data) > 16384 or (self.admission is not None and type(self.admission) is not dict):
@@ -169,7 +177,9 @@ class ExecLaunch:
         self._remaining()
 
     def _create_spec(self):
-        """Fixed Pi recipe; only trusted fixed helper subclasses may differ."""
+        """Fixture default; explicit native recipe only on canonical ExecLaunch."""
+        if getattr(self, 'native_recipe', None) is not None:
+            return self.native_recipe.exec_spec()
         return {'AttachStdin': True, 'AttachStdout': True, 'AttachStderr': True,
                 'Tty': False, 'Privileged': False, 'User': '65532:65532',
                 'WorkingDir': '/uas/workspace', 'Cmd': [CONNECTOR, self.seat.slot], 'Env': []}
@@ -178,11 +188,16 @@ class ExecLaunch:
         if self.state != 'new':
             raise ExecUnavailable('launch is one-shot; reconcile before replacement')
         # No engine mutation before actual platform and endpoint checks.
+        if getattr(self, 'native_recipe', None) is not None:
+            self.native_recipe.validate_container(self.engine)
         probe(); self.endpoint.require(); enable(listener)
         self.state = 'creating'
         self._save(first=True)
         self.deadline = time.monotonic() + self.timeout
         try:
+            if getattr(self, 'native_recipe', None) is not None:
+                self.native_recipe.validate_container(self.engine)
+                self._remaining()
             self.exec_id = self.engine.create(self.seat.container_id, self._create_spec())
             if type(self.exec_id) is not str or not ID.fullmatch(self.exec_id):
                 raise ExecUnavailable('invalid exec-create result')
@@ -281,6 +296,12 @@ class ExecLaunch:
                     or scope.get('participant_id') != self.seat.participant_id):
                 raise ExecUnavailable('trusted native scope/profile required')
             scope = dict(scope)
+            if getattr(self, 'native_recipe', None) is not None:
+                if (scope != self.native_recipe.scope
+                        or profile_digest != self.native_recipe.manifest_digest):
+                    raise ExecUnavailable('native recipe scope/payload mismatch')
+                self.native_recipe.validate_container(self.engine)
+                self._inspect(self.origin.credentials[0])
             receiver = FixturePiRpcReceiver.attach_workstation(self, journal=journal,
                 scope=scope, timeout=timeout, startup_observer=startup_observer,
                 initial_state_timeout=initial_state_timeout)
@@ -289,7 +310,8 @@ class ExecLaunch:
                     or receiver.runtime_version != '1.4.0'):
                 raise ExecUnavailable('native attachment binding mismatch')
             proof = receiver.prove_fresh_context()
-            prefix = '/uas/runtime/' + self.seat.slot + '/sessions/'
+            prefix = (self.native_recipe.sessions + '/' if getattr(self, 'native_recipe', None) is not None
+                      else '/uas/runtime/' + self.seat.slot + '/sessions/')
             if (type(proof) is not dict
                     or set(proof) != {'runtime_id', 'session_id', 'session_file', 'source'}
                     or any(type(proof[k]) is not str or not 0 < len(proof[k]) <= 1024
