@@ -145,6 +145,11 @@ async function main() {
       if (child) throw new Error('duplicate-native-spawn');
       child = spawn(options.command, options.args, {cwd: options.cwd, env: options.env,
         signal: options.signal, stdio: ['pipe', 'pipe', 'pipe']});
+      // Ownership only: expose the fixed child before initialization so a
+      // Supervisor Stop can retain a pidfd even during a cold-start timeout.
+      const identity = kernelIdentity();
+      write({type: 'native-spawned', host_pid: process.pid, native_pid: child.pid,
+        native_start: identity.start, session_id: sessionId});
       // Drain native diagnostics without retaining or exposing arbitrary content.
       child.stderr.on('data', () => {});
       child.once('exit', () => { state.hold('native-process-lost'); write({type: 'native-exit'}); });

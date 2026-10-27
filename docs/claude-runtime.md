@@ -7,8 +7,10 @@ SDK 0.3.310 with the same exact Claude Code 2.1.310 native binary. See
 [supported SDK fixture](claude-sdk-fixture.md) for the actual qualification run,
 source limits and durable integration. Fresh public control liveness plus exact
 native idle/state evidence replaces synthetic constructor bootstrap and manual
-model-turn refresh. SDK host and native PID remain distinct; neither is a
-qualified Supervisor badge. Unknown intents still hold and never reinject.
+model-turn refresh. SDK host and native PID remain distinct. The optional
+[Supervisor lifecycle](claude-context-reset.md) binds only the actual native PID
+and held pidfd to the immutable seat; standalone receiver use stays fixture-owned.
+Unknown intents still hold and never reinject.
 
 The direct-CLI sections below are historical/diagnostic evidence, **not** the
 default receiver's readiness or bootstrap policy. Listing alone remains unsafe:
@@ -134,7 +136,7 @@ that missing ACK. The working-hold test therefore uses a real in-flight fixture
 control turn to prove traffic retention independently of ACK latency; it does
 not claim ACK must precede model response or turn completion.
 
-## Validation and remaining gates
+## Historical direct-CLI validation and remaining gates
 
 The first integrated receiver passed [CI run 40330903455](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40330903455)
 for head `61c19cf505c4a7f147ecc2fe1e2d915a874d7bd3` (test-merge
@@ -156,9 +158,10 @@ Still **not qualified**: a production Supervisor badge, actual interactive
 permission / Needs input behavior, background sessions, authenticated inference,
 MCP/channel delivery or HTTP/SSE reconnect, observable compaction, cross-Run native
 reset, target Workstation image digest, or the full Pi–Claude–GitHub lifecycle.
-Needs-input / missing-signal parser tests are synthetic source coverage, not
-native permission-path evidence. The SIGSTOP test is an owned-process failure
-injection, not a native documented hung-state signal. **Issue #71 remains open.**
+At this historical stage, needs-input / missing-signal parser tests were synthetic
+source coverage, not native permission-path evidence. The later fixed permission
+qualification and Supervisor/reset integration below supersede those specific gaps. The SIGSTOP test is an owned-process failure
+injection, not a native documented hung-state signal. This historical direct-CLI stage did not complete issue #71.
 
 ## First-party surfaces checked 2026-10-26
 
