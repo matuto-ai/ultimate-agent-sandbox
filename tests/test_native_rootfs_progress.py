@@ -59,7 +59,7 @@ class RootfsProgressTests(unittest.TestCase):
                  and isinstance(n.args[0],ast.Constant) and isinstance(n.args[0].value,str)
                  and n.args[0].value.startswith('Native rootfs phase:')]
         self.assertEqual(markers,[f'Native rootfs phase: {name} {state}'
-            for name in ('rpm-transaction','filesystem-metadata','runtime-extraction','tini-copy',
+            for name in ('rpm-transaction','filesystem-metadata','trust-generation','runtime-extraction','tini-copy',
                          'debug-metadata','fingerprint','manifest-write') for state in ('start','complete')])
 
 if __name__=='__main__': unittest.main()

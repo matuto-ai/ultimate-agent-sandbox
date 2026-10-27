@@ -14,7 +14,7 @@ import stat
 import tarfile
 
 PAYLOAD = Path('/mnt/uas-payload')
-ROOTS = ('python3', 'tini', 'glibc', 'libstdc++')
+ROOTS = ('python3', 'tini', 'glibc', 'libstdc++', 'crypto-policies-scripts')
 MAX_FILES = 30000
 MAX_FILE_BYTES = 160 * 1024 * 1024
 MAX_RUNTIME_BYTES = 512 * 1024 * 1024
@@ -515,6 +515,10 @@ def build_rootfs(nonce, manifest, destination, *, run):
     print('Native rootfs phase: filesystem-metadata start', flush=True)
     filesystem_layout = verify_filesystem_layout(root, run=run)
     print('Native rootfs phase: filesystem-metadata complete', flush=True)
+    from native_trust import generate_trust
+    print('Native rootfs phase: trust-generation start', flush=True)
+    trust_generation = generate_trust(root, run=run)
+    print('Native rootfs phase: trust-generation complete', flush=True)
     print('Native rootfs phase: runtime-extraction start', flush=True)
     extract_runtime(archive, files, root)
     print('Native rootfs phase: runtime-extraction complete', flush=True)
@@ -548,4 +552,4 @@ def build_rootfs(nonce, manifest, destination, *, run):
     return {**result, 'rootfs_manifest': str(manifest_path), 'runtime_sha256': manifest['native_runtime']['sha256'],
             'tini_sha256': digest(target), 'rpm_roots': list(ROOTS), 'rpm_scriptlets': False,
             'rpm_automatic_sysusers': True, 'package_tools': package_tools,
-            'filesystem_layout': filesystem_layout}
+            'filesystem_layout': filesystem_layout, 'trust_generation': trust_generation}

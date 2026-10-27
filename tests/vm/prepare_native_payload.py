@@ -13,7 +13,7 @@ import shutil
 import tarfile
 
 PROFILE = 'native-pi-v1'
-RPM_ROOTS = ('python3', 'tini', 'glibc', 'libstdc++')
+RPM_ROOTS = ('python3', 'tini', 'glibc', 'libstdc++', 'crypto-policies-scripts')
 NODE_VERSION = '24.22.1'
 NODE_FILE = 'node-v24.22.1-linux-x64.tar.xz'
 NODE_URL = 'https://nodejs.org/dist/v24.22.1/' + NODE_FILE

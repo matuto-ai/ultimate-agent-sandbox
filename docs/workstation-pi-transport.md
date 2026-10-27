@@ -582,3 +582,64 @@ manual budget remain unchanged. Default synthetic #98 command behavior is
 unchanged. No arbitrary log, environment or credential collection is introduced.
 These are visibility changes, not proof the previous stall was load-related or
 that any native/container qualification has passed.
+
+### Required trust/configuration generation after run 40426350440
+
+Run 40426350440 on `03f2a04b` completed the RPM transaction, signed filesystem
+metadata checks, runtime extraction and tini copy. Fingerprinting processed
+24,786 entries / 373,067,696 bytes and reported all six unresolved links (not
+truncated). Cleanup completed in 594.05 seconds. No container, kernel-origin or
+native-delivery scenario was reached. The absence of a serial stall in this run
+does not establish the cause of the preceding stall.
+
+The installed signed-header inventory identified:
+
+| Link | Missing target | Installed owner |
+|---|---|---|
+| `etc/pki/tls/fips_local.cnf` | `etc/crypto-policies/back-ends/openssl_fips.config` | `openssl-libs-1:3.5.9-1.fc44.x86_64` |
+| `etc/pki/java/cacerts` | `etc/pki/ca-trust/extracted/java/cacerts` | `ca-certificates-0:2026.2.92_v9.0.319-2.fc44.noarch` |
+| `etc/ssl/cert.pem` | `etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` | same CA package |
+| `etc/ssl/certs/ca-bundle.crt` | same PEM target | same CA package |
+| `etc/ssl/certs/ca-bundle.trust.crt` | `etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt` | same CA package |
+| `etc/ssl/certs/ca-certificates.crt` | same PEM target | same CA package |
+
+These are required runtime configuration/trust links, **not optional debug
+indexes**. They remain strict: no exemption, deletion, dummy CA material or
+placeholder backend. With package scriptlets still disabled, the native profile
+explicitly includes signed `crypto-policies-scripts` and invokes supported tools
+inside the fresh guarded no-NIC installroot. The [Fedora crypto-policies spec](https://src.fedoraproject.org/rpms/crypto-policies/raw/f44/f/crypto-policies.spec)
+identifies DEFAULT generation; the [Fedora update-ca-trust source](https://src.fedoraproject.org/rpms/ca-certificates/raw/f44/f/update-ca-trust)
+and [p11-kit trust manual](https://p11-glue.github.io/p11-glue/p11-kit/manual/trust.html)
+supply the three extract operations below. The broader update-ca-trust script is
+not executed, avoiding unrelated hashed-directory and additional-format changes.
+
+All four fixed commands use `/usr/bin/chroot /var/lib/uas-native-rootfs`, then
+`/usr/bin/env -i` with only fixed PATH, LC_ALL, HOME and
+`P11_KIT_NO_USER_CONFIG=1` values. Their inner argv are:
+
+```
+/usr/bin/python3 -B /usr/bin/update-crypto-policies --no-reload --set DEFAULT
+/usr/bin/trust extract --format=openssl-bundle --filter=certificates --overwrite --comment /etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt
+/usr/bin/trust extract --format=pem-bundle --filter=ca-anchors --overwrite --comment --purpose server-auth /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+/usr/bin/trust extract --format=java-cacerts --filter=ca-anchors --overwrite --purpose server-auth /etc/pki/ca-trust/extracted/java/cacerts
+```
+
+The three CA outputs must be absent before invocation despite the documented
+`--overwrite` option. Tools and packaged trust input are checked against installed
+RPM header SHA-256 digests, relying on the preceding signature-verified offline
+transaction. This is not a fresh signature verification of the RPM database.
+Bounded before/after whole-root inventories allow changes only in
+`etc/crypto-policies` and the three exact CA files; expected directory timestamps
+are excluded, while modes, owners, bytes and link changes remain checked.
+Unexpected changes fail before image import. Generated targets must resolve
+inside the root to ordinary nonempty files. The final strict link fingerprint
+still applies without any new unresolved-link exception.
+
+Each fixed child has a hard 90-second deadline with bounded output and owned
+process-group cleanup. Only actual received byte deltas produce progress, never
+a timer-only heartbeat. Default synthetic #98 commands, native DNF's 900-second
+limit, serial idle limit and global round budget are unchanged. No shell, host
+mount/configuration, user trust store, guest fetch, broadened weak dependencies,
+generic package scriptlets or security-policy relaxation is involved. Actual
+signed-tool execution and the resulting image remain **unqualified** until the
+next reviewed exact-head deliberate run.

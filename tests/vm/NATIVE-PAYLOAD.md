@@ -25,11 +25,17 @@ The C connector is statically compiled, not run; acquired Node is not run.
 8 MiB maximum file list binds each runtime file's path, size, mode and digest.
 The guest must verify both before extracting ordinary relative paths and must
 reject duplicate/traversing/symlink/hardlink/special archive members. The native
-profile's signed RPM roots are Python 3, tini, glibc and libstdc++; the guest
+profile's signed RPM roots are Python 3, tini, glibc, libstdc++ and the explicit
+crypto-policies-scripts package (not a weak-dependency expansion); the guest
 owns offline `dnf --installroot` with `tsflags=noscripts`, exact local repository
 only, disabled weak dependencies, and signature verification. It copies the
 packaged tini to fixed `/opt/uas/bin/tini` and measures/hashes the final rootfs.
-No package lifecycle scripts, account configuration, or credentials are staged.
+Package scriptlets remain disabled. The RPM automatic sysusers helper is distinct
+and remains enabled inside the disposable root. Fixed signed Fedora tools generate
+DEFAULT crypto-policy and packaged CA trust outputs offline before fingerprinting;
+no host configuration, user credentials, downloaded CA data or generic package
+scriptlets are used. See the native transport qualification record for the exact
+commands, mutation checks and remaining actual-image qualification gate.
 
 The Node artifact and npm packages are exact pinned inputs. Fedora RPM candidate
 resolution remains version-observed and signed, **not reproducibly pinned across

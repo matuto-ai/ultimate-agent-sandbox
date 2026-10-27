@@ -10,6 +10,8 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import sys
+import types
 
 SPEC = importlib.util.spec_from_file_location('native_rootfs', Path(__file__).parent/'vm/native_rootfs.py')
 rootfs = importlib.util.module_from_spec(SPEC)
@@ -170,7 +172,8 @@ class NativeRootfsTests(unittest.TestCase):
             (destination/'usr/bin').mkdir(parents=True, exist_ok=True)
             (destination/'usr/bin/tini').write_bytes(b'packaged tini')
             (destination/'usr/bin/tini').chmod(0o555)
-        with patch.object(rootfs,'guest_guard') as guard, patch.object(rootfs,'PAYLOAD',self.payload):
+        with patch.object(rootfs,'guest_guard') as guard, patch.object(rootfs,'PAYLOAD',self.payload), \
+                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(generate_trust=lambda root,run: {'mock': True})}):
             result=rootfs.build_rootfs('a'*32,{'native_runtime':self.native},destination,run=fake_run)
         guard.assert_called_once_with('a'*32)
         args,timeout=calls[0]
@@ -178,7 +181,7 @@ class NativeRootfsTests(unittest.TestCase):
         for required in ('--disablerepo=*','--enablerepo=uas-native','--setopt=tsflags=noscripts',
                          '--setopt=plugins=False','--setopt=install_weak_deps=False','--setopt=uas-native.gpgcheck=1'):
             self.assertIn(required,args)
-        self.assertEqual(args[-4:],rootfs.ROOTS)
+        self.assertEqual(args[-len(rootfs.ROOTS):],rootfs.ROOTS)
         self.assertNotIn('manifest',result)
         self.assertLess(len(json.dumps(result)),2048)
         self.assertEqual(stat.S_IMODE(destination.stat().st_mode),0o755)
@@ -186,6 +189,20 @@ class NativeRootfsTests(unittest.TestCase):
         self.assertFalse(Path(result['rootfs_manifest']).is_relative_to(destination))
         self.assertEqual(rootfs.digest(Path(result['rootfs_manifest'])),result['rootfs_manifest_sha256'])
         self.assertEqual((destination/'opt/uas/bin/tini').read_bytes(),b'packaged tini')
+
+    def test_trust_failure_prevents_runtime_extraction_and_manifest(self):
+        destination = self.directory/'failed-trust'
+        trust = unittest.mock.Mock(side_effect=ValueError('unexpected trust mutation'))
+        with patch.object(rootfs, 'guest_guard'), patch.object(rootfs, 'PAYLOAD', self.payload), \
+                patch.object(rootfs, 'verify_filesystem_layout', return_value={}), \
+                patch.object(rootfs, 'extract_runtime') as extract, \
+                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(generate_trust=trust)}):
+            with self.assertRaisesRegex(ValueError, 'unexpected trust mutation'):
+                rootfs.build_rootfs('a'*32, {'native_runtime': self.native}, destination,
+                                   run=lambda *args, **kwargs: '')
+        trust.assert_called_once()
+        extract.assert_not_called()
+        self.assertFalse(destination.with_name(destination.name+'.manifest.json').exists())
 
     def test_exact_runtime_mtab_link_allowed_without_host_proc_following(self):
         (self.root/'etc').mkdir()

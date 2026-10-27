@@ -111,8 +111,10 @@ class NativeCapture:
                 'first_error_limit_reached': len(self.errors) == 8}
 
 
-def native_command(arguments, *, timeout, pass_fds=()):
-    """Fixed native DNF only: real-output progress, original hard deadline."""
+def native_command(arguments, *, timeout, pass_fds=(), phase="DNF"):
+    """Fixed native commands: real-output progress, original hard deadline."""
+    if phase not in ("DNF", "trust-generation"):
+        raise ValueError("invalid native command phase")
     started = time.monotonic()
     deadline = started + timeout
     process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -143,7 +145,7 @@ def native_command(arguments, *, timeout, pass_fds=()):
             counts = tuple(captures[name].count for name in ('stdout', 'stderr'))
             now = time.monotonic()
             if counts != reported and (now - last_report >= 30 or not selector.get_map()):
-                print('Native DNF output progress:', json.dumps(dict(zip(('stdout_bytes', 'stderr_bytes'), counts))), flush=True)
+                print('Native ' + phase + ' output progress:', json.dumps(dict(zip(('stdout_bytes', 'stderr_bytes'), counts))), flush=True)
                 reported, last_report = counts, now
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -152,7 +154,7 @@ def native_command(arguments, *, timeout, pass_fds=()):
         reaped = True
         return code, {name: capture.context() for name, capture in captures.items()}
     except subprocess.TimeoutExpired:
-        print('Native DNF timeout evidence:', json.dumps({
+        print('Native ' + phase + ' timeout evidence:', json.dumps({
             'timeout_seconds': timeout, **{name: capture.context() for name, capture in captures.items()}},
             ensure_ascii=True), flush=True)
         raise
@@ -181,9 +183,21 @@ def native_command(arguments, *, timeout, pass_fds=()):
             raise failures[0]
 
 
-def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False):
+def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False, native_trust_context=False):
     if type(native_failure_context) is not bool:
-        raise ValueError('invalid native failure diagnostic option')
+        raise ValueError("invalid native failure diagnostic option")
+    if type(native_trust_context) is not bool:
+        raise ValueError("invalid native trust diagnostic option")
+    if native_trust_context:
+        from native_trust import fixed_commands
+        if (native_failure_context or pass_fds or timeout != 90
+                or arguments not in fixed_commands(Path("/var/lib/uas-native-rootfs"))):
+            raise ValueError("native trust requires fixed offline installroot command")
+        code, streams = native_command(arguments, timeout=timeout, phase="trust-generation")
+        if code:
+            raise RuntimeError("native trust command failed: " + json.dumps(
+                {"tool": arguments[0], "returncode": code, **streams}, ensure_ascii=True))
+        return streams["stdout"]["output"]
     if native_failure_context and (not arguments or arguments[0] != 'dnf'
             or not any(type(value) is str and value.startswith('--installroot=') for value in arguments)
             or not {'--disablerepo=*', '--enablerepo=uas-native', '--setopt=tsflags=noscripts',
