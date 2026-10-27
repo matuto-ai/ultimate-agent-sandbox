@@ -93,6 +93,145 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(self.head, source['head_sha']); self.assertEqual('primary', source['slot_id'])
         self.assertNotIn('path', source)
 
+    def test_actual_allocator_save_metadata_is_compatible_with_inert_resolver(self):
+        from uas.checkouts import CheckoutAllocator
+        from uas.lifecycle import Supervisor
+        original = self.resolve()
+        allocator = CheckoutAllocator.__new__(CheckoutAllocator)
+        allocator.supervisor, allocator.manifest = self.supervisor, self.allocator.manifest
+        self.supervisor._sync_directory = lambda path: Supervisor._sync_directory(self.supervisor, path)
+        allocator._save(self.state)
+        self.assertEqual(1, json.loads(allocator.manifest.read_text())['observation_revision'])
+        self.assertEqual(original, self.resolve())
+        allocator._save(self.state)
+        self.assertEqual(2, json.loads(allocator.manifest.read_text())['observation_revision'])
+        self.assertEqual(original, self.resolve())
+
+    def test_passive_owner_revision_is_validated_but_does_not_change_artifact_binding(self):
+        original = self.resolve()
+        self.state.update(observation_revision=1,
+            observation_committed_at='2026-10-27T20:00:00+00:00')
+        self.save()
+        self.assertEqual(original, self.resolve())
+        self.state.update(observation_revision=2,
+            observation_committed_at='2026-10-27T20:01:00+00:00')
+        self.save()
+        self.assertEqual(original, self.resolve())
+        self.resolver.recheck(original)
+
+    def checkout_observer(self, dirty=''):
+        from uas.checkouts import CheckoutAllocator
+        from uas.lifecycle import Supervisor
+        allocator = CheckoutAllocator.__new__(CheckoutAllocator)
+        for field in ('supervisor', 'room', 'repo', 'root', 'manifest'):
+            setattr(allocator, field, getattr(self.allocator, field))
+        self.supervisor._allowed = lambda *_: None
+        self.supervisor._sync_directory = lambda path: Supervisor._sync_directory(self.supervisor, path)
+        def git(path, *args, **kwargs):
+            outputs = {('rev-parse', '--path-format=absolute', '--git-common-dir'): str(self.common),
+                       ('rev-parse', '--show-toplevel'): str(self.repo),
+                       ('config', '--get-regexp', r'^filter\.'): '',
+                       ('worktree', 'list', '--porcelain', '-z'):
+                           'worktree ' + str(self.repo) + '\0branch refs/heads/main\0\0',
+                       ('status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'): dirty,
+                       ('rev-parse', 'HEAD'): self.head}
+            self.assertIn(args, outputs)
+            return outputs[args]
+        allocator._git = Mock(side_effect=git)
+        return allocator
+
+    def test_checkout_probe_is_retained_durable_sanitized_and_resolver_inert(self):
+        original = self.resolve()
+        allocator = self.checkout_observer('?? SECRET_FILENAME\0')
+        observed = allocator.refresh_observation('primary')
+        self.assertTrue(observed['observed_dirty'])
+        self.assertEqual('DIRTY_OR_UNTRACKED_OR_IGNORED', observed['reason'])
+        saved = json.loads(allocator.manifest.read_text())
+        self.assertEqual(observed, saved['working_tree_observations']['primary'])
+        self.assertNotIn('SECRET_FILENAME', allocator.manifest.read_text())
+        allocator._git = Mock(side_effect=AssertionError('passive read ran Git'))
+        fact = allocator.manager_observations()[0].document()
+        self.assertEqual('dirty', fact['value']['primary']['working_tree_state'])
+        self.assertEqual(observed['observed_at'], fact['value']['primary']['working_tree_observed_at'])
+        self.assertIsNone(fact['observed_at'])
+        self.assertEqual('unknown', fact['freshness'])
+        self.assertEqual(original, self.resolve())
+        self.resolver.recheck(original)
+
+    def test_checkout_clean_probe_is_invalidated_by_any_ordinary_owner_save(self):
+        allocator = self.checkout_observer()
+        observed = allocator.refresh_observation('primary')
+        self.assertFalse(observed['observed_dirty'])
+        state = allocator._read(self.lifecycle['instance_id'], str(self.common))
+        self.assertEqual('clean', allocator.manager_observations()[0].document()['value']['primary']['working_tree_state'])
+        old_revision = state['observation_revision']
+        state['slots']['primary']['participant'] = 'bob'
+        allocator._save(state)
+        self.assertGreater(state['observation_revision'], old_revision)
+        self.assertNotIn('working_tree_observations', state)
+        fact = allocator.manager_observations()[0].document()
+        self.assertEqual('unknown', fact['value']['primary']['working_tree_state'])
+        self.assertNotIn('working_tree_observed_at', fact['value']['primary'])
+
+    def test_checkout_failed_probe_replaces_previous_clean_without_fabricating_dirty(self):
+        allocator = self.checkout_observer()
+        allocator.refresh_observation('primary')
+        with patch.object(allocator, '_registered', side_effect=OSError('PRIVATE_ERROR')):
+            observed = allocator.refresh_observation('primary')
+        self.assertIsNone(observed['observed_dirty'])
+        self.assertEqual('UNVERIFIABLE', observed['reason'])
+        self.assertNotIn('PRIVATE_ERROR', allocator.manifest.read_text())
+        self.assertEqual('unknown', allocator.manager_observations()[0].document()['value']['primary']['working_tree_state'])
+
+    def test_checkout_probe_metadata_is_exact_validated_in_both_readers(self):
+        allocator = self.checkout_observer()
+        allocator.refresh_observation('primary')
+        good = json.loads(allocator.manifest.read_text())
+        bads = []
+        for change in ({'extra': True}, {'reason': []}, {'observed_dirty': 0},
+                       {'observed_at': 'not-a-time'}, {'reason': 'RECONCILED', 'observed_dirty': True}):
+            state = deepcopy(good); state['working_tree_observations']['primary'].update(change); bads.append(state)
+        state = deepcopy(good); state['working_tree_observations']['other'] = state['working_tree_observations']['primary']; bads.append(state)
+        state = deepcopy(good); del state['observation_revision']; del state['observation_committed_at']; bads.append(state)
+        from uas.lifecycle import LifecycleError
+        for state in bads:
+            with self.subTest(state=state):
+                allocator.manifest.write_text(json.dumps(state))
+                with self.assertRaises(LifecycleError):
+                    allocator._read(self.lifecycle['instance_id'], str(self.common))
+                with self.assertRaises(ArtifactError):
+                    self.resolve()
+
+    def test_partial_invalid_or_extra_owner_metadata_is_not_ignored(self):
+        valid = {'observation_revision': 1,
+                 'observation_committed_at': '2026-10-27T20:00:00+00:00'}
+        malformed = [{'observation_revision': 1},
+                     {'observation_committed_at': valid['observation_committed_at']},
+                     {**valid, 'unexpected_metadata': 'ignored-no-longer'},
+                     *[{**valid, 'observation_revision': value}
+                       for value in (None, True, 0, -1, 1.5, '1', 2**63)],
+                     *[{**valid, 'observation_committed_at': value}
+                       for value in (None, True, '', 'not-a-time', '2026-10-27T20:00:00')]]
+        original = deepcopy(self.state)
+        for fields in malformed:
+            with self.subTest(fields=fields):
+                self.state = {**deepcopy(original), **fields}; self.save()
+                with self.assertRaises(ArtifactError) as caught:
+                    self.resolve()
+                self.assertEqual('INVALID_ARTIFACT_OWNERSHIP', caught.exception.code)
+
+    def test_valid_owner_metadata_never_bypasses_exact_ownership(self):
+        self.state.update(observation_revision=1,
+            observation_committed_at='2026-10-27T20:00:00+00:00')
+        original = deepcopy(self.state)
+        for field, value in (('room_id', 'another-room'), ('instance_id', 'b' * 32),
+                             ('project_id', 'another-project'), ('repo', '/another/repo')):
+            with self.subTest(field=field):
+                self.state = {**deepcopy(original), field: value}; self.save()
+                with self.assertRaises(ArtifactError) as caught:
+                    self.resolve()
+                self.assertEqual('INVALID_ARTIFACT_OWNERSHIP', caught.exception.code)
+
     def test_current_reports_new_head_and_recheck_fences_it(self):
         source = self.resolve(); other = self.object('commit', ('tree ' + self.tree + '\n\nother\n').encode())
         (self.common / 'refs/heads/main').write_text(other + '\n')

@@ -23,6 +23,7 @@ VM = Path(__file__).parent / 'vm'
 sys.path.insert(0, str(VM))
 try:
     import room_profile
+    import prepare_room_payload
     import room_service
     import native_rootfs
     import guest_workstation as native_guest
@@ -80,6 +81,87 @@ class RoomProfileTests(unittest.TestCase):
                        {'route':[]},{'ipv6':[{'dev':'uas-egress'}]},
                        {'nonce':'b'*32},{'mode':0o644}):
             with self.subTest(values=values),self.assertRaises(RuntimeError):check(**values)
+
+    def room_packages(self):
+        return {'profile': room_profile.PROFILE, 'packages': [
+            {'name': name, 'epoch': '0', 'version': '2.56.0' if name == 'git-core' else '10.2p1',
+             'release': '1.fc44' if name == 'git-core' else '16.fc44',
+             'arch': 'x86_64', 'signature_verified': True}
+            for name in room_profile.GUEST_RPM_ROOTS]}
+
+    def test_guest_package_family_is_complete_exact_and_signed_before_any_effect(self):
+        import copy
+        document = self.room_packages()
+        selected = room_profile.guest_package_roots(document)
+        self.assertEqual(list(room_profile.GUEST_RPM_ROOTS), list(selected))
+        self.assertEqual(1, len({selected[name] for name in room_profile.OPENSSH_FAMILY}))
+        for broken in ('missing_server', 'duplicate_server', 'mixed_server', 'mixed_core',
+                       'unsigned', 'wrong_arch', 'malformed_version', 'wrong_profile'):
+            value = copy.deepcopy(document)
+            if broken == 'missing_server': value['packages'].pop()
+            elif broken == 'duplicate_server': value['packages'].append(dict(value['packages'][-1]))
+            elif broken == 'mixed_server': value['packages'][-1]['release'] = '7.fc44'
+            elif broken == 'mixed_core': value['packages'][1]['epoch'] = '1'
+            elif broken == 'unsigned': value['packages'][1]['signature_verified'] = False
+            elif broken == 'wrong_arch': value['packages'][1]['arch'] = 'i686'
+            elif broken == 'malformed_version': value['packages'][1]['version'] = 'bad\nversion'
+            else: value['profile'] = 'native-pi-v1'
+            with self.subTest(broken=broken):
+                run = Mock()
+                with self.assertRaises(RuntimeError): room_profile.guest_package_install(value, run=run)
+                run.assert_not_called()
+
+    def test_guest_package_transaction_keeps_ssh_disabled_and_checks_exact_installed_versions(self):
+        document = self.room_packages()
+        selected = room_profile.guest_package_roots(document)
+        def observe(*args, **kwargs):
+            if args[:2] == ('systemctl', 'show'):
+                return 'ActiveState=inactive\nUnitFileState=masked\n'
+            if args[:3] == ('rpm', '-q', '--queryformat'):
+                epoch, version, release, arch = selected[args[-1]]
+                return f'{epoch}:{version}-{release}.{arch}\n'
+            return ''
+        run = Mock(side_effect=observe)
+        self.assertEqual(selected, room_profile.guest_package_install(document, run=run))
+        calls = run.call_args_list
+        self.assertEqual(('rpm','-q','openssh-server'), calls[0].args)
+        self.assertEqual(('systemctl','mask','--now','sshd.service','sshd.socket'), calls[1].args)
+        installs = [call for call in calls if call.args[0] == 'dnf']
+        self.assertEqual(1, len(installs)); self.assertEqual({'timeout':180}, installs[0].kwargs)
+        self.assertEqual(('dnf','-y','--setopt=reposdir=/run/uas-repositories','--disable-repo=*',
+            '--enable-repo=uas-offline','--setopt=localpkg_gpgcheck=True',
+            '--setopt=install_weak_deps=False','install',
+            'git-core-0:2.56.0-1.fc44.x86_64','openssh-0:10.2p1-16.fc44.x86_64',
+            'openssh-clients-0:10.2p1-16.fc44.x86_64','openssh-server-0:10.2p1-16.fc44.x86_64'), installs[0].args)
+        self.assertEqual(4, len([call for call in calls if call.args[:2] == ('systemctl','show')]))
+        for broken in ('server_absent','mask_failure','still_active','transaction_failure','wrong_installed','reactivated'):
+            count = [0]
+            def fail(*args, **kwargs):
+                if broken == 'server_absent' and args == ('rpm','-q','openssh-server'): raise RuntimeError('absent')
+                if broken == 'mask_failure' and args[:2] == ('systemctl','mask'): raise RuntimeError('mask')
+                if args[:2] == ('systemctl','show'):
+                    count[0] += 1
+                    if broken == 'still_active' or (broken == 'reactivated' and count[0] == 3):
+                        return 'ActiveState=active\nUnitFileState=masked\n'
+                if broken == 'transaction_failure' and args[0] == 'dnf': raise RuntimeError('transaction')
+                if broken == 'wrong_installed' and args[:3] == ('rpm','-q','--queryformat'): return '0:10.2p1-7.fc44.x86_64\n'
+                return observe(*args, **kwargs)
+            run = Mock(side_effect=fail)
+            with self.subTest(broken=broken), self.assertRaises(RuntimeError):
+                room_profile.guest_package_install(document, run=run)
+            if broken in ('server_absent','mask_failure','still_active'):
+                self.assertFalse(any(call.args[0] == 'dnf' for call in run.call_args_list))
+
+    def test_room_resolver_validates_same_package_family_before_vm_and_keeps_rootfs_minimal(self):
+        self.assertEqual(('python3','tini','glibc','libstdc++'),prepare_room_payload.ROOTFS_RPM_ROOTS)
+        self.assertEqual(room_profile.GUEST_RPM_ROOTS,prepare_room_payload.GUEST_RPM_ROOTS)
+        self.assertIs(room_profile.guest_package_roots,prepare_room_payload.guest_package_roots)
+        source=(VM/'prepare_payload.py').read_text()
+        check='native.guest_package_roots({**manifest, "profile": profile})'
+        self.assertIn(check,source)
+        self.assertLess(source.index(check),source.index('"createrepo_c"'))
+        guest=(VM/'guest_room.py').read_text()
+        self.assertIn('room_profile.guest_package_install(manifest, run=run)',guest)
 
     def test_distinct_rootfs_entrypoints_fail_before_common_assembly(self):
         manifest={'profile':room_profile.PROFILE,'native_runtime':{'profile':room_profile.PROFILE}}

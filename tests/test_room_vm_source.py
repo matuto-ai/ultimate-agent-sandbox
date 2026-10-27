@@ -114,7 +114,7 @@ class RoomVMSourceTests(unittest.TestCase):
             command.assert_not_called();fetch.assert_not_called()
             self.assertEqual(room_profile.PROFILE,result['profile'])
             self.assertEqual(['python3','tini','glibc','libstdc++'],result['rpm_roots'])
-            self.assertEqual(['git-core','openssh-clients'],result['guest_rpm_roots'])
+            self.assertEqual(['git-core','openssh','openssh-clients','openssh-server'],result['guest_rpm_roots'])
             self.assertTrue(result['help_only'] and result['runtime_python_only'])
             self.assertFalse(result['production_enabled'] or result['rpm_scriptlets'])
             self.assertEqual(len(stage.ROOM_MODULES),result['file_count'])

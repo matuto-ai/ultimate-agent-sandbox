@@ -93,7 +93,7 @@ def verify_runtime(payload, native):
         raise ValueError('unsupported artifacts source profile')
     if room and (native.get('production_enabled') is not False or native.get('help_only') is not True
                  or native.get('runtime_python_only') is not True
-                 or native.get('guest_rpm_roots') != ['git-core', 'openssh-clients']):
+                 or native.get('guest_rpm_roots') != ['git-core', 'openssh', 'openssh-clients', 'openssh-server']):
         raise ValueError('unsupported Room fixture source profile')
     prefix = 'room' if room else 'artifact' if artifact else 'native'
     archive = checked_asset(payload, {k: native.get(k) for k in ('file', 'bytes', 'sha256')},

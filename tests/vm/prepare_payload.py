@@ -319,6 +319,10 @@ def build_payload(directory, repository_root, nonce, *, source_paths, profile="s
                   "elapsed_seconds": round(time.monotonic() - started)}), flush=True)
     if not set(roots) <= {item["name"] for item in manifest["packages"]}:
         raise RuntimeError("resolved package bundle omitted a required package")
+    if profile == "room-launch-ipv4-v1":
+        # Reject a mixed/missing signed SSH family before spending a VM boot.
+        # The guest repeats this exact selection against the verified manifest.
+        native.guest_package_roots({**manifest, "profile": profile})
     # DNF4 download resolves each requested root separately, so its union may
     # contain conflicting alternatives. Offer the signed RPMs as candidates to
     # the guest's native solver; do not force-install the entire download pool.

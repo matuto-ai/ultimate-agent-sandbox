@@ -50,6 +50,70 @@ def _capacity(state):
         _json(state)
 
 
+def snapshot_gate_state(snapshot, room_id):
+    """Pure retained Gate facts at one Hub cut; never a current-pass decision.
+
+    Unlike GateHub.projection(), this performs no source/identity/provider
+    refresh and appends no event. A past pass remains a historical observation.
+    Currentness is unknown except for a mismatch already proven by this cut.
+    """
+    if (type(snapshot) is not dict or snapshot.get('room_id') != room_id
+            or type(snapshot.get('state')) is not dict):
+        raise LedgerError('GATE_SNAPSHOT_ROOM_MISMATCH')
+    state = snapshot['state']; rows, checkpoints, candidates = {}, {}, {}
+    for run_id, run in state.get('runs', {}).items():
+        target, binding = run.get('gate_target'), run.get('gate_target_binding')
+        if type(target) is dict and type(binding) is dict:
+            valid = (binding.get('generation') == run['generation']
+                     and binding.get('digest') == _digest(target)
+                     and binding.get('policy_digest') == _digest(run['policy']))
+            candidates[run_id] = {'candidate_sha': target['head_sha'], 'pull_number': target['pull_number'],
+                'generation': binding.get('generation'), 'state': 'bound' if valid else 'stale'}
+        for gate in run.get('policy', {}).get('gates', []):
+            gate_id = gate['id']
+            key = hashlib.sha256(_json([run_id, gate_id]).encode()).hexdigest()
+            item = {'run_id': run_id, 'generation': run['generation'], 'gate_id': gate_id,
+                    'evaluation_id': None, 'state': 'missing', 'reason': 'NO_RECORDED_EVALUATION',
+                    'observed_state': None, 'observation_version': None, 'observation_time': None,
+                    'observed_generation': None,
+                    'owner': 'hub-gate', 'checkpoint': None}
+            attempts = [row for row in state.get('gate_evaluations', {}).values()
+                          if row['scope']['run_id'] == run_id and row['scope']['gate_id'] == gate_id]
+            if attempts:
+                row = max(attempts, key=lambda value: value['started']['sequence'])
+                result, refresh = row.get('result'), row.get('refresh', {})
+                completed = result.get('completed', {}) if result else {}
+                item.update(evaluation_id=row['evaluation_id'], state='unknown',
+                            reason='CURRENT_DEPENDENCIES_NOT_OBSERVED',
+                            observed_generation=row['scope'].get('generation'),
+                            observed_state=None if result is None else result['verdict'],
+                            observation_version=completed.get('sequence'), observation_time=completed.get('time'))
+                if row['scope'].get('generation') != run['generation']:
+                    item.update(state='stale', reason='RUN_GENERATION_CHANGED')
+                elif row['scope'].get('policy_digest') not in (None, _digest(run['policy'])):
+                    item.update(state='stale', reason='POLICY_CHANGED')
+                elif result and result.get('freshness_at_completion', {}).get('state') == 'stale':
+                    item.update(state='stale', reason='RECORDED_STALE_DEPENDENCIES')
+                if row.get('phase') == 'STARTED':
+                    item['checkpoint'] = 'evaluation'
+                elif refresh.get('phase') == 'STARTED':
+                    item['checkpoint'] = 'refresh'
+                if refresh.get('phase') == 'TERMINAL':
+                    item['last_refresh_state'] = refresh.get('projection', {}).get('state')
+                    if item['last_refresh_state'] == 'stale':
+                        item.update(state='stale', reason='RECORDED_STALE_REFRESH')
+                if item['checkpoint'] is not None and gate.get('evaluator') == 'forge-state':
+                    target = row.get('target') or {}
+                    checkpoints[key] = {'run_id': run_id, 'generation': row['scope'].get('generation'),
+                        'gate_id': gate_id, 'evaluation_id': row['evaluation_id'],
+                        'candidate_sha': target.get('head_sha'), 'owner': 'hub-gate',
+                        'checkpoint': item['checkpoint'], 'state': 'owner-pending',
+                        'reason': 'REMOTE_CI_STATE_NOT_OBSERVED'}
+            rows[key] = item
+    return {'room_id': room_id, 'room_seq': snapshot['room_seq'], 'gates': rows,
+            'pending_ci': checkpoints, 'candidates': candidates}
+
+
 @dataclass(frozen=True)
 class GateRoomBinding:
     room_id: str

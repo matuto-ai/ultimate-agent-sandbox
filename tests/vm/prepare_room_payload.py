@@ -9,10 +9,9 @@ import shutil
 import stat
 
 from prepare_native_payload import archive_tree, sha256
-from room_profile import PROFILE
+from room_profile import PROFILE, GUEST_RPM_ROOTS, guest_package_roots
 
 ROOTFS_RPM_ROOTS = ('python3', 'tini', 'glibc', 'libstdc++')
-GUEST_RPM_ROOTS = ('git-core', 'openssh-clients')
 RPM_ROOTS = ROOTFS_RPM_ROOTS + GUEST_RPM_ROOTS
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 MAX_WORK_BYTES = 3 * 1024 * 1024 * 1024
@@ -23,7 +22,7 @@ BUILD_TIMEOUT = 1200
 # provider implementation, launcher script, package lock, Node/npm or Pi asset.
 ROOM_MODULES = (
     '__init__', 'config', 'gate_policy', 'forge', 'ledger',
-    'lifecycle', 'launch', 'docker_fixture', 'guest_fixture', 'room_fixture',
+    'lifecycle', 'manager_owner', 'manager_projection', 'launch', 'docker_fixture', 'guest_fixture', 'room_fixture',
     'room_probe', 'docker_exec_api', 'kernel_origin', 'workstation_exec',
     'workstation_probe', 'forge_audit', 'git_audit', 'git_controller',
     'git_endpoint', 'git_launcher', 'git_policy', 'git_process', 'git_provenance',

@@ -197,3 +197,33 @@ No network policy or identity check is relaxed. Regression fixtures use the
 IPv4-only shape without a MAC and explicitly deny missing, malformed, extra,
 or mismatched link observations. These are pure parser/policy tests; actual
 composed VM qualification remains pending.
+
+## Offline guest package compatibility checkpoint — 2026-10-27
+
+The subsequently authorized [run 40589296271](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40589296271)
+on `735c574b5d1ddf77bf0f147acbab8bbef503a65a` passed the corrected NIC
+observation but failed in the offline guest package transaction, before composed
+checks. The fixed Cloud image contains `openssh-server-10.2p1-7.fc44`, which
+requires the exact matching `openssh` core. The signed candidate pool selected
+`openssh-clients` and core `10.2p1-16.fc44`, but omitted the matching server
+counterpart. An empty-installroot dependency download cannot discover this
+installed reverse dependency. Owned outer cleanup completed after 499.676 seconds.
+
+The Room-only candidate pool now explicitly includes core, client and the
+already-installed server counterpart. Payload preparation requires one signed
+package per root and equal epoch/version/release/architecture across the OpenSSH
+family before building the payload. The guest repeats that selection, confirms
+the server is already installed, masks/stops its service and socket, and requests
+all exact NEVRAs in one offline transaction. It verifies every installed NEVRA
+and confirms both units remain inactive and masked after package scriptlets.
+The client and Git executable-package integrity checks remain unchanged.
+
+There is no new guest login route, account, credential, service activation,
+forwarding rule or Workstation SSH server. The Workstation rootfs roots remain
+Python/tini/glibc/libstdc++; the SSH family only supplies the outside guest's
+pinned descriptor packages. Fedora signing-key checks, hash-bound repository
+metadata and fail-closed DNF behavior remain mandatory. No `--skip-broken`,
+`--allowerasing`, downgrade, forced RPM install or online guest repository is
+used. Pure tests prove family rejection, exact command construction, ordering
+and failed-state handling, not compatibility of the installed image transaction.
+A further VM is only run within the owner's explicit remaining execution budget.

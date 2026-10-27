@@ -32,16 +32,8 @@ def install(nonce, digest):
     manifest = boundary.verify_payload(nonce, digest)
     require(manifest.get('profile') == PROFILE, 'exact fixed Room payload required')
     boundary.install_packages(nonce, manifest, exact_roots=PACKAGE_PROFILE)
-    # Only this profile's signed pool supplies the real, uninvoked descriptors.
-    roots = []
-    for name in ('git-core', 'openssh-clients'):
-        candidates = [item for item in manifest['packages'] if item['name'] == name]
-        require(len(candidates) == 1, 'unique signed Room guest package required')
-        item = candidates[0]
-        roots.append(f"{name}-{item['epoch']}:{item['version']}-{item['release']}.{item['arch']}")
-    run('dnf', '-y', '--setopt=reposdir=/run/uas-repositories', '--disable-repo=*',
-        '--enable-repo=uas-offline', '--setopt=localpkg_gpgcheck=True',
-        '--setopt=install_weak_deps=False', 'install', *roots, timeout=180)
+    # Resolve the installed cloud-image SSH family as one signed exact transaction.
+    room_profile.guest_package_install(manifest, run=run)
     for name in ('git-core', 'openssh-clients'):
         result = run('rpm', '-V', name)
         require(not result.strip(), 'signed Room executable package changed')

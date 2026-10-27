@@ -5,6 +5,7 @@ must not be mutated concurrently by an adversarial host actor. Git observations
 are not filesystem leases; production mount/process qualification remains #62.
 """
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,8 @@ import uuid
 from .config import load
 from .checkout_scope import valid_writer_scope
 from .lifecycle import LifecycleError, _canonical, _path, _unique_object
+from .manager_owner import (REVISION_FIELDS, CHECKOUT_OBSERVATION_FIELDS, advance_revision,
+                            checkout_observations, validate_revision, validate_checkout_observations)
 
 
 MAX_SLOTS = 1000
@@ -127,8 +130,11 @@ class CheckoutAllocator:
             if self.manifest.is_symlink() or self.manifest.stat().st_size > MAX_STORE_BYTES:
                 raise ValueError()
             state = json.loads(self.manifest.read_text(), object_pairs_hook=_unique_object)
-            if type(state) is not dict or set(state) != set(binding) | {'slots'}:
+            required = set(binding) | {'slots'}
+            if (type(state) is not dict or not required <= state.keys()
+                    or set(state) - required - REVISION_FIELDS - CHECKOUT_OBSERVATION_FIELDS):
                 raise ValueError()
+            validate_revision(state)
             if any(_canonical(state[k]) != _canonical(v) for k, v in binding.items()):
                 raise ValueError()
             if type(state['slots']) is not dict or len(state['slots']) > MAX_SLOTS:
@@ -161,11 +167,22 @@ class CheckoutAllocator:
                     raise ValueError()
                 if slot['phase'] in ('removing', 'removed') and slot['active']:
                     raise ValueError()
+            validate_checkout_observations(state)
             return state
         except (ValueError, TypeError, KeyError, OSError, RecursionError) as error:
             raise LifecycleError('INVALID_CHECKOUT_STORE') from error
 
-    def _save(self, state):
+    def _save(self, state, *, working_tree_observations=None):
+        # Every ordinary owner save invalidates retained probes before changing
+        # slot bindings/phase. Only the explicit trusted observer supplies these.
+        state.pop('working_tree_observations', None)
+        if working_tree_observations is not None:
+            state['working_tree_observations'] = working_tree_observations
+        try:
+            advance_revision(state)
+            validate_checkout_observations(state)
+        except ValueError as error:
+            raise LifecycleError('INVALID_CHECKOUT_STORE') from error
         encoded = _canonical(state).encode('utf-8')
         # Reserve the eventual observed device/inode fields before Git add.
         # A valid creating intent must also fit its ready/recovery record.
@@ -232,6 +249,48 @@ class CheckoutAllocator:
     def status(self):
         with self._locked('status') as state:
             return [self._observe(state, key) for key in state['slots']]
+
+    def refresh_observation(self, slot):
+        """Trusted host probe of ONE owned slot; never called by Manager reads.
+
+        Reuses existing Git admission/observation limits and Room authorization.
+        Retained results are historical observations, not current leases or an
+        authorization to reclaim a checkout. No file names or Git output escape.
+        """
+        with self._locked('status') as state:
+            if type(slot) is not str or slot not in state['slots']:
+                raise LifecycleError('CHECKOUT_SLOT_NOT_OWNED')
+            observed = self._observe(state, slot)
+            rows = dict(state.get('working_tree_observations', {}))
+            dirty = (observed['observed_dirty'] if observed['reason'] in
+                     {'DIRTY_OR_UNTRACKED_OR_IGNORED', 'ACTIVE', 'UNMERGED', 'RECONCILED'} else None)
+            rows[slot] = {'observed_dirty': dirty,
+                          'observed_at': datetime.now(timezone.utc).isoformat(),
+                          'reason': observed['reason']}
+            self._save(state, working_tree_observations=rows)
+            return rows[slot].copy()
+
+    def manager_observations(self):
+        """Passive slot intent, NOT working-tree cleanliness or Git existence.
+
+        Do not enter _locked(), which deliberately runs Git admission probes.
+        Validate the exact Room/Project/instance manifest under its owner lock.
+        """
+        with self.supervisor._locked():
+            lifecycle = self.supervisor._read()
+            if lifecycle is None or lifecycle['spec']['project_id'] != self.room['project']['id']:
+                raise LifecycleError('ROOM_UNAVAILABLE')
+            if not self.manifest.exists():
+                return checkout_observations({'slots': {}})
+            try:
+                if self.manifest.is_symlink() or self.manifest.stat().st_size > MAX_STORE_BYTES:
+                    raise ValueError()
+                stored = json.loads(self.manifest.read_text(), object_pairs_hook=_unique_object)
+                common = _path(stored['common'])
+                state = self._read(lifecycle['instance_id'], str(common))
+            except (ValueError, KeyError, TypeError, OSError) as error:
+                raise LifecycleError('INVALID_CHECKOUT_STORE') from error
+            return checkout_observations(state)
 
     def _quiescent(self, slot):
         # Called only under the lifecycle lock, which also serializes Start and

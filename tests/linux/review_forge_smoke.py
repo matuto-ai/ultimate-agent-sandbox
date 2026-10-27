@@ -23,6 +23,8 @@ PHASES=('prepare','stale','outage','changes','pass','comment','repass','merged')
 # Deliberately excludes unused provider routes/runtime integrations.
 SOURCES = (
     'uas/__init__.py',
+    'uas/manager_owner.py',
+    'uas/manager_projection.py',
     'uas/artifact_protocol.py',
     'uas/config.py',
     'uas/context.py',

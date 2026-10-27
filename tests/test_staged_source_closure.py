@@ -55,6 +55,7 @@ def missing_imports(paths):
 class StagedSourceClosureTests(unittest.TestCase):
     def test_fixed_source_manifests_have_eager_import_closure(self):
         for fixture in ('tests/linux/artifact_smoke.py', 'tests/linux/diff_smoke.py',
+                        'tests/linux/review_forge_smoke.py',
                         'tests/vm/run_artifacts.py', 'tests/vm/run_boundary.py', 'tests/vm/run_workstation.py'):
             with self.subTest(fixture=fixture):
                 sources = source_list(fixture)

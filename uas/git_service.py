@@ -168,8 +168,16 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
     try:
         send(channel, {'kind': 'GIT_READY', 'nonce': hello['nonce'], 'binding': broker.scope()})
         late_eof = False
-        while not broker.failed:
-            with receive(channel) as record:
+        while not broker.failed and alive(supervisor.pidfd):
+            # Idle is not a transaction deadline. Keep the persistent Broker
+            # available after Workstation Stop while observing owner death.
+            channel.settimeout(1)
+            try:
+                record = receive(channel)
+            except socket.timeout:
+                continue
+            channel.settimeout(35)
+            with record:
                 supervisor.require(record)
                 request = decode(record.data)
             if late_eof and request == {'kind': 'eof'}:

@@ -7,7 +7,7 @@ import unittest
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 1, 1, 2, 1, 1, 2, 1], 'claude-native.yml': [2],
+        budgets = {'validate.yml': [1, 1, 1, 1, 2, 1, 1, 2, 1, 2, 1], 'claude-native.yml': [2],
                    'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
@@ -20,7 +20,7 @@ class VMCITriggerTests(unittest.TestCase):
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
-                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams', 'gate-linux-smoke', 'gate-command-native', 'gate-artifact-native'}
+                    integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams', 'gate-linux-smoke', 'gate-command-native', 'gate-artifact-native', 'room-control-plane', 'manager-mtls'}
                     roots = {'validate', 'unit-slow'}
                     self.assertEqual(set(jobs), roots | integrations)
                     for root in roots:
@@ -64,6 +64,15 @@ class VMCITriggerTests(unittest.TestCase):
                         self.assertIn('persist-credentials: false', jobs[job])
                         self.assertIn(f'{seconds}s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/{script} --run', jobs[job])
                         self.assertNotIn('tests/vm/', jobs[job])
+                    manager = jobs['manager-mtls']
+                    self.assertIn('UAS_MANAGER_TLS_TEST: "1"', manager)
+                    self.assertIn('timeout --signal=TERM --kill-after=2s 40s python3 -m unittest discover -s tests -p test_manager_tls.py -v', manager)
+                    self.assertNotIn('sudo', manager)
+                    room = jobs['room-control-plane']
+                    self.assertIn("UAS_ROOM_CONTROL_TEST: '1'", room)
+                    self.assertIn('75s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,UAS_ROOM_CONTROL_TEST,UAS_MANAGER_TLS_TEST /usr/bin/python3 tests/linux/room_control_smoke.py', room)
+                    self.assertIn('persist-credentials: false', room)
+                    self.assertNotIn('tests/vm/', room)
                     self.assertLessEqual(max(actual[:2]) + max(actual[2:]), 3)
                 else:
                     self.assertLessEqual(sum(actual), 3)
