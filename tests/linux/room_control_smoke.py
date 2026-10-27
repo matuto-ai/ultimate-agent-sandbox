@@ -88,7 +88,7 @@ def run():
     from uas.manager_transport import client_tls_context, server_tls_context, send_frame, receive_frame
     probe()
     children=[]; clients=[]; exit_proofs={}; owned=ExitStack(); manager_proof=None
-    with tempfile.TemporaryDirectory(prefix='uas-room-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='r61-', dir='/tmp') as temporary:
         root=Path(temporary); root.chmod(0o755)
         project=root/'project'; project.mkdir(); (project/'retain').write_text('human data')
         class CheckedBackend(FileFixtureBackend):
@@ -98,18 +98,19 @@ def run():
                 require(all(not os.path.lexists(path) for path in endpoints),'endpoint exists before Workstation removal')
                 super().remove(state,kind)
         backend=CheckedBackend(root/'resources')
-        supervisor=Supervisor(root/'control','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
+        supervisor=Supervisor(root/'c','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
         spec=FixtureSpec('alpha','project',(str(project),),'sha256:'+'a'*64,'sha256:'+'b'*64,'sha256:'+'c'*64)
         started=supervisor.start(spec); instance=started['instance_id']
         owner=RoomControlPlane(supervisor); instance_dir=owner.directory
-        for path in (root/'control',supervisor.directory,instance_dir.parent,instance_dir,instance_dir/'data'):
+        for path in (root/'c',supervisor.directory,instance_dir.parent,instance_dir,instance_dir/'data'):
             path.chmod(0o711)  # Traverse only; manifests remain root-private.
         endpoints=[]
         try:
             for name, uid in (('hub',65530),('forge',65531),('git',65532)):
                 private=instance_dir/'data'/name; private.mkdir(mode=0o700); os.chown(private,uid,uid)
-                directory=instance_dir/'data'/(name+'-endpoint'); directory.mkdir(mode=0o710); os.chown(directory,0,uid)
-                endpoint=directory/'service.sock'
+                directory=instance_dir/'data'/(name+'-e'); directory.mkdir(mode=0o710); os.chown(directory,0,uid)
+                endpoint=directory/'s'
+                require(len(os.fsencode(endpoint)) <= 107, 'fixture Unix endpoint exceeds Linux sun_path bound')
                 listener=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
                 enable(listener); listener.bind(str(endpoint)); os.chown(endpoint,0,uid); endpoint.chmod(0o620); listener.listen(1)
                 lease=EndpointLease(endpoint,owner=0,group=uid); endpoints.append(endpoint)
@@ -222,7 +223,7 @@ def run():
             git_client.close()  # Simulate accepted-operation cancellation cleanup.
             require(owner.services['git'].origin.pidfd>=0,'client close lost lifecycle kernel handle')
             retained = owner.services['git']
-            supervisor = Supervisor(root/'control','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
+            supervisor = Supervisor(root/'c','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
             owner = RoomControlPlane(supervisor)
             owner.recover(retained,client=git_client)
             require(manager_proof.worker.join(3),'Manager worker did not finish after Destroy request')
@@ -250,7 +251,7 @@ def run():
             require((project/'retain').read_text()=='human data','Project data changed')
             # Reconstruct without process handles; durable verified-exit proof
             # must allow targeted cleanup rather than inventing a new PID owner.
-            reopened=Supervisor(root/'control','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
+            reopened=Supervisor(root/'c','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
             restored=RoomControlPlane(reopened)
             backend.fail_before.clear()
             from unittest.mock import patch
@@ -258,7 +259,7 @@ def run():
             with patch.object(reopened,'_tombstone',side_effect=LifecycleError('TOMBSTONE_TEST_FAILURE')):
                 require(reopened.reconcile()['phase']=='destroy_failed','tombstone failure not retained')
             require(not restored.directory.exists(),'owned data not removed before tombstone failure')
-            final_owner=Supervisor(root/'control','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
+            final_owner=Supervisor(root/'c','alpha',backend,authorize=lambda *_:True,revoke=backend.revoke)
             require(final_owner.reconcile()['phase']=='destroyed','fresh-owner tombstone retry after directory removal failed')
             require((project/'retain').exists(),'Project removed')
             recreated=reopened.start(spec)

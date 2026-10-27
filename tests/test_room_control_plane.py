@@ -28,6 +28,23 @@ class RoomFixture(unittest.TestCase):
 
 
 class RoomControlPlaneTests(RoomFixture):
+    def test_hosted_fixture_unix_paths_are_short_and_guarded_before_bind(self):
+        import ast
+        source = (Path(__file__).parent/'linux/room_control_smoke.py').read_text()
+        tree = ast.parse(source)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        temporary = next(node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == 'TemporaryDirectory')
+        options = {node.arg: ast.literal_eval(node.value) for node in temporary.keywords}
+        self.assertEqual({'prefix':'r61-', 'dir':'/tmp'}, options)
+        self.assertIn("directory=instance_dir/'data'/(name+'-e')", source)
+        self.assertIn("endpoint=directory/'s'", source)
+        self.assertIn("Supervisor(root/'c','alpha'", source)
+        guard = source.index("require(len(os.fsencode(endpoint)) <= 107")
+        self.assertLess(guard, source.index('listener.bind(str(endpoint))'))
+        for name in ('hub','forge','git'):
+            path = Path('/tmp')/('r61-'+'x'*8)/'c'/'alpha'/'instances'/('a'*32)/'data'/(name+'-e')/'s'
+            self.assertLessEqual(len(str(path).encode()), 107)
+
     def test_stream_identity_is_persistent_and_callback_cannot_certify_missing_services(self):
         owner = RoomControlPlane(self.supervisor)
         identity = owner.status()['stream_id']
