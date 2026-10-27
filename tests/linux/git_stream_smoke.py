@@ -205,6 +205,74 @@ def broker_process(channel, private, digest, supervisor_gid):
         owner.close()
 
 
+def install_bridge_diagnostics():
+    """Observe only this fixture's bridge code; preserve every production call.
+
+    The original loop catches its inner failure, so an outer wrapper cannot
+    expose the decisive stage. A thread-local Python trace records only fixed
+    frame kinds, source locations and exception types, never packet/argv/error
+    text. It does not perform extra reads, sends, authentication or retries.
+    """
+    import uas.git_worker_native as worker
+    original = worker.WorkerBridge._loop
+    budget = {'ordinary': 64, 'failure': 8}
+
+    def observed(self):
+        previous = sys.gettrace()
+        last_value = None
+
+        def trace(frame, event, argument):
+            nonlocal last_value
+            if frame.f_code is not original.__code__:
+                return None
+            try:
+                error = argument[1] if event == 'exception' else None
+                value = frame.f_locals.get('value')
+                if error is None and (event != 'line' or value is last_value):
+                    return trace
+                last_value = value
+                slot = 'failure' if error is not None else 'ordinary'
+                if budget[slot] <= 0:
+                    return trace
+                budget[slot] -= 1
+                kind = value.get('kind') if type(value) is dict else None
+                if kind not in {'ssh-open', 'ready', 'data', 'eof', 'cancel', 'exit', 'refused'}:
+                    kind = 'REDACTED'
+                key = frame.f_locals.get('key')
+                direction = getattr(key, 'data', None)
+                if direction not in {'shim', 'supervisor'}:
+                    direction = 'UNKNOWN'
+                row = {'fixture_bridge_stage': event, 'line': frame.f_lineno,
+                       'kind': kind, 'direction': direction, 'active': self._active}
+                if error is not None:
+                    row['error_type'] = type(error).__name__
+                    row['errno'] = error.errno if isinstance(error, OSError) else None
+                    frames, traceback = [], argument[2]
+                    while traceback is not None:
+                        frames.append([Path(traceback.tb_frame.f_code.co_filename).name,
+                                       traceback.tb_frame.f_code.co_name, traceback.tb_lineno])
+                        traceback = traceback.tb_next
+                    row['frames'] = frames[-8:]
+                print(json.dumps(row, sort_keys=True), file=sys.stderr, flush=True)
+            except Exception:
+                pass  # A diagnostic failure never replaces the original decision.
+            return trace
+
+        try:
+            try:
+                sys.settrace(trace)
+            except Exception:
+                pass
+            return original(self)
+        finally:
+            try:
+                sys.settrace(previous)
+            except Exception:
+                pass
+
+    worker.WorkerBridge._loop = observed
+
+
 def worker_process(channel, worktree, home, digest, private, seed, other_seed, smoke):
     from uas.forge import ForgeBinding
     from uas.git_policy import GitIdentity, parse_git
@@ -213,6 +281,7 @@ def worker_process(channel, worktree, home, digest, private, seed, other_seed, s
     from uas.git_transaction import ReferenceTransaction
     from uas.git_worker_native import WorkerBridge
     from uas.kernel_origin import HeldOrigin, enable, receive
+    install_bridge_diagnostics()
     smoke.isolate_process()
     os.umask(0o002)
     enable(channel)
