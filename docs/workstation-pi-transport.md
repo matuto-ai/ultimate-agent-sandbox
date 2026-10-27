@@ -722,3 +722,51 @@ bounded before/after inventory. No proc fabrication/mount, host trust import,
 policy change or native security weakening is introduced. Pure tests do not
 qualify actual package materialization, CA execution or native delivery; a fresh
 reviewed exact-head deliberate run remains required.
+
+### Completed rootfs, bounded image-import failure: run 40436690890
+
+The [exact-head native run](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40436690890)
+on `f607de9d` completed the signed RPM transaction, filesystem contract,
+signed pre-generated DEFAULT materialization, all three CA extracts and their
+strict postchecks, runtime extraction, tini copy, debug-index checks, final
+strict fingerprint and manifest write. This qualifies that image-build sequence
+in the disposable guest, not a successfully imported image or native delivery.
+
+Docker 29.8.2 started and its Engine/profile checks returned. The unchanged
+`docker import /var/lib/uas-native-rootfs.tar` client then exceeded its 120-second
+deadline. No image ID was returned; no Workstation/Hub containers or native
+two-seat checks were reached. Retained daemon logs show successful startup, not
+an import-specific cause. No disk-full, OOM or AVC cause was established; missing
+AVC output is not proof of no denials. The runner removed its temporary directory
+after 1,255.683 seconds, destroying the disposable VM and any uncertain in-guest
+import. This is not evidence that terminating the CLI cancelled daemon work.
+
+The completed manifest digest, exact final entry/byte totals, installed trust
+input digests and archive size/hash were not emitted before that failure. The
+manifest was subsequently cleaned up. Periodic fingerprint counters are not
+final totals and cannot reconstruct the missing evidence.
+
+The next diagnostic candidate emits the complete bounded rootfs/trust result
+before archive/import, as ordered JSON fragments with an overall digest. It
+records the completed archive's actual size and SHA-256, fixed phase boundaries,
+and start/end daemon CPU/I/O plus filesystem free-space facts. Daemon observations
+use a held pidfd and proc-directory descriptor, fixed `stat`/`io` names, matching
+task start time and before/after exit checks; unavailable or changed tasks produce
+explicit unknown diagnostics, not guessed counters. These facts are diagnostic
+only and do not grant authority, qualify liveness or reset a deadline.
+
+The file-argument import and 120-second limit remain unchanged. Only this exact
+native argv opts into the existing bounded-output, owned-process-group runner;
+failure kills the owned CLI group before reaping and reports client cleanup
+separately from the unknown daemon outcome. Fixed, five-second journal/AVC reads
+retain bounded failure summaries, including empty/nonzero/unavailable results.
+Import observations and output are best-effort: diagnostic sample/log/write/close
+errors cannot replace the original import exception or prevent a confirmed image
+ID from reaching the caller for cleanup. Unavailable markers are emitted when
+the output channel permits; no successful diagnostic result is manufactured.
+Actual command/process-resource cleanup failures remain distinct from writer
+failures and are not silently declared successful.
+No polling heartbeat, stdin transport change, timeout increase, arbitrary log
+collection, custom policy, proc mount, confinement change or retry is introduced.
+The original outer/serial limits and final disposable-VM cleanup still apply.
+Pure/mock diagnostic tests do not establish an import cause or native success.

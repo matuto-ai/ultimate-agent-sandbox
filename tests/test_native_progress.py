@@ -130,6 +130,58 @@ class NativeProgressTests(unittest.TestCase):
         self.assertEqual([call.kwargs['timeout'] for call in process.wait.call_args_list],[900,5])
         selector.close.assert_called_once();process.stdout.close.assert_called_once();process.stderr.close.assert_called_once()
 
+    def test_import_phase_retains_120_second_deadline_and_client_cleanup_only(self):
+        times=iter([0,0,121,121]);order=[]
+        stack,process,selector,kill,printed,*_=self.setup_command([[]],clock=lambda:next(times))
+        kill.side_effect=lambda *a:order.append('kill')
+        def reap(**kwargs):order.append('wait');return -9
+        process.wait.side_effect=reap
+        with stack,self.assertRaises(subprocess.TimeoutExpired) as caught:
+            boundary.native_command(('docker','import','/var/lib/uas-native-rootfs.tar'),timeout=120,phase='image-import')
+        self.assertEqual(caught.exception.timeout,120);self.assertEqual(order,['kill','wait'])
+        self.assertEqual(printed.call_args_list[-1].args[0],'Native image-import client cleanup:')
+        evidence=json.loads(printed.call_args_list[-1].args[1])
+        self.assertEqual(evidence,{'group_sigkill_sent':True,'returncode':-9,
+                                  'cleanup_errors':[],'daemon_import_outcome_inferred':False})
+        self.assertFalse(any('output progress' in call.args[0] for call in printed.call_args_list))
+
+    def test_successful_import_emits_client_reap_without_signalling(self):
+        stack,process,selector,kill,printed,*_=self.setup_command([[('stdout',b''),('stderr',b'')]])
+        with stack:boundary.native_command(('docker','import','/var/lib/uas-native-rootfs.tar'),timeout=120,phase='image-import')
+        kill.assert_not_called();process.wait.assert_called_once_with(timeout=120)
+        evidence=json.loads(printed.call_args.args[1])
+        self.assertEqual(evidence['returncode'],0);self.assertFalse(evidence['group_sigkill_sent'])
+        self.assertFalse(evidence['daemon_import_outcome_inferred'])
+
+    def test_import_progress_and_cleanup_writer_failure_preserves_output_and_returncode(self):
+        stack,process,selector,kill,printed,*_=self.setup_command([
+            [('stdout',b'sha256:actual\n')],[('stdout',b''),('stderr',b'')]])
+        printed.side_effect=OSError('broken diagnostic writer')
+        with stack:
+            code,streams=boundary.native_command(('docker','import','/var/lib/uas-native-rootfs.tar'),timeout=120,phase='image-import')
+        self.assertEqual(code,0);self.assertEqual(streams['stdout']['output'],'sha256:actual\n')
+        self.assertEqual(printed.call_count,2);kill.assert_not_called()
+        process.wait.assert_called_once_with(timeout=120)
+
+    def test_import_timeout_and_cleanup_writer_failure_preserves_original_timeout(self):
+        stack,process,selector,kill,printed,*_=self.setup_command([[('stdout',b''),('stderr',b'')]])
+        original=subprocess.TimeoutExpired(('docker','import'),120)
+        process.wait.side_effect=[original,-9];printed.side_effect=OSError('broken diagnostic writer')
+        with stack,self.assertRaises(subprocess.TimeoutExpired) as caught:
+            boundary.native_command(('docker','import','/var/lib/uas-native-rootfs.tar'),timeout=120,phase='image-import')
+        self.assertIs(caught.exception,original);kill.assert_called_once()
+        self.assertEqual([call.kwargs['timeout'] for call in process.wait.call_args_list],[120,5])
+        self.assertEqual(printed.call_count,2)
+
+    def test_import_writer_failure_does_not_hide_actual_resource_cleanup_failure(self):
+        stack,process,selector,kill,printed,*_=self.setup_command([[('stdout',b''),('stderr',b'')]])
+        original=OSError('actual pipe close failure')
+        process.stdout.close.side_effect=original;printed.side_effect=OSError('broken diagnostic writer')
+        with stack,self.assertRaises(OSError) as caught:
+            boundary.native_command(('docker','import','/var/lib/uas-native-rootfs.tar'),timeout=120,phase='image-import')
+        self.assertIs(caught.exception,original);kill.assert_not_called()
+        process.stderr.close.assert_called_once();selector.close.assert_called_once()
+
     def test_original_read_error_survives_kill_wait_and_close_failures(self):
         stack,process,selector,kill,printed,popen,blocking,reader=self.setup_command([[('stdout',b'x')]])
         reader.side_effect=RuntimeError('original read')

@@ -113,7 +113,7 @@ class NativeCapture:
 
 def native_command(arguments, *, timeout, pass_fds=(), phase="DNF"):
     """Fixed native commands: real-output progress, original hard deadline."""
-    if phase not in ("DNF", "trust-generation"):
+    if phase not in ("DNF", "trust-generation", "image-import"):
         raise ValueError("invalid native command phase")
     started = time.monotonic()
     deadline = started + timeout
@@ -123,6 +123,8 @@ def native_command(arguments, *, timeout, pass_fds=(), phase="DNF"):
     captures = {'stdout': NativeCapture(), 'stderr': NativeCapture()}
     reported, last_report = (0, 0), started
     reaped = False
+    cleanup_code = None
+    group_killed = False
     try:
         selector = selectors.DefaultSelector()
         for name in captures:
@@ -145,18 +147,25 @@ def native_command(arguments, *, timeout, pass_fds=(), phase="DNF"):
             counts = tuple(captures[name].count for name in ('stdout', 'stderr'))
             now = time.monotonic()
             if counts != reported and (now - last_report >= 30 or not selector.get_map()):
-                print('Native ' + phase + ' output progress:', json.dumps(dict(zip(('stdout_bytes', 'stderr_bytes'), counts))), flush=True)
+                try:
+                    print('Native ' + phase + ' output progress:', json.dumps(dict(zip(('stdout_bytes', 'stderr_bytes'), counts))), flush=True)
+                except Exception:
+                    if phase != 'image-import': raise
                 reported, last_report = counts, now
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(arguments, timeout)
         code = process.wait(timeout=remaining)
+        cleanup_code = code
         reaped = True
         return code, {name: capture.context() for name, capture in captures.items()}
     except subprocess.TimeoutExpired:
-        print('Native ' + phase + ' timeout evidence:', json.dumps({
-            'timeout_seconds': timeout, **{name: capture.context() for name, capture in captures.items()}},
-            ensure_ascii=True), flush=True)
+        try:
+            print('Native ' + phase + ' timeout evidence:', json.dumps({
+                'timeout_seconds': timeout, **{name: capture.context() for name, capture in captures.items()}},
+                ensure_ascii=True), flush=True)
+        except Exception:
+            if phase != 'image-import': raise
         raise
     finally:
         # The owned new process group is killed before leader reaping on errors;
@@ -165,12 +174,13 @@ def native_command(arguments, *, timeout, pass_fds=(), phase="DNF"):
         if not reaped:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
+                group_killed = True
             except ProcessLookupError:
                 pass
             except BaseException as error:
                 failures.append(error)
             try:
-                process.wait(timeout=5)
+                cleanup_code = process.wait(timeout=5)
             except BaseException as error:
                 failures.append(error)
         for resource in (selector, process.stdout, process.stderr):
@@ -179,15 +189,35 @@ def native_command(arguments, *, timeout, pass_fds=(), phase="DNF"):
                     resource.close()
                 except BaseException as error:
                     failures.append(error)
+        if phase == 'image-import':
+            try:
+                print('Native image-import client cleanup:', json.dumps({
+                    'group_sigkill_sent': group_killed, 'returncode': cleanup_code,
+                    'cleanup_errors': [type(error).__name__ for error in failures],
+                    'daemon_import_outcome_inferred': False}), flush=True)
+            except Exception:
+                pass  # Output failure cannot replace the command/cleanup outcome.
         if failures and sys.exc_info()[0] is None:
             raise failures[0]
 
 
-def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False, native_trust_context=False):
+def run(*arguments, timeout=90, pass_fds=(), native_failure_context=False,
+        native_trust_context=False, native_import_context=False):
     if type(native_failure_context) is not bool:
         raise ValueError("invalid native failure diagnostic option")
     if type(native_trust_context) is not bool:
         raise ValueError("invalid native trust diagnostic option")
+    if type(native_import_context) is not bool:
+        raise ValueError("invalid native import diagnostic option")
+    if native_import_context:
+        if (native_failure_context or native_trust_context or pass_fds or timeout != 120
+                or arguments != ('docker', 'import', '/var/lib/uas-native-rootfs.tar')):
+            raise ValueError('native import requires fixed archive-file command')
+        code, streams = native_command(arguments, timeout=timeout, phase='image-import')
+        if code:
+            raise RuntimeError('native image import failed: ' + json.dumps(
+                {'returncode': code, **streams}, ensure_ascii=True))
+        return streams['stdout']['output']
     if native_trust_context:
         from native_trust import fixed_commands
         if (native_failure_context or pass_fds or timeout != 90

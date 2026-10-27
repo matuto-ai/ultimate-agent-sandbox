@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import socket
 import sqlite3
@@ -30,6 +31,143 @@ REQUIRED={'payload','confinement','socket_policy','hub_startup','native_two_seat
           'actor_attribution','wrong_process','control_loss','resources','guest_cleanup'}
 run=boundary.run
 expect=boundary.expect
+
+
+def emit_evidence(kind, document):
+    """Lossless bounded records; chunking does not replace completed totals."""
+    text=json.dumps(document,sort_keys=True,separators=(',',':'),ensure_ascii=True)
+    expect(len(text)<=16384,'native evidence exceeds fixed bound')
+    digest=hashlib.sha256(text.encode('ascii')).hexdigest()
+    parts=[text[offset:offset+2048] for offset in range(0,len(text),2048)]
+    for index,part in enumerate(parts):
+        print('Native image evidence:',json.dumps({'kind':kind,'part':index+1,
+            'parts':len(parts),'sha256':digest,'json_fragment':part}),flush=True)
+
+
+class ImportDaemonFacts:
+    """Diagnostic-only same-task CPU/I/O, never authority or a liveness gate."""
+    IO_KEYS=('rchar','wchar','syscr','syscw','read_bytes','write_bytes','cancelled_write_bytes')
+
+    def __init__(self):
+        self.pidfd=None;self.procfd=None;self.starttime=None;self.error=None
+        try:
+            value=run('systemctl','show','docker','--property=MainPID','--value',timeout=5).strip()
+            expect(value.isascii() and value.isdecimal() and 1<int(value)<2**31,'invalid daemon PID')
+            self.pid=int(value)
+            self.pidfd=os.pidfd_open(self.pid,0)
+            self.procfd=os.open('/proc/'+value,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC|os.O_NOFOLLOW)
+            expect(os.fstat(self.procfd).st_uid==0,'daemon task not root-owned')
+            expect(os.readlink('exe',dir_fd=self.procfd)=='/usr/bin/dockerd','unexpected daemon executable')
+            self.starttime=self._task()['starttime_ticks']
+        except Exception as error:
+            self.error=type(error).__name__
+            self.close()
+
+    def _read(self,name):
+        descriptor=os.open(name,os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW,dir_fd=self.procfd)
+        try:
+            data=os.read(descriptor,4097)
+            expect(len(data)<=4096,'oversized daemon proc evidence')
+            return data.decode('ascii')
+        finally:os.close(descriptor)
+
+    def _live(self):
+        poller=select.poll();poller.register(self.pidfd,select.POLLIN)
+        expect(not poller.poll(0),'held daemon task exited')
+
+    def _task(self):
+        self._live()
+        value=self._read('stat')
+        expect(value.startswith(str(self.pid)+' ('),'daemon stat identity differs')
+        fields=value[value.rfind(')')+2:].split()
+        expect(len(fields)>=20,'incomplete daemon stat')
+        result={'pid':self.pid,'state':fields[0],'utime_ticks':int(fields[11]),
+                'stime_ticks':int(fields[12]),'starttime_ticks':int(fields[19])}
+        expect(self.starttime is None or result['starttime_ticks']==self.starttime,'daemon task replaced')
+        self._live()
+        return result
+
+    def sample(self):
+        result={'monotonic_seconds':round(time.monotonic(),3)}
+        try:
+            usage=os.statvfs('/var/lib/docker')
+            result['docker_filesystem']={'free_bytes':usage.f_bfree*usage.f_frsize,
+                'available_bytes':usage.f_bavail*usage.f_frsize,'free_inodes':usage.f_ffree,
+                'total_bytes':usage.f_blocks*usage.f_frsize}
+        except Exception as error:result['filesystem_error']=type(error).__name__
+        try:
+            if self.error is not None:raise RuntimeError(self.error)
+            task=self._task()
+            rows=[line.split(':',1) for line in self._read('io').splitlines()]
+            expect(len(rows)==len(self.IO_KEYS) and {row[0] for row in rows}==set(self.IO_KEYS),'unexpected daemon I/O fields')
+            task['io']={key:int(value.strip()) for key,value in rows}
+            expect(all(value>=0 for value in task['io'].values()),'negative I/O counter')
+            task['clock_ticks_per_second']=os.sysconf('SC_CLK_TCK')
+            expect(self._task()['starttime_ticks']==task['starttime_ticks'],'daemon changed while sampled')
+            result['daemon']=task
+        except Exception as error:result['daemon_error']=self.error or type(error).__name__
+        return result
+
+    def close(self):
+        failures=[]
+        for name in ('procfd','pidfd'):
+            descriptor=getattr(self,name)
+            if descriptor is not None:
+                setattr(self,name,None)
+                try:os.close(descriptor)
+                except OSError as error:
+                    self.error=type(error).__name__
+                    failures.append(error)
+        if failures:raise failures[0]
+
+
+def import_failure_diagnostics():
+    # Fixed guest logs only; empty/denied/unavailable is not proof of no AVCs.
+    for kind,command in (
+            ('kernel-avc',('journalctl','-k','-b','--no-pager','-n','40','--grep=avc:.*denied')),
+            ('docker-journal',('journalctl','-u','docker','--no-pager','-n','30'))):
+        try:
+            result=subprocess.run(command,stdin=subprocess.DEVNULL,capture_output=True,
+                                  timeout=5,check=False)
+            raw=result.stdout+result.stderr
+            evidence={'returncode':result.returncode,'bytes':len(raw),'truncated':len(raw)>8192,
+                      'output':raw[-8192:].decode('utf-8',errors='replace')}
+        except Exception as error:evidence={'unavailable':type(error).__name__}
+        # Unicode escaping can expand the fixed excerpt; bound the complete JSON.
+        if len(json.dumps(evidence,ensure_ascii=True))>15000:
+            evidence['output']=evidence['output'][-1024:];evidence['truncated']=True
+        emit_evidence(kind,evidence)
+
+
+def import_diagnostic(kind,action):
+    """Do not let observation/output errors replace an Engine effect/outcome."""
+    try:return action()
+    except Exception as error:
+        try:
+            print('Native image diagnostic unavailable:',json.dumps({
+                'kind':kind,'error':type(error).__name__}),flush=True)
+        except Exception:pass  # A broken output channel cannot report its failure.
+
+
+def import_image(archive):
+    import_diagnostic('phase-start',lambda:print('Native image phase: import start',flush=True))
+    facts=import_diagnostic('daemon-open',ImportDaemonFacts)
+    def record(kind):
+        emit_evidence(kind,facts.sample() if facts is not None else {'daemon_error':'unavailable'})
+    try:
+        import_diagnostic('start-sample',lambda:record('import-start'))
+        try:
+            image=run('docker','import',str(archive),timeout=120,native_import_context=True).strip()
+        except BaseException:
+            import_diagnostic('failure-sample',lambda:record('import-failure'))
+            import_diagnostic('failure-logs',import_failure_diagnostics)
+            import_diagnostic('phase-failure',lambda:print('Native image phase: import failed',flush=True))
+            raise
+        import_diagnostic('end-sample',lambda:record('import-end'))
+        import_diagnostic('phase-complete',lambda:print('Native image phase: import complete',flush=True))
+        return image
+    finally:
+        if facts is not None:import_diagnostic('daemon-close',facts.close)
 
 
 def labeled_listener(path,group):
@@ -187,12 +325,20 @@ def scenario(nonce,manifest):
         # Keep exact root/marker/no-NIC guard before Docker can create its
         # owned bridge. No interface allowlist relaxation or policy fallback.
         image_evidence=build_rootfs(nonce,manifest,image_root,run=run)
+        emit_evidence('completed-rootfs',image_evidence)
         boundary.start_engine()
         engine=engine_profile(manifest)
         ownership['archive']=True
+        print('Native image phase: archive start',flush=True)
         with tarfile.open(archive,'x',format=tarfile.PAX_FORMAT) as target:
             for path in sorted(image_root.iterdir()):target.add(path,arcname=path.name,recursive=True)
-        image=run('docker','import',str(archive),timeout=120).strip()
+        digest=hashlib.sha256()
+        with archive.open('rb') as source:
+            while chunk:=source.read(1024*1024):digest.update(chunk)
+            archive_bytes=os.fstat(source.fileno()).st_size
+        emit_evidence('completed-archive',{'bytes':archive_bytes,'sha256':digest.hexdigest()})
+        print('Native image phase: archive complete',flush=True)
+        image=import_image(archive)
         expect(image.startswith('sha256:') and len(image)==71,'native immutable image ID')
         checks['payload']={'status':'passed','image':image,'engine':engine,**image_evidence}
         paths=storage(nonce,ownership)
