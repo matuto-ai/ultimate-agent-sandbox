@@ -608,7 +608,10 @@ class FixturePiRpcReceiver:
             self.db.execute('BEGIN IMMEDIATE')
             row = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
             current = json.loads(row[0]) if row else None
-            if current not in (expected_scope, target_scope) or self.scope not in (expected_scope, target_scope):
+            if (type(current) is not dict or set(current) != set(expected_scope)
+                    or any(type(current[k]) is not type(expected_scope[k]) for k in expected_scope)
+                    or current not in (expected_scope, target_scope)
+                    or self.scope not in (expected_scope, target_scope)):
                 raise NativeUnavailable('native generation binding conflict')
             if authorize() is not True:
                 raise NativeUnavailable('native generation authority revoked')

@@ -106,6 +106,12 @@ class RunGenerationBindingTests(unittest.TestCase):
             self.advance(old={**self.old, 'generation': 0}, new=self.old)
         self.assertEqual(self.old, self.binding())
         self.assertEqual(self.old, self.receiver.scope)
+        malformed = {**self.old, 'context_generation': True}
+        self.db.execute('UPDATE binding SET scope=?', (json.dumps(malformed),))
+        self.db.commit()
+        with self.assertRaises(NativeUnavailable):
+            self.advance()
+        self.assertIs(True, self.binding()['context_generation'])
 
     def test_prepared_old_generation_offer_cannot_reach_native_after_fence(self):
         envelope = {**self.old, 'incarnation_id': self.receiver.incarnation_id,

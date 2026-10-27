@@ -608,12 +608,17 @@ class FixtureParticipantController:
                     raise ValueError()
                 saved = json.loads(path.read_text(), object_pairs_hook=_unique_object)
                 if (set(saved) != {'version', 'room_instance', 'participant', 'reset_id', 'scope', 'directory', 'native'}
-                        or saved['version'] != 1 or saved['room_instance'] != self.instance
-                        or saved['participant'] != participant or saved['scope'] not in (expected_scope, target_scope)
+                        or type(saved['version']) is not int or saved['version'] != 1 or saved['room_instance'] != self.instance
+                        or saved['participant'] != participant
+                        or _canonical(saved['scope']) not in (_canonical(expected_scope), _canonical(target_scope))
                         or saved['directory'] != str(recipe.directory)
                         or saved['native']['session_id'] != receiver.initial_state['session_id']):
                     raise ValueError()
                 reset_id, proof = saved['reset_id'], saved['native']
+                if (type(proof) is not dict or set(proof) != {'runtime_id', 'session_id', 'session_file', 'source'}
+                        or any(type(value) is not str or not value for value in proof.values())
+                        or proof['source'] != 'native-empty-session-and-no-pending-messages'):
+                    raise ValueError()
             else:
                 # No stored native proof means no qualified restoration.
                 # A canonical admission row cannot prove this replacement session.
