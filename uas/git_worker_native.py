@@ -512,12 +512,12 @@ def _shim_reply(channel, worker):
     return _server_frame(value), value
 
 
-def shim_stream(channel, worker, *, stdin=0, stdout=1, timeout=30):
+def shim_stream(channel, worker, *, stdin=0, stdout=1, timeout=30, initial_refused=False):
     """Fixed native-SSH stdio adapter. No credential, actor selector or shell."""
     pending_in, pending_out = [], bytearray()
     input_bytes = output_bytes = queued_input = 0
     eof = False
-    exit_code = None
+    exit_code = 128 if initial_refused else None
     finish_sent = finish_ack = False
     deadline = time.monotonic() + timeout
     channel.setblocking(False)
@@ -635,12 +635,12 @@ def ssh_shim_main(argv):
                 worker = HeldOrigin(record)
                 response = decode(record.data)
             kind = _server_frame(response)
-            if kind == 'refused':
-                return 128
-            if kind != 'ready':
+            if kind not in ('ready', 'refused'):
                 _fail()
             try:
-                return shim_stream(channel, worker)
+                # Even admission refusal owns an active bridge binding. Finish
+                # it while this shim is alive, without reading or sending stdin.
+                return shim_stream(channel, worker, initial_refused=kind == 'refused')
             except BaseException:
                 try:
                     send(channel, {'kind': 'cancel'})

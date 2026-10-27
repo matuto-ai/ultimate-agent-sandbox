@@ -633,6 +633,49 @@ class ShimPumpTests(unittest.TestCase):
         result = self.pump([[('channel', 1)], [('channel',2)], [('channel',1)]], frames=[{'kind': 'refused', 'error': 'FORBIDDEN', 'record': None}, {'kind':'shim-finish-ack'}])
         self.assertEqual(128, result)
         self.assertEqual([{'kind':'shim-finished'}],self.channel.sent)
+
+    def initial_refusal(self, ack, *, authentication_error=False):
+        self.channel.settimeout = Mock()
+        # Special methods are resolved on the type, not the instance.
+        records = [Record(json.dumps(value).encode(), (100,65530,65532), -1)
+                   for value in ({'kind':'refused','error':'DENIED','record':None}, ack)]
+        if authentication_error:
+            self.worker.require.side_effect = OriginDenied('wrong or dead worker')
+        with patch.object(ShimChannel, '__enter__', lambda channel: channel, create=True), \
+             patch.object(ShimChannel, '__exit__', lambda *args: False, create=True), \
+             patch('uas.git_worker_native.socket.socket', return_value=self.channel), \
+             patch('uas.git_worker_native.enable'), \
+             patch('uas.git_worker_native.send') as send, \
+             patch('uas.git_worker_native.os.getuid', return_value=65530), \
+             patch('uas.git_worker_native.os.getgid', return_value=65532), \
+             patch('uas.git_worker_native.HeldOrigin', return_value=self.worker), \
+             patch('uas.git_worker_native.receive', side_effect=records), \
+             patch('uas.git_worker_native.selectors.DefaultSelector', return_value=ShimPoll([[('channel',2)],[('channel',1)]])), \
+             patch('uas.git_worker_native.os.read') as read, \
+             patch('uas.git_worker_native.os.write') as write:
+            self.worker.close = Mock()
+            self.read, self.write, self.initial_send = read, write, send
+            return ssh_shim_main(['--fd','3','git@github.com',"git-upload-pack 'owner/repo.git'"])
+
+    def test_initial_refusal_entrypoint_finishes_before_return_without_stdio(self):
+        self.assertEqual(128, self.initial_refusal({'kind':'shim-finish-ack'}))
+        self.assertEqual([{'kind':'shim-finished'}], self.channel.sent)
+        self.assertEqual(['ssh-open'], [call.args[1]['kind'] for call in self.initial_send.call_args_list])
+        self.worker.require.assert_called_once()
+        self.worker.close.assert_called_once()
+        self.read.assert_not_called()
+        self.write.assert_not_called()
+
+    def test_initial_refusal_wrong_ack_or_worker_cannot_return_successfully(self):
+        for ack, wrong_worker in (({'kind':'ready'},False), ({'kind':'shim-finish-ack','extra':True},False),
+                                  ({'kind':'shim-finish-ack'},True)):
+            with self.subTest(ack=ack, wrong_worker=wrong_worker):
+                self.worker.require.reset_mock(side_effect=True)
+                with self.assertRaises((GitWorkerError,OriginDenied)):
+                    self.initial_refusal(ack, authentication_error=wrong_worker)
+                self.worker.close.assert_called_once()
+                self.assertEqual('cancel', self.initial_send.call_args.args[1]['kind'])
+
     def test_terminal_discards_unsent_input_and_waits_for_authenticated_finish_ack(self):
         result = self.pump([[('stdin',1)],[('channel',1)],[('channel',2)],[('channel',1)]],
             frames=[{'kind':'exit','code':0,'status':'OK'},{'kind':'shim-finish-ack'}],reads=[b'unsent'])
