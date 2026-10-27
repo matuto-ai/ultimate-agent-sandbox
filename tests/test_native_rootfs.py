@@ -66,6 +66,21 @@ class NativeRootfsTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.extract()
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_fingerprint_propagates_root_and_nested_scandir_failures_without_manifest(self):
+        self.extract()
+        original_scandir = os.scandir
+        for target in (self.root, self.root/'opt/uas'):
+            for error in (PermissionError('injected scan denial'), OSError('injected scan I/O failure')):
+                with self.subTest(path=target, error=type(error).__name__):
+                    def scandir(path):
+                        if Path(path) == target: raise error
+                        return original_scandir(path)
+                    with patch.object(rootfs.os, 'scandir', side_effect=scandir), \
+                            patch.object(rootfs, 'canonical') as canonical, self.assertRaises(type(error)) as caught:
+                        rootfs.fingerprint(self.root)
+                    self.assertIs(caught.exception, error)
+                    canonical.assert_not_called()
+
     def test_file_manifest_hash_failure_precedes_extraction(self):
         (self.payload/'native-files.json').write_text('{}')
         with self.assertRaises(ValueError): self.extract()

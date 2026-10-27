@@ -5,6 +5,7 @@ No custom policy or permissive fallback. Stock-policy failures stop before Pi.
 This first native scenario is not production, real Internet or quota exhaustion.
 """
 import ctypes
+from contextlib import closing
 import errno
 import hashlib
 import json
@@ -250,6 +251,13 @@ def failed_checks(checks,progress):
         checks[failed].update(status='failed',error='NATIVE_SCENARIO_FAILED',stage=progress['stage'])
     for name in REQUIRED:
         checks.setdefault(name,{'status':'not_run','reason':'NOT RUN: required check was not completed'})
+
+
+def read_admission_states(path):
+    # Connection.__exit__ ends transactions but does not close the file.
+    # Release this read-only guest probe before quota-filesystem cleanup.
+    with closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)) as database:
+        return database.execute('SELECT state FROM admissions').fetchall()
 
 
 def labeled_listener(path,group):
@@ -527,8 +535,7 @@ def scenario(nonce,manifest,*,checks=None,progress=None):
         emit_check(checks,'wrong_process')
         progress.update(check='control_loss',stage='control-loss-result')
         expect(result['hub_exited_after_control_eof'],'Hub control-loss monitor did not stop')
-        with sqlite3.connect('file:'+str(paths['hub']/'admissions.db')+'?mode=ro',uri=True) as database:
-            states=database.execute('SELECT state FROM admissions').fetchall()
+        states=read_admission_states(paths['hub']/'admissions.db')
         expect(states and all(row[0]=='revoked' for row in states),'control loss retained authority projection')
         checks['control_loss']={'status':'passed','all_admissions_revoked':True,'hub_survived_workstation_stop':result['hub_alive_after_workstation_stop']}
         emit_check(checks,'control_loss')
@@ -574,9 +581,24 @@ def scenario(nonce,manifest,*,checks=None,progress=None):
                 run('docker','rm','--force',container)
             cleanup_action('container',remove_container)
         if ownership.get('mount_attempted'):
+            umount_details={}
             def unmount():
-                if STORAGE.is_mount():run('umount',str(STORAGE))
+                if STORAGE.is_mount():
+                    try:run('umount',str(STORAGE))
+                    except RuntimeError as error:
+                        # Only this fixed owned command may retain error text.
+                        # Observation failure must not replace the real error.
+                        try:
+                            raw=str(error).encode('utf-8',errors='replace')
+                            umount_details.update(bytes=len(raw),sha256=hashlib.sha256(raw).hexdigest(),
+                                text=raw[:2048].decode('utf-8',errors='ignore'),truncated=len(raw)>2048)
+                        except Exception as diagnostic_error:
+                            umount_details['unavailable']=type(diagnostic_error).__name__
+                        raise
             cleanup_action('quota-mount',unmount)
+            if umount_details:
+                for error in cleanup_errors:
+                    if error['resource']=='quota-mount':error['fixed_umount_diagnostic']=umount_details
         if image is not None:
             cleanup_action('image',lambda:run('docker','image','rm',image))
         def remove_scratch():
@@ -587,9 +609,11 @@ def scenario(nonce,manifest,*,checks=None,progress=None):
             if ownership.get('scratch'):shutil.rmtree(ownership['scratch'])
         cleanup_action('build-scratch',remove_scratch)
         cleanup=not cleanup_errors
+        failed_resources={error['resource'] for error in cleanup_errors}
         checks['guest_cleanup']={'status':'passed' if cleanup else 'failed','cleanup_errors':cleanup_errors,
-            'owned_containers_removed':cleanup,'quota_disk_unmounted':cleanup,
-            'owned_image_and_build_scratch_removed':cleanup}
+            'owned_containers_removed':'container' not in failed_resources,
+            'quota_disk_unmounted':'quota-mount' not in failed_resources,
+            'owned_image_and_build_scratch_removed':not {'image','build-scratch'}&failed_resources}
         emit_check(checks,'guest_cleanup')
         if not cleanup:
             if original is None:raise RuntimeError('owned native cleanup incomplete')

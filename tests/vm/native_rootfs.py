@@ -312,7 +312,9 @@ def fingerprint(root, *, debug_indexes=None, unresolved_owner=None):
     unresolved, unresolved_count = [], 0
     inventory_bytes, inventory_full = 0, False
     reported_entries, reported_bytes = 0, 0
-    for base, dirs, names in os.walk(root, followlinks=False):
+    def walk_error(error):
+        raise error
+    for base, dirs, names in os.walk(root, followlinks=False, onerror=walk_error):
         for name in sorted(dirs + names):
             path = Path(base) / name
             key = path.relative_to(root).as_posix(); relative(key)

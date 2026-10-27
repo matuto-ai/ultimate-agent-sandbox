@@ -1,8 +1,14 @@
-# Workstation Pi transport — private source, not qualified
+# Workstation Pi transport — native proof, cleanup qualification pending
 
-This source advances #62/#63/#70; it does not complete #58, #78 or #81. No real
-two-Pi Docker-to-outside-Hub execution is established. Participants within one
-Workstation are trusted peers, not mutually memory-isolated. A bootstrap
+This source advances #62/#63/#70; it does not complete #58, #78 or #81.
+[Run 40453997464](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40453997464)
+established actual two-Pi execution with an outside Hub, Alice → Bob → Alice
+native receipts and the reported confinement/attribution/negative/control gates.
+Overall scenario qualification still failed at guest quota-mount cleanup; the
+explicit connection-close and fail-closed fingerprint corrections below require
+a new exact-tree deliberate run. Production launch remains disabled.
+Participants within one Workstation are trusted peers, not mutually
+memory-isolated. A bootstrap
 challenge is launch correlation, never bearer authority; no nonce-secrecy or
 malicious-in-process-influence immunity is claimed.
 
@@ -56,7 +62,9 @@ pairs; reject reused pairs, empty categories, supersets, broad ranges and
 unconstrained processes. No `:z` shared label, `label=disable`, permissive domain,
 `spc_t`, `unconfined_t`, 0666 endpoint or broad allow workaround.
 
-The following remain explicit qualification gates—no success is assumed:
+The following are required qualification gates. The latest retained native
+report establishes only its specifically recorded checks; unmeasured object-SID
+or permission details are not inferred from a broad passed label:
 
 1. **Socket creation context:** capture the actual Supervisor-created socket
    object SID, inode/parent labels and Room categories. Determine whether trusted
@@ -106,20 +114,19 @@ is introduced. The old `participant.py` same-UID guards remain unchanged.
 
 ### Startup probe choice
 
-Prefer a fixed, pinned minimal init in the future Hub container profile, with Hub
-as its ordinary child, for normal orphan reaping. The current capability probe
-can then compare its own pidfd against its known parent object. There is no
-selected/qualified init payload yet. A Hub started as namespace PID1 with parent0
-now explicitly fails capability admission (`qualified Hub init required`) rather
-than invoking pidfd_open(0), pretending support, or scanning for another task.
-No fallback fork/probe or runtime-profile change is introduced in this slice.
-The init binary/digest, lifecycle and actual startup capability result still
-require deliberate container qualification.
+The fixed native fixture selects signed, digest-verified tini, with Hub as its
+ordinary child for orphan reaping. The capability probe compares its own pidfd
+against that known parent object; actual Hub startup and the selected init
+digest are retained in the native results below. A Hub started as namespace PID1
+with parent0 explicitly fails capability admission (`qualified Hub init required`)
+rather than invoking pidfd_open(0), pretending support, or scanning for another
+task. No fallback fork/probe is used. Successful fixture startup does not enable
+an independently qualified production profile or erase the cleanup failure.
 
 ## Single authenticated ADMIT
 
-`workstation_admission.py` is a private source library, **not yet a deployed Hub
-control service**. Its decoder is separate from ordinary participant receive,
+`workstation_admission.py` remains private fixture source, **not a deployed
+production Hub control service**. Its decoder is separate from ordinary participant receive,
 which continues to reject SCM_RIGHTS. All socket/namespace/SELinux preflight
 above remains required; the library does not manufacture that evidence.
 
@@ -175,8 +182,9 @@ failure still closes resources and leaves the controller fenced. The concrete so
 held Supervisor pidfd and admitted task/channel descriptors on the existing
 ledger-owning thread. Bounded polls prioritize control EOF/revocation and task
 exit over ready peer traffic; a still-pending bounded control batch defers peers.
-It never reconstructs a process from selector descriptor integers. This loop is
-not yet running in an admitted container/profile.
+It never reconstructs a process from selector descriptor integers. This loop ran
+in the admitted outside-Hub container of the fixed native fixture; production
+profile admission remains disabled.
 
 `SupervisorAdmission` serializes single ADMIT, authenticated STATUS and REVOKE
 against the existing `ExecLaunch` journal. Intent is fsynced before FD transfer;
@@ -193,10 +201,12 @@ origins must still be established by trusted container startup, not packet claim
 checks its fresh empty context proof and records bounded profile/scope/session
 metadata plus digest in the same launch journal. Receiver, Engine stream and
 native handoff journal remain Supervisor-only. A trusted profile digest is not
-independent verification of the Node/Pi image; that qualification is still due.
-Hub-local ADMIT attachment reuses `FixturePeerHub.connect` before ACK; its explicit
-inbound-only receiver refuses delivery until an authenticated Supervisor delivery
-bridge is independently wired. No callable or store handle crosses the wire.
+independent verification of the Node/Pi image. Selected image evidence is retained
+below; corrected full-scenario and production qualification remain separate.
+Hub-local ADMIT attachment reuses `FixturePeerHub.connect` before ACK. Its
+inbound-only receiver never supplies delivery itself: the authenticated
+Supervisor delivery bridge below owns outbound native delivery. No callable or
+store handle crosses the wire.
 
 Tests prove a strict two-rights decoder, FD closure on rejection, Actor/mapping
 mismatch denial, actual same-UID wrong control sender denial, queued-record
@@ -251,7 +261,9 @@ closure is not an immutable native payload or exec-handshake qualification;
 exact package/hash/API and actual handshake remain required before this launch
 can be promoted. Node binary/hash,
 Pi 1.4.0 lock/package contents, connector, extension, offline guard and account-free
-faux provider must likewise form an immutable selected image payload.
+faux provider must likewise form an immutable selected image payload. The latest
+native run below records these actual selected-image/package/API and handshake
+observations, without claiming reproducible RPM selection or production launch.
 
 Measure real two-seat startup/idle/turn/reset RSS, CPU, PID and disk use under a
 **separate native resource profile**. Do not silently inflate #98's small
@@ -269,19 +281,20 @@ before execution. No further listener attempt, escalation, alternate transport
 or bypass is authorized here. Later ordinary authorized CI may test a supported
 listener platform; that must not be reported as local success.
 
-No policy installation, VM launch, credential contact, paid provider or user-host
-setting change has occurred in this source work. The first reviewed ingress source
-was published as draft PR 108; the subsequent private integration candidate now
-preserves remote main `4234e67127e9af4cd8de087b85c17da3d4490948` through verified
+No local VM launch, policy installation, credential contact, paid provider or
+user-host setting change occurred. Authorized deliberate CI VM rounds are
+recorded below. Historically, the first reviewed ingress source was published
+as draft PR 108; that early integration candidate preserved remote main `4234e67127e9af4cd8de087b85c17da3d4490948` through verified
 content-identical local materialization `cdc4d80ec519d6f6aae0e0785fff4045a55e3e35`,
 base tree `415f5449977ba9fa1fb4c30eac3351f263d18cd0`. The six Run pause/resume files
-are preserved. Existing Claude sources remain unchanged; README follows latest
-main. Local synthetic ancestry is not remote history. The one draft integration
+were preserved in that early candidate. The current integration instead preserves
+main117 (`95a32134`) and its reviewed Claude changes. Local synthetic ancestry is
+not remote history. The one draft integration
 PR remains open; ordinary CI or initial ingress qualification does not complete
 the frozen contracts or parent issues.
 
 
-## First ordinary CI and next deliberate integration
+## First ordinary CI and original deliberate plan (historical)
 
 Draft [PR 108](https://github.com/matuto-ai/ultimate-agent-sandbox/pull/108), head
 `45dcf70c8515ff1a87b2a9b0769c60bac44677f1`, passed ordinary validate, Pi-native and
@@ -558,7 +571,7 @@ per-query limit, bounded metadata and owner count). Owner-query failure remains
 a diagnostic fact, never authorization. Escapes, cycles, special files and
 other containment violations still fail immediately. This is bounded diagnosis,
 not a generic dangling-link exception or an assertion that missing executables
-exist. Actual exact image/native qualification remains pending.
+exist. At that stage actual exact image/native qualification remained pending.
 
 ### Serial-stall instrumentation after run 40423347331
 
@@ -640,9 +653,9 @@ process-group cleanup. Only actual received byte deltas produce progress, never
 a timer-only heartbeat. Default synthetic #98 commands, native DNF's 900-second
 limit, serial idle limit and global round budget are unchanged. No shell, host
 mount/configuration, user trust store, guest fetch, broadened weak dependencies,
-generic package scriptlets or security-policy relaxation is involved. Actual
-signed-tool execution and the resulting image remain **unqualified** until the
-next reviewed exact-head deliberate run.
+generic package scriptlets or security-policy relaxation was involved. At that
+stage actual signed-tool execution and the resulting image remained unqualified
+pending the next reviewed exact-head deliberate run.
 
 
 ### Fixed packaged Python entrypoint after run 40429443685
@@ -832,8 +845,8 @@ held-task snapshot and exact-exec exit/readiness/transport observations were not
 retained; the internal cause remains unknown. There was no state reinjection or
 automatic retry. Source control flow implies earlier container/socket and Hub
 startup assertions returned, but missing detailed values are not reconstructed
-or claimed as retained qualification evidence. Both seats and bidirectional
-delivery remain unqualified.
+or claimed as retained qualification evidence. At that run both seats and
+bidirectional delivery remained unqualified.
 
 The complete retained 249,884-byte job log SHA-256 is
 `c62cff04a3ffd675695ff9c59503c333ad6a04fbc38009b4c8d5324e87093bbf`.
@@ -937,3 +950,73 @@ fallback, and a failed read is not retried. These observations do not reset dead
 ordinary receiver stays silent unless its owner explicitly enables diagnostics.
 Import 240 seconds, serial idle 300 seconds, guest outer 1,200 seconds, workflow
 45 minutes and all stock SELinux/capability/seccomp boundaries remain unchanged.
+
+### Native round trip verified; guest cleanup still failed: run 40453997464
+
+The [run on `2abff880`](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40453997464/job/122022953520)
+passed both actual Pi attachments and the **Alice → Bob → Alice** exchange.
+Each recipient supplied its exact active-native-branch/session-file receipt,
+matched to the existing durable Hub confirmation. The retained report passed
+payload, full Workstation/outside-Hub confinement, socket policy, Hub startup,
+native two-seat delivery, Actor attribution, actual inherited-descriptor transfer
+to a different Node task, control-loss revocation and the bounded diagnostic
+resource profile. Native tool-end counts were `[3,3]`; only `native-0` / actor-a
+and `native-1` / actor-b mutated peer traffic, with final Room sequence 13.
+These are actual native results, not replacement mocks. Resource exhaustion,
+production capacity, reset-resource measurements and whole-product acceptance
+remain outside this diagnostic scenario.
+
+The confirmed image was
+`sha256:c65aba624cddff080bebe770a229c20e931488ecccc9655d8176d9b15abc90db`.
+Rootfs: **24,885 entries / 374,552,676 bytes**, manifest SHA-256
+`16c2dcf6c38c1345fcaf858b899152c7c98b1027543ddb21ea0ea9a31f4cce70`.
+Archive: **411,627,520 bytes**, SHA-256
+`08c27fb207c314c59a6b3f6aab74de56328844591ded6e2caf2b4da399460d8b`.
+Import start/end observations span 177.915 seconds. Held-task start/end samples
+through attachment and fresh-context proof span **15.599209 seconds / 15.52 CPU
+seconds** for Alice and **13.339667 seconds / 13.00 CPU seconds** for Bob. Both
+same-task samples ended in state S, with matching start times and no diagnostic
+close errors; observed proc-directory UID was 165532. These intervals include
+more than the initial state call, so they are not exact initial-state latency
+measurements or proof of the earlier timeout's internal cause.
+
+Overall qualification still **failed**, solely at guest cleanup: quota-mount
+reported `RuntimeError`. The old cleanup record retained no umount stderr or
+errno and set all three cleanup flags false whenever any cleanup action failed.
+It therefore cannot establish the exact errno or independently describe each
+successful cleanup action. The runner subsequently removed its disposable VM
+scratch in 1,217.312 seconds. Full retained job log: 247,095 bytes, SHA-256
+`44b26fb757b1ac5a533ae8632135ebf944566ccdb427c66811553f8848f0d4fd`.
+The complete report and ordered, hash-verified fragments retain every native
+receipt and passed gate; no overall success is inferred from those partial facts.
+
+The source has a definite ownership leak: the read-only inspection of
+`/mnt/uas-native/hub/admissions.db` used a SQLite connection context manager and
+kept that connection referenced through quota unmount. Python explicitly states
+that its [connection context manager does not close the connection](https://docs.python.org/3/library/sqlite3.html#how-to-use-the-connection-context-manager).
+An owned temporary SQLite reproduction confirmed that it remained usable after
+the block and became closed only after explicit close, without any mount or
+native test. A busy unmount is consistent with that leaked descriptor, but
+**EBUSY was not retained and is not claimed as an observed errno**.
+
+The correction explicitly closes this read-only probe before returning its
+states, including on query failure, using `contextlib.closing`. Tests retain the
+actual connection object to verify closure before a mocked unmount. The fixed
+owned umount alone now retains at most 2,048 UTF-8 error-text bytes with full
+observed count/hash and truncation status; unrelated exception messages remain
+unlogged. Diagnostic failures cannot replace the actual cleanup error.
+Container, quota-mount and image/build-scratch cleanup flags are now independent,
+while any cleanup error still fails the scenario. No force/lazy unmount, retry,
+new resource authority, native RPC behavior or deadline change is introduced.
+The correction still requires independently reviewed source, ordinary CI and a
+new sole deliberate VM run before cleanup or full scenario success can be claimed.
+
+Independent accumulated-source review also found that the final rootfs
+fingerprint's `os.walk` lacked an error callback and could silently omit a
+subtree when `scandir` failed. This is a fail-open source defect, not evidence
+that an earlier guest actually encountered such an error. The same narrow
+raising `onerror` pattern already used by the trust inventory now aborts the
+final fingerprint on root or nested traversal failure. Pure injected permission
+and I/O-error regressions require the original exception and no completed
+manifest; file, mode, link and byte-budget semantics are unchanged. The corrected
+scan and cleanup code must both be present in the next qualified native tree.
