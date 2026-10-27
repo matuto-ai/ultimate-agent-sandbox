@@ -390,9 +390,11 @@ class FixturePeerHub:
                   "submitted_seq": self.ledger.snapshot()["room_seq"] + 1, "deliveries": {}}
         if command.kind == "peer.work-request":
             record.update(status="QUEUED", response_started_at=None, reason=None, attention=None)
-            from .run_coordination import current_coordinator
             run = state.get('runs', {}).get(command.target)
-            coordinator = current_coordinator(run) if run else None
+            coordinator = None
+            if run is not None:
+                from .run_coordination import current_coordinator
+                coordinator = current_coordinator(run)
             if (coordinator and coordinator['participant_id'] == connection.participant_id
                     and coordinator['incarnation_id'] == connection.incarnation_id
                     and coordinator['requests_used'] < coordinator['request_budget']):
@@ -431,8 +433,12 @@ class FixturePeerHub:
             grant.update(status='CONSUMED', reserved_run='x' * 256, consumed_run='x' * 256, reason='x' * 256)
         for proposal in reserved.get('run_proposals', {}).values():
             proposal.update(status='APPROVED', request_id='x' * 256)
-        from .run_control import reserve_run_control_capacity
-        reserve_run_control_capacity(reserved)
+        # Peer-only staged profiles have no canonical Run owner or capability.
+        # A configured Run path still requires its dependencies; do not mask a
+        # missing module there or silently omit its reserved control headroom.
+        if reserved.get('runs') or reserved.get('run_admissions'):
+            from .run_control import reserve_run_control_capacity
+            reserve_run_control_capacity(reserved)
         for run in reserved.get('runs', {}).values():
             run.update(control_revision=MAX_CONTEXT_GENERATION, control_reason='x' * 256)
         reserve_context_capacity(reserved)
@@ -559,10 +565,12 @@ class FixturePeerHub:
             if previous and (item["kind"] == "peer.message" or previous["incarnation_id"] == connection.incarnation_id):
                 continue
             pending.append(item)
-        from .run_coordination import current_coordinator
         def priority(item):
             run = snapshot['state'].get('runs', {}).get(item['run_id'])
-            coordinator = current_coordinator(run) if run else None
+            coordinator = None
+            if run is not None:
+                from .run_coordination import current_coordinator
+                coordinator = current_coordinator(run)
             is_coordinator = (coordinator is not None and item['kind'] == 'peer.work-request'
                               and item['sender'] == coordinator['participant_id']
                               and domain['connections'].get(item['sender'], {}).get('incarnation_id') == coordinator['incarnation_id']

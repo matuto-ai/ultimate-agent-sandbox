@@ -16,7 +16,7 @@ import test_pi_run_admission as harness
 from uas.fixture_peer import FixtureReceiver
 from uas.ledger import LedgerError
 from uas.participant import FixtureSeat
-from uas.peer import WorkRequest
+from uas.peer import Readiness, WorkRequest
 from uas.pi_fixture import FixturePiRecipe
 from uas.run_admission import RunAdmission
 
@@ -139,6 +139,10 @@ class RunManagementTests(unittest.TestCase):
         self.assertEqual(session, restored.connection.receiver.initial_state['session_id'])
         self.assertEqual(self.repo, Path('/proc', str(restored.process.pid), 'cwd').resolve())
         self.admission.resume('resume-stopped', row['run_id'], 3, 3, 'explicit-restore', human=self.human)
+        self.assertEqual('HELD', self.hub.deliver(restored.connection)['outcome'])
+        observation = restored.connection.receiver.observe()
+        self.assertIs(Readiness.SAFE, observation)
+        self.hub.observe(restored.connection, observation)
         self.assertEqual('CONFIRMED', self.hub.deliver(restored.connection)['outcome'])
         closed = self.admission.terminal_stop('terminal', row['run_id'], 3, 4, 'ended-early', human=self.human)
         self.assertEqual(('CLOSED', 'stopped', 'ended-early'), (closed['status'], closed['outcome'], closed['reason']))
@@ -176,6 +180,10 @@ class RunManagementTests(unittest.TestCase):
         self.assertEqual(2, restored.connection.context_generation)
         self.assertEqual(self.repo, Path('/proc', str(restored.process.pid), 'cwd').resolve())
         self.admission.resume('later-context-resume', next_run['run_id'], 3, 2, 'continue', human=self.human)
+        self.assertEqual('HELD', self.hub.deliver(restored.connection)['outcome'])
+        observation = restored.connection.receiver.observe()
+        self.assertIs(Readiness.SAFE, observation)
+        self.hub.observe(restored.connection, observation)
         self.assertEqual('CONFIRMED', self.hub.deliver(restored.connection)['outcome'])
         self.admission.appoint_coordinator('human-appoint', next_run['run_id'], 3, 3, 'builder',
                                            human=self.human, ttl_seconds=30, request_budget=1)

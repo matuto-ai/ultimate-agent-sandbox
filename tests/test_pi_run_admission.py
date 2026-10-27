@@ -231,11 +231,11 @@ class RunAdmissionTests(unittest.TestCase):
     def test_successful_read_before_interruption_is_not_reused_as_fresh_activation(self):
         slot = self.admission._slot
         count = [0]
-        def interrupt_after_read(*args):
+        def interrupt_after_read(*args, **kwargs):
             count[0] += 1
             if count[0] == 2:
                 raise LedgerError('STORAGE_ERROR')
-            return slot(*args)
+            return slot(*args, **kwargs)
         with patch.object(self.admission, '_slot', interrupt_after_read):
             self.error('STORAGE_ERROR', self.open)
         calls = len(self.calls)
@@ -289,7 +289,8 @@ class RunAdmissionTests(unittest.TestCase):
         self.assertEqual(full_reservation, len(self.admission._pending(run)['reservation']))
         from uas.ledger import Command
         self.admission._attention(run, self.human, 'x' * 256,
-            Command('max-attention', 'run.admission-attempt-result', run, 1, {}))
+            Command('max-attention', 'run.admission-attempt-result', run, 1, {}),
+            None)
         self.assertEqual('x' * 256, self.admission._pending(run)['attention'])
         self.assignment = [41]
         row = self.open(attempt='after-saturated-conflict')
@@ -383,14 +384,14 @@ class RunAdmissionTests(unittest.TestCase):
                 attempting.set()
                 return admission.pause('race-pause', run, 1, 0, 'hold', human=control)
         apply = self.admission._apply
-        def activate_with_racer(command, origin, decide):
+        def activate_with_racer(command, origin, decide, **kwargs):
             if command.kind == 'run.admission-attempt-result':
                 def raced(state, cmd):
                     entered.set()
                     self.assertTrue(attempting.wait(5))
                     return decide(state, cmd)
-                return apply(command, origin, raced)
-            return apply(command, origin, decide)
+                return apply(command, origin, raced, **kwargs)
+            return apply(command, origin, decide, **kwargs)
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(pause)
             with patch.object(self.admission, '_apply', activate_with_racer):
