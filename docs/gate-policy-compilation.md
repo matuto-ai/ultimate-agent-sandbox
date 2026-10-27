@@ -2,7 +2,9 @@
 
 This increment implements only the configuration prerequisite of #73 under #58
 and the surviving Gate contract in [#25's resolution](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/25#issuecomment-6397323807).
-It does not evaluate a Gate or authorize a protected operation.
+The compiler itself does not evaluate a Gate or authorize a protected operation.
+The separate [artifacts Evaluation slice](gate-artifact-evaluation.md) consumes
+this exact snapshot; its boundary still requires fresh manual qualification.
 
 ## Supported definition
 
@@ -10,10 +12,12 @@ Trusted Project configuration may define a mechanical `artifacts` Gate with a
 nonempty bounded list of explicit target-relative paths, each with `type` (`file`
 or `directory`) and a boolean `nonempty` requirement. The compiler rejects missing
 configuration, duplicate items, absolute/traversing/ambiguous paths, Git metadata,
-patterns, unknown fields, unknown guard targets and dangling references. It does
+patterns, unknown fields, unknown guard targets and dangling references. Paths
+remain at most 1024 Unicode characters, 4095 UTF-8 bytes, 32 components, and 255
+UTF-8 bytes per component, matching the fixed helper source profile. It does
 not touch the filesystem. Filesystem containment, symlink rejection, actual
 presence/type/content, unchanged exact-revision target proof and helper isolation
-remain obligations of a future evaluator, not consequences of lexical checks.
+remain obligations of the evaluator boundary, not consequences of lexical checks.
 
 For this one evaluator the accepted contract determines the source
 (`supervisor-one-shot-helper`), scope (`exact-head-tree`) and freshness
@@ -58,6 +62,7 @@ Pure configuration tests cover the supported canonical definition and refused
 incomplete, unsafe, unsupported and unbound definitions. Admission tests show
 failure before provider/Git/native effects and durable exact-retry preservation
 of the compiled snapshot after a trusted configuration change. This is not Gate
-runtime qualification: no helper execution, evidence collection, Checks,
-verdicts, eligibility adjudication, protected-operation advancement or policy
-migration is implemented. No native or listener qualification is run locally.
+runtime qualification. The compiler establishes no helper execution, evidence,
+Checks, verdicts or eligibility. The connected artifacts-only slice has separate
+pure policy and boundary tests; protected-operation advancement and policy
+migration remain unavailable. No native or listener qualification is run locally.

@@ -101,4 +101,7 @@ The [PR/review observation prerequisite](docs/forge-pull-observations.md) adds
 bounded exact-revision Forge reads through the existing Broker, without Gate or
 review-routing authority.
 
-Gate-policy configuration prerequisite: [bounded artifacts compilation](docs/gate-policy-compilation.md) (no evaluator execution or Gate verdict).
+Gate-policy configuration: [bounded artifacts compilation](docs/gate-policy-compilation.md).
+The [artifacts-only Evaluation slice](docs/gate-artifact-evaluation.md) connects
+Hub adjudication to the private Supervisor boundary; pure tests are not native
+helper qualification, production enablement, or protected-operation authority.

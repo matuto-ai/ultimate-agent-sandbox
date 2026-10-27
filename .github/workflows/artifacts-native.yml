@@ -1,0 +1,38 @@
+name: artifacts-native-deliberate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+# Explicit review/ordinary CI must precede dispatch or the trusted reviewer label.
+# Never run on opened/synchronize/push/cron. Serialize even across branches.
+concurrency:
+  group: artifacts-native-deliberate
+  cancel-in-progress: false
+
+jobs:
+  exact-artifacts-two-rooms:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'qualify-native-artifacts' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact reviewed event head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "${#EXPECTED_HEAD}" -eq 40
+          case "$EXPECTED_HEAD" in *[!0-9a-f]*) exit 1 ;; esac
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - name: Install disposable runner image and signed payload tools
+        timeout-minutes: 10
+        run: python3 tests/vm/install_runner_tools.py boundary
+      - name: Deliberate exact artifacts helper qualification
+        run: python3 tests/vm/run_artifacts.py

@@ -218,11 +218,13 @@ def build_payload(directory, repository_root, nonce, *, source_paths, profile="s
     existing Go fixture is ``/fixture``; signed packages are ``/rpms`` and the
     fingerprint-checked certificate and manifest are at the ISO root.
     """
-    if profile not in ("static-go-v1", "native-pi-v1"):
+    if profile not in ("static-go-v1", "native-pi-v1", "artifacts-v1-source"):
         raise ValueError("unknown payload profile")
     native = None
     if profile == "native-pi-v1":
         import prepare_native_payload as native
+    elif profile == "artifacts-v1-source":
+        import prepare_artifact_payload as native
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.geteuid() == 0:
         raise RuntimeError("payload preparation runs only as unprivileged disposable CI user")
     if not re.fullmatch(r"[0-9a-f]{32}", nonce):
