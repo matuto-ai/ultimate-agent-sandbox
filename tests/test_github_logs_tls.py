@@ -83,7 +83,7 @@ class HostedLogHTTPTests(unittest.TestCase):
         return response(run())
 
     def test_actual_tls_redirect_strips_credentials_and_truncated_body_is_unknown(self):
-        with patch('uas.github_logs.http.client.HTTPSConnection', self.connection), \
+        with patch('uas.github_logs.http.client.HTTPSConnection.connect', self.connection.connect), \
              patch('uas.github_logs.ssl.create_default_context', return_value=self.trust):
             provider = CompletedJobLogProvider(GitHubProject(REPO), self.metadata, self.transport)
             result = provider.read(RUN, JOB, ATTEMPT, HEAD)
@@ -101,7 +101,7 @@ class HostedLogHTTPTests(unittest.TestCase):
         self.assertEqual(4, len(self.requests))
 
     def test_actual_untrusted_server_certificate_never_receives_credentials(self):
-        with patch('uas.github_logs.http.client.HTTPSConnection', self.connection):
+        with patch('uas.github_logs.http.client.HTTPSConnection.connect', self.connection.connect):
             with self.assertRaises(LogFailure):
                 self.transport(f'repos/{REPO}/actions/jobs/{JOB}/logs')
         self.assertEqual([], self.requests)
