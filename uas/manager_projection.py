@@ -14,7 +14,7 @@ import json
 import re
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_PROJECTION_BYTES = 524_288
 MAX_ROWS = 1024
 TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z')
@@ -193,7 +193,7 @@ class SourceObservation:
                     freshness=self.freshness, reason=self.reason)
 
 
-def project_hub(snapshot, *, captured_at, observations=()):
+def project_hub(snapshot, *, captured_at, observations=(), journey_events=None, schema_version=SCHEMA_VERSION):
     """One already-atomic Hub cut, plus independently versioned owner captures.
 
     No calls to Gate.projection, Supervisor.status, native evidence(), Broker,
@@ -324,7 +324,13 @@ def project_hub(snapshot, *, captured_at, observations=()):
         hub('lifecycle_label_drift', rows, freshness='unknown')
     else:
         missing('lifecycle_label_drift')
-    result = {'schema_version': SCHEMA_VERSION, 'room_id': snapshot['room_id'],
+    if type(schema_version) is not int or schema_version not in {1, SCHEMA_VERSION}:
+        raise ProjectionError('UNSUPPORTED_PROJECTION_SCHEMA')
+    if schema_version == 2:
+        from .manager_journey import project_journey
+        sections['journey'] = (fact('hub', seq, status='unavailable', reason='SOURCE_HISTORY_NOT_CAPTURED')
+            if journey_events is None else project_journey(snapshot, journey_events))
+    result = {'schema_version': schema_version, 'room_id': snapshot['room_id'],
               'room_seq': seq, 'captured_at': captured_at, 'sections': sections}
     canonical(result)
     return result
@@ -346,6 +352,10 @@ HUB_FIELDS = {
 
 def validate_section_value(section, value):
     """Also enforce the disclosure allowlist on the receiving side."""
+    if section == 'journey':
+        from .manager_journey import validate_journey
+        validate_journey(value)
+        return
     if section in EXTERNAL_FIELDS or section in HUB_FIELDS:
         fields = EXTERNAL_FIELDS[section][1] if section in EXTERNAL_FIELDS else HUB_FIELDS[section]
         if _rows(value, fields) != value:
