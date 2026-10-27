@@ -121,8 +121,10 @@ class ArtifactManualSourceTests(unittest.TestCase):
         self.assertLess(block.index('durable_probe_record('),block.index('engine.create('))
         self.assertIn("'state':'launch-possible'",block)
         quota=(VM/'artifact_quota_probe.py').read_text()
-        self.assertIn('denied!=errno.EDQUOT',quota)
-        self.assertIn('os.posix_fallocate(descriptor,0,(256<<20)+4096)',quota)
+        self.assertIn('denied in (errno.EDQUOT, errno.ENOSPC)',quota)
+        self.assertIn('FS_IOC_FSGETXATTR',quota)
+        self.assertIn('GLOBAL_MARGIN_BYTES = 64 << 20',quota)
+        self.assertIn('os.posix_fallocate(descriptor, 0, REQUEST_BYTES)',quota)
         self.assertIn('(165533,165533)',quota)
         self.assertIn('tests/vm/artifact_quota_probe.py',run.SOURCES)
 
@@ -131,7 +133,7 @@ class ArtifactManualSourceTests(unittest.TestCase):
         block=source[source.index('def scenario('):source.index('def main(')]
         transition=block.index('marker_descriptor=publish_boot_marker(nonce)')
         self.assertLess(block.index('rootfs=build_rootfs('),transition)
-        self.assertLess(block.index('subprocess.run('),transition)  # Quota probe only stats it.
+        self.assertLess(block.index("captured('quota-'+room"),transition)  # Quota probe only stats it.
         self.assertLess(transition,block.index('subprocess.Popen('))
         self.assertNotIn('build_rootfs(',block[transition:])
         self.assertNotIn('guest_guard(',block[transition:])

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -151,6 +152,78 @@ def create(image,name,paths,nonce,*,hub=False,foreign=None):
 def inspect(identifier):return json.loads(run('docker','inspect',identifier))[0]
 
 
+def quota_mount_identity(document,device):
+    """Exact mounted filesystem root/device, not a literal XFS assertion."""
+    expect(type(document) is str and len(document.encode())<=65536,'bounded mount evidence')
+    matches=[]
+    for line in document.splitlines():
+        pieces=line.split(' - ')
+        if len(pieces)!=2:continue
+        left,right=pieces[0].split(),pieces[1].split()
+        if len(left)>=6 and left[4]==str(STORAGE):matches.append((left,right))
+    expect(len(matches)==1,'one exact artifact quota mount required')
+    left,right=matches[0]
+    expect(len(right)>=3 and left[3]=='/' and right[0]=='xfs'
+        and left[2]==str(os.major(device))+':'+str(os.minor(device)),
+        'actual XFS root mount/device differs')
+    return {'filesystem':right[0],'device':device,'mountpoint':left[4],'filesystem_root':left[3]}
+
+
+def quota_state(document,kind):
+    expect(type(document) is str and len(document.encode())<8192,'bounded quota state')
+    headers=[line for line in document.splitlines() if ' quota state on ' in line]
+    expect(len(headers)==1 and headers[0].startswith(kind+' quota state on '+str(STORAGE)+' ('),
+        'exact mounted quota state required')
+    accounting=re.findall(r'^\s*Accounting:\s+(ON|OFF)\s*$',document,re.M)
+    enforcement=re.findall(r'^\s*Enforcement:\s+(ON|OFF)\s*$',document,re.M)
+    expect(len(accounting)==len(enforcement)==1,'one actual quota accounting/enforcement state')
+    return {'accounting':accounting[0]=='ON','enforcement':enforcement[0]=='ON'}
+
+
+def quota_hard_limit(document,project):
+    expect(type(document) is str and len(document.encode())<8192,'bounded quota limit report')
+    rows=[line.split() for line in document.splitlines() if line.split() and line.split()[0]=='#'+str(project)]
+    expect(len(rows)==1 and len(rows[0])>=4 and all(value.isdigit() for value in rows[0][1:4]),
+        'one actual numeric project limit required')
+    used,soft,hard=map(int,rows[0][1:4])
+    expect(soft==0 and hard==262144 and used<=hard-1024,'exact project hardlimit and positive-allocation headroom required')
+    return {'used_bytes':used*1024,'soft_limit_bytes':soft*1024,'hard_limit_bytes':hard*1024}
+
+
+def quota_facts(room):
+    from artifact_diagnostics import captured, FixtureCommandFailure, stream_facts
+    expect(room in ('alpha','beta'),'fixed quota Room required')
+    descriptor=os.open(STORAGE,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        node=os.fstat(descriptor)
+        expect(node.st_uid==0,'root-owned fixed quota mount required')
+        with open('/proc/self/mountinfo','rb') as stream:raw=stream.read(65537)
+        expect(len(raw)<=65536,'mount evidence output bound')
+        mount=quota_mount_identity(raw.decode(),node.st_dev)
+        def observe(phase,command,parse):
+            result=captured(phase,['xfs_quota','-x','-c',command,str(STORAGE)],output_limit=8192,
+                stdin=subprocess.DEVNULL,capture_output=True,timeout=5,
+                env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','HOME':'/nonexistent','LC_ALL':'C'})
+            try:return parse(result.stdout.decode('utf-8'))
+            except (AssertionError,UnicodeError,ValueError):
+                raise FixtureCommandFailure(phase,'schema',returncode=result.returncode,
+                    stdout=stream_facts(result.stdout),stderr=stream_facts(result.stderr)) from None
+        states={kind:observe('quota-state-'+kind.lower(),'state -'+flag,lambda value:quota_state(value,kind))
+            for kind,flag in (('User','u'),('Group','g'),('Project','p'))}
+        expect(states['Project']=={'accounting':True,'enforcement':True}
+            and not states['User']['enforcement'] and not states['Group']['enforcement'],
+            'project-only quota enforcement required for attribution')
+        project=301 if room=='alpha' else 303
+        limits=observe('quota-hard-limits','report -p -b -n -N',lambda value:quota_hard_limit(value,project))
+        current=os.stat(STORAGE,follow_symlinks=False)
+        expect((current.st_dev,current.st_ino)==(node.st_dev,node.st_ino),'quota mount identity changed')
+        facts={'version':1,'room':room,'project_id':project,'device':node.st_dev,
+            'hard_limit_bytes':limits['hard_limit_bytes'],'accounting':True,'enforcement':True,
+            'filesystem':mount['filesystem'],'user_enforcement':False,'group_enforcement':False}
+        return facts,{'mount':mount,'states':states,'limits':limits,'kernel_release':os.uname().release}
+    finally:os.close(descriptor)
+
+
 def publish_boot_marker(nonce):
     """Read access only after root-only assembly; retain exact FD for reset."""
     expect(os.geteuid()==0 and type(nonce) is str and len(nonce)==32
@@ -180,6 +253,8 @@ def reset_boot_marker(descriptor):
 
 def scenario(nonce,manifest,checks):
     sys.path[:0]=[str(ROOT),str(ROOT/'tests/vm')]
+    from artifact_diagnostics import (captured, require_file_result, decoded_json,
+        FixtureCommandFailure, file_facts)
     from native_rootfs import build_rootfs
     from guest_workstation import import_image,engine_profile,NATIVE_PACKAGE_PROFILE
     owned=[];listeners=[];image=None;ownership={};children=[];marker_descriptor=None
@@ -202,14 +277,19 @@ def scenario(nonce,manifest,checks):
             'engine':engine,'trusted_git_sha256':hashlib.sha256(Path('/usr/bin/git').read_bytes()).hexdigest(),
             'trusted_prlimit_sha256':hashlib.sha256(Path('/usr/bin/prlimit').read_bytes()).hexdigest(),
             'native_pi_qualification_reused':False,'production_enabled':False};emit('payload',checks['payload'])
-        rooms=storage(nonce,ownership);containers={};quota_exhaustion={}
+        rooms=storage(nonce,ownership);containers={};quota_exhaustion={};quota_observations={}
         for room in rooms:
-            result=subprocess.run([sys.executable,str(ROOT/'tests/vm/artifact_quota_probe.py'),room],
-                user=165533,group=165533,extra_groups=[],stdin=subprocess.DEVNULL,capture_output=True,timeout=20,
+            facts,before=quota_facts(room)
+            print('UAS_ARTIFACT_QUOTA_PREFLIGHT:'+json.dumps({'room':room,'facts':facts,'observations':before},sort_keys=True),flush=True)
+            result=captured('quota-'+room,[sys.executable,str(ROOT/'tests/vm/artifact_quota_probe.py'),room],output_limit=8192,
+                user=165533,group=165533,extra_groups=[],input=json.dumps(facts,sort_keys=True).encode(),capture_output=True,timeout=20,
                 env={'PATH':'/usr/bin:/bin','PYTHONDONTWRITEBYTECODE':'1'})
-            expect(result.returncode==0 and len(result.stdout)+len(result.stderr)<8192,'actual nonroot project-quota excess denial')
-            quota_exhaustion[room]=json.loads(result.stdout)
-            expect(quota_exhaustion[room]['project_hard_quota_enforced'] is True,'missing actual quota enforcement')
+            quota_exhaustion[room]=decoded_json('quota-'+room,result)
+            after_facts,after=quota_facts(room)
+            expect(after_facts==facts and quota_exhaustion[room]['quota_facts']==facts
+                and quota_exhaustion[room]['project_hard_quota_enforced'] is True,
+                'missing exact independently observed project quota enforcement')
+            quota_observations[room]={'before':before,'after':after}
         rooms['beta']['foreign_scratch']=rooms['alpha']['scratch']
         for room,paths in rooms.items():
             listener=labeled_listener(Path(paths['gate'])/'gate.sock',165530,paths['level'])
@@ -241,17 +321,23 @@ def scenario(nonce,manifest,checks):
             file=Path(paths['journal'])/'config.json';file.write_text(json.dumps(config));os.chown(file,165533,165533);file.chmod(0o400)
             output=Path(paths['journal'])/'stdout';errors=Path(paths['journal'])/'stderr'
             with output.open('xb') as stdout,errors.open('xb') as stderr:
-                child=subprocess.Popen([sys.executable,str(ROOT/'tests/vm/artifact_supervisor.py'),str(file),
-                    *map(str,paths['listener_fds'])],stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,
-                    user=165533,group=165533,extra_groups=[165530,os.stat('/run/docker.sock').st_gid],
-                    pass_fds=paths['listener_fds'],env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(ROOT)+':'+str(ROOT/'tests/vm'),
-                        'PYTHONDONTWRITEBYTECODE':'1','HOME':paths['journal']})
+                try:
+                    child=subprocess.Popen([sys.executable,str(ROOT/'tests/vm/artifact_supervisor.py'),str(file),
+                        *map(str,paths['listener_fds'])],stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,
+                        user=165533,group=165533,extra_groups=[165530,os.stat('/run/docker.sock').st_gid],
+                        pass_fds=paths['listener_fds'],env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(ROOT)+':'+str(ROOT/'tests/vm'),
+                            'PYTHONDONTWRITEBYTECODE':'1','HOME':paths['journal']})
+                except OSError as error:
+                    raise FixtureCommandFailure('supervisor-'+room,'launch',errno=error.errno) from None
                 children.append(child);deadline=time.monotonic()+300
                 while child.poll() is None:
-                    expect(time.monotonic()<deadline,'bounded concrete Supervisor scenario')
-                    expect(max(output.stat().st_size,errors.stat().st_size)<=1<<20,'Supervisor output exceeded bound')
+                    outcome='timeout' if time.monotonic()>=deadline else (
+                        'output' if max(output.stat().st_size,errors.stat().st_size)>1<<20 else None)
+                    if outcome:
+                        raise FixtureCommandFailure('supervisor-'+room,outcome,
+                            stdout=file_facts(output),stderr=file_facts(errors))
                     time.sleep(.2)
-            expect(child.returncode==0,'actual Supervisor failed: '+errors.read_text()[-8192:])
+            require_file_result('supervisor-'+room,child.returncode,output,errors,output_limit=1<<20)
             lines=[line.split(':',1)[1] for line in output.read_text().splitlines() if line.startswith('UAS_ARTIFACT_SUPERVISOR:')]
             expect(len(lines)==1,'exact Supervisor result required');result=json.loads(lines[0]);supervisors[room]=result
             report_path=Path(paths['hub'])/'report.json';raw=report_path.read_bytes()
@@ -301,6 +387,7 @@ def scenario(nonce,manifest,checks):
         checks['resource_limits']={'status':'passed','cpu':probes['C'],'wall':probes['H'],
             'memory_allocation_syscall_denied':probes['M'],'rlimit_as_checked_by_static_evaluator':128<<20,
             'room_disk_bytes':256<<20,'reservation_bytes':32<<20,'quota_reports':quota,'actual_quota_exhaustion':quota_exhaustion,
+            'independent_quota_observations':quota_observations,
             'per_helper_cgroup_claimed':False,'target_host_release_defaults_measured':False}
         checks['two_rooms']={'status':'passed','distinct_hub_namespaces':True,'sibling_survived_A_stop_and_completed_real_gate':True,
             'different_MCS':LEVELS,'actual_cross_room_MCS_read_denial':cross}

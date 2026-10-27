@@ -29,6 +29,7 @@ SOURCES=(
     'tests/vm/fedora-image.json','tests/vm/boundary_fixture.go','tests/vm/guest_boundary.py',
     'tests/vm/guest_workstation.py','tests/vm/native_rootfs.py','tests/vm/native_trust.py',
     'tests/vm/guest_artifacts.py','tests/vm/artifact_supervisor.py','tests/vm/artifact_hub.py',
+    'tests/vm/artifact_diagnostics.py',
     'tests/vm/artifact_room_probe.py','tests/vm/artifact_confinement_probe.c','tests/vm/artifact_quota_probe.py',
     'tests/fixtures/two-rooms.json','runtime/workstation/artifact_protocol.h',
     'runtime/workstation/artifact_bootstrap.c','runtime/workstation/artifact_evaluator.c')

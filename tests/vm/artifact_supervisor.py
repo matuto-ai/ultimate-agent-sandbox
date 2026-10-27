@@ -31,6 +31,7 @@ from uas.docker_exec_api import DockerExecAPI
 from uas.kernel_origin import HeldOrigin, OriginDenied, _identity, alive, enable, probe, receive
 from uas.lifecycle import Supervisor, FixtureSpec
 from artifact_hub import RELEASE, DONE_ACK
+from artifact_diagnostics import captured, decoded_json
 
 UID=165533
 HELPER=165530
@@ -42,11 +43,10 @@ def expect(value,message):
 
 
 def command(*arguments,timeout=15):
-    result=subprocess.run(arguments,stdin=subprocess.DEVNULL,capture_output=True,timeout=timeout,
+    result=captured('outer-facts',arguments,output_limit=65536,inclusive=True,
+        stdin=subprocess.DEVNULL,capture_output=True,timeout=timeout,
         env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'})
-    expect(len(result.stdout)+len(result.stderr)<=65536,'bounded native observation output')
-    expect(result.returncode==0,'fixed native command failed: '+result.stderr[-1024:].decode(errors='replace'))
-    return result.stdout.decode('utf-8')
+    return decoded_json('outer-facts',result)
 
 
 @contextmanager
@@ -87,8 +87,8 @@ class NativeAdmission:
         for target,source in (('/uas/gate-targets',c['scratch']),('/uas/gate',c['gate'])):
             expect(target in mounts and mounts[target]['RW'] is False and mounts[target]['Source']==source,'exact readonly target/rendezvous mount')
         expect(not any('docker.sock' in name or name in ('/uas/hub','/uas/control') for name in mounts),'private authority unmounted')
-        facts=json.loads(command('docker','exec','--user','65532:65532',workstation.container_id,
-            '/usr/bin/python3','/opt/uas/tests/vm/artifact_room_probe.py','facts'))
+        facts=command('docker','exec','--user','65532:65532',workstation.container_id,
+            '/usr/bin/python3','/opt/uas/tests/vm/artifact_room_probe.py','facts')
         expect(facts['uid']==65532 and facts['gid']==65532 and facts['kernel_status']=={
             'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'},'actual outer process boundary')
         mapping={key:facts[key] for key in ('uid_map','gid_map','overflow_uid','overflow_gid')}
@@ -138,8 +138,10 @@ def setup_source(config):
     env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LC_ALL':'C','GIT_CONFIG_NOSYSTEM':'1',
          'GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_SYSTEM':'/dev/null','GIT_CONFIG_COUNT':'0'}
     def git(*args):
-        value=subprocess.run(['/usr/bin/git','-C',str(repo),*args],env=env,capture_output=True,timeout=10)
-        expect(value.returncode==0 and len(value.stdout)+len(value.stderr)<65536,'benign fixture Git setup')
+        phase='source-init' if args[0]=='init' else 'source-add' if args[0]=='add' else (
+            'source-commit' if 'commit' in args else 'source-pack')
+        value=captured(phase,['/usr/bin/git','-C',str(repo),*args],output_limit=65536,
+            env=env,capture_output=True,timeout=10)
         return value.stdout.decode().strip()
     git('init','-b','main');(repo/'docs').mkdir();(repo/'README.md').write_text('committed artifact proof\n')
     (repo/'docs/evidence.txt').write_text('committed directory presence\n')

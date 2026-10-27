@@ -170,7 +170,16 @@ retained quarantine reservations and outside-quota lifecycle/rendezvous
 metadata. Each 32 MiB reservation includes the object cache, expanded tree and
 metadata; 1536 reserved inodes cover this source profile's 512 object files,
 512 tree entries and ancillary directories. A separate fixed nonroot quota
-probe must actually receive EDQUOT for an excess allocation. No quota inflation
+probe must prove positive allocation and then an actual over-limit denial.
+EDQUOT or ENOSPC is accepted only with independently observed exact XFS mount,
+project assignment/inheritance, unchanged 256 MiB hardlimit, project enforcement
+and other quota enforcement off. Held-FD project IDs, a 1 MiB positive allocation,
+ample global project-0 filesystem space before/after, same-device identity and
+confirmed owned cleanup are mandatory; generic ENOSPC never qualifies. Parent
+quota facts are re-read after the child. Typed phase/errno and bounded subprocess
+stdout/stderr diagnostics preserve failures without dumping argv, environment,
+credentials or arbitrary files. Run 40477912335 did not retain its child errno, so
+this correction does not claim to establish that run's underlying cause. No quota inflation
 or literal-true capacity callback qualifies the profile.
 
 The fixture seeds a real persisted Supervisor checkout and a trusted Hub Run
