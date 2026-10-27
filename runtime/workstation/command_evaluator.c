@@ -201,7 +201,8 @@ static void guard_message(int fd,uint32_t tag,uint32_t status) {
 }
 int main(int argc,char **argv,char **environment) {
     (void)argv;
-    if(argc!=1||environment[0]!=NULL)fail();command_identity();
+    if(argc!=1||environment[0]!=NULL)fail();
+    command_identity();
     parent_filter();
     unsigned char request[CG_REQUEST_BYTES+1];ssize_t received=read(AG_CHANNEL_FD,request,sizeof(request));
     if(received<100||received>CG_REQUEST_BYTES||memcmp(request,"CGQ1",4))fail();
@@ -216,7 +217,8 @@ int main(int argc,char **argv,char **environment) {
     if(memchr(cwd,0,cwdlen)|| (strcmp(cwd,".")&&!path_valid((unsigned char*)cwd,cwdlen)))fail();
     char *command[CG_MAX_ARGV+1]={0},*env[CG_MAX_ENV+1]={0};char data[CG_REQUEST_BYTES];size_t used=0;
     for(unsigned index=0;index<arguments+environments;index++) {
-        if(position+4>(size_t)received)fail();size_t size=ag_u32(request+position);position+=4;
+        if(position+4>(size_t)received)fail();
+        size_t size=ag_u32(request+position);position+=4;
         if(size>1024||position+size>(size_t)received||used+size+1>sizeof(data)||memchr(request+position,0,size))fail();
         char *value=data+used;memcpy(value,request+position,size);value[size]=0;position+=size;used+=size+1;
         if(index<arguments)command[index]=value;
@@ -247,14 +249,16 @@ int main(int argc,char **argv,char **environment) {
     static unsigned char executable_bytes[16*1024*1024];size_t loaded=0;
     while(loaded<(size_t)executable_before.st_size) {
         ssize_t n=read(executable,executable_bytes+loaded,(size_t)executable_before.st_size-loaded);
-        if(n<=0)fail();loaded+=(size_t)n;
+        if(n<=0)fail();
+        loaded+=(size_t)n;
     }
     unsigned char digest[32];path_digest(executable_bytes,loaded,digest);
     if(memcmp(executable_bytes,"\177ELF",4)||memcmp(digest,request+36,32)
        ||fstat(executable,&executable_after)||!unchanged(&executable_before,&executable_after))fail();
     int dependencies[8];
     for(unsigned i=0;i<dependency_count;i++) {
-        if(position+4>(size_t)received)fail();size_t size=ag_u32(request+position);position+=4;
+        if(position+4>(size_t)received)fail();
+        size_t size=ag_u32(request+position);position+=4;
         if(size<10||size>140||position+size+32>(size_t)received||memcmp(request+position,"/usr/bin/",9)
            ||memchr(request+position+9,'/',size-9)||memchr(request+position,0,size))fail();
         char path[141];memcpy(path,request+position,size);path[size]=0;position+=size;
@@ -330,17 +334,20 @@ int main(int argc,char **argv,char **environment) {
             memcpy(meta+meta_size,record,(size_t)n);meta_size+=(size_t)n;
         }
         if(meta_size>=8) {
-            if(ag_u32(meta)!=1)fail();status=(int)ag_u32(meta+4);root_seen=1;
+            if(ag_u32(meta)!=1)fail();
+            status=(int)ag_u32(meta+4);root_seen=1;
         }
         if(meta_size==16) {
-            if(ag_u32(meta+8)!=2||ag_u32(meta+12))fail();tree_message=1;
+            if(ag_u32(meta+8)!=2||ag_u32(meta+12))fail();
+            tree_message=1;
         }
         if(!killed&&(now>=deadline||limited||guard_done)) {
             timed_out=now>=deadline;limited=limited!=0;
             guard_error=guard_done&&(!tree_message||info.si_code!=CLD_EXITED||info.si_status!=0);
             /* Exactly once, before guard is reaped: never a guessed or reused
              * group. Includes guard plus all nonescaping project descendants. */
-            if(kill(-guard,SIGKILL)&&errno!=ESRCH)fail();killed=1;
+            if(kill(-guard,SIGKILL)&&errno!=ESRCH)fail();
+            killed=1;
         }
         if(killed&&!reaped) {
             for(;;) {
