@@ -19,6 +19,7 @@ import time
 import uuid
 
 from .artifact_paths import READABLE_DIRECTORY_FLAGS, open_directory
+from .checkout_scope import valid_writer_scope
 from .artifact_protocol import (ArtifactError, MAX_BLOB_BYTES, MAX_DEPTH, MAX_ENTRIES,
     MAX_METADATA_BYTES, MAX_OBJECT_BYTES, MAX_TARGET_BYTES, RESERVATION_BYTES,
     canonical, validate_path, validate_scope, validate_source, validate_target)
@@ -167,7 +168,9 @@ class ArtifactSourceResolver:
                     if len(matches) != 1:
                         _fail('ARTIFACT_SLOT_NOT_OWNED')
                     key, slot = matches[0]
-                    if (set(slot) != {'path', 'branch', 'base', 'run', 'participant', 'active', 'phase', 'identity'}
+                    fields = {'path', 'branch', 'base', 'run', 'participant', 'active', 'phase', 'identity'}
+                    if (set(slot) not in (fields, fields | {'writer_scope'})
+                            or ('writer_scope' in slot and not valid_writer_scope(slot['writer_scope'], room_instance))
                             or slot['participant'] != participant_id or slot['phase'] != 'ready'
                             or (key != 'primary' and not re.fullmatch(r'[0-9a-f]{32}', key))
                             or not isinstance(slot['branch'], str) or not _BRANCH.fullmatch(slot['branch'])

@@ -10,6 +10,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -115,7 +116,7 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
         self.assertEqual(smoke.LIMIT_SECONDS, 40)
 
     def test_staged_sources_are_exact_bounded_readonly_ordinary_copies(self):
-        self.assertEqual(len(smoke.SOURCES), 22)
+        self.assertEqual(len(smoke.SOURCES), 23)
         self.assertEqual(len(set(smoke.SOURCES)), len(smoke.SOURCES))
         with tempfile.TemporaryDirectory() as directory:
             payload = smoke.stage_sources(Path(directory))
@@ -140,6 +141,28 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
                     for candidate in candidates:
                         if (ROOT / candidate).is_file():
                             self.assertIn(candidate.as_posix(), smoke.SOURCES, relative)
+
+    def test_staged_host_checkout_and_artifact_imports_do_not_load_engine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = smoke.stage_sources(Path(directory))
+            code = '''import pathlib,sys
+sys.path.insert(0,sys.argv[1])
+from uas.lifecycle import Supervisor
+from uas.checkouts import CheckoutAllocator
+from uas.artifact_target import ArtifactSourceResolver
+supervisor=Supervisor('/srv/uas/state','alpha',None,authorize=lambda *_:True,revoke=lambda *_:True)
+with (pathlib.Path(sys.argv[1])/'tests/fixtures/two-rooms.json').open() as source:
+    allocator=CheckoutAllocator(supervisor,source)
+ArtifactSourceResolver(supervisor,allocator)
+assert 'uas.checkout_writers' not in sys.modules
+assert 'uas.docker_fixture' not in sys.modules
+assert 'uas.launch' not in sys.modules
+'''
+            # Import/construction only: no child fixture, listener, kernel
+            # boundary, Git, Docker or credential operation is executed.
+            result = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(payload)],
+                cwd=directory, capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
 
     def test_staging_refuses_symlink_sources_and_oversized_files(self):
         for kind in ('symlink', 'oversized'):

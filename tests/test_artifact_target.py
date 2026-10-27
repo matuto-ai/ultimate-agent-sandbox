@@ -100,6 +100,24 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(source['source_digest'], self.resolver.current(source)['source_digest'])
         with self.assertRaises(ArtifactError): self.resolver.recheck(source)
 
+    def test_guarded_checkout_scope_remains_inert_strict_and_source_bound(self):
+        original = self.resolve()
+        scope = {'kind': 'docker-workstation', 'instance': 'a' * 32,
+                 'container': 'b' * 64, 'started_at': '2026-10-27T14:00:00Z'}
+        slot = self.state['slots']['primary']
+        slot['writer_scope'] = scope; self.save()
+        self.allocator._git = lambda *_: self.fail('source Git invoked')
+        guarded = self.resolve()
+        self.assertEqual(original['head_sha'], guarded['head_sha'])
+        self.assertNotEqual(original['source_digest'], guarded['source_digest'])
+        for bad in (None, {}, {**scope, 'instance': 'c' * 32},
+                    {**scope, 'container': 'name-only'}, {**scope, 'extra': True}):
+            slot['writer_scope'] = bad; self.save()
+            with self.assertRaises(ArtifactError) as error: self.resolve()
+            self.assertEqual('ARTIFACT_SLOT_NOT_OWNED', error.exception.code)
+        slot['writer_scope'] = scope; slot['unknown'] = True; self.save()
+        with self.assertRaises(ArtifactError): self.resolve()
+
     def test_wrong_run_participant_instance_phase_and_stored_identity_fail(self):
         for change in ('participant', 'instance', 'phase', 'identity'):
             with self.subTest(change=change):

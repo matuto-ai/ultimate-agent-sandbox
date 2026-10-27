@@ -140,9 +140,9 @@ func probe(project string) {
 	}
 }
 
-// Read only a marker-prefixed, bounded fixture file under harness-selected roots.
+// Open only a marker-prefixed, bounded fixture file under harness-selected roots.
 // This command is test-image functionality, not a production file/agent API.
-func readCheckout(root, checkout string) {
+func checkoutFile(root, checkout string, flags int) (*os.File, []byte) {
 	fail := func(reason string) {
 		json.NewEncoder(os.Stdout).Encode(map[string]string{"error": reason})
 		os.Exit(3)
@@ -166,12 +166,11 @@ func readCheckout(root, checkout string) {
 			fail("SYMLINK_FIXTURE_PATH")
 		}
 	}
-	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	fd, err := syscall.Open(path, flags|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		fail("FIXTURE_UNAVAILABLE")
 	}
 	file := os.NewFile(uintptr(fd), path)
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		fail("INVALID_FIXTURE_FILE")
@@ -180,6 +179,12 @@ func readCheckout(root, checkout string) {
 	if err != nil || len(content) > 4096 || !strings.HasPrefix(string(content), "uas-checkout-fixture-v1\n") {
 		fail("INVALID_FIXTURE_CONTENT")
 	}
+	return file, content
+}
+
+func readCheckout(root, checkout string) {
+	file, content := checkoutFile(root, checkout, syscall.O_RDONLY)
+	defer file.Close()
 	digest := sha256.Sum256(content)
 	json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
 		"path": checkout, "file": "uas-checkout-fixture.txt", "bytes": len(content),
@@ -187,7 +192,50 @@ func readCheckout(root, checkout string) {
 	})
 }
 
+// The bounded test-image writer touches only the same checked marker file.
+// Parent exit intentionally leaves a child holding the file open: an exited
+// Docker exec parent or revoked authority must NOT count as writer quiescence.
+func writeCheckout(root, checkout string, spawn bool) {
+	file, _ := checkoutFile(root, checkout, syscall.O_RDWR)
+	defer file.Close()
+	if spawn {
+		null, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
+		if err != nil {
+			panic(err)
+		}
+		defer null.Close()
+		child, err := os.StartProcess("/fixture", []string{"/fixture", "--write-checkout", root, checkout},
+			&os.ProcAttr{Files: []*os.File{null, null, null}})
+		if err != nil {
+			panic(err)
+		}
+		json.NewEncoder(os.Stdout).Encode(map[string]int{"child": child.Pid, "uid": os.Geteuid()})
+		child.Release()
+		return
+	}
+	// Docker Stop terminates the whole container, including this orphan writer.
+	// A fixed deadline bounds it even if a failed test never reaches Stop.
+	deadline := time.Now().Add(20 * time.Second)
+	for counter := 1; time.Now().Before(deadline); counter++ {
+		content := []byte(fmt.Sprintf("uas-checkout-fixture-v1\nworkstation writer uid=%d tick=%d\n", os.Geteuid(), counter))
+		if _, err := file.WriteAt(content, 0); err != nil {
+			panic(err)
+		}
+		if err := file.Truncate(int64(len(content))); err != nil {
+			panic(err)
+		}
+		if err := file.Sync(); err != nil {
+			panic(err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func main() {
+	if len(os.Args) == 4 && (os.Args[1] == "--write-checkout" || os.Args[1] == "--spawn-checkout-writer") {
+		writeCheckout(os.Args[2], os.Args[3], os.Args[1] == "--spawn-checkout-writer")
+		return
+	}
 	if len(os.Args) == 4 && os.Args[1] == "--read-checkout" {
 		readCheckout(os.Args[2], os.Args[3])
 		return
