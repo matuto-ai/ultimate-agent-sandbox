@@ -419,7 +419,6 @@ class HubAdmission:
     def admit(self, control):
         # Never hold the authority/ledger lock over a blocking transport read.
         # Revoke and control-loss must be able to fence a stalled receiver.
-        self.bind_control(control)
         controller, supervisor = self.controller, self.supervisor
         try:
             offer = _receive_offer(control, supervisor, self.seats)
@@ -490,7 +489,6 @@ class HubAdmission:
         kind, receipt=None) is also Hub-local and runs outside the admission
         lock; its dispatcher must acquire current authorization itself.
         """
-        self.bind_control(control)
         controller, supervisor = self.controller, self.supervisor
         try:
             packet = _receive_offer(control, supervisor, self.seats, commands=True, roots=self._active)

@@ -33,3 +33,24 @@ Focused guarded tests use the real controlled Room ledger and inert kernel/poll
 adapters: exact attachment loss, helper cascade, controller loss, replacement
 preservation, failed publication, partial attachment, failed cleanup and queued
 reply plus HUP. Actual OS disconnect/native lifecycle qualification is separate.
+
+## Connection and descriptor ownership
+
+Revocation can be requested from a different control thread. Its dispatcher opens
+one short-lived writer connection to the existing canonical Room database using
+the startup-captured path and device/inode binding. This reuses the validated
+existing-store open path with SQLite `mode=rw`; it cannot create a missing store,
+initialize a new schema or disable SQLite thread affinity. The ordinary Hub writer
+may already be closed during orderly shutdown. Final attachment comparison still
+runs inside the canonical observation transaction; a replacement is never lost.
+
+The path is a trusted control-plane namespace, inaccessible to Workstations.
+Before/after pathname identity checks detect ordinary replacement; they do not
+attest the opened SQLite inode against a hostile ABA rename in that namespace.
+
+The trusted Hub event loop explicitly binds its owned control descriptor. A
+single `admit` or `serve_once` invocation only borrows its receive/reply argument,
+which may be a bounded adapter; it never assumes ownership of that adapter or
+substitutes it for the loop's retained endpoint. Failure fences the explicitly
+bound endpoint. Standalone embedding must bind its owned endpoint before relying
+on host-visible fencing.

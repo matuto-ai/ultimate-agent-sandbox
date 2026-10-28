@@ -9,7 +9,7 @@ import json
 import re
 
 from .kernel_origin import MAX_PACKET, OriginDenied, OriginUnavailable, receive
-from .ledger import LedgerError, Origin, _json
+from .ledger import LedgerError, Origin, RoomLedger, _json
 from .lifecycle import _unique_object
 from .peer import FixtureConnection, FixturePeerHub, Readiness
 from .workstation_admission import HubAdmission, _canonical
@@ -34,20 +34,34 @@ class AdmittedPeerDispatcher:
         self._pending_connections = {}
         self._delivery_offers = {}
         self._delivery_confirmed = set()
+        self._revocation_store = hub.ledger.writer_binding()
         admissions.bind_revocations(self)
 
     def lost(self, operation):
-        """Admission-lock → Room transaction; only the original attachment."""
+        """Admission → thread-local connection to the SAME canonical Room DB."""
         connection = self._connections.get(operation) or self._pending_connections.get(operation)
         if connection is None:
             return
-        current = self.hub._state()['connections'].get(connection.participant_id, {})
-        exact = (current.get('attachment_id') == connection.attachment_id
-                 and current.get('incarnation_id') == connection.incarnation_id
-                 and current.get('context_generation') == connection.context_generation)
-        if not exact or current.get('readiness') == Readiness.LOST.value:
-            return  # Never mark a replacement attachment lost.
-        self.hub.observe(connection, Readiness.LOST)
+        path, identity = self._revocation_store
+        with RoomLedger.open_writer(path, self.hub.ledger.room_id, identity=identity) as ledger:
+            hub = FixturePeerHub(ledger)
+            hub._connections[connection.participant_id] = connection
+            def already_absent():
+                current = hub._state()['connections'].get(connection.participant_id, {})
+                exact = (current.get('attachment_id') == connection.attachment_id
+                         and current.get('incarnation_id') == connection.incarnation_id
+                         and current.get('context_generation') == connection.context_generation)
+                return not exact or current.get('readiness') == Readiness.LOST.value
+            if already_absent():
+                return
+            try:
+                # observe rechecks the same attachment under BEGIN IMMEDIATE;
+                # a replacement after the preliminary read cannot be marked LOST.
+                hub.observe(connection, Readiness.LOST)
+            except LedgerError as error:
+                if error.code in ('STALE_CONNECTION', 'FORBIDDEN') and already_absent():
+                    return
+                raise
 
     def attach_host_forge_binding(self, binding):
         """Immutable trusted startup Project binding, never credentials/authority."""

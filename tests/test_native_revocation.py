@@ -7,6 +7,7 @@ import test_native_helper_owner as fixture
 from uas import workstation_control as control
 from uas import workstation_admission as admission
 from uas.peer import Readiness
+from uas.ledger import RoomLedger, LedgerError
 from uas.kernel_origin import OriginDenied
 
 class RevocationTests(unittest.TestCase):
@@ -35,7 +36,7 @@ class RevocationTests(unittest.TestCase):
         self.assertEqual(self.state()['attachment_id'],replacement.attachment_id)
         self.assertNotEqual(self.state()['readiness'],'lost')
     def test_room_write_failure_fences_and_never_acknowledges_retry(self):
-        with patch.object(self.f.f.peer,'observe',side_effect=RuntimeError('controlled-store-failure')):
+        with patch('uas.workstation_peer.FixturePeerHub.observe',side_effect=RuntimeError('controlled-store-failure')):
             with self.assertRaisesRegex(RuntimeError,'controlled-store'):self.hub.revoke('a'*32)
         self.assertTrue(self.hub._fenced);self.channel.close.assert_called_once()
         self.assertNotEqual(self.state()['readiness'],'lost')
@@ -64,6 +65,55 @@ class RevocationTests(unittest.TestCase):
         with self.assertRaises(OSError):self.hub.revoke('a'*32)
         root.close.assert_called_once();self.assertTrue(self.hub._fenced)
         with self.assertRaises(OriginDenied):self.hub.revoke('a'*32)
+
+    def test_original_room_connection_closed_before_revocation_is_supported(self):
+        path,identity=self.f.dispatcher._revocation_store
+        self.f.f.ledger.close()
+        self.hub.revoke('a'*32)
+        with RoomLedger.open_reader(path,'room') as reader:
+            self.assertEqual(reader.snapshot()['state']['peer_traffic']['connections']['builder-seat']['readiness'],'lost')
+    def test_missing_or_replaced_room_store_never_creates_or_revokes_successfully(self):
+        path,identity=self.f.dispatcher._revocation_store
+        self.f.f.ledger.close()
+        moved=path.with_suffix('.saved');path.rename(moved)
+        try:
+            with self.assertRaises(LedgerError):self.hub.revoke('a'*32)
+            self.assertFalse(path.exists());self.assertTrue(self.hub._fenced)
+        finally:moved.rename(path)
+    def test_replacement_attachment_during_observe_is_not_marked_lost(self):
+        from uas.peer import FixturePeerHub
+        original=FixturePeerHub.observe
+        def raced(hub,connection,readiness):
+            if readiness is Readiness.LOST:
+                self.f.f.peer.connect('replacement-during-observe','builder-seat',self.f.binding.incarnation,object())
+            return original(hub,connection,readiness)
+        with patch.object(FixturePeerHub,'observe',raced):self.hub.revoke('a'*32)
+        self.assertEqual(self.state()['attachment_id'],'replacement-during-observe')
+        self.assertNotEqual(self.state()['readiness'],'lost')
+
+    def test_borrowed_receive_reply_wrappers_never_replace_owned_control(self):
+        packet={'kind':'POLL_DELIVERY','operation_id':'a'*32,'exchange_id':'e'*32,'controller':self.hub.controller}
+        for _ in range(2):
+            borrowed=N(send=lambda data:len(data))  # deliberately no close method
+            with patch.object(admission,'_receive_offer',return_value=packet):
+                self.assertEqual(self.hub.serve_once(borrowed,on_delivery=lambda *a,**k:{'status':'HELD'}),{'status':'HELD'})
+        self.assertIs(self.hub._control,self.channel);self.channel.close.assert_not_called()
+    def test_malformed_borrowed_input_does_not_claim_control_ownership(self):
+        self.hub._control=None
+        borrowed=object()
+        with patch.object(admission,'_receive_offer',side_effect=OriginDenied('malformed')):
+            with self.assertRaisesRegex(OriginDenied,'malformed'):self.hub.admit(borrowed)
+        self.assertIsNone(self.hub._control);self.channel.close.assert_not_called()
+        self.assertEqual(self.state()['readiness'],'lost')
+    def test_replaced_store_same_room_id_is_rejected(self):
+        path,identity=self.f.dispatcher._revocation_store
+        self.f.f.ledger.close();saved=path.with_suffix('.saved');path.rename(saved)
+        try:
+            replacement=RoomLedger(path,'room');replacement.close()
+            with self.assertRaisesRegex(LedgerError,'STORE_REPLACED'):
+                RoomLedger.open_writer(path,'room',identity=identity)
+        finally:
+            path.unlink();saved.rename(path)
 
 class ControlCurrentTests(unittest.TestCase):
     def make(self):
