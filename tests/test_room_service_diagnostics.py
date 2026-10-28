@@ -386,22 +386,30 @@ class DiagnosticsTests(unittest.TestCase):
                     self.assertEqual({'stop','resume','stop_for_drift','drift_refusal','reconcile'},set(observed))
                     self.assertFalse(checks['persistent_participant_service_restart'])
 
-    def test_scenario_retains_observed_limits_when_later_service_and_listener_cleanup_fail(self):
+    def scenario_case(self, fault=None, *, quota_kind='block', cleanup_fault=False):
         import native_rootfs
+        import room_policy_diagnostics
         import uas.guest_fixture as fixture
         import uas.lifecycle as lifecycle
         import uas.room_fixture as room_fixture
-        # Proc labels/status/maps match the recorded run40729545828 report.
-        # Cgroup/quota values below model this fixture's configured limits;
-        # they are not represented as newly captured target observations.
-        primary=RuntimeError('synthetic later service failure'); checks={}; calls=[]
+        # These are modeled component outcomes, not new target observations.
+        # The composed scenario/limits/network/recovery/cleanup functions below
+        # run unchanged; only native effects and separate service proofs are inert.
+        primary=RuntimeError('synthetic later service failure')
+        remove_error=OSError('synthetic owned quota probe removal failure')
+        checks={};calls=[];removed=[];current_quota=[None]
         listeners={room:Mock() for room in ('alpha','beta')}
-        listeners['alpha'].close.side_effect=OSError('synthetic listener failure')
-        endpoints={room:SimpleNamespace(listeners=[listeners[room]]) for room in listeners}
+        if cleanup_fault:listeners['alpha'].close.side_effect=OSError('synthetic listener failure')
+        endpoints={room:SimpleNamespace(listeners=[listeners[room]],parent=Path('/owned/'+room),
+            leases=[SimpleNamespace(path=Path('/owned/'+room+'/request.sock'))],require=Mock()) for room in listeners}
         supervisors={room:Mock() for room in listeners}
         backends={room:Mock() for room in listeners}
         for room in listeners:
-            supervisors[room].start.return_value={'phase':'running','observed':{'container':{'id':room}}}
+            running={'phase':'running','observed':{'container':{'id':room}}}
+            supervisors[room].start.side_effect=[running,running,
+                {'phase':'start_failed','observed':{'container':{'running':False}}}]
+            supervisors[room].stop.return_value={'phase':'stopped'}
+            supervisors[room].reconcile.return_value={'phase':'running'}
             supervisors[room].destroy.return_value={'phase':'destroyed'}
             supervisors[room]._read.return_value={}
             backends[room].admit.return_value={'HostConfig':{'LogConfig':{'Type':'local'}},'Mounts':[]}
@@ -410,7 +418,7 @@ class DiagnosticsTests(unittest.TestCase):
             if args[:2]==('docker','version'):return '29.8.2'
             if args[0]=='blockdev':return str(2*1024**3)
             if args[:2]!=('docker','exec'):return ''
-            room=args[2]; mode=args[4] if args[3]=='/fixture' else args[6]
+            room=args[2];mode=args[4] if args[3]=='/fixture' else args[6]
             if mode=='observe':
                 value={'uid':65532,'gid':65532,'files':{
                     '/proc/self/status':'CapEff: 0000000000000000\nCapBnd: 0000000000000000\nNoNewPrivs: 1\nSeccomp: 2\n',
@@ -422,36 +430,155 @@ class DiagnosticsTests(unittest.TestCase):
                 'initial_project':fixture.ROOMS[room][0],'after_change_project':fixture.ROOMS[room][0],'after_clear_inherit':True}
             elif mode=='private':value={'endpoint_unlink':'EROFS','/var/run/docker.sock':'ENOENT'}
             elif mode=='write':value={'error':'EROFS' if args[5].endswith('/references') else 'OK'}
+            elif mode.startswith('quota-'):
+                current_quota[0]=mode[6:];bad=current_quota[0]==quota_kind
+                path=fixture.STORAGE/'alpha/workspace'/('quota-probe-'+current_quota[0])
+                if bad and fault=='unsafe-parent':path=fixture.STORAGE/'beta/workspace'/path.name
+                if bad and fault=='unsafe-name':path=path.with_name('human-file')
+                value={'error':'EIO' if bad and fault=='not-enospc' else 'ENOSPC','probe_path':str(path)}
+            elif mode=='write-new':value={'error':'EACCES' if current_quota[0]==quota_kind and fault=='sibling' else 'OK'}
+            elif mode=='public-head':value={'certificate_hostname_verified':True}
+            elif mode=='connect':value=({'error':'OK','reply':'uas-boundary-ok\n'} if room=='beta'
+                else {'error':'ENETUNREACH' if args[5].startswith('[') else 'TIMEOUT'})
             else:raise AssertionError('unexpected dependent probe '+mode)
             return json.dumps(value)
-        def service(*args,checks,**kwargs):checks.update(status='failed');raise primary
+        def service(*args,checks,**kwargs):
+            if fault=='service':checks.update(status='failed');raise primary
+            checks.update(status='passed',held_bootstrap_exit_observed=True)
+        def foreign(*args,checks,**kwargs):checks.update(status='passed',original_lease_restored=True)
+        def command(*args,**kwargs):
+            calls.append(args)
+            if args[0]=='xfs_quota':
+                limit='8192' if '-b' in args[3] else '128'
+                return '#101 0 0 '+limit+' 00 [--------]\n#102 0 0 '+limit+' 00 [--------]\n'
+            return ''
+        def space(path):
+            self.assertEqual(fixture.STORAGE,path);bad=current_quota[0]==quota_kind
+            return SimpleNamespace(f_bavail=16384 if bad and fault=='global-blocks' else 16385,
+                f_frsize=4096,f_favail=1000 if bad and fault=='global-inodes' else 1001)
+        original_resolve=Path.resolve
+        def resolve(path,*args,**kwargs):
+            if current_quota[0]==quota_kind and fault=='unsafe-resolve' and path.name.startswith('quota-probe-'):
+                return Path('/unowned/redirect')
+            return original_resolve(path,*args,**kwargs)
+        def remove(path):
+            removed.append(path)
+            if current_quota[0]==quota_kind and fault=='remove':raise remove_error
+        counters=iter(range(8))
+        def firewall(_state):
+            count=next(counters)
+            return {'nftables':[{'rule':{'chain':chain,'expr':[
+                {'match':{'left':{'payload':{'protocol':'ip','field':'daddr'}}}},
+                {'counter':{'packets':count}},{'drop':None}]}} for chain in ('input','forward')]}
+        backends['alpha']._firewall.side_effect=firewall
         with ExitStack() as stack:
             for owner,name,value in ((guest_room,'run',run),(native_rootfs,'build_room_rootfs',Mock(return_value={})),
                     (guest_room.boundary,'start_engine',Mock()),(guest_room.boundary,'attribute_positive_control',Mock(return_value={})),
                     (guest_room,'import_image',Mock(return_value='sha256:owned')),
                     (room_service,'endpoint',lambda room,run:endpoints[room]),(room_service,'prove_service',service),
-                    (fixture,'prepare_storage',Mock()),(fixture,'command',Mock(return_value='#101 0 0 8192\n#102 0 0 8192\n')),
+                    (room_service,'prove_foreign_listener_admission',foreign),
+                    (room_policy_diagnostics,'capture_endpoint_probe',Mock(return_value={'returncode':0,'timeout':False,
+                        'status':'observed','cleanup_errors':[],'stdout':{'truncated':False},'stderr':{'truncated':False},
+                        'decoded':{'connected':False,'error':'EACCES'}})),
+                    (fixture,'prepare_storage',Mock()),(fixture,'command',command),
+                    (fixture,'network_names',Mock(return_value=('owned','bridge','table'))),
+                    (fixture,'firewall_document',Mock(return_value={'synthetic':'repair'})),
                     (lifecycle,'Supervisor',lambda control,room,*args,**kwargs:supervisors[room]),
-                    (room_fixture,'RoomLaunchFixtureBackend',lambda nonce,room,**kwargs:backends[room])):
+                    (room_fixture,'RoomLaunchFixtureBackend',lambda nonce,room,**kwargs:backends[room]),
+                    (guest_room.os,'statvfs',space),(guest_room.os,'getxattr',Mock(return_value=b'synthetic-label')),
+                    (guest_room.os,'open',Mock(return_value=91)),(guest_room.os,'close',Mock()),
+                    (guest_room.os,'waitid',Mock(return_value=None)),
+                    (guest_room.subprocess,'Popen',Mock(side_effect=[SimpleNamespace(pid=101),SimpleNamespace(pid=102)])),
+                    (guest_room,'stop_child',Mock()),(guest_room.shutil,'rmtree',remove),
+                    (guest_room.boundary,'connect',Mock(return_value=True)),
+                    (guest_room.boundary,'verified_sibling',Mock(return_value={'address':'10.89.2.2','bridge':'uasbbbbbbbbbbbb'})),
+                    (guest_room.boundary,'read_sibling_raw',Mock(side_effect=[{'rule':['synthetic'],'packets':1,'bytes':60},
+                        {'rule':['synthetic'],'packets':2,'bytes':120}]))):
                 stack.enter_context(patch.object(owner,name,value))
             stack.enter_context(patch.object(Path,'mkdir'))
             stack.enter_context(patch.object(Path,'exists',return_value=True))
             stack.enter_context(patch.object(Path,'iterdir',return_value=[]))
+            stack.enter_context(patch.object(Path,'resolve',resolve))
             archive=Mock();archive.__enter__=Mock(return_value=archive);archive.__exit__=Mock(return_value=False)
             stack.enter_context(patch.object(guest_room.tarfile,'open',return_value=archive))
             stack.enter_context(patch.object(sys,'path',list(sys.path)))
-            with self.assertRaises(RuntimeError) as caught:guest_room.scenario('a'*32,{}, {},checks)
-        self.assertIs(primary,caught.exception)
+            result=error=None
+            try:result=guest_room.scenario('a'*32,{}, {},checks)
+            except BaseException as caught:error=caught
+        return SimpleNamespace(checks=checks,calls=calls,removed=removed,listeners=listeners,
+            supervisors=supervisors,result=result,error=error,primary=primary,remove_error=remove_error)
+
+    def test_scenario_retains_observed_limits_when_later_service_and_listener_cleanup_fail(self):
+        case=self.scenario_case('service',cleanup_fault=True);checks=case.checks
+        self.assertIs(case.primary,case.error)
         self.assertEqual('blocked',checks['limits']['status'])
         self.assertEqual('endpoint_service',checks['limits']['blocked_by'])
-        for room in listeners:
+        for room in case.listeners:
             self.assertEqual('100663296',checks['limits']['observed'][room]['memory'])
             self.assertIn('actual_xfs_b',checks['limits']['observed'][room])
-            listeners[room].close.assert_called_once();supervisors[room].destroy.assert_called_once()
+            case.listeners[room].close.assert_called_once();case.supervisors[room].destroy.assert_called_once()
         self.assertEqual('failed',checks['guest_cleanup']['status'])
-        self.assertIn(('docker','image','rm','sha256:owned'),calls)
-        self.assertIn(('umount',str(fixture.STORAGE)),calls)
+        self.assertIn(('docker','image','rm','sha256:owned'),case.calls)
+        self.assertIn(('umount','/mnt/uas-boundary'),case.calls)
         self.assertNotIn('network',checks)
+
+    def test_scenario_quota_faults_stop_dependent_work_and_preserve_first_failure_and_cleanup(self):
+        messages={'not-enospc':'configured XFS bound','global-blocks':'underlying filesystem exhausted',
+            'global-inodes':'underlying filesystem exhausted','unsafe-parent':'unsafe owned quota',
+            'unsafe-name':'unsafe owned quota','unsafe-resolve':'unsafe owned quota',
+            'sibling':'sibling quota isolation failed','remove':'owned quota probe removal failure'}
+        for kind in ('block','inode'):
+            for fault,message in messages.items():
+                with self.subTest(kind=kind,fault=fault):
+                    case=self.scenario_case(fault,quota_kind=kind,cleanup_fault=True);checks=case.checks
+                    self.assertIsNone(case.result);self.assertIn(message,str(case.error))
+                    if fault=='remove':self.assertIs(case.remove_error,case.error)
+                    else:self.assertIsInstance(case.error,AssertionError)
+                    self.assertEqual('failed',checks['limits']['status'])
+                    observed=checks['limits']['observed'];self.assertIn('exhaustion_'+kind,observed)
+                    if kind=='block':self.assertNotIn('exhaustion_inode',observed)
+                    else:self.assertEqual('ENOSPC',observed['exhaustion_block']['error'])
+                    self.assertEqual(([Path('/mnt/uas-boundary/alpha/workspace/quota-probe-block')] if kind=='inode' else [])+
+                        ([Path('/mnt/uas-boundary/alpha/workspace/quota-probe-'+kind)] if fault=='remove' else []),case.removed)
+                    probes=[call for call in case.calls if call[:2]==('docker','exec') and call[3]=='/fixture']
+                    self.assertEqual(['quota-block']+(['quota-inode'] if kind=='inode' else []),
+                        [call[4] for call in probes if call[4].startswith('quota-')])
+                    self.assertEqual(int(kind=='inode')+int(fault in ('sibling','remove')),
+                        len([call for call in probes if call[4]=='write-new']))
+                    self.assertNotIn(('ip','netns','add','uas-public'),case.calls)
+                    self.assertNotIn('network',checks);self.assertNotIn('recovery',checks)
+                    self.assertEqual('failed',checks['guest_cleanup']['status'])
+                    self.assertIn('OSError:listener:alpha:0',checks['guest_cleanup']['errors'])
+                    for room in case.listeners:
+                        case.listeners[room].close.assert_called_once();case.supervisors[room].destroy.assert_called_once()
+                    self.assertIn(('docker','image','rm','sha256:owned'),case.calls)
+                    self.assertIn(('umount','/mnt/uas-boundary'),case.calls)
+
+    def test_complete_synthetic_scenario_roundtrips_unchanged_bounded_report(self):
+        import run_room
+        case=self.scenario_case();checks=case.checks
+        self.assertIsNone(case.error);self.assertIs(case.result,checks)
+        self.assertEqual(guest_room.REQUIRED,set(checks))
+        self.assertTrue(all(entry['status']=='passed' for entry in checks.values()))
+        self.assertEqual([Path('/mnt/uas-boundary/alpha/workspace/quota-probe-'+kind) for kind in ('block','inode')],case.removed)
+        self.assertEqual({'host-private','host-public','LAN','metadata','sibling'},set(checks['network']['denied']))
+        self.assertTrue(checks['recovery']['same_container_resume'] and checks['recovery']['drift_failed_closed'])
+        self.assertEqual([],checks['guest_cleanup']['errors'])
+        report={'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,'checks':checks}
+        encoded=guest_room.encode_report(report)
+        self.assertLessEqual(len(encoded.encode()),65536)
+        self.assertEqual(json.dumps(report,sort_keys=True),encoded)
+        self.assertEqual(report,run_room.parse_report('UAS_ROOM_REPORT:'+'a'*32+':'+encoded,'a'*32))
+
+    def test_complete_scenario_cleanup_failure_cannot_roundtrip_as_success(self):
+        import run_room
+        case=self.scenario_case(cleanup_fault=True)
+        self.assertIsInstance(case.error,AssertionError);self.assertIsNone(case.result)
+        self.assertEqual('passed',case.checks['recovery']['status'])
+        self.assertEqual('failed',case.checks['guest_cleanup']['status'])
+        report={'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,'checks':case.checks}
+        with self.assertRaisesRegex(RuntimeError,'incomplete or failed'):
+            run_room.parse_report('UAS_ROOM_REPORT:'+'a'*32+':'+guest_room.encode_report(report),'a'*32)
 
 
     def test_recovery_projection_does_not_duplicate_recorded_mounts_or_large_synthetic_state(self):
