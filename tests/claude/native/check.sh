@@ -12,3 +12,5 @@ node --check runtime/provider-auth.mjs
 node --check runtime/pi/native-entry.mjs
 node tests/claude/native/provider-auth.mjs
 node --check runtime/pi/provider-store.mjs
+
+node tests/claude/native/pi-startup.mjs

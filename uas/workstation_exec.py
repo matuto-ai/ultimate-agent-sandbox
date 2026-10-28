@@ -189,7 +189,14 @@ class ExecLaunch:
                 'Tty': False, 'Privileged': False, 'User': '65532:65532',
                 'WorkingDir': '/uas/workspace', 'Cmd': [CONNECTOR, self.seat.slot], 'Env': []}
 
-    def launch(self, listener):
+    def launch(self, listener, *, authorize=None):
+        # Optional deny-only fence for a canonical Run owner. It cannot replace
+        # native image/endpoint/kernel authority or hold a lock across Engine I/O.
+        if authorize is not None and not callable(authorize):
+            raise ExecUnavailable('invalid launch authorization fence')
+        def recheck():
+            if authorize is not None and authorize() is not True:
+                raise ExecUnavailable('launch authorization revoked')
         if self.state != 'new':
             raise ExecUnavailable('launch is one-shot; reconcile before replacement')
         # No engine mutation before actual platform and endpoint checks.
@@ -197,6 +204,7 @@ class ExecLaunch:
             self.native_recipe.validate_container(self.engine)
             self.native_recipe.require_provider_auth()
         probe(); self.endpoint.require(); enable(listener)
+        recheck()
         self.state = 'creating'
         self._save(first=True)
         self.deadline = time.monotonic() + self.timeout
@@ -204,10 +212,12 @@ class ExecLaunch:
             if getattr(self, 'native_recipe', None) is not None:
                 self.native_recipe.validate_container(self.engine)
                 self._remaining()
+            recheck()
             self.exec_id = self.engine.create(self.seat.container_id, self._create_spec())
             if type(self.exec_id) is not str or not ID.fullmatch(self.exec_id):
                 raise ExecUnavailable('invalid exec-create result')
             self.state = 'starting'; self._save()
+            recheck()
             self.transport = self.engine.start(self.exec_id)
             self.challenge = secrets.token_bytes(32)
             self.transport.write(self.challenge, timeout=self._remaining())
@@ -226,11 +236,13 @@ class ExecLaunch:
             self.endpoint.require()
             self.state = 'bound'; self._save()
             self._inspect(self.origin.credentials[0])
+            recheck()
             if self.channel.send(RELEASE) != len(RELEASE):
                 raise ExecUnavailable('incomplete release')
             self.state = 'released'; self._save()
             if self.native_recipe is not None:
                 self._receive_native_forge(listener)
+            recheck()
             return self
         except BaseException:
             self.challenge = None

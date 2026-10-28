@@ -7,6 +7,8 @@ are not filesystem leases; production mount/process qualification remains #62.
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import math
+import time
 import os
 from pathlib import Path
 import re
@@ -39,7 +41,8 @@ def _identity_shape(value):
 
 
 class CheckoutAllocator:
-    def __init__(self, supervisor, source, *, writer_quiescent=None, writer_guard=None):
+    def __init__(self, supervisor, source, *, writer_quiescent=None, writer_guard=None, deadline=None,
+                 manifest_reader_gid=None, git_identity=None):
         # Non-Docker consumers (including inert artifact fixtures) must not
         # import Engine/launch code just to inspect or allocate host Git slots.
         guard_factory = getattr(supervisor.backend, 'checkout_writer_guard', None)
@@ -48,6 +51,17 @@ class CheckoutAllocator:
                 raise LifecycleError('INVALID_WRITER_GUARD')
             if writer_guard is None:
                 writer_guard = guard_factory(supervisor)
+        if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            raise LifecycleError('INVALID_DEADLINE')
+        if manifest_reader_gid is not None and (type(manifest_reader_gid) is not int
+                or not 0 < manifest_reader_gid < 2**31 or os.geteuid() != 0):
+            raise LifecycleError('INVALID_MANIFEST_READER')
+        if git_identity is not None and (type(git_identity) is not tuple or len(git_identity) != 2
+                or any(type(n) is not int or not 0 < n < 2**31 for n in git_identity)
+                or os.geteuid() != 0):
+            raise LifecycleError('INVALID_GIT_IDENTITY')
+        self.manifest_reader_gid, self.git_identity = manifest_reader_gid, git_identity
+        self.deadline = deadline
         self.supervisor = supervisor
         self.writer_quiescent = writer_quiescent
         self.writer_guard = writer_guard
@@ -68,17 +82,36 @@ class CheckoutAllocator:
             raise LifecycleError('ROOM_MISMATCH')
         self.manifest = supervisor.directory / 'checkouts.json'
 
+    def _remaining(self):
+        if getattr(self, 'deadline', None) is None:
+            return 20
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            # Never undo a creating intent or guess whether a Git effect ran.
+            raise LifecycleError('CHECKOUT_DEADLINE_RECONCILE')
+        return min(20, remaining)
+
     def _git(self, path, *args, allowed=(0,)):
         # No ambient Git credentials/config/environment, hooks, helper/network
         # transport, pager, fsmonitor or recursive submodule commands.
         env = {'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'LC_ALL': 'C',
                'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
                'GIT_TERMINAL_PROMPT': '0', 'GIT_OPTIONAL_LOCKS': '0'}
+        options = {}
+        if getattr(self, 'git_identity', None) is not None:
+            # Root only owns the control manifest. Git runs as the fixed owner
+            # of prepared native Project roots, with no supplementary groups.
+            for root in (self.repo, self.root):
+                info = _path(root).stat()
+                if (info.st_uid, info.st_gid) != self.git_identity:
+                    raise LifecycleError('GIT_OWNER_CHANGED')
+            options = {'user': self.git_identity[0], 'group': self.git_identity[1],
+                       'extra_groups': [], 'stdin': subprocess.DEVNULL, 'close_fds': True}
         try:
             result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null',
                 '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never',
                 '-c', 'submodule.recurse=false', '-C', str(path), *args],
-                env=env, capture_output=True, timeout=20)
+                env=env, capture_output=True, timeout=self._remaining(), **options)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise LifecycleError('GIT_OBSERVATION_UNKNOWN') from error
         if result.returncode not in allowed:
@@ -90,7 +123,10 @@ class CheckoutAllocator:
 
     @contextmanager
     def _locked(self, action):
-        with self.supervisor._locked():
+        lock = (self.supervisor._locked() if getattr(self, 'deadline', None) is None
+                else self.supervisor._locked(deadline=self.deadline))
+        with lock:
+            self._remaining()
             lifecycle = self.supervisor._read()
             if not lifecycle or lifecycle['phase'] in ('destroying', 'destroy_failed', 'destroyed'):
                 raise LifecycleError('ROOM_UNAVAILABLE')
@@ -173,6 +209,7 @@ class CheckoutAllocator:
             raise LifecycleError('INVALID_CHECKOUT_STORE') from error
 
     def _save(self, state, *, working_tree_observations=None):
+        self._remaining()
         # Every ordinary owner save invalidates retained probes before changing
         # slot bindings/phase. Only the explicit trusted observer supplies these.
         state.pop('working_tree_observations', None)
@@ -196,7 +233,13 @@ class CheckoutAllocator:
         descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
             with os.fdopen(descriptor, 'wb') as output:
+                if getattr(self, 'manifest_reader_gid', None) is not None:
+                    # Fixed trusted host gets read only; atomic replacements
+                    # preserve that policy without a writable control directory.
+                    os.fchown(output.fileno(), 0, self.manifest_reader_gid)
+                    os.fchmod(output.fileno(), 0o640)
                 output.write(encoded); output.flush(); os.fsync(output.fileno())
+            self._remaining()
             os.replace(temporary, self.manifest)
             self.supervisor._sync_directory(self.manifest.parent)
         finally:
@@ -340,6 +383,7 @@ class CheckoutAllocator:
                     observed = self._observe(state, key)
                     if observed['reason'] not in ('ACTIVE', 'DIRTY_OR_UNTRACKED_OR_IGNORED'):
                         raise LifecycleError('CHECKOUT_UNVERIFIABLE')
+                    self._remaining()
                     return observed
             if any(s['phase'] in ('creating', 'removing') for s in state['slots'].values()):
                 raise LifecycleError('CHECKOUT_RECONCILIATION_REQUIRED')
@@ -368,7 +412,9 @@ class CheckoutAllocator:
             self._save(state)  # Intent precedes Git effects.
             if concurrent:
                 self._recover_creation(state, key)
-            return self._observe(state, key)
+            observed = self._observe(state, key)
+            self._remaining()
+            return observed
 
     def _recover_creation(self, state, key):
         slot = state['slots'][key]

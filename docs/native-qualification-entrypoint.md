@@ -104,3 +104,37 @@ socket and provider doubles. They cover configuration, exact owner constructor
 compatibility, bounded writes/dispatch, custody, uncertain results and cleanup
 ordering. They are not evidence of an executed native image, authenticated model,
 real provider action or successful guest boundary qualification.
+
+## Initial native Run admission (trusted hosting API)
+
+`native_session.run(..., human_request=NativeHumanRunRequest(...))` consumes an
+**existing authenticated `HumanSession`** supplied by the hosting application.
+Neither the CLI JSON nor the installation manifest constructs a session or grants
+human-open authority. The ordinary command remains the paired attachment check;
+its missing prerequisite is an authenticated native Run host, not an identity
+string to paste into configuration.
+
+The initial Pi path uses the existing `RunAdmission` reservation, fresh Forge
+observation, eligibility and activation reducers on the same Room database.
+Before any native launch, the root-owned checkout handoff verifies the exact
+persisted PREPARING reservation and allocates through `CheckoutAllocator`.
+The non-root host receives only the resulting owned slot. It never receives
+permission to edit root lifecycle/checkout metadata. After provider observation,
+the root re-observes that same slot before canonical activation.
+
+The native recipe binds the reserved Run/context and owned checkout before
+`ExecLaunch.attach_native` proves a fresh session. Original kernel admission and
+canonical attachment must remain current through provider contact and the final
+transaction. The canonical implementation Work Request is delivered only after
+activation through `SupervisorAdmission.deliver_one`; uncertain delivery uses
+its existing journal, not another prompt. Exact committed retries return the
+existing terminal receipt without allocating, launching, reading Forge or
+queueing a second Work Request.
+
+This increment admits only the initial configured Pi implementer, with an
+already-exact GitHub assignment. It does not invent self-assignment authority,
+authenticated login, native reset/replacement/stop, participant Run Request
+routing, or reviewer recruitment. Those inherited fixture effect entrypoints
+fail explicitly. Claude's bootstrap context is never relabeled as the new Run.
+The authenticated initial-Run branch records the reviewer-recruitment gap rather
+than claiming full implementation/review/completion qualification.

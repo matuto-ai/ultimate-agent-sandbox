@@ -50,7 +50,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
             profile = next((p for p in self.room['profiles']
                             if configured is not None and p['id'] == configured['profile']), None)
             if (configured is None or configured['actor'] != seat.actor_id
-                    or configured['runtime'] != 'pi' or seat.runtime != 'pi-fixture'
+                    or not self._runtime_binding(configured, seat)
                     or profile is None or seat.profile_id != profile['id']
                     or 'implement' not in profile['capabilities'] or 'implement' not in seat.capabilities
                     or set(seat.capabilities) - {'peer-traffic'} - set(profile['capabilities'])
@@ -69,6 +69,10 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         self.broker, self.allocator = broker, allocator
         self.install, self.runtime_root = install, Path(runtime_root)
         self.authorize_human = authorize_human
+
+    @staticmethod
+    def _runtime_binding(configured, seat):
+        return configured['runtime'] == 'pi' and seat.runtime == 'pi-fixture'
 
     @staticmethod
     def run_id(operation_id):
@@ -219,7 +223,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         actor_id = self.actors[seat.actor_id].get('github_user_id')
         policy = next(p for p in self.room['policies'] if p['id'] == self.room['default_policy'])
         with self.supervisor._locked():
-            self.controller._room()
+            self._room()
             def prepare(state, _):
                 if actor_id is None:
                     raise LedgerError('GITHUB_ACTOR_ID_UNKNOWN')
@@ -261,7 +265,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                     preceding = deepcopy(assigned)
                 elif (context['context_generation'] != 1 or context['bound_run'] is not None
                         or context['reset'] is not None or participant in peer['connections']
-                        or participant in self.controller._read()['seats']
+                        or self._participant_started(participant)
                         or any(participant == t['sender'] or participant in t['recipients']
                                for t in peer['traffic'].values())):
                     raise LedgerError('UNUSED_NATIVE_CONTEXT_REQUIRED')
@@ -300,6 +304,26 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
             self._apply(command, human, prepare, authorize=authorize)
         return run, command
 
+    def _room(self):
+        return self.controller._room()
+
+    def _participant_started(self, participant):
+        return participant in self.controller._read()['seats']
+
+    def _observe_handle(self, handle):
+        self.hub.observe(handle.connection, handle.connection.receiver.observe())
+
+    def _safe_handle(self, handle):
+        return handle.connection.receiver.observe() is Readiness.SAFE
+
+    def _current_context(self, state, handle, run, pending):
+        if not self.hub._current(handle.connection, safe=True):
+            raise LedgerError('NATIVE_NOT_SAFE')
+        scope = self.hub.contexts.scope(pending['participant_id'])
+        if (scope != handle.connection.receiver.scope or scope['run_id'] != run
+                or scope['context_generation'] != pending.get('context_generation', 1)):
+            raise LedgerError('CONTEXT_MISMATCH')
+
     def _authority(self, handle):
         # Trusted supervisor examination of its exact owned child, not a client
         # identity claim or a replacement for SCM_CREDENTIALS on native traffic.
@@ -318,13 +342,16 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
             raise LedgerError('CHECKOUT_OBSERVATION_LIMIT')
         return slot
 
+    def _handle_origin(self, handle):
+        return handle.badge.origin()
+
     def _fresh_read(self, run, number, handle, attempt_id):
         # Stable ID within one explicit attempt: interrupted contact is reconciled,
         # never repeated. A NEW human refresh attempt gets a new observation.
         envelope = {'id': 'admit-read-' + hashlib.sha256(attempt_id.encode()).hexdigest(), 'kind': 'forge-read',
                     'argv': ['issue', 'view', str(number)]}
         with self.supervisor._locked():
-            intent = self.broker.prepare(envelope, origin=handle.badge.origin(),
+            intent = self.broker.prepare(envelope, origin=self._handle_origin(handle),
                 authorize=lambda: self._authority(handle), admission=True, admission_reservation=run)
         outcome = self.broker.perform(intent)
         try:
@@ -475,7 +502,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 or self._seat_binding(participant_id) != pending['seat_binding']):
             raise LedgerError('ACTOR_BINDING_CHANGED')
         with self.supervisor._locked():
-            self.controller._room()
+            self._room()
             if not authorize(human, command):
                 raise LedgerError('FORBIDDEN')
         def stage_authorized():
@@ -527,7 +554,17 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 reset = self.hub.contexts._row(participant_id).get('reset')
                 self.controller._save_pi_checkpoint(participant_id, recipe,
                     reset['id'] if reset is not None and reset['status'] == 'SUCCEEDED' else None, native_proof)
-        self.hub.observe(handle.connection, native.observe())
+        return self._observe_and_activate(run, command, pending, attempt_id, terminal,
+            issue_number, participant_id, human, authorize, handle, slot)
+
+    def _observe_and_activate(self, run, command, pending, attempt_id, terminal,
+                              issue_number, participant_id, human, authorize, handle, slot):
+        """Shared canonical eligibility/activation; only concrete native seams vary."""
+        def stage_authorized():
+            if not authorize(human, command) or self._pending(run)['status'] != 'PREPARING':
+                raise LedgerError('ADMISSION_REVOKED')
+            return True
+        self._observe_handle(handle)
         receipt, fresh = self._fresh_read(run, issue_number, handle, attempt_id)
         observed = time.monotonic()
         if not fresh:
@@ -565,7 +602,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 assignment_service._key(assignment_operation)) is not None else None)
         with self.supervisor._locked():
             self._authority(handle)
-            if native.observe() is not Readiness.SAFE:
+            if not self._safe_handle(handle):
                 raise LedgerError('NATIVE_NOT_SAFE')
             def activate(state, _):
                 if time.monotonic() - observed > 5:
@@ -574,11 +611,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 if (current['status'] != 'PREPARING'
                         or current.get('admission_origin', current['human_origin']) != human.canonical()):
                     raise LedgerError('ADMISSION_CONFLICT')
-                if not self.hub._current(handle.connection, safe=True):
-                    raise LedgerError('NATIVE_NOT_SAFE')
-                scope = self.hub.contexts.scope(participant_id)
-                if scope != native.scope or scope['run_id'] != run or scope['context_generation'] != pending.get('context_generation', 1):
-                    raise LedgerError('CONTEXT_MISMATCH')
+                self._current_context(state, handle, run, pending)
                 # Refresh configured policy at activation, not at an earlier held attempt.
                 policy = next(p for p in self.room['policies'] if p['id'] == self.room['default_policy'])
                 request_id = 'implementation-' + run

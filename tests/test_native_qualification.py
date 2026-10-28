@@ -66,7 +66,7 @@ class NativeQualificationTests(unittest.TestCase):
         self.assertFalse(result['effects'])
         self.assertEqual(result['production_launcher'], 'disabled')
         self.assertEqual(result['missing_prerequisites'], [])
-        self.assertIn('RUN_ADMISSION_NATIVE_ADAPTER_UNAVAILABLE', result['lifecycle_blockers'])
+        self.assertIn('AUTHENTICATED_NATIVE_RUN_HOST_UNAVAILABLE', result['lifecycle_blockers'])
         self.assertEqual(reader.call_count, 2)
         self.assertNotIn('/providers/', json.dumps(result))
 

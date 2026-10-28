@@ -163,6 +163,12 @@ class ReadBrokerClient:
 
     def prepare(self, envelope, origin, *, authorize=None):
         if self.closed or type(origin) is not Origin: raise LedgerError('FORBIDDEN')
+        if type(envelope) is dict and envelope.get('kind') == 'admission-read':
+            if (set(envelope) != {'id', 'kind', 'issue_number'}
+                    or type(envelope['issue_number']) is not int
+                    or not 1 <= envelope['issue_number'] <= 9_999_999_999
+                    or not callable(authorize) or 'forge-read' not in origin.capabilities):
+                raise LedgerError('INVALID_FORGE_ENVELOPE')
         if type(envelope) is dict and envelope.get('kind') in {'forge-write','forge-reconcile'} and not self.write_enabled:
             raise LedgerError('FORGE_WRITE_UNAVAILABLE')
         if type(envelope) is dict and envelope.get('kind')=='forge-projection' and not self.projection_enabled:
@@ -446,7 +452,7 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
                 origin = Origin(**{**origin_doc, 'capabilities': tuple(origin_doc['capabilities'])})
                 def current_authority():
                     if not alive(supervisor.pidfd): return False
-                    if packet['envelope'].get('kind') not in {'forge-write','forge-reconcile','forge-projection','gate-forge','gate-target','review-observe','review-comment','review-reconcile'}: return True
+                    if packet['envelope'].get('kind') not in {'forge-write','forge-reconcile','forge-projection','gate-forge','gate-target','review-observe','review-comment','review-reconcile','admission-read'}: return True
                     nonce = uuid.uuid4().hex
                     send_result(channel,packet['request_id'],{'authorize':nonce})
                     with receive(channel) as record:

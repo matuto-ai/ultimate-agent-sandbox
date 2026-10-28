@@ -137,7 +137,7 @@ class QualificationPlan:
             'missing_prerequisites': problems,
             'unobserved': ['disposable-guest-boundary', 'owned-runtime-resources',
                            'provider-authentication', 'native-process-admission'],
-            'lifecycle_blockers': ['RUN_ADMISSION_NATIVE_ADAPTER_UNAVAILABLE']}
+            'lifecycle_blockers': ['AUTHENTICATED_NATIVE_RUN_HOST_UNAVAILABLE']}
 
     def preflight(self):
         result = self.check()
@@ -228,6 +228,8 @@ def execute(plan):
     import time
     from pathlib import Path
     from .native_qualification_backend import provision
+    from .native_checkout_handoff import RootCheckoutHandoff, collect_child
+    from .kernel_origin import enable
     plan.require_unchanged()
     if os.getuid() != 0:
         raise QualificationError('DISPOSABLE_ROOT_SETUP_REQUIRED')
@@ -252,13 +254,15 @@ def execute(plan):
             raise QualificationError('BROKER_PRIVATE_DIRECTORY_UNAVAILABLE')
         result_root = private / 'results'; result_root.mkdir(mode=0o700); os.chown(result_root, 165534, 165534)
         host_channel, broker_channel = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        broker = child = None
+        allocation_root, allocation_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        broker = child = handoff = None
         deadline = time.monotonic() + plan.installation['timeout_seconds']
         def left():
             remaining = deadline - time.monotonic()
             if remaining <= 0: raise QualificationError('NATIVE_SESSION_DEADLINE')
             return remaining
         try:
+            enable(allocation_root)
             configuration = {'room_id': plan.room['id'], 'room_instance': resources.data['instance'],
                 'project_id': plan.room['project']['id'], 'repository': plan.room['project']['repository'],
                 'deployment_id': plan.config['deployment']['id'], 'audit_path': str(private / 'audit.db'),
@@ -277,16 +281,19 @@ def execute(plan):
             write_startup(broker.stdin, raw, deadline)
             broker_channel.close()
             resources.expect_child()
-            child = subprocess.Popen([sys.executable, '-m', 'uas.native_session', str(host_channel.fileno())],
+            child = subprocess.Popen([sys.executable, '-m', 'uas.native_session', str(host_channel.fileno()), str(allocation_child.fileno())],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 user=165533, group=165533, extra_groups=[165531, os.stat('/run/docker.sock').st_gid],
-                pass_fds=resources.pass_fds + (host_channel.fileno(),), env=environment)
+                pass_fds=resources.pass_fds + (host_channel.fileno(), allocation_child.fileno()), env=environment)
             resources.hold_child(child)
+            allocation_child.close()
+            handoff = RootCheckoutHandoff(plan, resources, child, allocation_root, deadline=deadline)
             host_channel.close()
             startup = canonical({'configuration': plan.config_text, 'installation': plan.installation,
                 'installation_digest': plan.installation_digest, 'resources': resources.data})
             if len(startup) > 2 * 1048576: raise QualificationError('HOST_STARTUP_TOO_LARGE')
-            output, _ = child.communicate(startup, timeout=left())
+            write_startup(child.stdin, startup, deadline)
+            output = collect_child(child, handoff, deadline=deadline)
             if len(output) > 16384:
                 raise QualificationError('NATIVE_PAIR_STARTUP_FAILED')
             result = json.loads(output)
@@ -304,12 +311,15 @@ def execute(plan):
             if broker.returncode != 0: raise QualificationError('BROKER_EXIT_UNCERTAIN')
         finally:
             host_channel.close(); broker_channel.close()
+            allocation_root.close(); allocation_child.close()
             if child is not None and child.poll() is None:
                 # Exact owned trusted child only, not a PID supplied in data.
                 child.terminate()
                 try: child.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     child.kill(); child.wait(timeout=5)
+            if handoff is not None:
+                handoff.close()
             if broker is not None and broker.poll() is None:
                 # Channel EOF is the canonical stop request. A stuck Broker may
                 # own an uncertain provider effect: never call it successful or

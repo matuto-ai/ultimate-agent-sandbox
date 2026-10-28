@@ -598,6 +598,7 @@ class LaunchResources:
     _broker_expected: bool = False
     _preserve: bool = False
     retained_evidence: object = None
+    _supervisor: object = None  # Root-only owner reference; never serialized.
 
     def preserve_evidence(self):
         self._preserve=True
@@ -761,6 +762,7 @@ def provision(plan):
               'peer_path':str(layout['peer']/'pi.sock'),'control_path':str(layout['control']/'hub.sock'),
               'peer_fd':backend.listeners[0].fileno(),'control_fd':backend.listeners[1].fileno(),
               'mapping_digest':mapping_digest,**manifests}
+        resources._supervisor = owner
         resources.data = data
         resources.pass_fds = tuple(s.fileno() for s in backend.listeners)
         handed_off=True

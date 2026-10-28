@@ -11,6 +11,8 @@ try {
       || process.env.UAS_PI_FORGE_FD !== '4' || !fstatSync(3).isSocket() || !fstatSync(4).isSocket()) throw Error();
   if (process.argv.length !== 7 || ![cwd,sessions,authPath].every(x => typeof x === 'string' && x.startsWith('/'))
       || ![provider,modelId].every(x => /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(x))) throw Error();
+  // Fixed bootstrap must have entered the exact owned checkout before SDK load.
+  if (process.cwd() !== cwd) throw Error();
   readProviderAuth(authPath,'pi-oauth-json',provider);
   const context = path.dirname(sessions), agentDir = context + '/agent';
   const parent = lstatSync(context);

@@ -1,8 +1,9 @@
 """Fixed trusted non-root qualification Supervisor, invoked only by its owner.
 
-This composes actual owners. Input selects public installation references, never
-an Actor supplied by a Participant. It does not create a product Run or declare
-the paired startup to be complete native lifecycle qualification.
+This composes actual owners. Serialized input selects public installation refs,
+never human authority. CLI startup attaches the pair only; an existing trusted
+HumanSession may select the separate initial-Run hosting API. Neither mode
+claims complete native implementation/review/completion qualification.
 """
 from contextlib import ExitStack, closing, contextmanager
 from io import StringIO
@@ -159,10 +160,19 @@ def dispatch(services, budget, *, max_packets=16):
     return {'packets': processed, 'stop': 'packet-budget-exhausted'}
 
 
-def run(plan, resources, broker_fd):
+def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None):
     from .native_qualification_backend import readonly_supervisor
     require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
     require(type(resources) is dict and resources.get('room_id') == plan.room['id'], 'INVALID_LAUNCH_RESOURCES')
+    if human_request is not None:
+        from .native_run_admission import NativeHumanRunRequest
+        require(type(human_request) is NativeHumanRunRequest and checkout_fd is not None,
+                'AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
+        session = human_request.session
+        require(session.deployment_id == plan.config['deployment']['id']
+                and session.room_id == plan.room['id'] and session.instance_id == resources['instance']
+                and 'human-open-run' in session.human.capabilities and session.allowed('open-run'),
+                'AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
     os.umask(0o007)  # Shared Room SQLite files only; private owners use explicit0600.
     probe()
     budget = SessionBudget(plan.installation['timeout_seconds'])
@@ -206,6 +216,34 @@ def run(plan, resources, broker_fd):
                 'run_id': 'qualification-scope', 'generation': 1, 'context_generation': 1}
             return exec_seat, admission_seat, scope
         pi_seat, pi_admit, pi_scope = seats('pi', 'seat-a')
+        if human_request is not None:
+            from .native_run_admission import NativeHumanRunRequest, NativeRunLauncher, NativeRunAdmission
+            from .native_admission_broker import NativeAdmissionBroker
+            from .native_checkout_handoff import NativeCheckoutClient
+            require(type(human_request) is NativeHumanRunRequest and checkout_fd is not None,
+                    'AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
+            checkout_channel = socket.socket(fileno=checkout_fd)
+            checkout_client = NativeCheckoutClient(checkout_channel, deadline=budget.deadline)
+            stack.callback(checkout_client.close)
+            admission_broker = NativeAdmissionBroker(ledger,binding,broker)
+            launcher = NativeRunLauncher(plan,resources,supervisor,ledger,admission_broker,
+                engine=engine,endpoint=peer_lease,listener=peer,control=control,
+                hub_origin=hub_origin,controller=ready['controller'],control_lock=control_lock,
+                exec_seat=pi_seat,admission_seat=pi_admit,mounts=mounts,stack=stack,
+                admissions=admissions,budget=budget)
+            owner = NativeRunAdmission(launcher,allocator,checkout_client)
+            activated = owner.open_human(human_request.operation_id,human_request.issue_number,
+                human_request.participant_id,session=human_request.session,attempt_id=human_request.attempt_id)
+            held = launcher.started.get(human_request.participant_id)
+            require(type(held) is SupervisorAdmission,'NATIVE_RUN_OWNER_UNAVAILABLE')
+            delivery = held.deliver_one()  # Existing journal reconciles unknown injection; never re-prompt.
+            return {'version':1,'status':'NATIVE_RUN_ACTIVE','room_id':room['id'],'instance':instance,
+                'run_id':activated['run_id'],'generation':activated['generation'],
+                'product_run_created':True,'delivery':delivery,
+                'configuration_sha256':plan.config_digest,
+                'installation_sha256':plan.installation_digest,
+                'lifecycle_blockers':['NATIVE_REVIEWER_RECRUITMENT_UNAVAILABLE'],
+                'production_launcher':'disabled'}
         pi_recipe = NativePiRecipe.from_configuration(StringIO(plan.config_text), room['id'], pi_seat.participant_id,
             resources['pi_manifest_path'], plan.installation['pi_manifest']['sha256'], seat=pi_seat, scope=pi_scope,
             checkout=room['project']['roots']['repo'], runtime_root=room['state_root'] + '/runtime',
@@ -258,13 +296,13 @@ def run(plan, resources, broker_fd):
             'product_run_created': False, 'git_history': 'new-empty-owner-not-independence-evidence',
             'configuration_sha256': plan.config_digest,
             'installation_sha256': plan.installation_digest,
-            'lifecycle_blockers': ['RUN_ADMISSION_NATIVE_ADAPTER_UNAVAILABLE']}
+            'lifecycle_blockers': ['AUTHENTICATED_NATIVE_RUN_HOST_UNAVAILABLE']}
         evidence['dispatch'] = dispatch((pi_forge, claude.forge_service), budget)
         return evidence
 
 
 def main():
-    require(len(sys.argv) == 2 and sys.argv[1].isdigit() and int(sys.argv[1]) >= 3,
+    require(len(sys.argv) == 3 and all(x.isdigit() and int(x) >= 3 for x in sys.argv[1:]),
             'INHERITED_BROKER_CHANNEL_REQUIRED')
     raw = sys.stdin.buffer.read(2 * 1048576 + 1)
     require(len(raw) <= 2 * 1048576, 'BOUNDED_TRUSTED_STARTUP_REQUIRED')
@@ -272,7 +310,9 @@ def main():
     require(type(value) is dict and set(value) == {'configuration', 'installation', 'installation_digest', 'resources'},
             'INVALID_TRUSTED_STARTUP')
     plan = QualificationPlan(value['configuration'], value['installation'], installation_digest=value['installation_digest'])
-    result = run(plan, value['resources'], int(sys.argv[1]))
+    # No serialized human grant. Authenticated hosting may call run(..., human_request=...)
+    # after constructing the existing exact HumanSession; CLI remains pair-only.
+    result = run(plan, value['resources'], int(sys.argv[1]), int(sys.argv[2]))
     print(json.dumps(result, sort_keys=True))
 
 
