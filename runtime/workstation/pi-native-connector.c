@@ -60,15 +60,25 @@ int main(int argc, char **argv) {
     char response[32];
     ssize_t count = recv(peer, response, sizeof(response), 0);
     if (count != 14 || memcmp(response, "UAS-RELEASE-1\n", 14)) fail();
-    /* The same task and open description continue through execve. */
+    int forge = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    const char forge_hello[] = "UAS-PI-FORGE-1\n";
+    if (forge < 0 || connect(forge, (struct sockaddr *)&address, sizeof(address))
+        || send(forge, forge_hello, sizeof(forge_hello)-1, MSG_NOSIGNAL) != (ssize_t)(sizeof(forge_hello)-1)) fail();
+    count = recv(forge, response, sizeof(response), 0);
+    if (count != 20 || memcmp(response, "UAS-FORGE-RELEASE-1\n", 20)) fail();
+    int peer_copy = fcntl(peer, F_DUPFD_CLOEXEC, 5), forge_copy = fcntl(forge, F_DUPFD_CLOEXEC, 5);
+    if (peer_copy < 0 || forge_copy < 0 || dup2(peer_copy,3)!=3 || dup2(forge_copy,4)!=4) fail();
+    if (fcntl(4,F_SETFD,0) || fcntl(4,F_SETFL,O_NONBLOCK)) fail();
+    peer = 3;
+    /* Same task retains distinct Hub and trusted-host open descriptions. */
     if (peer != 3 && dup2(peer, 3) != 3) fail();
     if (fcntl(3, F_SETFD, 0) || fcntl(3, F_SETFL, O_NONBLOCK)) fail();
-    if (close_range(4, ~0U, 0)) fail();
+    if (close_range(5, ~0U, 0)) fail();
     char home_env[520], agent_env[560];
     if (snprintf(home_env,sizeof(home_env),"HOME=%s",argv[3]) >= (int)sizeof(home_env)
         || snprintf(agent_env,sizeof(agent_env),"PI_CODING_AGENT_DIR=%s/agent",argv[3]) >= (int)sizeof(agent_env)) fail();
     char *environment[] = {"PATH=" UAS_ROOT "/node/bin:/usr/bin:/bin",home_env,agent_env,
-        "LANG=C.UTF-8","UAS_PI_PEER_FD=3",NULL};
+        "LANG=C.UTF-8","UAS_PI_PEER_FD=3","UAS_PI_FORGE_FD=4","UAS_PI_NATIVE=1",NULL};
     char *arguments[] = {UAS_ROOT "/node/bin/node",
         UAS_ROOT "/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
         "--mode","rpc","--no-extensions","--no-skills","--no-prompt-templates","--no-themes",

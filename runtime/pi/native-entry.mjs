@@ -1,12 +1,14 @@
 // Fixed public Pi 1.4.0 SDK composition, in the bootstrap's exact Node task.
 // Persistent provider auth only; no old HOME, settings, plugins or session import.
-import {mkdirSync, realpathSync, lstatSync} from 'node:fs';
+import {mkdirSync, realpathSync, lstatSync, fstatSync} from 'node:fs';
 import path from 'node:path';
 import {readProviderAuth} from '../provider-auth.mjs';
 import {oauthStore} from './provider-store.mjs';
 
 const [cwd, sessions, provider, modelId, authPath] = process.argv.slice(2);
 try {
+  if (process.env.UAS_PI_NATIVE !== '1' || process.env.UAS_PI_PEER_FD !== '3'
+      || process.env.UAS_PI_FORGE_FD !== '4' || !fstatSync(3).isSocket() || !fstatSync(4).isSocket()) throw Error();
   if (process.argv.length !== 7 || ![cwd,sessions,authPath].every(x => typeof x === 'string' && x.startsWith('/'))
       || ![provider,modelId].every(x => /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(x))) throw Error();
   readProviderAuth(authPath,'pi-oauth-json',provider);

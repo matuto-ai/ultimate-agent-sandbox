@@ -57,7 +57,43 @@ queued pre-admission data and lost responses. The hosted-only Node transport tes
 now supplies distinct FD3/FD4 and checks `gh` goes only to FD4. These are not real
 native Claude/SDK, account, namespace or complete-lifecycle qualification.
 
-Pi's direct native Forge route, isolated Git provenance/target fencing, typed
+Isolated Git provenance/target fencing, typed
 human control, full isolated RunReview composition and the trusted deployment
 launcher still need integration. The old same-process `attach_read_service`
 remains a controlled test seam, not permission to mount a Supervisor store in Hub.
+
+## Native Pi direct route
+
+The opt-in native Pi bootstrap likewise opens a second connection in its exact
+launch task. `ExecLaunch` verifies the fixed Pi Forge hello against the same held
+kernel origin, retains FD4 and releases initialization before SDK startup. The
+native entrypoint requires exact FD3/FD4 socket setup before reading provider auth;
+it cannot silently fall back to the Hub. The legacy fixture entrypoint preserves
+its existing single-channel behavior.
+
+Before root ADMIT, queued FD4 bytes/EOF are rejected. After its acknowledged
+admission, `SupervisorAdmission.attach_forge_service(existing_read_broker)` builds
+an exact `NativePiHostForge`; `receive_forge_once()` consumes original Pi records.
+It reuses the reviewed packet/Broker mechanics with direct root authority, not
+Claude helper authority. `RESERVE_PI_FORGE` uses canonical direct Hub admission
+and ledger reservation; its acknowledgment still grants no authority. Pi's Origin
+hash preserves the existing omitted native-payload field, rather than adding null.
+
+The shared extension routes native `gh` only to FD4 and bounds the whole request
+before contact; peer tools stay on FD3. Hosted-only Node transport tests use a
+fake SDK tool registry to verify routing, oversize rejection, both-channel cleanup
+and missing-native-FD denial without executing a model or contacting accounts.
+This completes the equivalent source route, not its native runtime qualification.
+
+
+## Pi typed review tool
+
+Pi now exposes `uas_review` with the same submit-for-review/review-result schema
+as Claude. It preserves stable operation IDs, Run/generation, observation and
+payload fields and sends them only to Hub FD3. Malformed/oversized envelopes are
+rejected before either transport. Hub rejection remains a tool error; the tool
+never infers role, reviewer independence, current revision or a successful verdict.
+Those remain canonical AdmittedPeerDispatcher/RunReview decisions. The hosted
+controlled routing test compares the tool schemas, checks both review operations
+and verifies rejected requests leave both channels empty. This adds a callable
+proposal path, not the missing isolated RunReview deployment owner.

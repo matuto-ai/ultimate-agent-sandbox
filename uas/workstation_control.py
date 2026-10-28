@@ -33,8 +33,21 @@ class SupervisorAdmission:
         self._fenced = False
         self._delivery_lock = threading.Lock()
         self._delivery_pending = None
+        self.forge_service = None
         enable(control)
         control.settimeout(timeout)
+
+    def attach_forge_service(self, client):
+        from .native_host_forge import NativePiHostForge
+        if type(self) is not SupervisorAdmission or self.forge_service is not None:
+            raise OriginDenied('one direct native Pi Forge service required')
+        self.forge_service = NativePiHostForge(self, client)
+        return self.forge_service
+
+    def receive_forge_once(self):
+        if self.forge_service is None:
+            raise OriginDenied('trusted native Pi Forge service unavailable')
+        return self.forge_service.receive_once()
 
     def _current(self):
         if (self._fenced or self.hub_origin.revoked or not alive(self.hub_origin.pidfd)
@@ -53,6 +66,17 @@ class SupervisorAdmission:
             self.control.close()  # Hub EOF monitor must fence transferred authority.
             raise
 
+    def _empty_native_forge(self):
+        import socket
+        channel = self.launch.forge_channel
+        if channel is None:
+            raise OriginDenied('native Pi Forge channel missing')
+        try:
+            channel.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except BlockingIOError:
+            return
+        raise OriginDenied('premature Pi Forge traffic or closed channel')
+
     def admit(self, operation_id, epoch):
         """Exactly one send attempt; any uncertain result requires status only."""
         with self._io:
@@ -61,6 +85,8 @@ class SupervisorAdmission:
                 proof = self.launch.native_readiness
                 if proof is None or self.launch.admission is not None:
                     raise OriginDenied('durable native readiness and unused admission required')
+                if type(self.launch) is ExecLaunch and getattr(self.launch, 'native_recipe', None) is not None:
+                    self._empty_native_forge()
                 exchange_id = uuid.uuid4().hex  # Correlation only, never bearer authority.
                 document = _admission_document(self.launch, self.seat, operation_id, epoch, proof['digest'], exchange_id)
                 self.launch.admission = {'version': 1, 'operation_id': operation_id,

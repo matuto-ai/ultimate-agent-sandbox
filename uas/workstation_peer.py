@@ -53,12 +53,15 @@ class AdmittedPeerDispatcher:
             raise LedgerError('FORGE_UNAVAILABLE')
         if hashlib.sha256(_canonical(envelope)).hexdigest() != digest:
             raise LedgerError('INVALID_FORGE_ENVELOPE')
-        with self.admissions.authorize_descendant(helper, None) as binding:
+        authority = (self.admissions.authorize(operation, None) if helper is None
+                     else self.admissions.authorize_descendant(helper, None))
+        with authority as binding:
             connection = self._connections.get(operation)
             if (binding.operation_id != operation or connection is None
                     or not self.hub._current(connection)):
                 raise LedgerError('STALE_CONNECTION')
-            guard = lambda: (self.admissions.recheck_descendant(helper, None)
+            guard = lambda: ((self.admissions.recheck(operation, None) if helper is None
+                              else self.admissions.recheck_descendant(helper, None))
                              and self.hub._current(connection))
             reserve_forge_operation(self.hub.ledger, self.host_forge_binding,
                                     envelope, self._origin(binding), guard)

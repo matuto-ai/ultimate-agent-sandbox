@@ -51,7 +51,10 @@ class NativeHostForge:
 
     def _origin(self, binding):
         # Exact same canonical authority version as Hub's admitted dispatcher.
-        context = {'controller':self.admission.controller,'binding':asdict(binding)}
+        document = asdict(binding)
+        if document.get('native_payload_digest') is None:
+            document.pop('native_payload_digest', None)
+        context = {'controller':self.admission.controller,'binding':document}
         version = 'seat-' + hashlib.sha256(_canonical(context)).hexdigest()
         return Origin(binding.seat.actor_id, binding.seat.participant_id,
                       binding.incarnation, version, binding.seat.capabilities)
@@ -71,6 +74,9 @@ class NativeHostForge:
             raise LedgerError('ROOM_NOT_RUNNING')
         return True
 
+    def _reservation(self):
+        return {'kind':'RESERVE_FORGE','helper_operation':self.helper.operation_id}
+
     def _reserve(self, envelope):
         try:
             return self._reserve_exchange(envelope)
@@ -87,9 +93,9 @@ class NativeHostForge:
         admission = self.admission
         digest = hashlib.sha256(_canonical(envelope)).hexdigest()
         exchange = uuid.uuid4().hex
-        packet = _canonical({'version':1,'kind':'RESERVE_FORGE',
+        packet = _canonical({'version':1,**self._reservation(),
             'operation_id':self.binding.operation_id,'controller':admission.controller,
-            'exchange_id':exchange,'helper_operation':self.helper.operation_id,
+            'exchange_id':exchange,
             'envelope':envelope,'digest':digest})
         if len(packet) > MAX_PACKET:
             raise LedgerError('INVALID_NATIVE_FRAME')
@@ -174,3 +180,40 @@ class NativeHostForge:
         channel, self.helper.forge_channel = self.helper.forge_channel, None
         if channel is not None:
             channel.close()
+
+
+class NativePiHostForge(NativeHostForge):
+    """Same packet/Broker mechanics; authority is the exact native Pi root itself."""
+    def __init__(self, admission, client):
+        from .workstation_control import SupervisorAdmission
+        from .workstation_exec import ExecLaunch
+        from .native_pi_recipe import NativePiRecipe
+        if (type(admission) is not SupervisorAdmission or type(admission.launch) is not ExecLaunch
+                or type(admission.launch.native_recipe) is not NativePiRecipe
+                or type(client) is not ReadBrokerClient or type(client.supervisor) is not Supervisor
+                or admission.launch.forge_channel is None):
+            raise OriginDenied('exact native Pi admission and trusted Broker required')
+        self.helper, self.admission, self.client = admission.launch, admission, client
+        self.closed = False
+        self.binding = self._binding()
+        seat = self.binding.seat
+        if (seat.room_id != client.binding.room_id or seat.room_instance != client.room_instance
+                or client.supervisor.room_id != seat.room_id):
+            raise OriginDenied('direct Pi Forge Room binding differs')
+        self.origin = self._origin(self.binding)
+        self.helper.forge_channel.settimeout(5)
+        with client.supervisor._locked():
+            self._current()
+
+    def _binding(self):
+        admission = self.admission
+        admission._current()
+        current = admission.launch.admission
+        if (current is None or current['state'] != 'admitted'
+                or current['controller'] != admission.controller):
+            raise OriginDenied('Pi ADMIT acknowledgment required')
+        return AdmittedBinding(admission.seat, current['operation_id'],
+            admission.launch.incarnation, current['epoch'], current['readiness_digest'])
+
+    def _reservation(self):
+        return {'kind':'RESERVE_PI_FORGE'}

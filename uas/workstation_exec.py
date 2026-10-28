@@ -101,6 +101,7 @@ class ExecLaunch:
         self.timeout = timeout
         self.exec_id = None
         self.origin = self.channel = self.transport = None
+        self.forge_channel = None
         self.state = 'new'
         self._owns_journal = False
         self.incarnation = uuid.uuid4().hex
@@ -228,6 +229,8 @@ class ExecLaunch:
             if self.channel.send(RELEASE) != len(RELEASE):
                 raise ExecUnavailable('incomplete release')
             self.state = 'released'; self._save()
+            if self.native_recipe is not None:
+                self._receive_native_forge(listener)
             return self
         except BaseException:
             self.challenge = None
@@ -239,6 +242,28 @@ class ExecLaunch:
             except (OSError, ExecUnavailable, ValueError):
                 pass  # Existing creating/starting marker still blocks retry.
             self.close_transport()
+            raise
+
+    def _receive_native_forge(self, listener):
+        """Native-only second connection, authenticated as the exact Pi task."""
+        if self.native_recipe is None or self.state != 'released' or self.forge_channel is not None:
+            raise OriginDenied('native Pi direct Forge binding unavailable')
+        self.endpoint.require()
+        listener.settimeout(self._remaining())
+        channel, _ = listener.accept()
+        try:
+            enable(channel); channel.settimeout(self._remaining())
+            with receive(channel) as record:
+                self.origin.require(record)
+                if record.data != b'UAS-PI-FORGE-1\n':
+                    raise OriginDenied('invalid fixed Pi Forge hello')
+            self.forge_channel = channel
+            release = b'UAS-FORGE-RELEASE-1\n'
+            if channel.send(release) != len(release):
+                raise OriginDenied('partial Pi Forge release')
+        except BaseException:
+            channel.close()
+            self.forge_channel = None
             raise
 
     def require_record(self, record, *, room_id, participant_id):
@@ -369,8 +394,8 @@ class ExecLaunch:
     def close_transport(self):
         # No numeric-PID kill, whole-container kill, broad cleanup or respawn.
         # Transport closure does not assert actual task exit.
-        resources = (self.channel, self.transport)
-        self.channel = self.transport = None
+        resources = (self.channel, self.transport, getattr(self, 'forge_channel', None))
+        self.channel = self.transport = self.forge_channel = None
         error = None
         for resource in resources:
             if resource is not None:
