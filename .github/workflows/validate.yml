@@ -143,12 +143,77 @@ jobs:
         if: steps.changes.outputs.skip_tests == 'true'
         run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; this exemption is not runtime or security evidence.'
 
+  unit-integration:
+    outputs:
+      skip_tests: ${{ steps.changes.outputs.skip_tests }}
+    if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect test applicability
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            push) base="$PUSH_BEFORE_SHA" ;;
+            *) base="" ;;
+          esac
+
+          only_exempt_paths() (
+            [[ "$base" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            git cat-file -e "$base^{commit}" 2>/dev/null || exit 1
+            changes="$(mktemp)" || exit 1
+            trap 'rm -f "$changes"' EXIT
+            # Keep source deletions visible when files move into an exempt folder.
+            git diff --name-only -z --no-renames "$base" HEAD -- > "$changes" || exit 1
+            [[ -s "$changes" ]] || exit 1
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                # Extend only with folders that have no runtime, test, or build inputs.
+                docs/*) ;;
+                *) exit 1 ;;
+              esac
+            done < "$changes"
+          )
+
+          skip_tests=false
+          if only_exempt_paths; then
+            skip_tests=true
+          fi
+          echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
+
+      # Give every test-only setup/check step this condition, not the whole job.
+      - name: Validate measured integration unit partition
+        if: steps.changes.outputs.skip_tests != 'true'
+        env:
+          UAS_REQUIRE_UNIX_PEER_TESTS: "1"
+          UAS_REQUIRE_PARTICIPANT_PROCESS_TESTS: "1"
+          UAS_WORKSTATION_CONNECTOR_TEST: "1"
+          UAS_FORGE_HTTP_TEST: "1"
+          UAS_FORGE_CHANNEL_TEST: "1"
+        run: ./validate.sh integration
+
+      - name: Report tests not applicable
+        if: steps.changes.outputs.skip_tests == 'true'
+        run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; this exemption is not runtime or security evidence.'
+
   forge-broker-smoke:
     # Preserve both required Forge checks without serializing them with the
     # aggregate. All downstream jobs must succeed for this workflow to pass.
-    # Critical path: max(unit roots 1, 1) + max(Docker 2, other seams 1) <= 3.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    # Critical path: max(unit roots 1, 1, 1) + max(Docker 2, other seams 1) <= 3.
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
@@ -164,8 +229,8 @@ jobs:
   artifact-linux-smoke:
     # Fast real Linux seams, NOT stock-policy/native/VM qualification.
     # Both unit roots must pass; max(1, 1) + max(1, 2) <= 3 minutes.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
@@ -177,8 +242,8 @@ jobs:
 
   docker-lifecycle:
     # This is fixture lifecycle evidence, not production launch qualification.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -191,8 +256,8 @@ jobs:
   git-native-seams:
     # Account-free actual seams, not OpenSSH/GitHub or exact Pi image qualification.
     # Both unit roots required: max(1, 1) + max(Docker 2, Git 1) <= 3 minutes.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
@@ -218,8 +283,8 @@ jobs:
   gate-linux-smoke:
     # Focused reviewed diff/Broker seams, not command runtime or VM qualification.
     # Both roots mandatory; max(unit 1, 1) + max(Docker 2, this 1) <= 3 minutes.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
@@ -242,8 +307,8 @@ jobs:
   gate-command-native:
     # Reviewed isolated one-shot Linux seam; never a VM or production admission.
     # Sibling of other integrations: max(unit 1, 1) + max(integrations 2) <= 3.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -256,8 +321,8 @@ jobs:
   gate-artifact-native:
     # Reviewed isolated one-shot Linux seam; never a VM or production admission.
     # Sibling of other integrations: max(unit 1, 1) + max(integrations 2) <= 3.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
@@ -270,8 +335,8 @@ jobs:
   room-control-plane:
     # Actual account-free persistent service lifetime; no VM/native admission.
     # Parallel sibling: max(unit 1, 1) + max(integrations 2) <= 3 minutes.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -286,9 +351,9 @@ jobs:
 
   manager-mtls:
     # Temporary test certificates and loopback sockets only; no production credentials.
-    # Parallel sibling: max(unit roots 1, 1) + max(existing integrations 2, this 1) <= 3.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    # Parallel sibling: max(unit roots 1, 1, 1) + max(existing integrations 2, this 1) <= 3.
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
@@ -303,8 +368,8 @@ jobs:
   manager-field-notes:
     # Reuses the existing check entrypoint and runner's installed Chrome.
     # No download/server/sandbox bypass. max(unit 1,1)+max(existing 2,this 1)<=3.
-    needs: [validate, unit-slow]
-    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    needs: [validate, unit-slow, unit-integration]
+    if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
     steps:
