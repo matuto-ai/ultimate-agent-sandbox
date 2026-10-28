@@ -65,6 +65,7 @@ SOURCES = (
     'uas/native_pi_retirement.py',
     'uas/native_pi_reset.py',
     'uas/native_pi_restore.py',
+    'uas/native_broker_audit.py',
     'uas/native_pi_rebind.py',
     'uas/native_claude_retirement.py',
     'uas/native_admission_broker.py',
@@ -159,9 +160,9 @@ SOURCES = (
     'runtime/workstation/diff_evaluator.c',
     'runtime/workstation/artifact_protocol.h',
 )
-# Explicit Gate closure: base126 / artifacts130 / command133 files.
+# Explicit Gate closure: base130 / artifacts134 / command137 files.
 # Fixed paths only; byte budgets remain the reviewed 256KiB/file and3MiB total.
-MAX_SOURCE_FILES=136
+MAX_SOURCE_FILES=137
 MAX_SOURCE_BYTES=256<<10
 MAX_SOURCE_TOTAL=3<<20
 

@@ -320,10 +320,13 @@ class NativeReviewHost:
         self.gates._require_owner()
         from .manager_actions import HumanSession, OwnerFence, REVIEW_ACTIONS
         from .forge_audit import ForgeAudit
-        if (type(session) is not HumanSession or type(audit) is not ForgeAudit
+        from .native_broker_audit import NativeBrokerAudit
+        if (type(session) is not HumanSession or type(audit) not in (ForgeAudit, NativeBrokerAudit)
                 or session.room_id != self.identity.binding.room_id
                 or session.instance_id != self.identity.binding.room_instance
-                or audit.deployment_id != session.deployment_id):
+                or audit.deployment_id != session.deployment_id
+                or type(audit) is NativeBrokerAudit and (audit.session is not session
+                    or audit.client is not self.identity.ingresses[0].client)):
             raise LedgerError('MANAGER_AUTHENTICATION_REQUIRED')
         fence = OwnerFence(self.identity.ledger,session,value,REVIEW_ACTIONS,audit=audit,
                            repository=self.identity.binding.repository,supervisor=self.identity.supervisor)

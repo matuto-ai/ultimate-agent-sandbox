@@ -153,15 +153,19 @@ class ReadBrokerClient:
             self.projection_enabled = ready.get('projection_enabled') is True
             self.gate_enabled = ready.get('gate_enabled') is True
             self.review_enabled = ready.get('review_enabled') is True
+            self.manager_audit_enabled = ready.get('manager_audit_enabled') is True
             extensions={**({'mutation_enabled':True} if self.write_enabled else {}),
                 **({'projection_enabled':True} if self.projection_enabled else {}),
                 **({'gate_enabled':True} if self.gate_enabled else {}),
-                **({'review_enabled':True} if self.review_enabled else {})}
+                **({'review_enabled':True} if self.review_enabled else {}),
+                **({'manager_audit_enabled':True} if self.manager_audit_enabled else {})}
             if ready != {**expected,**extensions}:
                 raise OriginDenied('uncorrelated Broker bootstrap')
             self.worker = HeldOrigin(record)
 
     def prepare(self, envelope, origin, *, authorize=None):
+        if getattr(self, '_manager_audit_active', None) is not None:
+            raise LedgerError('NATIVE_AUDIT_PROVIDER_FENCED')
         if self.closed or type(origin) is not Origin: raise LedgerError('FORBIDDEN')
         if type(envelope) is dict and envelope.get('kind') == 'admission-read':
             if (set(envelope) != {'id', 'kind', 'issue_number'}
@@ -191,6 +195,8 @@ class ReadBrokerClient:
         return packet
 
     def perform(self, packet):
+        if getattr(self, '_manager_audit_active', None) is not None:
+            raise LedgerError('NATIVE_AUDIT_PROVIDER_FENCED')
         with self.lock:
             if self.closed or not alive(self.worker.pidfd): raise LedgerError('BROKER_UNAVAILABLE')
             if packet.get('request_id') not in self._guards: raise LedgerError('FORBIDDEN')
@@ -235,6 +241,8 @@ class ReadBrokerClient:
                 self._guards.pop(packet['request_id'], None)
 
     def denied(self, code):
+        if getattr(self, '_manager_audit_active', None) is not None:
+            raise LedgerError('NATIVE_AUDIT_PROVIDER_FENCED')
         # The code is chosen by the trusted controller, never raw client prose.
         with self.lock:
             if self.closed: raise LedgerError('AUDIT_UNAVAILABLE')
@@ -408,6 +416,7 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
         supervisor = HeldOrigin(record)
     try:
         ready = _json({'kind':'READ_BROKER_READY','nonce':hello['nonce'],'binding':hello['binding'],
+            'manager_audit_enabled':True,
             **({'mutation_enabled':True} if broker.mutations is not None else {}),
             **({'projection_enabled':True} if broker.projections is not None else {}),
             **({'gate_enabled':True} if broker.gates is not None else {}),
@@ -434,6 +443,13 @@ def serve(channel, broker, *, supervisor_uid, supervisor_gid):
             except (OriginDenied, ValueError):
                 broker.denied('WRONG_PROCESS')
                 raise
+            # Dedicated trusted-host audit fence, never a Participant/provider
+            # route. Its failure path must not append audit rows under its own
+            # retained SQLite transaction or continue ordinary serving.
+            from .native_broker_audit import KIND, serve_audit_fence
+            if type(packet) is dict and packet.get('kind') == KIND:
+                serve_audit_fence(channel, broker, supervisor, packet)
+                continue
             if (type(packet) is not dict or set(packet) not in ({'request_id','room_id','room_instance','origin','envelope'},
                         {'request_id','room_id','room_instance','denial'})
                     or packet['room_id'] != broker.binding.room_id or packet['room_instance'] != broker.room_instance

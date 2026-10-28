@@ -115,15 +115,15 @@ class RunReview:
         if self.native_host is not None:
             scope = self.identity.active
             if scope is None: raise LedgerError('NATIVE_REVIEW_SCOPE_REQUIRED')
-            with scope.commit():
-                from contextlib import nullcontext
-                if _manager_fence is not None:
-                    from .manager_actions import OwnerFence
-                    if (type(_manager_fence) is not OwnerFence or scope.human_fence is None
-                            or _manager_fence.session is not scope.human_fence.session
-                            or _manager_fence.value != scope.human_fence.value
-                            or _manager_fence.supervisor is not self.identity.supervisor):
-                        raise LedgerError('INVALID_NATIVE_REVIEW_SCOPE')
+            from contextlib import nullcontext
+            if _manager_fence is not None:
+                from .manager_actions import OwnerFence
+                if (type(_manager_fence) is not OwnerFence or scope.human_fence is None
+                        or _manager_fence.session is not scope.human_fence.session
+                        or _manager_fence.value != scope.human_fence.value
+                        or _manager_fence.supervisor is not self.identity.supervisor):
+                    raise LedgerError('INVALID_NATIVE_REVIEW_SCOPE')
+            with (_manager_fence.prepare() if _manager_fence is not None else nullcontext()), scope.commit():
                 def native_authorize(*_):
                     scope.check_state(self.ledger.snapshot()['state'])
                     return authorize() is True

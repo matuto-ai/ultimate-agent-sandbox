@@ -32,8 +32,10 @@ class NativeHumanReviewInbox:
     def __init__(self,session,audit):
         from .manager_actions import HumanSession
         from .forge_audit import ForgeAudit
-        if (type(session) is not HumanSession or type(audit) is not ForgeAudit
-                or audit.deployment_id!=session.deployment_id):
+        from .native_broker_audit import NativeBrokerAudit
+        if (type(session) is not HumanSession or type(audit) not in (ForgeAudit, NativeBrokerAudit)
+                or audit.deployment_id!=session.deployment_id
+                or type(audit) is NativeBrokerAudit and audit.session is not session):
             raise LedgerError('MANAGER_AUTHENTICATION_REQUIRED')
         self.session,self.audit=session,audit
         self._lock=threading.Lock();self._items={};self._queue=[];self._consumer=None
