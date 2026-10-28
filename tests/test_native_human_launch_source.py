@@ -15,12 +15,12 @@ from uas.native_image_package import canonical
 from uas.native_qualification import QualificationPlan
 from uas.native_human_launch import (GRANTS_DIRECTORY, NativeHumanLaunch, _identity, _parse,
     host_bindings, open_grant, raw_stream_identity, read_held_grant, reference)
-from test_native_qualification import NativeQualificationTests
+import test_native_qualification as qualification_fixture
 
 
 class NativeHumanLaunchSourceTests(unittest.TestCase):
     def setUp(self):
-        fixture=NativeQualificationTests();fixture.setUp();self.plan=fixture.plan()
+        fixture=qualification_fixture.NativeQualificationTests();fixture.setUp();self.plan=fixture.plan()
         self.value={'version':1,'purpose':'one-original-native-qualification',
             'deployment_id':self.plan.config['deployment']['id'],'room_id':self.plan.room['id'],
             'configuration_sha256':self.plan.config_digest,'installation_nonce':self.plan.installation['nonce'],
@@ -49,6 +49,28 @@ class NativeHumanLaunchSourceTests(unittest.TestCase):
             return N(**{name:getattr(info,name) for name in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns',
                 'st_gid','st_nlink')},st_uid=0,st_mode=stat.S_IFREG|0o600)
         return fd,controlled
+
+    def test_finite_new_module_loader_preserves_ids_without_fixture_reexports(self):
+        # Loading is not executing. Keep this exact inventory finite: all new
+        # B2 test modules plus the original fixture module they may reference.
+        # The global partition verifier remains unchanged and still rejects
+        # duplicate IDs; never repair this by excluding or deduplicating tests.
+        import importlib
+        modules=('test_native_qualification','test_native_human_launch_source',
+                 'test_native_human_host_source','test_native_human_tls')
+        identifiers=[]
+        for name in modules:
+            pending=[unittest.defaultTestLoader.loadTestsFromModule(importlib.import_module(name))]
+            current=[]
+            while pending:
+                item=pending.pop()
+                if isinstance(item,unittest.TestSuite):pending.extend(item)
+                else:
+                    self.assertEqual(type(item).__module__,name,'fixture TestCase reexported from '+name)
+                    current.append(item.id())
+            self.assertTrue(current,name)
+            identifiers.extend(current)
+        self.assertEqual(len(identifiers),len(set(identifiers)))
 
     def test_default_absent_and_exact_existing_fixed_reference_only(self):
         self.assertIsNone(reference(self.plan));self.selected()
