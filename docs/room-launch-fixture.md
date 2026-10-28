@@ -95,6 +95,15 @@ The unrelated same-UID task negative retains caller-owned evidence before its
 fixed Docker CLI launch. Launch, accept, service and output-collection stages
 have elapsed timestamps; each output stream retains at most 4096 bytes (also
 bounded after JSON escaping), with total byte counts and EOF/truncation state.
+Preparation has a five-second marker-readiness phase and a separate five-second
+parent release phase, started once on validating the complete marker, before
+lock acquisition and every fresh release check. The hosted smoke follows the
+same phase boundary. The child independently requires G within five seconds
+after emitting its marker; delayed delivery or scheduling can still exhaust
+that stricter child window. Parent release eligibility is checked immediately
+before G, not a hard wall-time interruption of synchronous callbacks. No
+check is cached or skipped; all fresh checks and G remain under the same lock.
+Release start/deadline/write timestamps are diagnostics, not authority evidence.
 The accept and collection deadlines remain five seconds each, and draining
 output does not restart them. A timeout or early client exit is incomplete
 evidence, never an authority refusal. Pre-cleanup process state is distinct

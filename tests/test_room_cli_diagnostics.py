@@ -6,6 +6,7 @@ import sys
 from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE
 from unittest import TestCase
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 VM = Path(__file__).parent / 'vm'
 sys.path.insert(0, str(VM))
@@ -16,10 +17,11 @@ finally:
 
 
 class CLIDiagnosticsTests(TestCase):
-    def exercise(self, fault=None, *, noisy=False):
+    def exercise(self, fault=None, *, noisy=False, startup=.1, lock_cost=0, check_cost=0,
+                 gate_fault=None, delivery_lag=0, child_schedule=0, compose=False):
         checks = {}
         clock = [0.0]
-        calls = {'select': [], 'read': 0, 'wait': 0, 'killed': False}
+        calls = {'select': [], 'read': 0, 'wait': 0, 'killed': False, 'order': [], 'launcher': 0}
         error = OSError('inert original ' + str(fault))
         stdin = Mock(); stdin.fileno.return_value = 23
         stdout = Mock(); stdout.fileno.return_value = 21
@@ -47,11 +49,14 @@ class CLIDiagnosticsTests(TestCase):
                 return ([listener] if fault=='early-at-release' else []), [], []
             if checks.get('stage') == 'startup' and not calls['killed']:
                 if fault=='startup-timeout':clock[0]+=timeout;return [],[],[]
-                clock[0] += min(1,timeout) if fault=='startup-flood' else .1
+                clock[0] += min(1,timeout) if fault=='startup-flood' else startup
                 if fault=='startup-listener':return [listener],[],[]
                 if fault=='startup-stdout':return [stdout],[],[]
                 return [stderr],[],[]
             if listener in readers:
+                if calls.get('child_expired'):
+                    clock[0] += timeout
+                    return [], [], []
                 if fault in ('accept-timeout', 'early-exit', 'kill', 'cleanup-wait'):
                     clock[0] += timeout
                     return [], [], []
@@ -110,9 +115,49 @@ class CLIDiagnosticsTests(TestCase):
         def write(fd, data):
             self.assertEqual(23,fd);self.assertEqual(DENIED_HELP_RELEASE,data)
             calls['write_stage']=checks['stage']
+            if compose:
+                self.assertTrue(calls['locked'])
+                calls['order'].append('G')
+                # Run the actual child barrier with the same logical timeline,
+                # without a real process/thread. Its first clock is emission;
+                # its select resumes only when the parent's G is scheduled.
+                from uas import room_probe
+                import uas.git_launcher as launcher
+                emission = checks['release']['started_elapsed_seconds'] - delivery_lag
+                child_now = [emission]
+                def child_select(*args):
+                    child_now[0] = clock[0] + child_schedule
+                    return [0], [], []
+                def git(*args, **kwargs):
+                    calls['launcher'] += 1
+                    return 128
+                with patch.object(room_probe.time, 'monotonic', side_effect=lambda: child_now[0]), \
+                     patch.object(room_probe.os, 'write', side_effect=lambda fd, data: len(data)), \
+                     patch.object(room_probe.os, 'read', return_value=b'G'), \
+                     patch.object(room_probe.select, 'select', side_effect=child_select), \
+                     patch.object(launcher, 'main', side_effect=git):
+                    try: room_probe.denied_help_ready()
+                    except RuntimeError: calls['child_expired'] = True
             if fault=='release-write':raise error
             return 0 if fault=='short-release' else 1
         def release(write_fixed):
+            if compose:
+                tree = ast.parse((VM/'room_service.py').read_text())
+                callback = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'release_unrelated')
+                class Lock:
+                    def __enter__(inner):
+                        calls['order'].append('lock'); clock[0] += lock_cost; calls['locked'] = True
+                    def __exit__(inner, *args):
+                        calls['order'].append('unlock'); calls['locked'] = False
+                def gate(name):
+                    self.assertTrue(calls['locked'])
+                    calls['order'].append(name); clock[0] += check_cost
+                    if gate_fault == name: raise error
+                env = dict(supervisor=SimpleNamespace(_locked=Lock), current=lambda: gate('current'),
+                           resources=lambda: gate('resources'), backend=SimpleNamespace(admit=lambda state: gate('admit')),
+                           state=object(), broker=SimpleNamespace(require=lambda: gate('broker')))
+                exec(compile(ast.Module(body=[callback], type_ignores=[]), '<actual release callback>', 'exec'), env)
+                return env['release_unrelated'](write_fixed)
             if fault=='release-gate':raise error
             if fault=='release-timeout':clock[0]+=5
             if fault!='no-release':write_fixed()
@@ -289,3 +334,65 @@ class CLIDiagnosticsTests(TestCase):
         for gate in ('current()','resources()','backend.admit(state)','broker.require()'):
             self.assertLess(text.index(gate),text.index('write()'))
         self.assertIn('with supervisor._locked()',text)
+
+
+    def test_parent_and_child_release_phases_compose_without_spending_startup_twice(self):
+        checks, result, caught, _, _, _, calls = self.exercise(
+            startup=2.732526, check_cost=3.6527/4, compose=True)
+        self.assertIsNone(caught)
+        self.assertIsNotNone(result)
+        self.assertEqual(['lock','current','resources','admit','broker','G','unlock'], calls['order'])
+        self.assertEqual(1, calls['launcher'])
+        self.assertEqual(5, checks['timeout_seconds']['release'])
+        self.assertEqual(2.732526, checks['release']['started_elapsed_seconds'])
+        self.assertEqual(7.732526, checks['release']['deadline_elapsed_seconds'])
+        self.assertEqual(6.385226, checks['release']['sent_elapsed_seconds'])
+        self.assertEqual('collected', checks['status'])
+        self.assertNotIn('authority_refusal_proved', checks)
+
+    def test_startup_lock_and_fresh_check_costs_fail_at_exact_phase_bounds(self):
+        for kwargs in (dict(startup=5), dict(startup=5.1), dict(lock_cost=5),
+                       dict(check_cost=1.25), dict(lock_cost=2, check_cost=.75),
+                       dict(check_cost=2)):
+            with self.subTest(kwargs=kwargs):
+                checks, result, caught, _, _, serve, calls = self.exercise(compose=True, **kwargs)
+                self.assertIsNotNone(caught); self.assertIsNone(result)
+                self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
+                serve.assert_not_called(); self.assertFalse(checks['startup']['release_sent'])
+                self.assertEqual('failed', checks['status'])
+                self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_each_fresh_gate_failure_preserves_locked_order_and_never_writes(self):
+        gates = ['current','resources','admit','broker']
+        for index, gate in enumerate(gates):
+            with self.subTest(gate=gate):
+                checks, result, caught, original, _, serve, calls = self.exercise(compose=True, gate_fault=gate)
+                self.assertIs(original, caught); self.assertIsNone(result)
+                self.assertEqual(['lock', *gates[:index+1], 'unlock'], calls['order'])
+                self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
+                serve.assert_not_called(); self.assertEqual('release', checks['stage'])
+                self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_delayed_delivery_and_G_scheduling_cannot_extend_child_deadline(self):
+        for lag, schedule in ((2,0), (0,2), (1,1)):
+            with self.subTest(lag=lag, schedule=schedule):
+                checks, result, caught, _, _, serve, calls = self.exercise(
+                    compose=True, startup=2.73, check_cost=.8, delivery_lag=lag, child_schedule=schedule)
+                self.assertTrue(checks['startup']['release_sent'])
+                self.assertEqual(0, calls['launcher']); self.assertTrue(calls['child_expired'])
+                self.assertIsInstance(caught, TimeoutError); self.assertIsNone(result)
+                serve.assert_not_called(); self.assertFalse(checks['connected'])
+                self.assertNotIn('authority_refusal_proved', checks)
+                self.assertEqual('failed', checks['status']); self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_marker_fragments_never_restart_startup_or_release_phase(self):
+        checks, _, caught, _, _, _, calls = self.exercise('startup-fragmented', startup=2, compose=True)
+        self.assertIsNone(caught)
+        self.assertEqual(4, checks['release']['started_elapsed_seconds'])
+        self.assertEqual(9, checks['release']['deadline_elapsed_seconds'])
+        waits = [t for has_listener,t in calls['select'] if has_listener and t > 0]
+        self.assertEqual([5,3], waits[:2])
+        checks, result, caught, _, _, serve, calls = self.exercise('startup-fragmented', startup=2.5, compose=True)
+        self.assertIsNotNone(caught); self.assertIsNone(result)
+        self.assertNotIn('release', checks); self.assertNotIn('write_stage', calls)
+        serve.assert_not_called()

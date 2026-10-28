@@ -152,6 +152,12 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         self.assertGreater(block.rindex('broker.require()'), block.index('fresh_digest == digest'))
         self.assertLess(block.rindex('held.current()'), block.index('os.write(go_w'))
         self.assertIn('close_pipe(go_w)', block)
+        self.assertLess(block.rindex('broker.require()'), block.index('time.monotonic() < release_deadline'))
+        self.assertLess(block.index('time.monotonic() < release_deadline'), block.index('os.write(go_w'))
+        self.assertNotIn('release_deadline =', block)
+        self.assertIn('release_deadline = marker_observed + DENIED_HELP_SETUP_SECONDS', self.source)
+        self.assertLess(self.source.index('release_deadline = marker_observed'),
+                        self.source.index("checks['unrelated_readiness'] ="))
         source = ast.parse((ROOT / 'uas/room_probe.py').read_text())
         constants = {n.targets[0].id: ast.literal_eval(n.value) for n in source.body
                      if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
@@ -165,7 +171,7 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         with patch.object(smoke.time, 'monotonic', return_value=0), \
                 patch.object(smoke.select, 'select', side_effect=[([30], [], []), ([30], [], []), ([], [], [])]), \
                 patch.object(smoke.os, 'read', side_effect=[marker[:8], marker[8:]]) as read:
-            smoke.read_probe_ready(10, 20, 30, child, marker, 5)
+            self.assertEqual(0, smoke.read_probe_ready(10, 20, 30, child, marker, 5))
         self.assertEqual(read.call_args_list[0].args, (30, 65))
 
     def test_readiness_rejects_early_socket_stdout_exit_bad_duplicate_eof_and_timeout(self):

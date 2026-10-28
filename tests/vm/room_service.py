@@ -462,7 +462,7 @@ def prove_foreign_listener_admission(supervisor, endpoint_, probe, *, run, check
 def observe_unrelated_cli(listener, container, serve, *, checks, release):
     """Bounded evidence around the existing fixed same-UID negative, not denial.
 
-    Draining output never extends either five-second deadline. Killing this
+    Draining output never extends any five-second phase deadline. Killing this
     owned docker CLI does not prove its daemon-owned container task stopped;
     the caller's exact Room teardown remains mandatory on every failure.
     """
@@ -471,7 +471,8 @@ def observe_unrelated_cli(listener, container, serve, *, checks, release):
     started = time.monotonic()
     checks.update(status='in_progress', stage='launch', stage_elapsed_seconds={},
                   connected=False, returncode=None, capture_limit_bytes=4096,
-                  timeout_seconds={'startup': DENIED_HELP_SETUP_SECONDS, 'accept': 5, 'collect': 5, 'cleanup': 5},
+                  timeout_seconds={'startup': DENIED_HELP_SETUP_SECONDS, 'release': DENIED_HELP_SETUP_SECONDS,
+                                   'accept': 5, 'collect': 5, 'cleanup': 5},
                   startup={'marker_observed': False, 'release_sent': False, 'marker_bytes': 0})
     buffers = {name: bytearray() for name in ('stdout', 'stderr')}
     counts = {name: 0 for name in buffers}
@@ -532,15 +533,24 @@ def observe_unrelated_cli(listener, container, serve, *, checks, release):
             if prefix == DENIED_HELP_READY:
                 checks['startup'].update(marker_observed=True, marker_bytes=len(prefix), marker=prefix.decode('ascii'))
                 break
+        # Start once at the validated marker, before lock acquisition and all
+        # fresh checks. This guards G eligibility, not callback wall runtime.
+        # The child's emission-based deadline remains independently authoritative.
+        release_started = time.monotonic()
+        release_deadline = release_started + DENIED_HELP_SETUP_SECONDS
+        checks['release'] = {'started_elapsed_seconds': round(release_started - started, 6),
+                             'deadline_elapsed_seconds': round(release_deadline - started, 6)}
         stage('release')
         def write_fixed_release():
             nonlocal stdin_closed
             require(not checks['startup']['release_sent'], 'duplicate unrelated preparation release')
-            require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
+            require(time.monotonic() < release_deadline, 'unrelated CLI release deadline')
             ready, _, _ = select.select([listener], [], [], 0)
             require(not ready, 'unrelated CLI connected before preparation release')
+            require(time.monotonic() < release_deadline, 'unrelated CLI release deadline')
             require(os.write(process.stdin.fileno(), DENIED_HELP_RELEASE) == 1, 'incomplete unrelated preparation release')
             checks['startup']['release_sent'] = True
+            checks['release']['sent_elapsed_seconds'] = round(time.monotonic() - started, 6)
             process.stdin.close(); stdin_closed = True
         # The caller holds its lifecycle lock and rechecks fresh prerequisites
         # through this exact write, not just before returning a readiness bit.

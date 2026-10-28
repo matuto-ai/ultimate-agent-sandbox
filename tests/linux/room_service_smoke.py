@@ -160,6 +160,7 @@ def read_probe_ready(listener, stdout, stderr, child, expected, deadline):
             and not select.select([listener, stdout, stderr], [], [], 0)[0],
             'unexpected activity after unrelated readiness')
     require(time.monotonic() < deadline, 'unrelated readiness deadline')
+    return time.monotonic()
 
 
 def collect_probe_output(stdout, stderr, deadline):
@@ -317,8 +318,11 @@ def protocol(root, jail, endpoint):
         sibling = helper.OwnedChild(pid)
         for fd in (go_r, out_w, err_w): close_pipe(fd)
         for fd in (out_r, err_r): os.set_blocking(fd, False)
-        read_probe_ready(listener, out_r, err_r, sibling, DENIED_HELP_READY,
+        marker_observed = read_probe_ready(listener, out_r, err_r, sibling, DENIED_HELP_READY,
                          time.monotonic() + DENIED_HELP_SETUP_SECONDS)
+        # Same parent phase contract as the VM: marker observation, then lock
+        # and every fresh check, then G; the child's own deadline still rules.
+        release_deadline = marker_observed + DENIED_HELP_SETUP_SECONDS
         checks['unrelated_readiness'] = {'observed': True, 'role': 'DIAGNOSTIC_ONLY_NOT_AUTHORITY'}
         with lock:
             current(); resources(); held.current(); broker.require()
@@ -334,6 +338,7 @@ def protocol(root, jail, endpoint):
             finally: os.close(fresh_fd)
             # Recheck after executable observation and through the single G write.
             current(); resources(); held.current(); broker.require()
+            require(time.monotonic() < release_deadline, 'unrelated release deadline')
             require(os.write(go_w, DENIED_HELP_RELEASE) == 1, 'probe release incomplete')
             close_pipe(go_w)
         listener.settimeout(5)
