@@ -265,7 +265,8 @@ Unexpected transport/owner exceptions stop conservatively with the attempted ID
 retained rather than being swallowed or automatically retried.
 
 This input is limited to one Run and cannot be combined with `next_request`.
-Authenticated external Manager hosting and same-Run native crash restoration are
-still missing. No actual live scenario policy has been selected by this source:
+Authenticated external Manager hosting remains missing. The one-Run driver now
+composes [retained-owner Pi crash restoration](native-pi-same-run-restore.md),
+which still requires actual native qualification. No actual live scenario policy has been selected by this source:
 required Gates must come from the real configured snapshot, never a substituted
 weaker policy to make qualification succeed.

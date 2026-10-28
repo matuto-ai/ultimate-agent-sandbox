@@ -323,8 +323,14 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 gate_operations=NativeGateOperations(recruitment.root.review_host,gate_resources)
                 stack.callback(gate_operations.close)
                 NativeGateWorkflow(recruitment.root.review_host,gate_operations.control)
+            # One-Run crash recovery retains these exact live host/Hub/Claude
+            # owners. The optional second-Run flow remains a separate contract.
+            from .native_pi_restore import NativePiSameRunRestore
+            pi_restoration=(None if next_request is not None else
+                NativePiSameRunRestore(owner,recruitment,human_request,budget,git_operations=git_operations))
             driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request,
-                                       git_operations=git_operations,human_actions=human_actions)
+                                       git_operations=git_operations,human_actions=human_actions,
+                                       pi_restoration=pi_restoration)
             result=driver.run()
             return {'version':1,'status':'NATIVE_RUN_SESSION_FINISHED','room_id':room['id'],'instance':instance,
                 'run_id':result['current_run'],'product_run_created':True,'reviewer_attached':True,

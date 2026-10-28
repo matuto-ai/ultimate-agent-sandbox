@@ -30,7 +30,8 @@ class CIPartitionTests(unittest.TestCase):
             'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
             'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
             'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
-            'test_diff_native', 'test_gate_forge_hub'})
+            'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
+            'test_manager_action_host', 'test_forge_assignment'})
         self.assertFalse(ci.SLOW_MODULES & ci.INTEGRATION_MODULES)
         for module in ci.INTEGRATION_MODULES:
             self.assertEqual('integration', ci.partition_for(module + '.Case.test_one'))
@@ -54,7 +55,7 @@ class CIPartitionTests(unittest.TestCase):
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
         self.assertEqual(len(groups['slow']), 9)
-        self.assertEqual(len(groups['integration']), 12)
+        self.assertEqual(len(groups['integration']), 15)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))

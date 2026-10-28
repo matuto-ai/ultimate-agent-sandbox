@@ -64,6 +64,8 @@ SOURCES = (
     'uas/native_completed_retirement.py',
     'uas/native_pi_retirement.py',
     'uas/native_pi_reset.py',
+    'uas/native_pi_restore.py',
+    'uas/native_pi_rebind.py',
     'uas/native_claude_retirement.py',
     'uas/native_admission_broker.py',
     'uas/native_checkout_handoff.py',

@@ -25,6 +25,7 @@ from uas.native_run_admission import NativeRunLauncher,NativeHumanRunRequest
 from uas.native_reviewer_recruitment import NativeReviewerRecruitment
 from uas.native_review_host import NativeReviewHost
 from uas.native_session_driver import NativeSessionDriver
+from uas.native_pi_restore import NativePiSameRunRestore
 from uas.native_checkout_handoff import NativeCheckoutClient
 from uas.forge_read_service import ReadBrokerClient
 from uas.ledger import Origin
@@ -133,11 +134,20 @@ class NativeGateSessionCompositionTests(unittest.TestCase):
             self.assertIs(host.gates.control.service.resolver,host.sources)
             self.assertIs(host.identity.ledger,c.ledger);self.assertIs(host.identity.supervisor,c.supervisor)
             self.assertIs(driver.owner.launcher.gate_profile,self.gate_profile)
+            self.assertIs(type(driver.pi_restoration),NativePiSameRunRestore)
+            self.assertIs(driver.pi_restoration.owner,driver.owner)
+            self.assertIs(driver.pi_restoration.recruitment,driver.recruitment)
+            self.assertIs(driver.pi_restoration.graph.git,driver.git_operations)
             self.assertEqual(c.ledger.snapshot()['state']['runs'][driver.owner.run_id(self.request.operation_id)]['status'],'ACTIVE')
             self.captured['driver']=driver
             return {'current_run':driver.owner.run_id(self.request.operation_id),'outcome':'inconclusive'}
         def channel(*args,**kwargs):
             value=Mock();self.channels.append(value);return value
+        def restoration_init(value,owner,recruitment,request,budget,*,git_operations=None):
+            # This composition test supplies inert native roots; actual restore
+            # capture/guards have their own finite source-only test inventory.
+            value.owner=owner;value.recruitment=recruitment;value.request=request;value.budget=budget
+            value.graph=N(git=git_operations)
         def endpoint_init(value,path,**kwargs):value.path=Path(path)
         metadata={'seats':[{'participant_id':s['participant'],'capabilities':next(p['capabilities'] for p in c.room['profiles'] if p['id']==s['profile'])+['peer-traffic']} for s in c.room['seats']]}
         targets=Mock();targets.resolver=source
@@ -156,6 +166,7 @@ class NativeGateSessionCompositionTests(unittest.TestCase):
                 patch.object(NativeRunLauncher,'__init__',launcher_init),patch.object(NativeRunLauncher,'launch',native_launch),
                 patch.object(NativeCheckoutClient,'__init__',checkout_init),patch.object(NativeCheckoutClient,'close'),
                 patch.object(NativeReviewerRecruitment,'_launch',recruit_native),patch.object(NativeGitOperations,'__init__',git_operations),
+                patch.object(NativePiSameRunRestore,'__init__',restoration_init),
                 patch.object(session,'_gate_listener',side_effect=channel),patch.object(NativeGateResources,'from_session',side_effect=gate_resources),
                 patch('uas.native_gate_operations.ArtifactTargets',return_value=targets),patch.object(NativeSessionDriver,'run',driver_run)]
             for value in patches:stack.enter_context(value)

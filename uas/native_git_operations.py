@@ -162,6 +162,59 @@ class NativeGitOperations:
         self.owner._require_owner()
         raise LedgerError('NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE')
 
+    def require_pi_restore(self, old):
+        """Structural cut only: the old Pi is dead, so live _current cannot apply."""
+        from .git_process import GitChildAuthority
+        if (self.closed or self._capability is not None or self.pi is not old
+                or self.reviewer.pi is not old or self.reviewer.root is not self.claude
+                or self.identity is not self.reviewer.root.review_host.identity
+                or self.identity.ingresses != self.ingresses
+                or self.ingresses != (old.forge_service, self.claude.forge_service)
+                or self.processes != (old.launch.origin, self.claude.origin)
+                or type(self.service) is not GitSupervisor or self.service.closed
+                or type(self.service.children) is not GitChildAuthority
+                or self.service.native_resources is not self.resources):
+            raise LedgerError('NATIVE_RESTORE_GIT_GRAPH_CHANGED')
+        pair = self.service.seats.get(old.seat.participant_id)
+        if (not pair or pair[0].origin != old.forge_service.origin
+                or pair[0].process is not old.launch.origin
+                or self.service.children.seats.get(old.launch.origin.identity) is not pair[0]):
+            raise LedgerError('NATIVE_RESTORE_GIT_SEAT_CHANGED')
+        return pair
+
+    def prepare_pi_restore(self, old, new):
+        pair = self.require_pi_restore(old)
+        process = new.launch.origin
+        if (new.launch.native_recipe.scope != self.scope
+                or new.launch.native_recipe.git_profile is not self.resources.profile
+                or process.identity in self.service.children.seats
+                or process.credentials[1:] != old.launch.origin.credentials[1:]):
+            raise LedgerError('NATIVE_RESTORE_GIT_NEW_SEAT')
+        # Corroborate only the already-held new process; no PID authority adoption.
+        task = _Task(self.service.children.view, process.credentials[0], expected=process.identity)
+        try:
+            if task.namespace != pair[0].namespace or len(task.status['NSpid']) != pair[0].pid_depth:
+                raise OriginDenied('resumed Pi changed admitted Git namespace')
+            return GitSeat(new.forge_service.origin, process,
+                lambda: self._seat_current(new.forge_service), task.namespace, len(task.status['NSpid']))
+        finally:
+            task.close()
+
+    def publish_pi_restore(self, new, seat):
+        """Private assignment phase called only after NativePiRebind validation.
+
+        No new service, coordinator, child authority, listener or effect registry.
+        Existing unknown workers/transactions retain their original attribution.
+        """
+        old = self.pi
+        worker = self.service.seats[old.seat.participant_id][1]
+        del self.service.children.seats[old.launch.origin.identity]
+        self.service.children.seats[new.launch.origin.identity] = seat
+        self.service.seats[new.seat.participant_id] = (seat, worker)
+        self.pi = new
+        self.ingresses = (new.forge_service, self.ingresses[1])
+        self.processes = (new.launch.origin, self.processes[1])
+
     def close(self):
         if not self.closed:
             self.closed = True

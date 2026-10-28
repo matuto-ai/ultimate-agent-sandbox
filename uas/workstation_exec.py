@@ -315,7 +315,7 @@ class ExecLaunch:
         return None if self._native_readiness is None else json.loads(json.dumps(self._native_readiness))
 
     def attach_native(self, *, journal, scope, profile_digest, timeout=8, startup_observer=None,
-                      initial_state_timeout=None):
+                      initial_state_timeout=None, preceding_runtime_id=None):
         """Supervisor-only concrete fresh-native proof over exact Engine RPC.
 
         profile_digest identifies trusted immutable payload admission; this
@@ -344,21 +344,28 @@ class ExecLaunch:
                     raise ExecUnavailable('native recipe scope/payload mismatch')
                 self.native_recipe.validate_container(self.engine)
                 self._inspect(self.origin.credentials[0])
+            resume = getattr(getattr(self, 'native_recipe', None), 'resume', None)
+            if (resume is None) != (preceding_runtime_id is None):
+                raise ExecUnavailable('exact prior runtime required only for native resume')
             receiver = FixturePiRpcReceiver.attach_workstation(self, journal=journal,
                 scope=scope, timeout=timeout, startup_observer=startup_observer,
-                initial_state_timeout=initial_state_timeout)
+                initial_state_timeout=initial_state_timeout,
+                **({} if resume is None else {'require_existing_journal': True}))
             self.native_receiver = receiver
             if (receiver.incarnation_id != self.incarnation or receiver.scope != scope
                     or receiver.runtime_version != '1.4.0'):
                 raise ExecUnavailable('native attachment binding mismatch')
-            proof = receiver.prove_fresh_context()
+            proof = (receiver.prove_fresh_context() if resume is None else
+                     receiver.prove_resumed_context(session_id=resume.session_id,
+                         session_file=resume.session_file, preceding_runtime_id=preceding_runtime_id))
             prefix = (self.native_recipe.sessions + '/' if getattr(self, 'native_recipe', None) is not None
                       else '/uas/runtime/' + self.seat.slot + '/sessions/')
             if (type(proof) is not dict
                     or set(proof) != {'runtime_id', 'session_id', 'session_file', 'source'}
                     or any(type(proof[k]) is not str or not 0 < len(proof[k]) <= 1024
                            for k in proof)
-                    or proof['source'] != 'native-empty-session-and-no-pending-messages'
+                    or proof['source'] != ('native-empty-session-and-no-pending-messages' if resume is None
+                                          else 'native-existing-session-and-no-pending-messages')
                     or any(ord(c) < 32 or ord(c) == 127 for c in proof['session_file'])
                     or not proof['session_file'].startswith(prefix)
                     or str(Path(proof['session_file'])) != proof['session_file']

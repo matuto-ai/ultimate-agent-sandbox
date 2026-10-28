@@ -53,7 +53,7 @@ class FixturePiRpcReceiver:
 
     @classmethod
     def attach_workstation(cls, launch, *, journal, scope, timeout=8, startup_observer=None,
-                           initial_state_timeout=None):
+                            initial_state_timeout=None, require_existing_journal=False):
         """Attach native I/O separately from the Supervisor's held task object.
 
         Source integration seam only: it does not qualify image, mounts or
@@ -73,7 +73,7 @@ class FixturePiRpcReceiver:
                                 and not launch.origin.revoked and alive(launch.origin.pidfd)),
             journal=journal, runtime_version='1.4.0', scope=scope,
             incarnation_id=launch.incarnation, timeout=timeout, startup_observer=startup_observer,
-            initial_state_timeout=initial_state_timeout)
+            initial_state_timeout=initial_state_timeout, require_existing_journal=require_existing_journal)
         return receiver
 
     @staticmethod
@@ -89,7 +89,8 @@ class FixturePiRpcReceiver:
 
     def _initialize(self, *, journal, runtime_version, scope, timeout,
                     process=None, argv=None, cwd=None, env=None, incarnation_id=None,
-                    transport=None, task_alive=None, startup_observer=None, initial_state_timeout=None):
+                    transport=None, task_alive=None, startup_observer=None, initial_state_timeout=None,
+                    require_existing_journal=False):
         self._closed = False
         self._owns_process = process is None and transport is None
         self._task_alive = task_alive
@@ -124,17 +125,29 @@ class FixturePiRpcReceiver:
             self.scope = dict(scope)
             self.runtime_version = runtime_version
             self.timeout = timeout
-            self.db = sqlite3.connect(journal)
+            if type(require_existing_journal) is not bool:
+                raise NativeUnavailable('explicit existing journal requirement expected')
+            if require_existing_journal:
+                from pathlib import Path
+                # rw fails on absence; CREATE/INSERT are forbidden on restore.
+                self.db = sqlite3.connect(Path(journal).as_uri() + '?mode=rw', uri=True)
+            else:
+                self.db = sqlite3.connect(journal)
             self.db.execute('PRAGMA journal_mode=WAL')
             self.db.execute('PRAGMA synchronous=FULL')
-            self.db.execute('CREATE TABLE IF NOT EXISTS handoffs ('
+            if not require_existing_journal:
+                self.db.execute('CREATE TABLE IF NOT EXISTS handoffs ('
                             'logical_digest TEXT PRIMARY KEY, logical TEXT NOT NULL, '
                             'session_id TEXT NOT NULL, state TEXT NOT NULL, receipt TEXT)')
-            self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL)')
+                self.db.execute('CREATE TABLE IF NOT EXISTS binding (singleton INTEGER PRIMARY KEY CHECK(singleton=1), scope TEXT NOT NULL)')
             previous = self.db.execute('SELECT scope FROM binding WHERE singleton=1').fetchone()
-            if previous and json.loads(previous[0]) != self.scope:
+            if ((require_existing_journal and previous is None)
+                    or previous and json.loads(previous[0]) != self.scope):
                 raise NativeUnavailable('fixture scope cannot change without qualified native reset')
-            self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
+            if require_existing_journal:
+                self.db.execute('SELECT logical_digest, logical, session_id, state, receipt FROM handoffs LIMIT 0')
+            else:
+                self.db.execute('INSERT OR IGNORE INTO binding VALUES (1,?)', (json.dumps(self.scope),))
             self.db.commit()
             self.process = (transport if transport is not None else process) if not self._owns_process else subprocess.Popen(
                 argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -626,6 +639,24 @@ class FixturePiRpcReceiver:
             raise NativeUnavailable('fresh native context not proven')
         return {**self._binding, 'session_file': state['session_file'],
                 'source': 'native-empty-session-and-no-pending-messages'}
+
+    def prove_resumed_context(self, *, session_id, session_file, preceding_runtime_id):
+        """Existing-session observation only; never fresh/reset proof or authority."""
+        state = self._native('state', {})['state']
+        actual = self.rpc('get_state')['data']
+        if (type(session_id) is not str or not session_id or type(session_file) is not str
+                or type(preceding_runtime_id) is not str or not preceding_runtime_id
+                or state.get('readiness') != 'safe'
+                or any(state.get(k) != v for k, v in self._binding.items())
+                or state.get('session_id') != session_id or state.get('session_file') != session_file
+                or state.get('runtime_id') == preceding_runtime_id
+                or actual.get('sessionId') != session_id
+                or type(actual.get('messageCount')) is not int or actual['messageCount'] < 0
+                or type(actual.get('pendingMessageCount')) is not int or actual['pendingMessageCount'] != 0
+                or actual.get('isStreaming') is not False or actual.get('isCompacting') is not False):
+            raise NativeUnavailable('exact resumed native context not proven')
+        return {**self._binding, 'session_file': session_file,
+                'source': 'native-existing-session-and-no-pending-messages'}
 
     def event_snapshot(self):
         with self._condition:

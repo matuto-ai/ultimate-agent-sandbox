@@ -3,10 +3,14 @@ from copy import deepcopy
 import threading
 import hashlib
 import select
+import sqlite3
 import time
 
 from .claude_native_admission import NativeClaudeRoot, NativeClaudeSupervisorAdmission
 from .kernel_origin import OriginDenied, OriginUnavailable
+from .pi_runtime import NativeUnavailable
+from .workstation_exec import ExecUnavailable
+from .native_pi_recipe import NativeRecipeError
 from .ledger import LedgerError
 from .native_host_forge import NativeHostForge, NativePiHostForge
 from .native_review_host import NativeReviewHost
@@ -90,7 +94,8 @@ class NativeSessionDriver:
     an aggregate bound for nested Gates/Broker observations or lifecycle locks.
     Unknown effects stop this invocation with their original owners/journals intact.
     """
-    def __init__(self, owner, recruitment, request, budget, *, next_request=None, git_operations=None, human_actions=None):
+    def __init__(self, owner, recruitment, request, budget, *, next_request=None, git_operations=None, human_actions=None,
+                 pi_restoration=None):
         from .native_session import SessionBudget
         if (type(owner) is not NativeRunAdmission or type(recruitment) is not NativeReviewerRecruitment
                 or recruitment.owner is not owner or type(request) is not NativeHumanRunRequest
@@ -121,6 +126,14 @@ class NativeSessionDriver:
                 or next_request is not None):
             raise LedgerError('EXACT_NATIVE_HUMAN_ACTION_OWNER_REQUIRED')
         self.human_actions=human_actions
+        if pi_restoration is not None:
+            from .native_pi_restore import NativePiSameRunRestore
+            if (type(pi_restoration) is not NativePiSameRunRestore or pi_restoration.owner is not owner
+                    or pi_restoration.recruitment is not recruitment or pi_restoration.request is not request
+                    or pi_restoration.budget is not budget or pi_restoration.graph.git is not git_operations
+                    or next_request is not None):
+                raise LedgerError('EXACT_SAME_RUN_RESTORATION_OWNER_REQUIRED')
+        self.pi_restoration=pi_restoration
         if human_actions is not None:human_actions._bind(self)
         self.git_operations=git_operations
         self.owner,self.recruitment,self.request,self.budget=owner,recruitment,request,budget
@@ -162,7 +175,8 @@ class NativeSessionDriver:
                 'current_run':self.owner.run_id(self.request.operation_id),
                 'counts':dict(self.counts),'successor_started':len(self.runs)>0,
                 'phase':self.phase,'pending_successor':self.pending_successor,'last_observed_run':self.last_observed,
-                'crash_recovery':'explicit-native-restoration-unavailable',
+                'crash_recovery':('explicit-native-restoration-unavailable' if self.pi_restoration is None
+                                  else self.pi_restoration.result()),
                 'authority_restored_from_journal':False,
                 'human_actions':[] if self.human_actions is None else self.human_actions.snapshot(),
                 'pending_human_comments':self._pending_comments()}
@@ -171,6 +185,9 @@ class NativeSessionDriver:
         run=self.owner.run_id(self.request.operation_id)
         return sorted(key for key,row in self.owner.ledger.snapshot()['state'].get('review_comments',{}).items()
                       if row['run_id']==run and row['status'] in {'pending','unknown','confirmed-awaiting-target'})
+
+    def _restore_unknown(self):
+        return self.pi_restoration is not None and self.pi_restoration.phase == 'unknown'
 
     def _human_action(self,row):
         inbox=self.human_actions
@@ -266,6 +283,12 @@ class NativeSessionDriver:
                 if row['status']!='ACTIVE':return self._result('attention','canonical-run-not-active')
                 if self.budget.deadline-time.monotonic()<45:
                     return self._result('unknown','human-action-reconciliation-pending') if self._pending_comments() else self._result('inconclusive','operation-deadline')
+                # Only this loop preflight may restore an observed dead Pi.
+                # Never recover from an exception raised by delivery, Forge,
+                # Git, Gates or human mutation: their original unknowns hold.
+                if self.pi_restoration is not None and not self._pending_comments():
+                    if self.pi_restoration.preflight():
+                        self.next_delivery=self.next_completion=0.
                 self._current()
                 self._human_action(row)
                 if self._pending_comments():
@@ -295,6 +318,12 @@ class NativeSessionDriver:
         except TimeoutError:
             return self._result('unknown','operation-timeout-reconcile-original-owner')
         except (OriginDenied,OriginUnavailable):
+            if self._restore_unknown():
+                return self._result('unknown','native-restoration-unknown-reconcile-original-owner')
             return self._result('attention','native-authority-lost-restoration-required')
         except LedgerError as error:
-            return self._result('attention',error.code)
+            return self._result('unknown' if self._restore_unknown() else 'attention',error.code)
+        except (NativeUnavailable,ExecUnavailable,NativeRecipeError,OSError,sqlite3.Error):
+            # Neither runtime I/O failure nor a lost file/SQLite observation is
+            # permission to restart. Preserve the exact restoration marker.
+            return self._result('unknown','native-runtime-unverified-reconcile-original-owner')
