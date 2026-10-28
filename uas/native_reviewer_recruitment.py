@@ -56,7 +56,7 @@ class NativeReviewerRecruitment:
         self.review=review
         self._operation=None;self._pin=None;self._session=None;self._busy=False
         self._reserved=False;self._started=False;self.root=None;self.host=None
-        self._capability=None;self._source=None
+        self._capability=None;self._source=None;self._reset=None;self._context_generation=1
         self.journal=Path(self.launcher.resources['supervisor_directory'])/'claude-launch.json'
 
     @staticmethod
@@ -97,7 +97,9 @@ class NativeReviewerRecruitment:
         definition=state['peer_traffic']['definition']['participants'].get(self.selected['participant'])
         if not definition or definition['actor_id']!=self.selected['actor']:
             raise LedgerError('NATIVE_REVIEWER_BINDING')
-        if self._reserved:
+        if self._reserved and self._reset is not None:
+            self._reset.allowed(state)
+        elif self._reserved:
             row=state['fixture_context']['participants'][self.selected['participant']]
             if (row['status']!='READY' or row['context_generation']!=1 or row['reset'] is not None
                     or (row['bound_run'] or row['reserved_run'])!={'run_id':run['run_id'],'generation':run['generation']}):
@@ -110,7 +112,7 @@ class NativeReviewerRecruitment:
     def _allowed(self):
         with self._fence():return self._allowed_locked()
 
-    def recruit(self,operation_id,run_id,generation,*,session):
+    def recruit(self,operation_id,run_id,generation,*,session,reset_from=None):
         self.owner._require_owner();_token(operation_id);_token(run_id)
         if self._busy:raise LedgerError('NATIVE_REVIEWER_BUSY')
         if type(generation) is not int or not 1<=generation<2**53:
@@ -124,6 +126,17 @@ class NativeReviewerRecruitment:
                 if run is None or run['generation']!=generation:raise LedgerError('UNKNOWN_RUN')
                 if self._pin is None:self._pin=self._scope(run)
                 self._allowed_locked()
+                if reset_from is not None:
+                    from .native_reviewer_reset import NativeReviewerReset
+                    if self._reset is None:
+                        self._reset=NativeReviewerReset(self,reset_from,operation_id)
+                        self._context_generation=self._reset.next_generation
+                        self.journal=Path(self.launcher.resources['supervisor_directory'])/('claude-launch-g'+str(self._context_generation)+'.json')
+                    elif self._reset.previous is not reset_from:
+                        raise LedgerError('NATIVE_RESET_OWNERS_REQUIRED')
+                    self._reset.request_locked()
+                elif self._reset is not None:
+                    raise LedgerError('NATIVE_RESET_OWNERS_REQUIRED')
                 command=Command(operation_id,'context.native-reviewer-reserve',run_id,generation,
                     {'participant_id':self.selected['participant'],'configured_seat':self.selected,
                      'run_scope':self._pin})
@@ -138,15 +151,17 @@ class NativeReviewerRecruitment:
                     result={'run_id':run_id,'generation':generation,'participant_id':self.selected['participant'],
                             'context_generation':1,'status':'RESERVED'}
                     return Transition(state,(Event('context.native-reviewer-reserved',result),),result)
-                self.ledger.apply(command,session.human,authorize=lambda *_:self._allowed_locked(),decide=decide)
+                if self._reset is None:
+                    self.ledger.apply(command,session.human,authorize=lambda *_:self._allowed_locked(),decide=decide)
                 self._operation=(operation_id,run_id,generation);self._reserved=True
             if self.root is not None:
                 self._allowed()
-                if self.root.forge_service is None or self.root.review_host is None:
+                if self.root.forge_service is None or getattr(self.root,'review_host',None) is None:
                     raise LedgerError('NATIVE_REVIEWER_RECONCILIATION_REQUIRED')
                 with self.supervisor._locked():self.root.forge_service._current()
                 return self.root
             if self._started:raise LedgerError('NATIVE_REVIEWER_RECONCILIATION_REQUIRED')
+            if self._reset is not None:self._reset.retire()
             self._started=True
             return self._launch(operation_id,run_id,generation)
         finally:
@@ -160,11 +175,11 @@ class NativeReviewerRecruitment:
         admitted=AdmissionSeat(room['id'],instance,selected['participant'],selected['actor'],selected['profile'],
             tuple(sorted(set(self.profile['capabilities'])|{'peer-traffic'})),launch.admission_seat.receiver)
         scope={'room_id':room['id'],'participant_id':selected['participant'],'run_id':run_id,
-               'generation':generation,'context_generation':1}
+               'generation':generation,'context_generation':self._context_generation}
         self._allowed()
         recipe=NativeClaudeRecipe.from_configuration(StringIO(plan.config_text),room['id'],selected['participant'],
             resources['claude_manifest_path'],plan.installation['claude_manifest']['sha256'],seat=seat,scope=scope,
-            checkout=self._pin['checkout']['path'],home=room['state_root']+'/runtime/seat-b/contexts/1/home',
+            checkout=self._pin['checkout']['path'],home=room['state_root']+'/runtime/seat-b/contexts/'+str(self._context_generation)+'/home',
             runtime_root=room['state_root']+'/runtime',endpoint=resources['peer_path'],session_id=str(uuid.uuid4()),
             mounts=launch.mounts)
         if recipe.scope!=scope or recipe.checkout!=self._pin['checkout']['path']:
@@ -177,11 +192,17 @@ class NativeReviewerRecruitment:
             root=NativeClaudeRoot(host,admitted);self.root=root;launch.stack.callback(root.close)
             startup=NativeReviewStartup(self.pi.forge_service,self.ledger,self.provenance,self.resolver,self.binding,
                 reviewers=self.review['reviewers'],human_mergers=self.review['human_mergers'])
-            root.initialize_helper(launch.listener,journal=journal/'claude-native.db',control=launch.control,
+            initialize=root.initialize_helper if self._reset is None else root.prepare_helper
+            native_journal=journal/('claude-native.db' if self._reset is None else 'claude-native-g'+str(self._context_generation)+'.db')
+            initialize(launch.listener,journal=native_journal,control=launch.control,
                 hub_origin=launch.hub_origin,controller=launch.controller,control_lock=launch.control_lock,
                 operation_id=hashlib.sha256(('native-reviewer-'+instance+operation_id).encode()).hexdigest()[:32],
-                epoch=1,timeout=launch.budget.remaining(10),forge_client=self.owner.broker.client,
+                epoch=1 if self._reset is None else self._reset.next_epoch,
+                timeout=launch.budget.remaining(10),forge_client=self.owner.broker.client,
                 review_startup=startup,authorize=self._allowed)
+            if self._reset is not None:
+                self._reset.complete(root)
+                root.admit_prepared_helper()
             self._allowed()
             with self.supervisor._locked():root.forge_service._current()
             return root

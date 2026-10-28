@@ -241,7 +241,7 @@ class NativeClaudeRoot:
             forge_channel.close()
             raise
 
-    def initialize_helper(self, listener, *, journal, control, hub_origin,
+    def prepare_helper(self, listener, *, journal, control, hub_origin,
                           controller, control_lock, operation_id, epoch,
                           timeout=8, control_timeout=2, forge_client=None, review_startup=None, authorize=None):
         """Concrete fresh SDK/native/helper startup, without a worker thread.
@@ -270,7 +270,6 @@ class NativeClaudeRoot:
             value=deadline-time.monotonic()
             if value<=0:raise TimeoutError('native helper initialization deadline exceeded')
             return value
-        transfer_attempted=False
         try:
             if authorize is None:
                 self.launch(listener,timeout=remaining())
@@ -283,29 +282,63 @@ class NativeClaudeRoot:
             _authorized(authorize)
             self.attach_native(journal=journal,timeout=remaining())
             _authorized(authorize)
+            self._prepared_initialization = {
+                'deadline':deadline,'control':control,'hub_origin':hub_origin,
+                'controller':controller,'control_lock':control_lock,
+                'operation_id':operation_id,'epoch':epoch,'control_timeout':control_timeout,
+                'forge_client':forge_client,'review_startup':review_startup,'authorize':authorize}
+            self._prepared_admit_started = False
+            return self
+        except BaseException:
+            self._fail()
+            raise
+
+    def admit_prepared_helper(self):
+        """Consume the exact fresh owner once, within its original deadline."""
+        pending=getattr(self,'_prepared_initialization',None)
+        if pending is None or getattr(self,'_prepared_admit_started',True):
+            raise OriginDenied('one prepared native helper admission required')
+        self._prepared_admit_started=True
+        authorize=pending['authorize']
+        def remaining():
+            value=pending['deadline']-time.monotonic()
+            if value<=0:raise TimeoutError('native helper initialization deadline exceeded')
+            return value
+        transfer_attempted=False
+        try:
+            _authorized(authorize)
+            remaining()
             self.native_admission=NativeClaudeSupervisorAdmission(self,self.admission_seat,
-                control,hub_origin=hub_origin,controller=controller,
-                control_lock=control_lock,timeout=min(control_timeout,remaining()))
+                pending['control'],hub_origin=pending['hub_origin'],controller=pending['controller'],
+                control_lock=pending['control_lock'],timeout=min(pending['control_timeout'],remaining()))
             transfer_attempted=True
             _authorized(authorize)
-            self.native_admission.admit(operation_id,epoch)
-            self.native_admission.control.settimeout(min(control_timeout,remaining()))
+            self.native_admission.admit(pending['operation_id'],pending['epoch'])
+            self.native_admission.control.settimeout(min(pending['control_timeout'],remaining()))
             _authorized(authorize)
             self.helper_lease.admit(self.native_admission)
             _authorized(authorize)
-            if forge_client is not None:
+            if pending['forge_client'] is not None:
                 from .native_host_forge import NativeHostForge
-                self.forge_service = NativeHostForge(self.helper_lease, forge_client)
-            if review_startup is not None:
-                self.review_host = review_startup.attach(self.forge_service)
+                self.forge_service=NativeHostForge(self.helper_lease,pending['forge_client'])
+            if pending['review_startup'] is not None:
+                self.review_host=pending['review_startup'].attach(self.forge_service)
             _authorized(authorize)
             remaining()
             return self
         except BaseException:
             if not transfer_attempted:self._fail()
-            # A possibly stored ADMIT is reconciled through native_admission.status
-            # or helper_lease.status, not replaced by a fresh initialization.
+            # STATUS only after any possibly stored ADMIT; never resend.
             raise
+
+    def initialize_helper(self, listener, *, journal, control, hub_origin,
+                          controller, control_lock, operation_id, epoch,
+                          timeout=8, control_timeout=2, forge_client=None, review_startup=None, authorize=None):
+        self.prepare_helper(listener,journal=journal,control=control,hub_origin=hub_origin,
+            controller=controller,control_lock=control_lock,operation_id=operation_id,epoch=epoch,
+            timeout=timeout,control_timeout=control_timeout,forge_client=forge_client,
+            review_startup=review_startup,authorize=authorize)
+        return self.admit_prepared_helper()
 
     def receive_forge_once(self):
         if self.forge_service is None:

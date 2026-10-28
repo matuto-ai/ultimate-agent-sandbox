@@ -145,9 +145,42 @@ journal and refuses a second launch.
 The bounded dispatch loop now consumes both native Forge/review receivers after
 recruitment, and implementation Work Request delivery still follows canonical
 activation. This is not full implementation/review/completion qualification.
-It does not invent self-assignment authority, authenticated login, native
+It does not invent self-assignment authority, authenticated login, automatic
 reset/replacement/stop or participant Run Request routing. Reused reviewer
-contexts fail with `NATIVE_REVIEWER_RESET_REQUIRED`: reset needs independent
-proof of all old native/helper/SDK-host exits before advancing context generation.
+contexts without an explicit retained reset owner fail with
+`NATIVE_REVIEWER_RESET_REQUIRED`; the reset adapter below supplies the exact
+old-task exit and fresh-context checks before advancing context generation.
 The default CLI remains the paired attachment check and never manufactures the
 authenticated HumanSession required by this initial-Run path.
+
+
+### Explicit retained reviewer reset
+
+The trusted recruitment owner accepts `reset_from=previous_recruitment` only
+when that exact previous owner still holds its native tasks, the previous
+canonical Run is CLOSED, and a separately admitted target Pi Run is ACTIVE.
+The same context reset reducers record the genuine current HumanSession Origin;
+a JSON receipt or Actor name cannot reconstruct either human or process authority.
+
+The reset request is durable before process retirement. Retirement first retains
+the exact SDK-host, native Claude and fixed helper pidfds, then revokes helper
+before root through the existing Hub protocol. Transport shutdown is only a
+shutdown request. Only the exact retained descriptors reporting all three exits,
+together with confirmed revocation, permits preparation of the next context.
+Timeout or uncertain revocation leaves RESETTING/unknown; retry observes retained
+custody without resending the stop or creating a second context. These three-task
+facts do **not** establish arbitrary tool-descendant or checkout-writer quiescence.
+
+Fresh preparation and admission are separate concrete phases sharing one original
+deadline. A new exclusive generation directory, different explicit session and
+exact pending scope must pass the native fresh proof before the existing
+`succeed_reset` reducer advances the generation. Only then may the same prepared
+owner attempt ADMIT once. Unknown transfer retains its original STATUS owner; recruitment does not
+automatically resume a failed fresh-preparation or admission phase. It preserves
+the one-shot launch marker and refuses blind relaunch. Unknown canonical
+revocation cannot become confirmed solely because all three tasks later exit.
+
+This is a live-owner, trusted-host adapter, not restart recovery or a new CLI
+login mechanism. The current initial-only Pi admission still cannot create the
+next Run using a reused Pi seat; native Pi reset remains required for repeated
+full lifecycle operation. No synthetic target Run is introduced by this adapter.

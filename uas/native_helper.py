@@ -15,6 +15,7 @@ import uuid
 from .claude_native_admission import NativeClaudeRoot, NativeClaudeSupervisorAdmission
 from .git_process import GitChildAuthority, GitSeat
 from .kernel_origin import HeldOrigin, OriginDenied, Record, alive, receive
+from .workstation_control import _deadline_lock, _control_exchange, _socket_deadline
 from .ledger import Origin
 from .workstation_admission import _canonical, _unique
 
@@ -112,8 +113,21 @@ class NativeDescendantLease:
             self.close()
             raise
 
-    def _ready(self, admission):
-        self.current()
+    def _ready(self, admission, *, revoking=False):
+        if revoking:
+            # Hub removal may close the helper channel and let that exact task
+            # exit before its ACK arrives. Keep retained ownership checks, but
+            # do not require the removed task to remain alive for the receipt.
+            if (self.state != 'revoking' or self.origin is None or self.origin.revoked
+                    or self.root.origin is None or self.root.origin.identity != self._root_identity
+                    or self.root.incarnation != self._root_incarnation
+                    or self.root.recipe.manifest_digest != self._manifest_digest
+                    or self._admission is not admission or self._document is None
+                    or self._document.get('helper_identity') != list(self.origin.identity)):
+                raise OriginDenied('exact revoking helper ownership required')
+            self.root.current()
+        else:
+            self.current()
         if (type(admission) is not NativeClaudeSupervisorAdmission or admission.launch is not self.root
                 or self.root.state != 'active' or self.root.native_readiness is None
                 or type(self.root.admission) is not dict or self.root.admission.get('state') != 'admitted'
@@ -180,14 +194,15 @@ class NativeDescendantLease:
                     raise
             return self._receive(exchange)
 
-    def _receive(self, exchange, *, revoking=False):
+    def _receive(self, exchange, *, revoking=False, deadline=None):
         admission = self._admission
         try:
+            _socket_deadline(admission.control, deadline)
             with receive(admission.control) as record:
                 admission.hub_origin.require(record)
                 reply = json.loads(record.data.decode('utf-8'), object_pairs_hook=_unique)
-            with admission._authority:
-                self._ready(admission)
+            with _deadline_lock(admission._authority, deadline):
+                self._ready(admission, revoking=revoking)
                 expected = {'version':1,'kind':'REPLY','operation_id':self.operation_id,
                             'controller':admission.controller,'exchange_id':exchange}
                 if (type(reply) is not dict or set(reply) != set(expected) | {'result'}
@@ -209,7 +224,7 @@ class NativeDescendantLease:
             self.state = 'unknown'
             raise
         except BaseException:
-            self.close()
+            self.close(deadline=deadline)
             raise
 
     def status(self):
@@ -226,7 +241,7 @@ class NativeDescendantLease:
                     raise OriginDenied('partial helper status command')
             return self._receive(exchange)
 
-    def close(self):
+    def close(self, *, deadline=None):
         """Local fence; transferred authority requires controller/root revocation.
 
         Closing the private controller deliberately fences all its leases rather
@@ -236,7 +251,8 @@ class NativeDescendantLease:
         error = None
         if self._admission is not None:
             try:
-                self._admission.control_lost()
+                if deadline is None: self._admission.control_lost()
+                else: self._admission.control_lost(deadline=deadline)
             except BaseException as failure:
                 error = failure
         for name in ('origin','channel','forge_channel','_lineage','_authority'):
@@ -250,27 +266,29 @@ class NativeDescendantLease:
         if error is not None:
             raise error
 
-    def revoke(self):
+    def revoke(self, *, deadline=None):
         """Explicit helper revocation, or controller fence if outcome is unknown."""
         if self._admission is None or self.state == 'unavailable':
-            self.close()
+            self.close(deadline=deadline)
             return None
         admission = self._admission
         try:
-            with admission._io:
-                with admission._authority:
+            with _control_exchange(admission, deadline):
+                with _deadline_lock(admission._authority, deadline):
                     self._ready(admission)
                     self.state = 'revoking'
                     exchange = uuid.uuid4().hex
                     packet = _canonical({'version':1,'kind':'REVOKE_NATIVE_HELPER',
                         'operation_id':self.operation_id,'controller':admission.controller,'exchange_id':exchange})
+                    _socket_deadline(admission.control, deadline)
                     if admission.control.send(packet) != len(packet):
                         raise OriginDenied('partial helper revocation')
-                result = self._receive(exchange, revoking=True)
+                result = (self._receive(exchange, revoking=True) if deadline is None else
+                    self._receive(exchange, revoking=True, deadline=deadline))
             # Confirmed helper removal needs no Room-wide controller fence.
             self._admission = None
-            self.close()
+            self.close(deadline=deadline)
             return result
         except BaseException:
-            self.close()
+            self.close(deadline=deadline)
             raise

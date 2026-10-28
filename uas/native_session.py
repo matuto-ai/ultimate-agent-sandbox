@@ -248,7 +248,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None):
                 'product_run_created':True,'delivery':delivery,'reviewer_attached':True,'dispatch':packets,
                 'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
-                'lifecycle_blockers':['NATIVE_CONTEXT_RESET_UNAVAILABLE','FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
+                'lifecycle_blockers':['NATIVE_PI_RESET_UNAVAILABLE','FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
                 'production_launcher':'disabled'}
         pi_recipe = NativePiRecipe.from_configuration(StringIO(plan.config_text), room['id'], pi_seat.participant_id,
             resources['pi_manifest_path'], plan.installation['pi_manifest']['sha256'], seat=pi_seat, scope=pi_scope,
