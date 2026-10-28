@@ -24,7 +24,8 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(ci.SLOW_MODULES, {'test_peer', 'test_checkouts', 'test_forge_capacity',
                                           'test_gate_evaluation', 'test_forge_mutations',
                                           'test_context', 'test_artifact_manual_source',
-                                          'test_run_review', 'test_staged_source_closure'})
+                                          'test_run_review', 'test_staged_source_closure',
+                                          'test_claude_permission_policy', 'test_artifact_native_source'})
         for module in ci.SLOW_MODULES:
             self.assertEqual('slow', ci.partition_for(module + '.Case.test_one'))
         for name in ('test_new_future.Case.test_one', 'test_git_new.Case.test_one',
@@ -44,7 +45,7 @@ class CIPartitionTests(unittest.TestCase):
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
-        self.assertEqual(len(groups['slow']), 9)
+        self.assertEqual(len(groups['slow']), 11)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))

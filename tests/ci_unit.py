@@ -15,7 +15,9 @@ SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_forge_capacity',
                           'test_gate_evaluation', 'test_forge_mutations',
                           # Post-77 hosted log: approximately 16 seconds together.
                           'test_context', 'test_artifact_manual_source',
-                          'test_run_review', 'test_staged_source_closure'})
+                          'test_run_review', 'test_staged_source_closure',
+                          # #78 hosted timing: 6.34 + 5.54 seconds, existing slow job 20.12s.
+                          'test_claude_permission_policy', 'test_artifact_native_source'})
 PARTITIONS = ('slow', 'remainder')
 
 
