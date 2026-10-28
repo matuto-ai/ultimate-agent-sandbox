@@ -154,7 +154,9 @@ SOURCES = (
 )
 MAX_SOURCE_FILES=128
 MAX_SOURCE_BYTES=256<<10
-MAX_SOURCE_TOTAL=2<<20
+# Full lazy closure measured at 2,318,983 bytes for command (128 files).
+# Keep bounded headroom; cheap closure tests enforce all three exact profiles.
+MAX_SOURCE_TOTAL=3<<20
 
 
 def expect(value,message):
