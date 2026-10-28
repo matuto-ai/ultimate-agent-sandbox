@@ -184,3 +184,15 @@ This is a live-owner, trusted-host adapter, not restart recovery or a new CLI
 login mechanism. The current initial-only Pi admission still cannot create the
 next Run using a reused Pi seat; native Pi reset remains required for repeated
 full lifecycle operation. No synthetic target Run is introduced by this adapter.
+
+### Native admission observation and lock order
+
+Pi state RPCs run outside Supervisor lifecycle and Room transactions. After the
+provider/checkout work, activation prepares an invocation-local SAFE observation
+from the exact correlated state notification and prompt response. The native
+consumer checks the same receiver, scope/binding, event/request revisions and
+bounded age without SDK I/O, then consumes the sample once inside the canonical
+activation reducer. EOF, transport fencing, another request or later native event
+invalidates it. The sample is discarded on every exit; no stored receipt or
+serialized SAFE value can replace a new observation. This is bounded observational
+freshness, not a claim that the independent native process is atomically paused.

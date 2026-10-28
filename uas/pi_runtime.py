@@ -141,6 +141,10 @@ class FixturePiRpcReceiver:
                 stderr=subprocess.PIPE, bufsize=0)
             os.set_blocking(self.process.stdin.fileno(), False)
             self._transport_fenced = False
+            self._event_revision = self._request_revision = 0
+            self._response_revisions = {}
+            self._notification_revisions = {}
+            self._admission_observation = None
             self._responses = {}
             self._notifications = {}
             self._rpc_pending = set()
@@ -302,10 +306,13 @@ class FixturePiRpcReceiver:
                 if type(event) is not dict:
                     raise ValueError('invalid native record')
                 with self._condition:
+                    self._event_revision = getattr(self, "_event_revision", 0) + 1
                     self.events.append(event)
                     event_id = event.get('id')
                     if event.get('type') == 'response' and type(event_id) is str and event_id in self._rpc_pending:
                         self._responses[event_id] = event
+                        if not hasattr(self, "_response_revisions"): self._response_revisions = {}
+                        self._response_revisions[event_id] = (None if event_id in self._response_revisions else self._event_revision)
                     elif event.get('type') == 'extension_ui_request' and event.get('method') == 'notify':
                         try:
                             value = json.loads(event.get('message', ''))
@@ -313,6 +320,8 @@ class FixturePiRpcReceiver:
                                     and type(value.get('request_id')) is str
                                     and value['request_id'] in self._native_pending):
                                 self._notifications[value['request_id']] = value
+                                if not hasattr(self, '_notification_revisions'): self._notification_revisions = {}
+                                self._notification_revisions[value['request_id']] = (None if value['request_id'] in self._notification_revisions else self._event_revision)
                         except (ValueError, TypeError):
                             pass
                     self._condition.notify_all()
@@ -385,7 +394,7 @@ class FixturePiRpcReceiver:
                 self._transport_fenced = True
             self._write_lock.release()
 
-    def rpc(self, command, *, timeout=None, _deadline=None, **fields):
+    def rpc(self, command, *, timeout=None, _deadline=None, _capture=None, **fields):
         budget = self.timeout if timeout is None else timeout
         deadline = time.monotonic() + budget if _deadline is None else _deadline
         if _deadline is not None:
@@ -393,6 +402,8 @@ class FixturePiRpcReceiver:
         request_id = uuid.uuid4().hex
         wire = json.dumps({'id': request_id, 'type': command, **fields}, ensure_ascii=False).encode() + b'\n'
         with self._condition:
+            self._request_revision = getattr(self, "_request_revision", 0) + 1
+            request_revision = self._request_revision
             self._rpc_pending.add(request_id)
         try:
             self._write(wire, deadline)
@@ -403,13 +414,19 @@ class FixturePiRpcReceiver:
                 self._require_initial_deadline(deadline)
             if result.get('success') is not True:
                 raise NativeUnavailable('native command rejected: ' + str(result.get('error', 'unknown')))
+            if _capture is not None:
+                with self._condition:
+                    _capture.update(response_id=request_id,
+                        response_revision=self._response_revisions.get(request_id),
+                        request_revision=request_revision)
             return result
         finally:
             with self._condition:
+                getattr(self, '_response_revisions', {}).pop(request_id, None)
                 self._rpc_pending.discard(request_id)
                 self._responses.pop(request_id, None)
 
-    def _native(self, command, payload, *, deadline=None):
+    def _native(self, command, payload, *, deadline=None, _capture=None):
         request_id = uuid.uuid4().hex
         message = base64.urlsafe_b64encode(json.dumps({**payload, 'request_id': request_id},
                                                       ensure_ascii=False).encode()).decode()
@@ -418,19 +435,28 @@ class FixturePiRpcReceiver:
         try:
             # "handled" only means extension dispatch completed, NEVER delivery.
             if deadline is None:
-                self.rpc('prompt', message=f'/uas-{command} {message}')
+                if _capture is None:
+                    self.rpc('prompt', message=f'/uas-{command} {message}')
+                else:
+                    self.rpc('prompt', message=f'/uas-{command} {message}', _capture=_capture)
             else:
                 self._require_initial_deadline(deadline)
                 self.rpc('prompt', message=f'/uas-{command} {message}', _deadline=deadline)
             if command == 'state':
                 self._startup_stage('state-notification')
             if deadline is None:
-                return self._wait(self._notifications, request_id)
+                result = self._wait(self._notifications, request_id)
+                if _capture is not None:
+                    with self._condition:
+                        _capture.update(notification_id=request_id,
+                            notification_revision=self._notification_revisions.get(request_id))
+                return result
             result = self._wait(self._notifications, request_id, deadline=deadline)
             self._require_initial_deadline(deadline)
             return result
         finally:
             with self._condition:
+                getattr(self, "_notification_revisions", {}).pop(request_id, None)
                 self._native_pending.discard(request_id)
                 self._notifications.pop(request_id, None)
 
@@ -454,6 +480,50 @@ class FixturePiRpcReceiver:
         except (NativeUnavailable, KeyError, ValueError, TypeError, AttributeError):
             self.readiness = Readiness.AMBIGUOUS
             return self.readiness
+
+    def prepare_admission_observation(self):
+        """Observe outside lifecycle/Room locks; return private correlated evidence."""
+        self._admission_observation = None
+        capture = {}
+        with self._condition:
+            scope = dict(self.scope)
+            binding = dict(self._binding)
+        state = self._native('state', {}, _capture=capture)['state']
+        with self._condition:
+            first, second = capture.get('response_revision'), capture.get('notification_revision')
+            if (type(first) is not int or type(second) is not int or abs(first-second) != 1
+                    or self._event_revision != max(first, second)
+                    or self._request_revision != capture.get('request_revision')
+                    or self._transport_fenced or self._ended
+                    or self.scope != scope or self._binding != binding
+                    or type(state) is not dict or state.get('readiness') != 'safe'
+                    or any(state.get(k) != v for k,v in binding.items())):
+                raise NativeUnavailable('correlated current SAFE admission sample required')
+            sample = object()
+            self._admission_observation = (sample, threading.get_ident(), scope, binding,
+                self._event_revision, self._request_revision, time.monotonic())
+            return sample
+
+    def validate_admission_observation(self, sample, *, consume=False):
+        """Local-only precheck/one-shot final consumption; never native RPC."""
+        with self._condition:
+            captured = self._admission_observation
+            if (captured is None or sample is not captured[0]
+                    or threading.get_ident() != captured[1]
+                    or self.scope != captured[2] or self._binding != captured[3]
+                    or self._event_revision != captured[4] or self._request_revision != captured[5]
+                    or not 0 <= time.monotonic()-captured[6] <= 1.0
+                    or self._transport_fenced or self._ended):
+                raise NativeUnavailable('admission SAFE observation changed or expired')
+            if consume:
+                self._admission_observation = None
+            return Readiness.SAFE
+
+    def discard_admission_observation(self, sample):
+        with self._condition:
+            captured = self._admission_observation
+            if captured is not None and sample is captured[0]:
+                self._admission_observation = None
 
     @staticmethod
     def _logical(envelope):

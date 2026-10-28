@@ -74,7 +74,17 @@ class NativeRunAdversarialTests(unittest.TestCase):
             scope={'room_id':self.room['id'],'participant_id':self.participant,'run_id':run,'generation':1,'context_generation':1}
             handle=object.__new__(SupervisorAdmission)
             handle.seat=N(participant_id=self.participant,actor_id=self.actor)
-            handle.launch=N(incarnation='incarnation',native_recipe=N(scope=scope),native_receiver=N(scope=scope,observe=lambda:Readiness.SAFE))
+            receiver=N(scope=scope,observe=lambda:Readiness.SAFE)
+            def prepare():return N(receiver=receiver,consumed=False,valid=True)
+            def validate(sample,*,consume=False):
+                if sample.receiver is not receiver or sample.consumed or not sample.valid:
+                    raise LedgerError('NATIVE_SAMPLE_STALE')
+                if consume:sample.consumed=True
+                return Readiness.SAFE
+            receiver.prepare_admission_observation=prepare
+            receiver.validate_admission_observation=validate
+            receiver.discard_admission_observation=lambda sample:setattr(sample,'valid',False)
+            handle.launch=N(incarnation='incarnation',native_recipe=N(scope=scope),native_receiver=receiver)
             ingress=object.__new__(NativePiHostForge);ingress.client=client;ingress.binding=N(operation_id='operation')
             ingress.origin=Origin(self.actor,self.participant,'incarnation','native-authority',('forge-read','implement'))
             ingress._current=lambda:True;handle.forge_service=ingress

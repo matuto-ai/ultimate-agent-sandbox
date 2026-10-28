@@ -171,6 +171,7 @@ class NativeRunAdmission(RunAdmission):
             raise LedgerError('ADMISSION_BINDING_MISMATCH')
         self.launcher, self.checkout_client = launcher, checkout_client
         self._session = None
+        self._activation_observation = None
         self._owner_thread = threading.get_ident()
         config = load(StringIO(launcher.plan.config_text))
         selected = launcher.plan.seats['pi']
@@ -267,15 +268,39 @@ class NativeRunAdmission(RunAdmission):
     def _observe_handle(self, handle):
         with self.supervisor._locked():
             self._authority(handle)
-            if handle.launch.native_receiver.observe() is not Readiness.SAFE:
+        readiness=handle.launch.native_receiver.observe()  # SDK I/O outside lifecycle.
+        with self.supervisor._locked():
+            self._authority(handle)
+            if readiness is not Readiness.SAFE:
                 raise LedgerError('NATIVE_NOT_SAFE')
-        # Existing authenticated delivery poll marks SAFE in the canonical Hub;
-        # no synthetic FixtureConnection or Hub-supplied Actor is constructed.
         if handle._delivery_exchange('POLL_DELIVERY') != {'status':'HELD'}:
             raise LedgerError('UNUSED_NATIVE_CONTEXT_REQUIRED')
 
+    @contextmanager
+    def _activation_scope(self, handle):
+        self._require_owner()
+        if self._activation_observation is not None:
+            raise LedgerError('NATIVE_ACTIVATION_OBSERVATION_BUSY')
+        receiver=handle.launch.native_receiver
+        with self.supervisor._locked():self._authority(handle)
+        sample=receiver.prepare_admission_observation()  # Exact correlated state, no held lifecycle/ledger.
+        try:
+            with self.supervisor._locked():
+                self._authority(handle)
+                if handle.launch.native_receiver is not receiver:
+                    raise LedgerError('NATIVE_ACTIVATION_RECEIVER_CHANGED')
+            self._activation_observation=(handle,receiver,sample)
+            yield
+        finally:
+            self._activation_observation=None
+            receiver.discard_admission_observation(sample)
+
     def _safe_handle(self, handle):
-        return handle.launch.native_receiver.observe() is Readiness.SAFE
+        self._require_owner()
+        held=self._activation_observation
+        if held is None or held[0] is not handle or handle.launch.native_receiver is not held[1]:
+            raise LedgerError('NATIVE_ACTIVATION_OBSERVATION_REQUIRED')
+        return held[1].validate_admission_observation(held[2],consume=False) is Readiness.SAFE
 
     def _current_context(self, state, handle, run, pending):
         handle.forge_service._current()
@@ -289,6 +314,12 @@ class NativeRunAdmission(RunAdmission):
                 or (context['bound_run'] or context['reserved_run']) != {'run_id':run,'generation':1}
                 or scope != expected or handle.launch.native_receiver.scope != expected):
             raise LedgerError('CONTEXT_MISMATCH')
+
+        if not self._safe_handle(handle):
+            raise LedgerError('NATIVE_NOT_SAFE')
+        _,receiver,sample=self._activation_observation
+        if receiver.validate_admission_observation(sample,consume=True) is not Readiness.SAFE:
+            raise LedgerError('NATIVE_NOT_SAFE')
 
     def _handle_origin(self, handle):
         return handle.forge_service.origin
