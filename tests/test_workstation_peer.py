@@ -156,7 +156,16 @@ class AdmittedPeerTests(unittest.TestCase):
         binding = self.admissions.binding(operation)
         self.assertEqual(binding.seat.actor_id, 'actor-a')
         connection = hub.connect('attach', 'alice', binding.incarnation, object())
-        dispatcher = AdmittedPeerDispatcher(self.admissions, hub)
+        # A dispatcher owns one admission controller. Use a separate real
+        # admission fixture for the intentionally mismatched local Hub.
+        admissions = HubAdmission(self.root/'mismatched-admissions.db', seats=self.seats,
+                                  supervisor=self.supervisor, endpoint=Endpoint())
+        self.addCleanup(admissions.close)
+        send_admit(self.sender, launch=self.launches[0], seat=self.seats[0],
+                   operation_id=operation, epoch=1, readiness_digest='c'*64)
+        admissions.admit(self.control)
+        self.assertEqual(admissions.binding(operation), binding)
+        dispatcher = AdmittedPeerDispatcher(admissions, hub)
         before = ledger.snapshot()
         with self.assertRaisesRegex(OriginDenied, 'Hub Actor'):
             dispatcher.attach(operation, connection)
