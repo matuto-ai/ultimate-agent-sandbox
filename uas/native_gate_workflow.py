@@ -88,13 +88,64 @@ class _Preparation:
                 key=(run['run_id'],run['participant_id'],self.owner.host.identity.binding.room_instance)
                 source=self.scope.sources.get(key)
                 if source is None:raise LedgerError('GATE_SOURCE_NOT_PREPARED')
-                pin={'run':_run_pin(run),'source':deepcopy(source),
-                     'prior_target':deepcopy(run.get('gate_target')),
-                     'prior_binding':deepcopy(run.get('gate_target_binding'))}
+                pin=self.capture_pin(state,run,source)
                 return Transition(state,(Event('native.review-preparation-reserved',
                     {'operation_id':self.operation,'submission_id':self.command.id}),),pin)
             receipt=ledger.apply(intent,self.origin,authorize=authorized,decide=decide)
             self.pin=deepcopy(receipt['result'])
+
+
+    def capture_pin(self,state,run,source):
+        return {'run':_run_pin(run),'source':deepcopy(source),
+                'prior_target':deepcopy(run.get('gate_target')),
+                'prior_binding':deepcopy(run.get('gate_target_binding'))}
+
+
+class _CompletionPreparation(_Preparation):
+    """Service-owned completion preparation, never Participant bind authority."""
+    def __init__(self,owner,command,origin):
+        from .review_broker import review_origin
+        scope=owner.host.identity.active
+        expected=(Command(scope.envelope['id'],'review.observe-completion',
+            scope.envelope['run_id'],scope.envelope['generation'],
+            {'submission_id':scope.envelope['submission_id']})
+            if type(scope) is NativeReviewAcceptance and scope.host_poll else None)
+        if (expected is None or scope.host is not owner.host or scope.ingress is not None
+                or origin != review_origin(owner.host.identity.binding.room_instance)
+                or command.canonical()!=expected.canonical()):
+            raise LedgerError('NATIVE_GATE_COMPLETION_SCOPE_REQUIRED')
+        scope.require_observing()
+        self.owner,self.scope,self.command,self.origin=owner,scope,command,origin
+        self.operation=_id('native-gate-complete-prepare-',command.id)
+        self.binding_id=None
+        self.pin=None
+
+    def require(self,state):
+        if self.owner.active is not self or self.owner.host.identity.active is not self.scope:
+            raise LedgerError('NATIVE_GATE_COMPLETION_SCOPE_REQUIRED')
+        run=self.owner.host.reviews._run(state,self.command.target,self.command.generation)
+        row=state.get('run_reviews',{}).get(self.command.target,{}).get('current')
+        if (not row or row['submission_id']!=self.command.payload['submission_id']
+                or row['generation']!=self.command.generation
+                or row['stage'] not in {'READY_FOR_HUMAN','ATTENTION'}
+                or not (row['result']=='pass' or row.get('override_id'))):
+            raise LedgerError('REVIEW_PASS_REQUIRED')
+        self.owner.host.reviews._target(run,row['target'])
+        if not row.get('override_id'):
+            self.owner.host.reviews._fact(run,row['reviewer']['actor_id'],row['reviewer']['authority_epoch'])
+        if self.pin is not None:
+            key=(run['run_id'],run['participant_id'],self.owner.host.identity.binding.room_instance)
+            if (_run_pin(run)!=self.pin['run'] or row!=self.pin['review']
+                    or run.get('gate_target')!=self.pin['prior_target']
+                    or run.get('gate_target_binding')!=self.pin['prior_binding']):
+                raise LedgerError('REVIEW_COMPLETION_STALE')
+            if self.scope.sources.get(key)!=self.pin['source']:
+                raise LedgerError('GATE_SOURCE_CHANGED')
+        return run
+
+    def capture_pin(self,state,run,source):
+        return {**super().capture_pin(state,run,source),
+                'review':deepcopy(state['run_reviews'][run['run_id']]['current'])}
 
 
 class NativeGateWorkflow:
@@ -134,7 +185,7 @@ class NativeGateWorkflow:
 
     def authorize_target(self,origin,command):
         prep=self.active
-        if (prep is None or origin!=prep.origin or command.kind!='gate.bind-target'
+        if (type(prep) is not _Preparation or origin!=prep.origin or command.kind!='gate.bind-target'
                 or command.id!=prep.binding_id or command.target!=prep.command.target
                 or command.generation!=prep.command.generation
                 or command.payload!={'target':prep.target,'expected_binding':
@@ -164,6 +215,35 @@ class NativeGateWorkflow:
                 if profile is not None and self.controls.get(profile) is None:
                     raise LedgerError('NATIVE_GATE_PROFILE_UNAVAILABLE')
                 operation=_id('native-gate-evaluate-',command.id+':'+gate['id'])
+                evaluation=self.host.gates.evaluate(operation,command.target,command.generation,gate['id'],origin=origin)
+                if evaluation.get('phase')!='TERMINAL' or evaluation.get('result',{}).get('verdict')=='error':
+                    raise LedgerError('NATIVE_GATE_EVALUATION_UNAVAILABLE')
+            with self.commit(self.host.gates):prep.require(self.host.identity.ledger.snapshot()['state'])
+        finally:self.active=None
+
+
+    def prepare_completion(self,command,origin):
+        self.host.gates._require_owner()
+        if self.active is not None:raise LedgerError('NATIVE_GATE_PREPARATION_IN_FLIGHT')
+        prep=_CompletionPreparation(self,command,origin);self.active=prep
+        try:
+            prep.reserve()
+            with self.commit(self.host.gates):
+                run=deepcopy(prep.require(self.host.identity.ledger.snapshot()['state']))
+            for gate in run['policy']['gates']:
+                if (gate['kind']!='mechanical' or 'complete' not in gate['guarded_operations']
+                        or 'submit-for-review' in gate['guarded_operations']):continue
+                profile={'artifacts':PROFILE_ID,'command':COMMAND_PROFILE,'diff-claims':DIFF_PROFILE}.get(gate['evaluator'])
+                if profile is not None and self.controls.get(profile) is None:
+                    raise LedgerError('NATIVE_GATE_PROFILE_UNAVAILABLE')
+                # Merge polls are not evaluator retries. Every poll for this exact
+                # submission/candidate shares the original immutable attempt.
+                key={'room':self.host.identity.binding.room_id,
+                     'instance':self.host.identity.binding.room_instance,
+                     'run':command.target,'generation':command.generation,
+                     'submission':command.payload['submission_id'],
+                     'target':prep.pin['prior_target'],'gate':gate['id']}
+                operation='native-gate-complete-'+_digest(key)
                 evaluation=self.host.gates.evaluate(operation,command.target,command.generation,gate['id'],origin=origin)
                 if evaluation.get('phase')!='TERMINAL' or evaluation.get('result',{}).get('verdict')=='error':
                     raise LedgerError('NATIVE_GATE_EVALUATION_UNAVAILABLE')

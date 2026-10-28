@@ -56,8 +56,19 @@ usage; hard quota and ordinary error/quarantine handling remain mandatory.
 This profile implements artifacts only. Command/diff profiles are separate and
 fail explicitly if required; typed identity attestations and diff declarations
 have no new native transport. Mechanical Gates required only for completion are
-not eagerly evaluated at submission: their first trusted trigger remains a later
-integration seam. No early failed evaluation is manufactured for them.
+not eagerly evaluated at submission. The existing trusted completion poll prepares
+them only after its original receipt and exact eligible submission checks. It uses
+the canonical review service Origin, not a Participant or human impersonation, and
+never rebinds the candidate. Preparation pins the full review row, Run/control
+revision, existing target binding and source through every consuming fence.
+
+Evaluator IDs are stable across merge polls for the same Room/instance, Run,
+generation, submission, candidate and Gate. A pending/error attempt is not rerun
+with a fresh ID merely because the driver polls again. Existing projection refresh
+remains responsible for external freshness. Explicit reevaluation of a failed or
+unknown attempt remains unavailable here; a serialized preparation receipt is not
+a grant. The original merger identity, independent review and completion reducers
+remain unchanged.
 
 Git successor projection, authenticated human hosting/Manager dispatch, real
 prepared-image/helper execution, provider accounts and full GitHub lifecycle

@@ -574,6 +574,12 @@ class RunReview:
             target = self._target(run, row['target']); scope = self._scope(run)
             if not row.get('override_id'):
                 self._fact(run, row['reviewer']['actor_id'], row['reviewer']['authority_epoch'])
+            if self.native_host is not None:
+                self.native_host.prepare_completion(command,origin)
+                prepared = self.ledger.snapshot()['state']
+                if (self._scope(self._run(prepared, run_id, generation)) != scope
+                        or prepared.get('run_reviews', {}).get(run_id, {}).get('current') != row):
+                    raise LedgerError('REVIEW_COMPLETION_STALE')
             gates = self._operation_gates(run_id, generation, 'complete', origin=origin)
             state = self.ledger.snapshot()['state']
             if (self._scope(self._run(state, run_id, generation)) != scope

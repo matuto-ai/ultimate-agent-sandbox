@@ -325,7 +325,6 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 'session':result,'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
                 'lifecycle_blockers':((['NATIVE_COMMAND_DIFF_GATE_PROFILES_UNAVAILABLE',
-                                        'NATIVE_COMPLETION_GATE_TRIGGER_UNAVAILABLE',
                                         'NATIVE_GATE_IDENTITY_TRANSPORT_UNAVAILABLE'] if gate_operations is not None else
                                        ['NATIVE_GATE_WORKER_COMPOSITION_UNAVAILABLE'])+
                                       ['NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE'] if git_operations is not None else

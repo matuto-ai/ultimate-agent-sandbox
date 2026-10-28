@@ -71,9 +71,10 @@ No model prompt or product Run is manufactured by this startup milestone.
 The bootstrap `qualification-scope` is a **synthetic transport context**. A new
 empty Git provenance owner is initialization, not proof of contribution history
 or reviewer independence. Evidence explicitly reports those limits and
-`RUN_ADMISSION_NATIVE_ADAPTER_UNAVAILABLE`. Native Run admission is the next
-same-#78 adapter, using existing admission/request owners; this command does not
-claim to implement the full accepted work-item/review/human-merge lifecycle.
+`AUTHENTICATED_NATIVE_RUN_HOST_UNAVAILABLE`. The native Run admission adapter
+is implemented through existing admission/request owners, as described below, but
+the CLI does not authenticate or synthesize its required HumanSession. This
+attachment mode does not claim the full work-item/review/human-merge lifecycle.
 
 Dispatch is finite and never retransmits a tool mutation. An uncertain Pi ADMIT
 can only query its existing STATUS; uncertain Claude initialization queries
@@ -228,7 +229,8 @@ Git endpoints, mapped worker profile and separate credential-scoped Git Broker;
 see `native-git-qualification.md`. That primary-only profile refuses a successor
 before retirement until its new worktree has an exact admitted projection.
 An optional `gate_manifest` now consumes the artifacts-only helper/resource and
-trusted submission workflow described in `native-gate-workflow.md`. Command/diff
-profiles, identity evidence transport and completion-only first evaluation remain
-explicit gaps. Manager action transport still needs its authenticated host/audit
+trusted submission/completion preparation described in `native-gate-workflow.md`.
+Completion-only mechanical Gates first run at the eligible trusted completion cut;
+merge polls never create fresh evaluator attempts. Command/diff profiles and typed
+identity evidence transport remain explicit gaps. Manager action transport still needs its authenticated host/audit
 binding; the CLI cannot manufacture HumanSession.

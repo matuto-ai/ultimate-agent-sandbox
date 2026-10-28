@@ -308,6 +308,13 @@ class NativeReviewHost:
                 raise LedgerError('EXACT_NATIVE_GATE_WORKFLOW_REQUIRED')
             self.gate_workflow.prepare_submission(command, origin)
 
+    def prepare_completion(self,command,origin):
+        if self.gate_workflow is not None:
+            from .native_gate_workflow import NativeGateWorkflow
+            if type(self.gate_workflow) is not NativeGateWorkflow or self.gate_workflow.host is not self:
+                raise LedgerError('EXACT_NATIVE_GATE_WORKFLOW_REQUIRED')
+            self.gate_workflow.prepare_completion(command,origin)
+
     def human_action(self, value, *, session, audit):
         """Existing authenticated Manager vocabulary; never a native tool route."""
         self.gates._require_owner()
