@@ -71,7 +71,7 @@ def import_image(archive):
 def scenario(nonce, manifest, boot_network, checks):
     sys.path.insert(0, str(boundary.ROOT)); sys.path.insert(0, str(boundary.ROOT / 'tests/vm'))
     from native_rootfs import build_room_rootfs
-    from room_service import endpoint, prove_service, prove_foreign_socket_sid
+    from room_service import endpoint, prove_service, prove_foreign_listener_admission
     from room_policy_diagnostics import capture_endpoint_probe, capture_policy_diagnostic
     from uas.guest_fixture import CONTROL, ROOMS, STORAGE, prepare_storage, network_names, firewall_document, command
     from uas.lifecycle import Supervisor
@@ -167,12 +167,12 @@ def scenario(nonce, manifest, boot_network, checks):
                       run=run, checks=checks['endpoint_service'])
         require(checks['endpoint_service']['held_bootstrap_exit_observed'] is True,
                 'held workload must exit before destructive endpoint negatives')
-        checks['endpoint_service']['foreign_socket_sid'] = {}
+        checks['endpoint_service']['foreign_listener_admission'] = {}
         def raw_endpoint_probe(room, mode):
             require(room == 'alpha' and mode == 'endpoint', 'fixed Alpha endpoint probe required')
             return capture_endpoint_probe(containers[room])
-        prove_foreign_socket_sid(supervisors['alpha'], endpoints['alpha'], raw_endpoint_probe,
-            run=run, checks=checks['endpoint_service']['foreign_socket_sid'],
+        prove_foreign_listener_admission(supervisors['alpha'], endpoints['alpha'], raw_endpoint_probe,
+            run=run, checks=checks['endpoint_service']['foreign_listener_admission'],
             diagnostic=capture_policy_diagnostic)
         # Actual stock SELinux denial, not an invented receipt or off-host policy.
         directory, leaf = endpoints['alpha'].parent, endpoints['alpha'].leases[0].path

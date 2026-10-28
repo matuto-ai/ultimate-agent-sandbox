@@ -41,18 +41,28 @@ on accepted sockets. These observations do not infer either process label
 from a filesystem `chcon`; actual process labels are recorded separately.
 
 After the held bootstrap's pidfd signals exit and service/Broker teardown has
-completed, a locked negative temporarily parks the original leased socket inode
-outside its mounted directory. A disposable Beta-SID socket occupies the same
-Alpha pathname, with an Alpha filesystem label. The held descriptor establishes
-its Beta socket SID; Alpha's raw connect must still return exactly `EACCES`.
+completed, a locked trusted-root admission/drift negative temporarily parks the
+original leased socket inode outside its mounted directory. A disposable
+Beta-SID socket occupies the same Alpha pathname, with an Alpha filesystem
+label. The held descriptor establishes its Beta socket SID. This deliberately
+models trusted-host pathname tampering,
+not an operation available to the confined Participant: host/Supervisor takeover
+is outside the accepted threat boundary. It does not require an independent
+kernel socket-object category denial after root supplies an Alpha pathname.
 The replacement must fail both the original inode lease and canonical admission
 with a fresh lease. Caller-owned evidence retains actual labels and the bounded
 probe return code, timeout, stdout/stderr and decoded result before assertions.
+The raw transport outcome is explicitly observational: `connected: true` means
+the raw connection succeeded, never that it was denied or authenticated. Capture
+integrity and owned cleanup remain required, regardless of transport outcome.
 A bounded read-only diagnostic records fixed libselinux decisions and actual
-loaded/installed policy metadata; it never repairs policy or substitutes for the
-raw denial. Unavailable diagnostics do not skip that probe. The disposable socket is removed and the
-exact original inode/lease restored in `finally`, or qualification fails without
-further admission. A separate negative changes only the pathname MCS. No new
+loaded/installed policy metadata; it never repairs policy or substitutes for
+admission or transport evidence. Unavailable policy diagnostics do not skip the
+raw observation. The disposable socket is removed and the exact original
+inode/lease restored in `finally`, or qualification fails without
+further admission. A separate negative changes only the pathname MCS and still
+requires Alpha's actual raw connect to return exactly `EACCES`. Existing
+per-request kernel identity/authority checks remain mandatory. No new
 mount, policy allow rule, permissive mode or Supervisor process transition is
 used to make either test pass.
 

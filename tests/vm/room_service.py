@@ -266,13 +266,16 @@ def endpoint(room, run):
         listener.close(); raise
 
 
-def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run, checks, diagnostic):
-    """Destructive negative only after the held bootstrap and service exit.
+def prove_foreign_listener_admission(supervisor, endpoint_, probe, *, run, checks, diagnostic):
+    """Trusted-root admission/drift negative after bootstrap and service exit.
 
     Keep every original socket object/inode; replace only the pathname during
     this locked negative, with an owned disposable socket. Its pathname label
     stays Alpha while its kernel socket SID is Beta. No service/workload is
-    admitted until exact restoration succeeds. This is not a policy repair.
+    admitted until exact restoration succeeds. Raw transport is observational:
+    trusted-host pathname tampering is outside the Participant threat boundary.
+    Canonical admission must reject the foreign listener, regardless of connect.
+    This is not a policy repair or a claim of independent socket-SID denial.
     """
     from guest_boundary import require_process_label
     from guest_workstation import labeled_listener
@@ -298,7 +301,7 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run, checks, diagn
             path.rename(saved); parked = True
             foreign = labeled_listener(path, WORKSTATION_HOST_UID, level=ROOMS['beta'][3])
             node = path.lstat(); foreign_inode = (node.st_dev, node.st_ino)
-            # Deny cannot be attributed to a Beta pathname: only the socket
+            # Admission denial cannot rely on a Beta pathname: only the socket
             # object carries Beta. Parent, DAC and mounted path stay Alpha.
             run('chcon', '-t', 'container_file_t', '-l', ROOMS['alpha'][3], str(path))
             file_label = os.getxattr(path, 'security.selinux', follow_symlinks=False).rstrip(b'\0').decode()
@@ -331,19 +334,21 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run, checks, diagn
             checks['stage'] = 'loaded_policy_diagnostic'
             try: checks['policy_diagnostic'] = diagnostic()
             except Exception as error:
-                # Read-only diagnostics cannot suppress the decisive raw probe.
+                # Read-only policy diagnostics cannot suppress raw observation.
                 checks['policy_diagnostic'] = {'status': 'unavailable', 'error_type': type(error).__name__}
-            checks['stage'] = 'foreign_socket_connect'
+            checks['stage'] = 'foreign_socket_observation'
+            checks['raw_probe_role'] = 'observational_only'
             checks['raw_probe'] = probe('alpha', 'endpoint')
             raw = checks['raw_probe']
-            denied = raw.get('decoded')
-            checks['denied'] = denied
+            checks['observed_connect'] = raw.get('decoded')
+            # Capture integrity/owned cleanup remain mandatory; no transport
+            # outcome is reinterpreted as admission or kernel denial here.
             require(raw.get('returncode') == 0 and raw.get('timeout') is False
                     and raw.get('status') != 'unavailable' and raw.get('cleanup_errors') == []
                     and raw.get('stdout', {}).get('truncated') is False
                     and raw.get('stderr', {}).get('truncated') is False
-                    and denied == {'connected': False, 'error': 'EACCES'},
-                    'foreign socket SID with same-Room pathname was not denied')
+                    and isinstance(checks['observed_connect'], dict),
+                    'foreign listener raw observation incomplete or unclean')
         except BaseException as error:
             checks.update(status='failed', error_type=type(error).__name__)
             raise
