@@ -82,6 +82,10 @@ def report(ledger):
 def main():
     if len(sys.argv)!=1 or (os.getuid(),os.getgid())!=(65531,65531):
         raise OriginDenied('fixed unprivileged Hub entrypoint required')
+    # Only this Room ledger directory is shared with the trusted host owner.
+    # Setgid directory + group-readable/writable SQLite WAL files, never world
+    # access or a Supervisor-private-store mount into Hub.
+    os.umask(0o007)
     # Child of the fixed init, never unsupported PID1/parent0 or process scans.
     probe()
     kernel_status=process_status()
