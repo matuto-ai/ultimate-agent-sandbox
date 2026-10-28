@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import select
 import ssl
 import sys
 import time
@@ -69,6 +70,7 @@ def public_head():
                 require(len(header) < 4096 and time.monotonic() - started < 5, 'public header/time budget')
                 channel.settimeout(remaining())
                 chunk = channel.recv(min(512, 4096 - len(header)))
+                remaining()  # A complete final header cannot escape the same deadline.
                 require(bool(chunk), 'incomplete public HTTP header')
                 header.extend(chunk)
             # HEAD has no response body. Retain only header bytes even if a
@@ -167,6 +169,27 @@ def bootstrap():
             peer.close()
 
 
+
+DENIED_HELP_READY = b'UAS_ROOM_DENIED_HELP_READY\n'
+DENIED_HELP_RELEASE = b'G'
+DENIED_HELP_SETUP_SECONDS = 5
+
+
+def denied_help_ready():
+    """Fixture preparation barrier only; the real launcher still proves origin."""
+    from uas.git_launcher import main as git
+    # Imports happen in this fresh task before the diagnostic marker. No
+    # supplied module, PID, callback, endpoint or readiness flag grants access.
+    require(os.write(2, DENIED_HELP_READY) == len(DENIED_HELP_READY), 'incomplete readiness marker')
+    deadline = time.monotonic() + DENIED_HELP_SETUP_SECONDS
+    remaining = deadline - time.monotonic()
+    require(remaining > 0, 'unrelated readiness release deadline')
+    ready, _, _ = select.select([0], [], [], remaining)
+    require(ready == [0] and time.monotonic() < deadline, 'unrelated readiness release deadline')
+    require(os.read(0, 2) == DENIED_HELP_RELEASE, 'exact fixed unrelated readiness release required')
+    require(time.monotonic() < deadline, 'unrelated readiness release deadline')
+    return {'code': git(['--help'], invoked_as='git')}
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     require(os.getuid() == os.getgid() == 65532 and len(args) == 1, 'fixed nonroot Room probe required')
@@ -179,6 +202,7 @@ def main(argv=None):
     elif mode == 'public-head': result = public_head()
     elif mode == 'endpoint': result = socket_probe(ENDPOINT)
     elif mode == 'private': result = private_paths()
+    elif mode == 'denied-help-ready': result = denied_help_ready()
     elif mode == 'denied-help':
         from uas.git_launcher import main as git
         result = {'code': git(['--help'], invoked_as='git')}

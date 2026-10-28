@@ -209,8 +209,9 @@ jobs:
           timeout --signal=TERM --kill-after=2s 37s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/git_stream_smoke.py & stream=$!
           timeout --signal=TERM --kill-after=2s 17s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/git_process_smoke.py & ancestry=$!
           timeout --signal=TERM --kill-after=2s 42s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/git_composition_smoke.py & composition=$!
+          timeout --signal=TERM --kill-after=2s 29s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/room_service_smoke.py & room_protocol=$!
           status=0
-          for child in "$runtime" "$stream" "$ancestry" "$composition"; do
+          for child in "$runtime" "$stream" "$ancestry" "$composition" "$room_protocol"; do
             wait "$child" || status=1
           done
           exit "$status"

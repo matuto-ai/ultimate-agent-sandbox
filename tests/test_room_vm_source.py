@@ -14,6 +14,9 @@ import tarfile
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from contextlib import redirect_stdout
+import io
 
 VM = Path(__file__).parent / 'vm'
 sys.path.insert(0, str(VM))
@@ -44,7 +47,9 @@ class RoomVMSourceTests(unittest.TestCase):
             raw = ('# fixture copy of ' + name + '\n').encode()
             (source / name).write_bytes(raw)
             entries.append({'file': 'tests/vm/' + name, 'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
-        encoded = json.dumps({'nonce': 'a' * 32, 'profile': room_profile.PROFILE, 'source': entries}).encode()
+        encoded = json.dumps({'nonce': 'a' * 32, 'profile': room_profile.PROFILE, 'source': entries,
+            'packages': [dict(name=name, **dict(zip(('epoch','version','release','arch'), values)))
+                         for name, values in room_profile.PACKAGE_PROFILE.items()]}).encode()
         (payload / 'manifest.json').write_bytes(encoded)
         return payload, hashlib.sha256(encoded).hexdigest()
 
@@ -195,3 +200,101 @@ class RoomVMSourceTests(unittest.TestCase):
         self.assertIn("path.stat().st_size > feasibility.LOG_LIMIT",ast.unparse(boot))
         self.assertEqual(180,runner.SILENT_BOOT_TIMEOUT)
         self.assertEqual(300,runner.IDLE_SERIAL_TIMEOUT)
+
+
+    def test_seed_rejects_missing_ambiguous_and_wrong_exact_package_roots_before_commands(self):
+        for broken in ('missing', 'duplicate', 'epoch', 'version', 'release', 'arch'):
+            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); payload, _ = self.seed_input(root)
+                data = json.loads((payload/'manifest.json').read_text())
+                if broken == 'missing': data['packages'].pop()
+                elif broken == 'duplicate': data['packages'].append(dict(data['packages'][0]))
+                else: data['packages'][0][broken] = 'wrong'
+                raw = json.dumps(data).encode(); (payload/'manifest.json').write_bytes(raw)
+                with patch.object(runner.feasibility, 'command') as command:
+                    with self.assertRaisesRegex(AssertionError, 'exact native root'):
+                        runner.seed(root, 'a'*32, hashlib.sha256(raw).hexdigest(), payload_root=payload)
+                command.assert_not_called()
+
+    def boot_case(self, steps, *, stop_error=None, parse_error=None, final_clock=0):
+        # Every subprocess/clock is inert. Actual temporary regular files model
+        # the serial/log observations; there is no QEMU, sleep, or signaling.
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name); current = [0.0]
+        process = SimpleNamespace(returncode=None)
+        iterator = iter(steps)
+        def poll():
+            seconds, code, logs = next(iterator)
+            current[0] = seconds; process.returncode = code
+            for name, value in logs.items():
+                if isinstance(value, int):
+                    with (directory/name).open('wb') as stream: stream.truncate(value)
+                else: (directory/name).write_text(value)
+            return code
+        process.poll = Mock(side_effect=poll)
+        parsed = Mock(side_effect=parse_error, return_value=self.report())
+        stop = Mock(side_effect=stop_error); output = io.StringIO()
+        def clock(): return current[0] + final_clock
+        with patch.object(runner.subprocess, 'Popen', return_value=process) as popen, \
+                patch.object(runner.time, 'monotonic', side_effect=clock), \
+                patch.object(runner.time, 'sleep') as sleep, \
+                patch.object(runner.feasibility, 'stop_process', stop), \
+                patch.object(runner, 'parse_report', parsed), redirect_stdout(output):
+            result, error = None, None
+            try: result = runner.boot(directory, ['inert-qemu'], 'a'*32)
+            except BaseException as caught: error = caught
+        popen.assert_called_once(); stop.assert_called_once_with(process)
+        return result, error, parsed, sleep, output.getvalue()
+
+    def test_boot_behavioral_clock_serial_exit_and_log_budget_matrix(self):
+        cases = (
+            ('silent', [(181, None, {})], 'no serial boot output'),
+            ('idle', [(1, None, {'serial.log':'boot'}), (302, None, {})], 'serial output stalled'),
+            ('active_overall', [(1201, None, {'serial.log':'new output'})], 'exceeded budget'),
+            ('exit_overall', [(1201, 0, {'serial.log':'report'})], 'exceeded budget'),
+            ('abnormal', [(2, 7, {'serial.log':'boot'})], 'abnormal exit'),
+            ('live_log', [(1, None, {'serial.log':'boot', 'firmware.log':runner.feasibility.LOG_LIMIT+1})], 'log budget'),
+            ('final_log', [(1, 0, {'serial.log':'report', 'qemu.log':runner.feasibility.LOG_LIMIT+1})], 'final log budget'),
+            ('missing_serial', [(1, 0, {})], None),
+        )
+        for name, steps, message in cases:
+            with self.subTest(name=name):
+                result, error, parsed, _, _ = self.boot_case(steps)
+                self.assertIsNone(result); self.assertIsNotNone(error); parsed.assert_not_called()
+                if message is None: self.assertIsInstance(error, FileNotFoundError)
+                else: self.assertIn(message, str(error))
+
+    def test_boot_serial_activity_refreshes_idle_only_and_exact_bound_is_allowed(self):
+        result, error, parsed, sleep, output = self.boot_case([
+            (180, None, {'serial.log':'first'}), (480, None, {'serial.log':'next larger'}),
+            (780, None, {'serial.log':'another larger output'}),
+            (1080, None, {'serial.log':'yet another larger output'}),
+            (1200, 0, {'serial.log':'complete report'})])
+        self.assertIsNone(error); self.assertEqual(1200, result[1]); self.assertEqual(4, sleep.call_count)
+        parsed.assert_called_once_with('complete report', 'a'*32)
+        self.assertIn('Room VM progress:', output)
+
+    def test_boot_cleanup_cannot_mask_parser_failure_or_become_success(self):
+        primary, cleanup = ValueError('first report failure'), OSError('cleanup')
+        result, error, parsed, _, output = self.boot_case([(1, 0, {'serial.log':'bad'})],
+            parse_error=primary, stop_error=cleanup)
+        self.assertIs(error, primary); self.assertIsNone(result); parsed.assert_called_once()
+        self.assertIn('Room QEMU cleanup:', output)
+        self.assertIn('OSError', primary.__notes__[0])
+        result, error, _, _, _ = self.boot_case([(1, 0, {'serial.log':'good'})], stop_error=cleanup)
+        self.assertIs(error, cleanup); self.assertIsNone(result)
+
+
+    def test_boot_launch_failure_has_no_unacquired_process_cleanup(self):
+        primary=OSError('synthetic launch failure')
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(runner.subprocess,'Popen',side_effect=primary), \
+                patch.object(runner.feasibility,'stop_process') as stop:
+            with self.assertRaises(OSError) as caught:runner.boot(Path(temporary),['inert-qemu'],'a'*32)
+        self.assertIs(primary,caught.exception);stop.assert_not_called()
+
+    def test_boot_cancellation_preserves_primary_when_owned_cleanup_also_fails(self):
+        primary=KeyboardInterrupt()
+        _,error,_,_,output=self.boot_case([(1,0,{'serial.log':'report'})],
+            parse_error=primary,stop_error=OSError('synthetic cleanup'))
+        self.assertIs(primary,error);self.assertIn('Room QEMU cleanup:',output)

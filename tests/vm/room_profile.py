@@ -10,6 +10,8 @@ import re
 import stat
 
 PROFILE = 'room-launch-ipv4-v1'
+PACKAGE_PROFILE = {'moby-engine': ('0', '29.8.2', '2.fc44', 'x86_64'),
+                   'container-selinux': ('4', '2.251.0', '1.fc44', 'noarch')}
 MARKER = Path('/run/uas-room-network-profile')
 MAC = '52:54:00:62:00:01'
 INTERFACE = 'uas-egress'

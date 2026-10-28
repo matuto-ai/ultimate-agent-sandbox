@@ -387,7 +387,7 @@ class RoomProfileTests(unittest.TestCase):
                     elif fault=='probe-error':
                         with self.assertRaisesRegex(OSError,'inert probe exception'):action()
                     elif fault not in (None,'diagnostic','connected','other-result'):
-                        expected='cleanup failed' if fault in ('close','helper') else ('passed fresh canonical' if fault=='admission' else ('different admission invariant' if fault=='other-admission-error' else 'incomplete or unclean'))
+                        expected='inert uncertain helper failure' if fault=='helper' else ('cleanup failed' if fault=='close' else ('passed fresh canonical' if fault=='admission' else ('different admission invariant' if fault=='other-admission-error' else 'incomplete or unclean')))
                         with self.assertRaisesRegex(RuntimeError,expected):action()
                     else:
                         result=action();self.assertTrue(result['original_lease_restored'])
@@ -494,7 +494,94 @@ class RoomProfileTests(unittest.TestCase):
         source=(VM/'guest_room.py').read_text()
         self.assertIn('attribute_positive_control(STORAGE)',source)
         self.assertIn('space.f_bavail * space.f_frsize > 64 * 1024 * 1024 and space.f_favail > 1000',source)
-        self.assertIn("'persistent_participant_service_restart':False",source)
+        self.assertIn('persistent_participant_service_restart=False',source)
+
+
+
+
+    def test_public_probe_fragment_eof_size_status_and_operation_fault_matrix(self):
+        # Synthetic HTTP fragments and faults exercise the fixed protocol only;
+        # none of these observations claim actual public TLS reachability.
+        cases = {
+            'fragmented':([b'HTTP/1.1 20',b'0 OK\r\nX: y\r\n',b'\r\n'],None),
+            'eof':([b'HTTP/1.1 200 OK\r\n',b''],'incomplete'),
+            'oversized':([b'x'*512]*8,'budget'),
+            'invalid':([b'HTTP/2 200 OK\r\n\r\n'],'invalid'),
+            'status':([b'HTTP/1.1 500 Error\r\n\r\n'],'successfully'),
+        }
+        for name,(fragments,message) in cases.items():
+            with self.subTest(name=name):
+                raw,channel,context=Mock(),Mock(),Mock()
+                for stream in (raw,channel):
+                    stream.__enter__=Mock(return_value=stream);stream.__exit__=Mock(return_value=False)
+                context.wrap_socket.return_value=channel;channel.recv.side_effect=fragments
+                with patch.object(room_probe.socket,'socket',return_value=raw), \
+                        patch.object(room_probe.ssl,'create_default_context',return_value=context), \
+                        patch.object(room_probe.time,'monotonic',return_value=10):
+                    if message:
+                        with self.assertRaisesRegex(RuntimeError,message):room_probe.public_head()
+                    else: self.assertTrue(room_probe.public_head()['certificate_hostname_verified'])
+                raw.__exit__.assert_called_once();channel.__exit__.assert_called_once()
+        for operation in ('connect','tls','send','recv'):
+            with self.subTest(operation=operation):
+                raw,channel,context=Mock(),Mock(),Mock()
+                for stream in (raw,channel):
+                    stream.__enter__=Mock(return_value=stream);stream.__exit__=Mock(return_value=False)
+                context.wrap_socket.return_value=channel
+                primary=OSError('synthetic '+operation)
+                {'connect':raw.connect,'tls':context.wrap_socket,'send':channel.sendall,'recv':channel.recv}[operation].side_effect=primary
+                with patch.object(room_probe.socket,'socket',return_value=raw), \
+                        patch.object(room_probe.ssl,'create_default_context',return_value=context), \
+                        patch.object(room_probe.time,'monotonic',return_value=10):
+                    with self.assertRaises(OSError) as caught:room_probe.public_head()
+                self.assertIs(primary,caught.exception);raw.__exit__.assert_called_once()
+                if operation in ('send','recv'):channel.__exit__.assert_called_once()
+
+    def test_public_probe_complete_final_header_after_deadline_is_rejected(self):
+        raw,channel,context=Mock(),Mock(),Mock();now=[0.0]
+        for stream in (raw,channel):
+            stream.__enter__=Mock(return_value=stream);stream.__exit__=Mock(return_value=False)
+        context.wrap_socket.return_value=channel
+        def receive(_size):
+            now[0]=5.01
+            return b'HTTP/1.1 200 OK\r\n\r\n'
+        channel.recv.side_effect=receive
+        with patch.object(room_probe.socket,'socket',return_value=raw), \
+                patch.object(room_probe.ssl,'create_default_context',return_value=context), \
+                patch.object(room_probe.time,'monotonic',side_effect=lambda:now[0]):
+            with self.assertRaisesRegex(RuntimeError,'deadline'):room_probe.public_head()
+        raw.__exit__.assert_called_once();channel.__exit__.assert_called_once()
+
+
+    def test_fixed_ready_probe_calls_real_launcher_only_after_exact_owned_release(self):
+        import uas.git_launcher as launcher
+        for fault in (None,'bad-release','extra-release','eof','no-ready','late-select','late-read','short-marker'):
+            with self.subTest(fault=fault):
+                calls=[];now=[0.0]
+                def write(fd,data):
+                    calls.append('marker');self.assertEqual((2,room_probe.DENIED_HELP_READY),(fd,data))
+                    return 0 if fault=='short-marker' else len(data)
+                def select(readers,writers,errors,timeout):
+                    calls.append('wait');self.assertEqual([0],readers);self.assertEqual(5,timeout)
+                    if fault=='late-select':now[0]=5
+                    return ([] if fault=='no-ready' else [0]),[],[]
+                def read(fd,limit):
+                    calls.append('release');self.assertEqual((0,2),(fd,limit))
+                    if fault=='late-read':now[0]=5
+                    return {'bad-release':b'X','extra-release':b'GG','eof':b''}.get(fault,b'G')
+                def git(args,*,invoked_as):
+                    calls.append('git');self.assertEqual(['--help'],args);self.assertEqual('git',invoked_as);return 128
+                with patch.object(room_probe.os,'write',side_effect=write), \
+                        patch.object(room_probe.os,'read',side_effect=read), \
+                        patch.object(room_probe.select,'select',side_effect=select), \
+                        patch.object(room_probe.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(launcher,'main',side_effect=git) as launch:
+                    if fault:
+                        with self.assertRaises(RuntimeError):room_probe.denied_help_ready()
+                        launch.assert_not_called()
+                    else:
+                        self.assertEqual({'code':128},room_probe.denied_help_ready())
+                        self.assertEqual(['marker','wait','release','git'],calls)
 
 
 if __name__=='__main__':unittest.main()

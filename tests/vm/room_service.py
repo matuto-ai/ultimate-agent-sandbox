@@ -178,8 +178,29 @@ def confine_broker():
     return facts
 
 
+def close_service_resources(checks, owners, backend_fd=-1):
+    """Attempt every retained owner and preserve bounded cleanup evidence."""
+    first = None
+    cleanup = checks['cleanup'] = {'status': 'passed', 'attempted': [], 'errors': []}
+    for name, owner in owners:
+        if owner is None: continue
+        cleanup['attempted'].append(name)
+        try: owner.close()
+        except BaseException as error:
+            if first is None: first = error
+            cleanup['errors'].append({'owner': name, 'error_type': type(error).__name__[:64]})
+    if backend_fd >= 0:
+        cleanup['attempted'].append('backend_fd')
+        try: os.close(backend_fd)
+        except BaseException as error:
+            if first is None: first = error
+            cleanup['errors'].append({'owner': 'backend_fd', 'error_type': type(error).__name__[:64]})
+    if first is not None: cleanup['status'] = 'failed'
+    return first
+
+
 class BrokerProcess:
-    def __init__(self, binding, instance):
+    def __init__(self, binding, instance, *, checks=None):
         from uas.forge_audit import ForgeAudit
         from uas.git_audit import GitAudit
         from uas.git_service import ExternalGitBroker, GitBrokerClient, serve
@@ -235,8 +256,12 @@ class BrokerProcess:
             self.pidfd = os.pidfd_open(self.pid)
             self.client = GitBrokerClient(parent, binding, instance, broker_uid=BROKER_UID, broker_gid=BROKER_UID)
             self.require()
-        except BaseException:
-            parent.close(); child.close(); self.close(); raise
+        except BaseException as error:
+            evidence = {} if checks is None else checks
+            close_service_resources(evidence, (('parent_channel', parent), ('child_channel', child), ('broker', self)))
+            if evidence['cleanup']['errors']:
+                error.add_note('Room Broker cleanup: ' + json.dumps(evidence['cleanup']))
+            raise
 
     def require(self):
         from uas.kernel_origin import _identity, alive
@@ -403,6 +428,7 @@ def prove_foreign_listener_admission(supervisor, endpoint_, probe, *, run, check
             checks.update(status='failed', error_type=type(error).__name__)
             raise
         finally:
+            primary = sys.exc_info()[1]
             cleanup_errors = []
             if foreign is not None:
                 try: foreign.close()
@@ -425,13 +451,15 @@ def prove_foreign_listener_admission(supervisor, endpoint_, probe, *, run, check
             except BaseException as error: cleanup_errors.append(error)
             if cleanup_errors:
                 checks.update(status='failed', cleanup_errors=[type(error).__name__ for error in cleanup_errors])
-                raise RuntimeError('foreign-SID negative cleanup failed; no further admission') from cleanup_errors[0]
-            checks['original_lease_restored'] = True
+                if primary is None:
+                    raise RuntimeError('foreign-SID negative cleanup failed; no further admission') from cleanup_errors[0]
+            else:
+                checks['original_lease_restored'] = True
         checks.update(status='passed', stage='complete')
         return checks
 
 
-def observe_unrelated_cli(listener, container, serve, *, checks):
+def observe_unrelated_cli(listener, container, serve, *, checks, release):
     """Bounded evidence around the existing fixed same-UID negative, not denial.
 
     Draining output never extends either five-second deadline. Killing this
@@ -439,16 +467,19 @@ def observe_unrelated_cli(listener, container, serve, *, checks):
     the caller's exact Room teardown remains mandatory on every failure.
     """
     from room_policy_diagnostics import _output
+    from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE, DENIED_HELP_SETUP_SECONDS
     started = time.monotonic()
     checks.update(status='in_progress', stage='launch', stage_elapsed_seconds={},
                   connected=False, returncode=None, capture_limit_bytes=4096,
-                  timeout_seconds={'accept': 5, 'collect': 5, 'cleanup': 5})
+                  timeout_seconds={'startup': DENIED_HELP_SETUP_SECONDS, 'accept': 5, 'collect': 5, 'cleanup': 5},
+                  startup={'marker_observed': False, 'release_sent': False, 'marker_bytes': 0})
     buffers = {name: bytearray() for name in ('stdout', 'stderr')}
     counts = {name: 0 for name in buffers}
     eof = {name: False for name in buffers}
     streams = {}
     process = None
     failure = None
+    stdin_closed = False
     def stage(name):
         checks['stage'] = name
         checks['stage_elapsed_seconds'][name] = round(time.monotonic() - started, 6)
@@ -464,6 +495,8 @@ def observe_unrelated_cli(listener, container, serve, *, checks):
                 continue
             counts[name] += len(data)
             buffers[name].extend(data[:max(0, 4096 - len(buffers[name]))])
+            if name == 'stderr':
+                require(bytes(buffers[name]).count(DENIED_HELP_READY) <= 1, 'duplicate unrelated CLI readiness marker')
     def collect(deadline):
         while streams:
             remaining = deadline - time.monotonic()
@@ -472,14 +505,47 @@ def observe_unrelated_cli(listener, container, serve, *, checks):
             drain(ready)
     try:
         stage('launch')
-        process = subprocess.Popen(['docker', 'exec', container, '/usr/bin/python3', '-I',
-            '/opt/uas/uas/room_probe.py', 'denied-help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(['docker', 'exec', '-i', container, '/usr/bin/python3', '-I',
+            '/opt/uas/uas/room_probe.py', 'denied-help-ready'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         checks['pid'] = process.pid  # Diagnostic CLI PID, never request authority.
         stage('pipe_setup')
         for name in buffers:
             stream = getattr(process, name)
             os.set_blocking(stream.fileno(), False)
             streams[stream] = name
+        os.set_blocking(process.stdin.fileno(), False)
+        stage('startup')
+        deadline = time.monotonic() + DENIED_HELP_SETUP_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError('unrelated CLI startup deadline')
+            ready, _, _ = select.select([listener, *streams], [], [], remaining)
+            drain(ready)
+            require(listener not in ready, 'unrelated CLI connected before preparation release')
+            require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
+            prefix = bytes(buffers['stderr'])
+            require(counts['stdout'] == 0 and counts['stderr'] <= len(DENIED_HELP_READY)
+                    and DENIED_HELP_READY.startswith(prefix), 'malformed unrelated CLI readiness marker')
+            require(not eof['stdout'] and not eof['stderr'] and process.poll() is None,
+                    'unrelated CLI exited before preparation release')
+            if prefix == DENIED_HELP_READY:
+                checks['startup'].update(marker_observed=True, marker_bytes=len(prefix), marker=prefix.decode('ascii'))
+                break
+        stage('release')
+        def write_fixed_release():
+            nonlocal stdin_closed
+            require(not checks['startup']['release_sent'], 'duplicate unrelated preparation release')
+            require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
+            ready, _, _ = select.select([listener], [], [], 0)
+            require(not ready, 'unrelated CLI connected before preparation release')
+            require(os.write(process.stdin.fileno(), DENIED_HELP_RELEASE) == 1, 'incomplete unrelated preparation release')
+            checks['startup']['release_sent'] = True
+            process.stdin.close(); stdin_closed = True
+        # The caller holds its lifecycle lock and rechecks fresh prerequisites
+        # through this exact write, not just before returning a readiness bit.
+        release(write_fixed_release)
+        require(checks['startup']['release_sent'], 'unrelated preparation not released')
         stage('accept')
         deadline = time.monotonic() + 5
         listener.settimeout(5)
@@ -539,6 +605,10 @@ def observe_unrelated_cli(listener, container, serve, *, checks):
                 cleanup['reaped'] = True
             except BaseException as error:
                 cleanup['errors'].append({'operation': 'wait', 'error_type': type(error).__name__})
+            if not stdin_closed:
+                try: process.stdin.close()
+                except BaseException as error:
+                    cleanup['errors'].append({'operation': 'stdin_close', 'error_type': type(error).__name__})
             for name in buffers:
                 try: getattr(process, name).close()
                 except BaseException as error:
@@ -609,7 +679,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
                     'held bootstrap control differs')
             return value
     try:
-        broker = BrokerProcess(binding, instance)
+        broker = BrokerProcess(binding, instance, checks=checks.setdefault('broker', {}))
         checks['broker'] = broker.observe()
         seat = ExecSeat('alpha', instance, 'fixture-participant', 'fixture-actor', 'seat-a', container, 165532, 165532)
         launch = Bootstrap(DockerExecAPI('/var/run/docker.sock'), seat, endpoint_.leases[0], private / 'bootstrap.json')
@@ -705,9 +775,13 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         # ancestry to the held bootstrap. The real service must reject it.
         checks['stage'] = 'unrelated_task_refusal'
         checks['unrelated_task'] = {}
+        def release_unrelated(write):
+            with supervisor._locked():
+                current(); resources(); backend.admit(state); broker.require()
+                write()
         denied, stdout, stderr = observe_unrelated_cli(listener, container,
             lambda channel: serve_one(channel, service, authority, lifecycle_lock=supervisor._locked),
-            checks=checks['unrelated_task'])
+            checks=checks['unrelated_task'], release=release_unrelated)
         observed = checks['unrelated_task']
         require(not observed['stdout']['truncated'] and not observed['stderr']['truncated'],
                 'unrelated CLI evidence exceeded capture bound')
@@ -737,12 +811,9 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         raise
     finally:
         active = False
-        errors = []
-        for owner in (authority, launch, provenance, broker):
-            if owner is not None:
-                try: owner.close()
-                except BaseException as error: errors.append(error)
-        if backend_fd >= 0:
-            try: os.close(backend_fd)
-            except BaseException as error: errors.append(error)
-        if errors and sys.exc_info()[0] is None: raise errors[0]
+        primary = sys.exc_info()[1]
+        cleanup_error = close_service_resources(checks, (
+            ('authority', authority), ('launch', launch), ('provenance', provenance), ('broker', broker)), backend_fd)
+        if cleanup_error is not None:
+            checks['status'] = 'failed'
+            if primary is None: raise cleanup_error

@@ -22,6 +22,7 @@ import run as feasibility
 from prepare_payload import build_payload
 from prepare_room_payload import ROOM_MODULES
 import room_profile
+from guest_boundary import exact_install_roots
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -67,6 +68,9 @@ def seed(directory, nonce, manifest_hash, *, payload_root):
     if (type(manifest) is not dict or manifest.get('nonce') != nonce
             or manifest.get('profile') != PROFILE or type(manifest.get('source')) is not list):
         raise ValueError('staged Room payload scope differs')
+    # Reuse the guest's pure selector against the same digest-bound manifest.
+    # A missing/ambiguous/wrong pinned Engine or SELinux root fails before QEMU.
+    exact_install_roots(manifest, room_profile.PACKAGE_PROFILE)
     bootstrap = {}
     for name in BOOTSTRAP_SOURCES:
         relative = 'tests/vm/' + name
@@ -145,6 +149,7 @@ def boot(directory, values, nonce):
     previous_bytes = serial.stat().st_size if serial.exists() else 0
     with (directory / 'qemu.log').open('x') as output:
         process = subprocess.Popen(values, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
+        failure = None
         try:
             while process.poll() is None:
                 now = time.monotonic()
@@ -167,6 +172,8 @@ def boot(directory, values, nonce):
                     if path.exists() and path.stat().st_size > feasibility.LOG_LIMIT:
                         raise RuntimeError('Room VM log budget exceeded')
                 time.sleep(1)
+            if time.monotonic() - started > BOOT_TIMEOUT:
+                raise RuntimeError('Room guest install/scenario/shutdown exceeded budget')
             if process.returncode != 0:
                 raise RuntimeError('Room QEMU abnormal exit')
             # Recheck logs after exit; a final burst must not bypass the budget.
@@ -176,8 +183,18 @@ def boot(directory, values, nonce):
                     raise RuntimeError('Room VM final log budget exceeded')
             report = parse_report(serial.read_text(errors='replace'), nonce)
             return report, round(time.monotonic() - started, 3)
+        except BaseException as error:
+            failure = error
+            raise
         finally:
-            feasibility.stop_process(process)  # This exact owned Popen only.
+            try:
+                feasibility.stop_process(process)  # This exact owned Popen only.
+            except BaseException as error:
+                evidence = {'status': 'failed', 'error_type': type(error).__name__[:64],
+                            'outer_disposable_vm_removal_remains_mandatory': True}
+                print('Room QEMU cleanup:', json.dumps(evidence), flush=True)
+                if failure is None: raise
+                failure.add_note('Room QEMU cleanup: ' + json.dumps(evidence))
 
 
 def main():
