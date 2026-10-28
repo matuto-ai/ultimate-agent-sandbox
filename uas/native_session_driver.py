@@ -1,4 +1,6 @@
 """Finite retained-owner native session; no login, PID adoption or write retries."""
+from copy import deepcopy
+import threading
 import hashlib
 import select
 import time
@@ -17,6 +19,69 @@ def _operation(request, milestone):
     return 'native-session-'+hashlib.sha256((request.operation_id+':'+milestone).encode()).hexdigest()
 
 
+class NativeHumanReviewInbox:
+    """Bounded host scheduling only; canonical Manager/Room owners grant effects.
+
+    The authenticated hosting application supplies this object and exact observed
+    requests. It is neither a login/transport nor durable recovery authority.
+    """
+    def __init__(self,session,audit):
+        from .manager_actions import HumanSession
+        from .forge_audit import ForgeAudit
+        if (type(session) is not HumanSession or type(audit) is not ForgeAudit
+                or audit.deployment_id!=session.deployment_id):
+            raise LedgerError('MANAGER_AUTHENTICATION_REQUIRED')
+        self.session,self.audit=session,audit
+        self._lock=threading.Lock();self._items={};self._queue=[];self._consumer=None
+
+    def enqueue(self,value):
+        from .manager_actions import request
+        from .ledger import _json
+        from .manager_action_protocol import MAX_ACTION_BYTES
+        parsed=request(value,self.session)
+        if len(_json(parsed).encode('utf-8'))>MAX_ACTION_BYTES:
+            raise LedgerError('INVALID_MANAGER_ACTION')
+        if parsed['action'] not in {'request-changes','reconcile-changes'}:
+            raise LedgerError('NATIVE_HUMAN_ACTION_UNSUPPORTED')
+        payload=parsed['payload']
+        if (parsed['action']=='request-changes' and (set(payload)!={'body'}
+                or type(payload['body']) is not str or not 1<=len(payload['body'])<=8192)
+                or parsed['action']=='reconcile-changes' and payload):
+            raise LedgerError('INVALID_MANAGER_ACTION')
+        if not self.session.allowed(parsed['action']):raise LedgerError('FORBIDDEN')
+        with self._lock:
+            prior=self._items.get(parsed['operation_id'])
+            if prior is not None:
+                if prior['request']!=parsed:raise LedgerError('ID_CONFLICT')
+                return prior['status']
+            if len(self._items)>=8:raise LedgerError('NATIVE_HUMAN_ACTION_CAPACITY')
+            self._items[parsed['operation_id']]={'request':parsed,'status':'queued','reason':None}
+            self._queue.append(parsed['operation_id'])
+        return 'queued'
+
+    def _bind(self,consumer):
+        with self._lock:
+            if self._consumer is not None:raise LedgerError('NATIVE_HUMAN_INBOX_ALREADY_BOUND')
+            self._consumer=consumer
+
+    def _take(self,consumer):
+        with self._lock:
+            if self._consumer is not consumer:raise LedgerError('NATIVE_HUMAN_INBOX_OWNER_REQUIRED')
+            if not self._queue:return None
+            item=self._items[self._queue.pop(0)];item['status']='attempted'
+            return deepcopy(item['request'])
+
+    def _record(self,consumer,operation,status,reason=None):
+        with self._lock:
+            if self._consumer is not consumer:raise LedgerError('NATIVE_HUMAN_INBOX_OWNER_REQUIRED')
+            self._items[operation].update(status=status,reason=reason)
+
+    def snapshot(self):
+        with self._lock:
+            return [{'operation_id':key,'action':item['request']['action'],
+                     'status':item['status'],'reason':item['reason']} for key,item in self._items.items()]
+
+
 class NativeSessionDriver:
     """One initial Run and optional explicitly requested successor, same live host.
 
@@ -25,7 +90,7 @@ class NativeSessionDriver:
     an aggregate bound for nested Gates/Broker observations or lifecycle locks.
     Unknown effects stop this invocation with their original owners/journals intact.
     """
-    def __init__(self, owner, recruitment, request, budget, *, next_request=None, git_operations=None):
+    def __init__(self, owner, recruitment, request, budget, *, next_request=None, git_operations=None, human_actions=None):
         from .native_session import SessionBudget
         if (type(owner) is not NativeRunAdmission or type(recruitment) is not NativeReviewerRecruitment
                 or recruitment.owner is not owner or type(request) is not NativeHumanRunRequest
@@ -48,6 +113,15 @@ class NativeSessionDriver:
             if (type(git_operations) is not NativeGitOperations or git_operations.owner is not owner
                     or git_operations.reviewer is not recruitment):
                 raise LedgerError('NATIVE_GIT_OWNER_REQUIRED')
+        if human_actions is not None and (type(human_actions) is not NativeHumanReviewInbox
+                or human_actions.session is not request.session
+                or human_actions.audit.deployment_id!=request.session.deployment_id
+                or request.session.room_id!=owner.ledger.room_id
+                or request.session.instance_id!=recruitment.binding.room_instance
+                or next_request is not None):
+            raise LedgerError('EXACT_NATIVE_HUMAN_ACTION_OWNER_REQUIRED')
+        self.human_actions=human_actions
+        if human_actions is not None:human_actions._bind(self)
         self.git_operations=git_operations
         self.owner,self.recruitment,self.request,self.budget=owner,recruitment,request,budget
         self.next_request=next_request
@@ -89,7 +163,41 @@ class NativeSessionDriver:
                 'counts':dict(self.counts),'successor_started':len(self.runs)>0,
                 'phase':self.phase,'pending_successor':self.pending_successor,'last_observed_run':self.last_observed,
                 'crash_recovery':'explicit-native-restoration-unavailable',
-                'authority_restored_from_journal':False}
+                'authority_restored_from_journal':False,
+                'human_actions':[] if self.human_actions is None else self.human_actions.snapshot(),
+                'pending_human_comments':self._pending_comments()}
+
+    def _pending_comments(self):
+        run=self.owner.run_id(self.request.operation_id)
+        return sorted(key for key,row in self.owner.ledger.snapshot()['state'].get('review_comments',{}).items()
+                      if row['run_id']==run and row['status'] in {'pending','unknown','confirmed-awaiting-target'})
+
+    def _human_action(self,row):
+        inbox=self.human_actions
+        if inbox is None:return
+        value=inbox._take(self)
+        if value is None:return
+        operation=value['operation_id']
+        try:
+            if (inbox.session is not self.request.session
+                    or inbox.audit.deployment_id!=inbox.session.deployment_id
+                    or value['run_id']!=row['run_id'] or value['generation']!=row['generation']):
+                raise LedgerError('MANAGER_SCOPE_MISMATCH')
+            pending=self._pending_comments()
+            if pending and (value['action']!='reconcile-changes' or value['object_id'] not in pending):
+                raise LedgerError('NATIVE_HUMAN_RECONCILIATION_REQUIRED')
+            self._current();self._headroom(45)
+            self.recruitment.root.review_host.human_action(value,session=inbox.session,audit=inbox.audit)
+            original=operation if value['action']=='request-changes' else value['object_id']
+            comment=self.owner.ledger.snapshot()['state'].get('review_comments',{}).get(original)
+            if not comment or comment['run_id']!=row['run_id'] or comment['generation']!=row['generation']:
+                raise LedgerError('NATIVE_HUMAN_RESULT_UNVERIFIED')
+            inbox._record(self,operation,comment['status'])
+        except LedgerError as error:
+            inbox._record(self,operation,'unknown' if self._pending_comments() else 'rejected',error.code)
+        except BaseException:
+            inbox._record(self,operation,'unknown','original-owner-reconciliation-required')
+            raise
 
     def _deliver(self):
         for admission in (self.recruitment.pi,self.recruitment.root.native_admission):
@@ -157,8 +265,14 @@ class NativeSessionDriver:
                     return self._result('completed','canonical-human-merge-observed')
                 if row['status']!='ACTIVE':return self._result('attention','canonical-run-not-active')
                 if self.budget.deadline-time.monotonic()<45:
-                    return self._result('inconclusive','operation-deadline')
+                    return self._result('unknown','human-action-reconciliation-pending') if self._pending_comments() else self._result('inconclusive','operation-deadline')
                 self._current()
+                self._human_action(row)
+                if self._pending_comments():
+                    # No native/Git/provider work while a human comment is
+                    # unresolved. Only a supplied explicit reconciliation may run.
+                    select.select([],[],[],min(.1,self.budget.remaining(.1)))
+                    continue
                 now=time.monotonic()
                 if now>=self.next_delivery:self._deliver()
                 if now>=self.next_completion:self._completion(row)

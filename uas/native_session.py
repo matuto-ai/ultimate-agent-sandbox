@@ -188,11 +188,17 @@ def _gate_listener(resources):
         channel.close();raise
 
 
-def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None):
+def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None, human_actions=None):
     from .native_qualification_backend import readonly_supervisor
     require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
     require(type(resources) is dict and resources.get('room_id') == plan.room['id'], 'INVALID_LAUNCH_RESOURCES')
     require(('git_manifest' in plan.installation)==(git_fd is not None),'GIT_BROKER_CHANNEL_REQUIRED')
+    if human_actions is not None:
+        from .native_session_driver import NativeHumanReviewInbox
+        from .native_run_admission import NativeHumanRunRequest
+        require(type(human_actions) is NativeHumanReviewInbox and type(human_request) is NativeHumanRunRequest
+                and human_actions.session is human_request.session and next_request is None,
+                'EXACT_NATIVE_HUMAN_ACTION_OWNER_REQUIRED')
     if next_request is not None and human_request is None:
         raise QualificationError('AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
     if human_request is not None:
@@ -318,11 +324,12 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 stack.callback(gate_operations.close)
                 NativeGateWorkflow(recruitment.root.review_host,gate_operations.control)
             driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request,
-                                       git_operations=git_operations)
+                                       git_operations=git_operations,human_actions=human_actions)
             result=driver.run()
             return {'version':1,'status':'NATIVE_RUN_SESSION_FINISHED','room_id':room['id'],'instance':instance,
                 'run_id':result['current_run'],'product_run_created':True,'reviewer_attached':True,
-                'session':result,'configuration_sha256':plan.config_digest,
+                'session':result,'human_review_actions_attached':human_actions is not None,
+                'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
                 'lifecycle_blockers':((['NATIVE_COMMAND_DIFF_GATE_PROFILES_UNAVAILABLE',
                                         'NATIVE_GATE_IDENTITY_TRANSPORT_UNAVAILABLE'] if gate_operations is not None else

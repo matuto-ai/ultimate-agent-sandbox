@@ -234,3 +234,38 @@ Completion-only mechanical Gates first run at the eligible trusted completion cu
 merge polls never create fresh evaluator attempts. Command/diff profiles and typed
 identity evidence transport remain explicit gaps. Manager action transport still needs its authenticated host/audit
 binding; the CLI cannot manufacture HumanSession.
+
+### Explicit one-Run human changes and reconciliation
+
+An authenticated hosting application may supply
+`human_actions=NativeHumanReviewInbox(session, audit)` to the trusted `run` API.
+It must use the exact same real `HumanSession` as the initial Run request and
+an existing exact `ForgeAudit` for that deployment. This is not a CLI login,
+serialized human grant, browser endpoint or replacement Manager authority.
+
+The host enqueues existing canonical Manager `request-changes` or
+`reconcile-changes` envelopes with their original operation ID, exact observed
+version, Run/generation and submission/comment object. No body, identity,
+version upgrade or reconciliation is inferred by the driver. The inbox retains
+at most eight immutable requests within the existing Manager protocol 16 KiB
+UTF-8 envelope bound (separate from the canonical 8192-character body limit); repeated identical IDs
+never execute again, and changed content under an ID conflicts. It is ephemeral
+scheduling, not a second durable command ledger or restart-recovery mechanism.
+
+The driver consumes an action once before completion polling, outside lifecycle
+and Room locks, through the existing `NativeReviewHost.human_action` and Manager
+fence. Current authentication, exact version and target checks remain canonical.
+A confirmed comment queues the ordinary implementation Work Request. Unknown or
+pending comments suppress native/Git/delivery/completion work while the driver
+accepts only an explicitly supplied matching reconciliation request. It reads the
+canonical original comment row to establish settlement, never trusts inbox status
+as a receipt, and never reposts a comment. Deadline expiry reports pending IDs and
+unknown status; comments, audit and native custody remain with their owners.
+Unexpected transport/owner exceptions stop conservatively with the attempted ID
+retained rather than being swallowed or automatically retried.
+
+This input is limited to one Run and cannot be combined with `next_request`.
+Authenticated external Manager hosting and same-Run native crash restoration are
+still missing. No actual live scenario policy has been selected by this source:
+required Gates must come from the real configured snapshot, never a substituted
+weaker policy to make qualification succeed.

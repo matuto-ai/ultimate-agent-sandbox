@@ -88,7 +88,7 @@ SOURCES = (
     'uas/workstation_control.py',
     'uas/workstation_peer.py',
 
-    'uas/manager_actions.py', 'uas/manager_lifecycle.py',
+    'uas/manager_action_protocol.py', 'uas/manager_actions.py', 'uas/manager_lifecycle.py',
     'tests/linux/mapped_namespace.py',
     'uas/__init__.py',
     'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/manager_journey.py',
