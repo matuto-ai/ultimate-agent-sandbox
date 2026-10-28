@@ -292,6 +292,9 @@ def _egress(value):
             "approval_ref": _token(value["approval_ref"], "egress.approval_ref")}
 
 
+CORE_SETTINGS = ("version", "repository", "model", "filters", "limits")
+
+
 def admit_settings(source, *, egress_approvals=()):
     """Validate one complete active settings document; no defaults, no effects.
 
@@ -315,7 +318,28 @@ def admit_settings(source, *, egress_approvals=()):
         raise
     except (ValueError, UnicodeError, RecursionError):
         _fail("INVALID_SETTINGS")
-    _object(document, "$", ("version", "repository", "model", "filters", "limits"))
+    normalized = _settings_core(document)
+    egress = {}
+    for index, item in enumerate(egress_approvals):
+        approval = _egress(item)
+        if approval["model_profile_ref"] != normalized["model"]["profile_ref"]:
+            _fail("CONFLICTING_EGRESS", f"egress_approvals[{index}]")
+        previous = egress.get(approval["project_id"])
+        if previous is not None and previous != approval:
+            _fail("CONFLICTING_EGRESS", f"egress_approvals[{index}]")
+        egress[approval["project_id"]] = approval
+    normalized["egress"] = [egress[key] for key in sorted(egress)]
+    normalized["settings_id"] = _settings_id(normalized)
+    return normalized
+
+
+def _settings_id(normalized):
+    return _digest({key: normalized[key] for key in CORE_SETTINGS})
+
+
+def _settings_core(document):
+    """Validate and normalize the five shared settings namespaces."""
+    _object(document, "$", CORE_SETTINGS)
     if type(document["version"]) is not int or document["version"] != SETTINGS_VERSION:
         _fail("UNSUPPORTED_SETTINGS_VERSION", "$.version")
 
@@ -353,19 +377,6 @@ def admit_settings(source, *, egress_approvals=()):
         "filters": {name: filters[name] for name in INITIAL_FILTERS},
         "limits": admitted,
     }
-    egress = {}
-    for index, item in enumerate(egress_approvals):
-        approval = _egress(item)
-        if approval["model_profile_ref"] != normalized["model"]["profile_ref"]:
-            _fail("CONFLICTING_EGRESS", f"egress_approvals[{index}]")
-        previous = egress.get(approval["project_id"])
-        if previous is not None and previous != approval:
-            _fail("CONFLICTING_EGRESS", f"egress_approvals[{index}]")
-        egress[approval["project_id"]] = approval
-    normalized["egress"] = [egress[key] for key in sorted(egress)]
-    normalized["settings_id"] = _digest({key: normalized[key]
-                                         for key in ("version", "repository", "model",
-                                                     "filters", "limits")})
     return normalized
 
 
@@ -392,31 +403,39 @@ def egress_approval(settings, project_id):
 _SCOPE_SEAL = object()
 
 
-@dataclass(frozen=True)
 class LibraryScope:
-    """Authority-derived scope. Only the constructors below hold the seal."""
-    subject: str
-    actor_id: str
-    authority_version: str
-    capabilities: tuple
-    project_id: str | None = None
-    project_identity: str | None = None
-    reference_root: str | None = None
-    participant_id: str | None = None
-    human_id: str | None = None
-    _seal: object = field(default=None, repr=False, compare=False)
+    """Authority-derived scope; only the constructors below can mint one.
 
-    def __post_init__(self):
-        if self._seal is not _SCOPE_SEAL:
+    A scope is immutable and never deserialized: it is built from an already
+    authenticated Origin, Manager HumanSession or installation-authority Origin.
+    """
+    __slots__ = ("subject", "actor_id", "authority_version", "capabilities",
+                 "project_id", "project_identity", "reference_root",
+                 "participant_id", "human_id")
+
+    def __init__(self, *, seal, subject, actor_id, authority_version, capabilities,
+                 project_id=None, project_identity=None, reference_root=None,
+                 participant_id=None, human_id=None):
+        if seal is not _SCOPE_SEAL:
             _fail("INVALID_SCOPE", "seal")
+        for name, value in (("subject", subject), ("actor_id", actor_id),
+                            ("authority_version", authority_version)):
+            object.__setattr__(self, name, value)
+        if type(capabilities) is not tuple or not capabilities:
+            _fail("INVALID_SCOPE", "capabilities")
+        for capability in capabilities:
+            _token(capability, "capabilities")
+        object.__setattr__(self, "capabilities", capabilities)
+        for name, value in (("project_id", project_id),
+                            ("project_identity", project_identity),
+                            ("reference_root", reference_root),
+                            ("participant_id", participant_id),
+                            ("human_id", human_id)):
+            object.__setattr__(self, name, value)
         if self.subject not in SUBJECTS:
             _fail("INVALID_SCOPE", "subject")
         _token(self.actor_id, "actor_id")
         _token(self.authority_version, "authority_version")
-        if type(self.capabilities) is not tuple or not self.capabilities:
-            _fail("INVALID_SCOPE", "capabilities")
-        for capability in self.capabilities:
-            _token(capability, "capabilities")
         if self.subject == "operator":
             if self.project_id is not None or self.project_identity is not None:
                 _fail("INVALID_SCOPE", "project_id")
@@ -431,6 +450,12 @@ class LibraryScope:
             _fail("INVALID_SCOPE", "participant_id")
         if self.subject == "human" and self.human_id is None:
             _fail("INVALID_SCOPE", "human_id")
+
+    def __setattr__(self, name, value):
+        raise AttributeError("LibraryScope is immutable")
+
+    def __repr__(self):
+        return "LibraryScope(%s, %s)" % (self.subject, self.actor_id)
 
     def canonical(self):
         return {"subject": self.subject, "actor_id": self.actor_id,
@@ -476,13 +501,13 @@ def participant_scope(origin, *, binding):
         _fail("LIBRARY_AUTHENTICATION_REQUIRED", "origin")
     if ENQUEUE_CAPABILITY not in origin.capabilities:
         _fail("FORBIDDEN", "capabilities")
-    return LibraryScope(subject="participant", actor_id=origin.actor_id,
+    return LibraryScope(seal=_SCOPE_SEAL, subject="participant", actor_id=origin.actor_id,
                         authority_version=origin.authority_version,
                         capabilities=tuple(origin.capabilities),
                         project_id=binding["project_id"],
                         project_identity=binding["project_identity"],
                         reference_root=binding["reference_root"],
-                        participant_id=origin.participant_id, _seal=_SCOPE_SEAL)
+                        participant_id=origin.participant_id)
 
 
 def human_scope(session, *, binding, kind):
@@ -494,13 +519,13 @@ def human_scope(session, *, binding, kind):
     action = "library-" + kind
     if session.allowed(action) is not True:
         _fail("FORBIDDEN", "session")
-    return LibraryScope(subject="human", actor_id=session.human.actor_id,
+    return LibraryScope(seal=_SCOPE_SEAL, subject="human", actor_id=session.human.actor_id,
                         authority_version=session.human.authority_version,
                         capabilities=(action,),
                         project_id=binding["project_id"],
                         project_identity=binding["project_identity"],
                         reference_root=binding["reference_root"],
-                        human_id=session.manager_id, _seal=_SCOPE_SEAL)
+                        human_id=session.manager_id)
 
 
 def installation_scope(origin):
@@ -509,9 +534,9 @@ def installation_scope(origin):
         _fail("LIBRARY_AUTHENTICATION_REQUIRED", "origin")
     if SETTINGS_CAPABILITY not in origin.capabilities:
         _fail("FORBIDDEN", "capabilities")
-    return LibraryScope(subject="operator", actor_id=origin.actor_id,
+    return LibraryScope(seal=_SCOPE_SEAL, subject="operator", actor_id=origin.actor_id,
                         authority_version=origin.authority_version,
-                        capabilities=(SETTINGS_CAPABILITY,), _seal=_SCOPE_SEAL)
+                        capabilities=(SETTINGS_CAPABILITY,))
 
 
 # --- Operation contract ----------------------------------------------------
@@ -574,20 +599,21 @@ def _operation(kind, scope, settings, operation_id, request_id, payload, at, que
 
 
 def _settings(settings):
-    """Structural recheck of an already admitted settings value at operation start."""
+    """Revalidate an admitted settings value and its identity at operation start.
+
+    Values are re-admitted, not merely key-checked, and the recomputed digest
+    must equal the operation-start identity the caller passes on.
+    """
     if type(settings) is not dict:
         _fail("INVALID_SETTINGS", "settings")
-    if type(settings.get("version")) is not int or settings["version"] != SETTINGS_VERSION:
-        _fail("UNSUPPORTED_SETTINGS_VERSION", "settings.version")
-    _object(settings, "settings", ("version", "repository", "model", "filters", "limits",
-                                   "egress", "settings_id"))
-    _digest_value(settings["settings_id"], "settings.settings_id")
-    _object(settings["limits"], "settings.limits", tuple(MAXIMA))
-    _object(settings["model"], "settings.model", ("profile_ref", "placement",
-                                                  "qualification_ref"))
-    _object(settings["filters"], "settings.filters", tuple(INITIAL_FILTERS))
-    if type(settings["egress"]) is not list:
+    core = _settings_core({key: settings.get(key) for key in CORE_SETTINGS})
+    _digest_value(settings.get("settings_id"), "settings.settings_id")
+    if _settings_id(core) != settings["settings_id"]:
+        _fail("CONFIGURATION_MISMATCH", "settings.settings_id")
+    if type(settings.get("egress")) is not list:
         _fail("INVALID_SETTINGS", "settings.egress")
+    for item in settings["egress"]:
+        _egress(item)
     return settings
 
 
@@ -665,7 +691,8 @@ def _human_payload(kind, payload, limits):
                                             limits["scan_documents"], nonempty=True)):
             field = f"payload.paths[{index}]"
             if (type(path) is not str or not path or path.startswith("/") or "\\" in path
-                    or ".." in path.split("/") or posixpath.normpath(path) != path):
+                    or ".." in path.split("/") or posixpath.normpath(path) != path
+                    or any(ord(c) < 32 or ord(c) == 127 for c in path)):
                 _fail("UNSAFE_PATH", field)
     if "queue_ids" in payload:
         for index, queue_id in enumerate(_array(payload["queue_ids"], "payload.queue_ids",

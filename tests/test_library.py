@@ -1,5 +1,6 @@
 """Library contract seam and fail-closed settings admission, with no effects."""
 from copy import deepcopy
+from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -159,9 +160,26 @@ class SettingsAdmissionTests(unittest.TestCase):
         blocking["filters"]["heuristic"] = "block"
         self.assertNotEqual(admit()["settings_id"], admit(blocking)["settings_id"])
 
+    def test_mutated_settings_fail_closed_at_operation_start(self):
+        admitted = admit()
+        for change, code in (
+                (dict(admitted, limits={**admitted["limits"], "title_chars": "9"}),
+                 "INVALID_INTEGER"),
+                (dict(admitted, limits={**admitted["limits"], "title_chars": 201}),
+                 "CONFIGURATION_MISMATCH"),
+                (dict(admitted, model={**admitted["model"], "placement": "Hosted"}),
+                 "UNSAFE_SETTING"),
+                (dict(admitted, filters={"high_confidence": "block", "heuristic": "off"}),
+                 "UNSAFE_SETTING"),
+                (dict(admitted, egress=[{"project_id": "alpha"}]), "MISSING_FIELD")):
+            with self.subTest(code=code), self.assertRaises(library.LibraryError) as raised:
+                capture(change)
+            self.assertEqual(code, raised.exception.code)
+        capture(admit(egress=[EGRESS]))
+
     def test_unadmitted_settings_fail_typed_at_operation_start(self):
         for value, code in ((None, "INVALID_SETTINGS"), ({}, "UNSUPPORTED_SETTINGS_VERSION"),
-                            ({"version": 1}, "MISSING_FIELD")):
+                            ({"version": 1}, "INVALID_CONTRACT")):
             with self.subTest(code=code), self.assertRaises(library.LibraryError) as raised:
                 capture(value)
             self.assertEqual(code, raised.exception.code)
@@ -217,15 +235,19 @@ class ScopeTests(unittest.TestCase):
             library.human_scope(session(), binding=binding(), kind="settings-update")
         self.assertEqual("UNKNOWN_OPERATION", raised.exception.code)
 
-    def test_scope_cannot_be_built_outside_the_trusted_constructors(self):
-        with self.assertRaises(library.LibraryError) as raised:
-            library.LibraryScope(subject="human", actor_id="actor-alpha",
-                                 authority_version="epoch-1", capabilities=("library-drain",),
-                                 project_id="alpha", project_identity="github.com/acme/alpha",
-                                 reference_root="/srv/alpha/reference/library",
-                                 human_id="manager")
-        self.assertEqual(("INVALID_SCOPE", "seal"),
-                         (raised.exception.code, raised.exception.field))
+    def test_scope_cannot_be_built_or_replaced_outside_the_trusted_constructors(self):
+        forged = dict(subject="human", actor_id="actor-alpha", authority_version="epoch-1",
+                      capabilities=("library-drain",), project_id="alpha",
+                      project_identity="github.com/acme/alpha",
+                      reference_root="/srv/alpha/reference/library", human_id="manager")
+        with self.assertRaises(TypeError):
+            library.LibraryScope(**forged)
+        scope = library.participant_scope(ORIGIN, binding=binding())
+        with self.assertRaises(AttributeError):
+            scope.subject = "human"
+        with self.assertRaises(TypeError):
+            replace(scope, subject="human", capabilities=("library-drain",),
+                    human_id="manager")
 
     def test_installation_scope_holds_no_project_content_authority(self):
         operator = Origin("operator", "operator-seat", "inc-op", "epoch-op", ("library-settings",))
@@ -429,6 +451,8 @@ class TypedHumanPayloadTests(unittest.TestCase):
             request_id="request-import", at=AT, payload=manifest).kind)
         for change, code in ((dict(manifest, paths=["../escape.md"]), "UNSAFE_PATH"),
                              (dict(manifest, paths=["/etc/passwd"]), "UNSAFE_PATH"),
+                             (dict(manifest, paths=["a\nb.md"]), "UNSAFE_PATH"),
+                             (dict(manifest, paths=["a\x00b.md"]), "UNSAFE_PATH"),
                              (dict(manifest, source_commit="main"), "INVALID_COMMIT")):
             with self.subTest(code=code), self.assertRaises(library.LibraryError) as raised:
                 library.action(import_scope, settings, kind="import-confirm",
