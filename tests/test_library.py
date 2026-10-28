@@ -29,6 +29,7 @@ def document():
                        "qualification_ref": "target-qualification"},
         "model": {"profile_ref": "synth-local", "placement": "local",
                   "qualification_ref": "synth-qualification"},
+        "filters": dict(library.INITIAL_FILTERS),
         "limits": dict(library.INITIAL_LIMITS),
     }
 
@@ -69,6 +70,11 @@ EGRESS = {"project_id": "alpha", "model_profile_ref": "synth-local",
 
 class SettingsAdmissionTests(unittest.TestCase):
     def test_explicit_initial_values_and_stable_identity(self):
+        settled = {"title_chars": 200, "body_bytes": 16384, "sources": 16,
+                   "payload_bytes": 32768, "batch_drafts": 8,
+                   "batch_bytes": 65536, "attempt_seconds": 120,
+                   "warning_seconds": 86400, "result_count": 8}
+        self.assertEqual(settled, {key: library.INITIAL_LIMITS[key] for key in settled})
         admitted = admit()
         self.assertEqual(library.INITIAL_LIMITS, admitted["limits"])
         self.assertRegex(admitted["settings_id"], r"^[0-9a-f]{64}$")
@@ -134,6 +140,37 @@ class SettingsAdmissionTests(unittest.TestCase):
         with self.assertRaises(library.LibraryError):
             admit(settings)
 
+    def test_secret_filter_modes_are_finite_settings(self):
+        self.assertEqual({"high_confidence": "block", "heuristic": "observe"},
+                         library.INITIAL_FILTERS)
+        settings = document()
+        del settings["filters"]
+        with self.assertRaises(library.LibraryError) as raised:
+            admit(settings)
+        self.assertEqual(("MISSING_FIELD", "$.filters"), (raised.exception.code,
+                                                           raised.exception.field))
+        for mode in ("sometimes", "off", True):
+            settings = document()
+            settings["filters"]["heuristic"] = mode
+            with self.subTest(mode=mode), self.assertRaises(library.LibraryError) as raised:
+                admit(settings)
+            self.assertEqual("UNSAFE_SETTING", raised.exception.code)
+        blocking = document()
+        blocking["filters"]["heuristic"] = "block"
+        self.assertNotEqual(admit()["settings_id"], admit(blocking)["settings_id"])
+
+    def test_unadmitted_settings_fail_typed_at_operation_start(self):
+        for value, code in ((None, "INVALID_SETTINGS"), ({}, "UNSUPPORTED_SETTINGS_VERSION"),
+                            ({"version": 1}, "MISSING_FIELD")):
+            with self.subTest(code=code), self.assertRaises(library.LibraryError) as raised:
+                capture(value)
+            self.assertEqual(code, raised.exception.code)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.action(library.human_scope(session(), binding=binding(), kind="drain"),
+                           {}, kind="drain", operation_id="op", request_id="request", at=AT,
+                           payload={"observed_version": "a" * 64})
+        self.assertEqual("UNSUPPORTED_SETTINGS_VERSION", raised.exception.code)
+
     def test_egress_is_a_separate_project_approval_not_settings(self):
         self.assertEqual(admit()["settings_id"], admit(egress=[EGRESS])["settings_id"])
         approved = admit(egress=[EGRESS])
@@ -179,6 +216,16 @@ class ScopeTests(unittest.TestCase):
         with self.assertRaises(library.LibraryError) as raised:
             library.human_scope(session(), binding=binding(), kind="settings-update")
         self.assertEqual("UNKNOWN_OPERATION", raised.exception.code)
+
+    def test_scope_cannot_be_built_outside_the_trusted_constructors(self):
+        with self.assertRaises(library.LibraryError) as raised:
+            library.LibraryScope(subject="human", actor_id="actor-alpha",
+                                 authority_version="epoch-1", capabilities=("library-drain",),
+                                 project_id="alpha", project_identity="github.com/acme/alpha",
+                                 reference_root="/srv/alpha/reference/library",
+                                 human_id="manager")
+        self.assertEqual(("INVALID_SCOPE", "seal"),
+                         (raised.exception.code, raised.exception.field))
 
     def test_installation_scope_holds_no_project_content_authority(self):
         operator = Origin("operator", "operator-seat", "inc-op", "epoch-op", ("library-settings",))
@@ -253,6 +300,20 @@ class CaptureOperationTests(unittest.TestCase):
                           first, operation_id="op-1", at=AT)
         self.assertEqual("ID_CONFLICT", raised.exception.code)
 
+    def test_queue_and_retry_identity_stay_inside_one_project(self):
+        settings = admit()
+        alpha = capture(settings)
+        beta = capture(settings, scope=library.participant_scope(ORIGIN, binding=binding("beta",
+                                                                                        "acme/beta")))
+        self.assertNotEqual(alpha.queue_id, beta.queue_id)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.identity(alpha, beta)
+        self.assertEqual("INVALID_OPERATION", raised.exception.code)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.retry(library.participant_scope(ORIGIN, binding=binding("beta", "acme/beta")),
+                          settings, alpha, operation_id="op-2", at=AT)
+        self.assertEqual("FORBIDDEN", raised.exception.code)
+
     def test_identity_separates_duplicate_retry_and_conflict(self):
         settings = admit()
         first = capture(settings)
@@ -285,14 +346,36 @@ class HumanActionTests(unittest.TestCase):
         with self.assertRaises(library.LibraryError) as raised:
             library.action(scope, settings, kind="drain", operation_id="op-drain-2",
                            request_id="request-drain", at=AT, payload={})
+        self.assertEqual("MISSING_FIELD", raised.exception.code)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.action(scope, settings, kind="drain", operation_id="op-drain-2",
+                           request_id="request-drain", at=AT,
+                           payload={"observed_version": "not-a-digest"})
         self.assertEqual("INVALID_DIGEST", raised.exception.code)
         reject_scope = library.human_scope(session(("library-reject",)),
                                            binding=binding(), kind="reject")
+        payload = {"observed_version": "b" * 64, "drain_id": "drain-1"}
+        with self.assertRaises(library.LibraryError) as raised:
+            library.action(reject_scope, settings, kind="reject", operation_id="op-reject",
+                           request_id="request-reject", at=AT, payload=payload)
+        self.assertEqual("MISSING_FIELD", raised.exception.code)
         with self.assertRaises(library.LibraryError) as raised:
             library.action(reject_scope, settings, kind="reject", operation_id="op-reject",
                            request_id="request-reject", at=AT,
-                           payload={"observed_version": "b" * 64, "drain_id": "drain-1"})
-        self.assertEqual("INVALID_IDENTIFIER", raised.exception.code)
+                           payload=dict(payload, queue_id="a" * 64, reason="DUPLICATE",
+                                        commit_sha="c" * 40))
+        self.assertEqual("UNKNOWN_FIELD", raised.exception.code)
+        rejection = library.action(
+            reject_scope, settings, kind="reject", operation_id="op-reject",
+            request_id="request-reject", at=AT,
+            payload={"observed_version": "b" * 64, "drain_id": "drain-1",
+                     "queue_id": "a" * 64, "reason": "DUPLICATE"})
+        self.assertEqual("drain-1", rejection.drain_id)
+        self.assertEqual("drain-1", library.receipt(
+            rejection, "COMMITTED", at=AT,
+            publication={"commit_sha": "c" * 40,
+                         "path": "projects/github.com/acme/alpha/pending/x.md"},
+            reason="OPERATOR_DISPOSED")["drain_id"])
         with self.assertRaises(library.LibraryError) as raised:
             library.action(library.participant_scope(ORIGIN, binding=binding()), settings,
                            kind="drain", operation_id="op-drain-3",
@@ -319,6 +402,55 @@ class HumanActionTests(unittest.TestCase):
                                                  operation_id="op-drain-local",
                                                  request_id="request-drain", at=AT,
                                                  payload={"observed_version": "a" * 64}).kind)
+
+
+class TypedHumanPayloadTests(unittest.TestCase):
+    def test_adjudication_and_import_accept_only_their_typed_fields(self):
+        settings = admit()
+        scope = library.human_scope(session(("library-adjudicate",)), binding=binding(),
+                                    kind="adjudicate")
+        payload = {"drain_id": "drain-1", "queue_id": "a" * 64,
+                   "conclusion": "Use SQLite.\n", "rationale": "Fixed prior art.\n",
+                   "observed_version": "b" * 64}
+        self.assertEqual("adjudicate", library.action(
+            scope, settings, kind="adjudicate", operation_id="op-adjudicate",
+            request_id="request-adjudicate", at=AT, payload=payload).kind)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.action(scope, settings, kind="adjudicate", operation_id="op-adjudicate-2",
+                           request_id="request-adjudicate", at=AT,
+                           payload=dict(payload, commit_sha="c" * 40))
+        self.assertEqual("UNKNOWN_FIELD", raised.exception.code)
+        import_scope = library.human_scope(session(("library-import-confirm",)),
+                                           binding=binding(), kind="import-confirm")
+        manifest = {"preview_id": "preview-1", "source_commit": "d" * 40,
+                    "paths": ["docs/a.md"], "observed_version": "b" * 64}
+        self.assertEqual("import-confirm", library.action(
+            import_scope, settings, kind="import-confirm", operation_id="op-import",
+            request_id="request-import", at=AT, payload=manifest).kind)
+        for change, code in ((dict(manifest, paths=["../escape.md"]), "UNSAFE_PATH"),
+                             (dict(manifest, paths=["/etc/passwd"]), "UNSAFE_PATH"),
+                             (dict(manifest, source_commit="main"), "INVALID_COMMIT")):
+            with self.subTest(code=code), self.assertRaises(library.LibraryError) as raised:
+                library.action(import_scope, settings, kind="import-confirm",
+                               operation_id="op-import", request_id="request-import",
+                               at=AT, payload=change)
+            self.assertEqual(code, raised.exception.code)
+
+    def test_hosted_retry_needs_project_egress(self):
+        hosted_settings = hosted()
+        first = capture(hosted_settings)
+        retry_scope = library.human_scope(session(("library-retry",)), binding=binding(),
+                                          kind="retry")
+        payload = {"drain_id": "drain-1", "observed_version": "b" * 64}
+        with self.assertRaises(library.LibraryError) as raised:
+            library.action(retry_scope, hosted_settings, kind="retry",
+                           operation_id="op-retry", request_id="request-retry", at=AT,
+                           payload=payload)
+        self.assertEqual("EGRESS_NOT_AUTHORIZED", raised.exception.code)
+        self.assertEqual("retry", library.action(
+            retry_scope, hosted(egress=[EGRESS]), kind="retry", operation_id="op-retry",
+            request_id="request-retry", at=AT, payload=payload).kind)
+        self.assertEqual(first.kind, "enqueue")
 
 
 class SettingsChangeTests(unittest.TestCase):
@@ -374,6 +506,10 @@ class OutcomeTests(unittest.TestCase):
         self.assertIsNone(uncertain["publication"])
         refused = library.receipt(operation, "REJECTED", at=AT, reason="INVALID_TEXT")
         self.assertFalse(refused["retryable"])
+        with self.assertRaises(library.LibraryError) as raised:
+            library.receipt(operation, "DURABLY_QUEUED", at=AT,
+                            publication=durable["publication"])
+        self.assertEqual("PROJECTION_REQUIRED", raised.exception.code)
         for outcome, kwargs in (("DURABLY_QUEUED", {}),
                                 ("REJECTED", {"reason": "X", "publication": durable["publication"]}),
                                 ("REJECTED", {"reason": "X", "retryable": True})):
@@ -479,6 +615,16 @@ class ProposalTests(unittest.TestCase):
         with self.assertRaises(library.LibraryError):
             library.admit_proposal(self.proposal(queue_ids), drain_id="drain-2",
                                    queue_ids=queue_ids, limits=settings["limits"])
+        deprecated = library.admit_proposal(self.proposal(queue_ids, [
+            {"op": "deprecate", "path": "decisions/use-sqlite.md", "reason": "SUPERSEDED"}]),
+            drain_id="drain-1", queue_ids=queue_ids, limits=settings["limits"])
+        self.assertEqual("deprecate", deprecated["operations"][0]["op"])
+        with self.assertRaises(library.LibraryError) as raised:
+            library.admit_proposal(self.proposal(queue_ids, [
+                {"op": "deprecate", "path": "decisions/use-sqlite.md",
+                 "reason": "SUPERSEDED", "body": "gone"}]), drain_id="drain-1",
+                queue_ids=queue_ids, limits=settings["limits"])
+        self.assertEqual("UNKNOWN_FIELD", raised.exception.code)
 
 
 class ObservationAndMetadataTests(unittest.TestCase):
@@ -516,7 +662,7 @@ class NoEffectsTests(unittest.TestCase):
             library.action(scope, settings, kind="reject", operation_id="op-reject",
                            request_id="request-reject", at=AT,
                            payload={"observed_version": "b" * 64, "drain_id": "drain-1",
-                                    "queue_id": operation.queue_id})
+                                    "queue_id": operation.queue_id, "reason": "DUPLICATE"})
             library.receipt(operation, "NOT_DURABLE", at=AT, reason="TRANSPORT_UNKNOWN")
             library.admit_proposal(ProposalTests().proposal([operation.queue_id]),
                                    drain_id="drain-1", queue_ids=[operation.queue_id],

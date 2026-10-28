@@ -12,7 +12,7 @@ authority on every attempt; a stored scope is not fresh authorization.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
 import json
@@ -45,20 +45,32 @@ OUTCOMES = {
     "REFUSED", "BUSY", "STALE", "UNKNOWN",
 }
 OBSERVATION_STATES = {"healthy", "stale", "disconnected", "unknown", "blocked"}
-HUMAN_KINDS = {
-    "register", "import-preview", "import-confirm", "inspect", "drain", "retry",
-    "defer", "requeue", "reject", "adjudicate", "resume", "scan", "repair",
-    "archive", "restore",
+FILTER_MODES = ("observe", "block")
+INITIAL_FILTERS = {"high_confidence": "block", "heuristic": "observe"}
+# Fixed typed payload per human operation: (required, optional) fields. Nothing
+# else reaches the service, so a caller cannot assert a commit, outcome or path.
+HUMAN_PAYLOADS = {
+    "register": ((), ()),
+    "import-preview": (("source_commit", "paths"), ()),
+    "import-confirm": (("preview_id", "source_commit", "paths", "observed_version"), ()),
+    "inspect": (("queue_id", "observed_version"), ("drain_id",)),
+    "drain": (("observed_version",), ()),
+    "retry": (("drain_id", "observed_version"), ()),
+    "defer": (("drain_id", "observed_version"), ()),
+    "requeue": (("drain_id", "observed_version"), ()),
+    "resume": (("drain_id", "observed_version"), ("queue_ids",)),
+    "reject": (("drain_id", "queue_id", "reason", "observed_version"), ()),
+    "adjudicate": (("drain_id", "queue_id", "conclusion", "rationale",
+                    "observed_version"), ()),
+    "scan": (("observed_version",), ()),
+    "repair": (("observed_version",), ()),
+    "archive": (("observed_version",), ()),
+    "restore": (("observed_version",), ()),
 }
-DRAIN_KINDS = {"retry", "defer", "requeue", "reject", "adjudicate", "resume"}
-ITEM_KINDS = {"reject", "adjudicate"}
-FENCED_KINDS = {
-    "import-confirm", "drain", "retry", "defer", "requeue", "reject",
-    "adjudicate", "resume", "archive", "restore",
-}
+HUMAN_KINDS = set(HUMAN_PAYLOADS)
 # Only these operations reach a model, so only they need hosted-egress approval.
-MODEL_KINDS = {"drain", "archive"}
-PROPOSAL_OPERATIONS = {"create", "update", "park"}
+MODEL_KINDS = {"drain", "retry", "archive"}
+PROPOSAL_OPERATIONS = {"create", "update", "deprecate", "park"}
 CONCEPT_DIRECTORIES = ("context", "decisions", "research")
 
 # Fixed crash-protection maxima. They are constants, not settings: an operator
@@ -77,6 +89,7 @@ MAXIMA = {
     "document_bytes": 1048576,
     "scan_documents": 4096,
     "projection_bytes": 1048576,
+    "result_count": 64,
 }
 # Published starting values. Admission never substitutes them for a missing
 # setting; a deployment supplies every one of them explicitly.
@@ -94,6 +107,7 @@ INITIAL_LIMITS = {
     "document_bytes": 65536,
     "scan_documents": 256,
     "projection_bytes": 65536,
+    "result_count": 8,
 }
 # Caller-supplied authority or service-owned identity. Rejected at any depth.
 RESERVED_KEYS = frozenset({
@@ -219,6 +233,8 @@ def _reject_reserved(value, field="$", depth=0, extra=()):
     if depth > 16:
         _fail("INVALID_CONTRACT", field)
     if type(value) is dict:
+        if len(value) > 4096:
+            _fail("INVALID_CONTRACT", field)
         for key, item in value.items():
             if type(key) is not str or not TOKEN.fullmatch(key):
                 _fail("INVALID_CONTRACT", field)
@@ -226,6 +242,8 @@ def _reject_reserved(value, field="$", depth=0, extra=()):
                 _fail("CALLER_AUTHORITY", f"{field}.{key}")
             _reject_reserved(item, f"{field}.{key}", depth + 1, extra)
     elif type(value) is list:
+        if len(value) > 4096:
+            _fail("INVALID_CONTRACT", field)
         for index, item in enumerate(value):
             _reject_reserved(item, f"{field}[{index}]", depth + 1, extra)
     elif not (value is None or type(value) in (bool, int, float, str)):
@@ -297,7 +315,7 @@ def admit_settings(source, *, egress_approvals=()):
         raise
     except (ValueError, UnicodeError, RecursionError):
         _fail("INVALID_SETTINGS")
-    _object(document, "$", ("version", "repository", "model", "limits"))
+    _object(document, "$", ("version", "repository", "model", "filters", "limits"))
     if type(document["version"]) is not int or document["version"] != SETTINGS_VERSION:
         _fail("UNSUPPORTED_SETTINGS_VERSION", "$.version")
 
@@ -307,6 +325,10 @@ def admit_settings(source, *, egress_approvals=()):
                     ("profile_ref", "placement", "qualification_ref"))
     if model["placement"] not in ("local", "hosted"):
         _fail("UNSAFE_SETTING", "model.placement")
+    filters = _object(document["filters"], "filters", tuple(INITIAL_FILTERS))
+    for name in INITIAL_FILTERS:
+        if filters[name] not in FILTER_MODES:
+            _fail("UNSAFE_SETTING", "filters." + name)
     limits = _object(document["limits"], "limits", tuple(MAXIMA))
     admitted = {key: _integer(limits[key], "limits." + key, maximum=MAXIMA[key])
                 for key in MAXIMA}
@@ -328,6 +350,7 @@ def admit_settings(source, *, egress_approvals=()):
             "placement": model["placement"],
             "qualification_ref": _token(model["qualification_ref"], "model.qualification_ref"),
         },
+        "filters": {name: filters[name] for name in INITIAL_FILTERS},
         "limits": admitted,
     }
     egress = {}
@@ -341,7 +364,8 @@ def admit_settings(source, *, egress_approvals=()):
         egress[approval["project_id"]] = approval
     normalized["egress"] = [egress[key] for key in sorted(egress)]
     normalized["settings_id"] = _digest({key: normalized[key]
-                                         for key in ("version", "repository", "model", "limits")})
+                                         for key in ("version", "repository", "model",
+                                                     "filters", "limits")})
     return normalized
 
 
@@ -365,9 +389,12 @@ def egress_approval(settings, project_id):
 
 # --- Trusted scope ---------------------------------------------------------
 
+_SCOPE_SEAL = object()
+
+
 @dataclass(frozen=True)
 class LibraryScope:
-    """Authority-derived scope. Construct only through a trusted constructor."""
+    """Authority-derived scope. Only the constructors below hold the seal."""
     subject: str
     actor_id: str
     authority_version: str
@@ -377,8 +404,11 @@ class LibraryScope:
     reference_root: str | None = None
     participant_id: str | None = None
     human_id: str | None = None
+    _seal: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
+        if self._seal is not _SCOPE_SEAL:
+            _fail("INVALID_SCOPE", "seal")
         if self.subject not in SUBJECTS:
             _fail("INVALID_SCOPE", "subject")
         _token(self.actor_id, "actor_id")
@@ -417,7 +447,12 @@ def _absolute(value):
 
 
 def project_binding(project):
-    """Derive the Library binding from the trusted configured Room Project."""
+    """Derive the Library binding from the trusted configured Room Project.
+
+    The source identity is the configured GitHub Project identity because the
+    main product is GitHub-first. Library hosting stays independent of it: the
+    canonical target above may live on any qualifying Git host.
+    """
     if type(project) is not dict:
         _fail("INVALID_BINDING", "project")
     project_id = _identifier(project.get("id"), "project.id")
@@ -447,7 +482,7 @@ def participant_scope(origin, *, binding):
                         project_id=binding["project_id"],
                         project_identity=binding["project_identity"],
                         reference_root=binding["reference_root"],
-                        participant_id=origin.participant_id)
+                        participant_id=origin.participant_id, _seal=_SCOPE_SEAL)
 
 
 def human_scope(session, *, binding, kind):
@@ -465,7 +500,7 @@ def human_scope(session, *, binding, kind):
                         project_id=binding["project_id"],
                         project_identity=binding["project_identity"],
                         reference_root=binding["reference_root"],
-                        human_id=session.manager_id)
+                        human_id=session.manager_id, _seal=_SCOPE_SEAL)
 
 
 def installation_scope(origin):
@@ -476,7 +511,7 @@ def installation_scope(origin):
         _fail("FORBIDDEN", "capabilities")
     return LibraryScope(subject="operator", actor_id=origin.actor_id,
                         authority_version=origin.authority_version,
-                        capabilities=(SETTINGS_CAPABILITY,))
+                        capabilities=(SETTINGS_CAPABILITY,), _seal=_SCOPE_SEAL)
 
 
 # --- Operation contract ----------------------------------------------------
@@ -493,6 +528,7 @@ class Operation:
     settings_id: str
     provenance: dict
     queue_id: str | None = None
+    drain_id: str | None = None
 
     def digest(self):
         return _digest(self.payload)
@@ -500,7 +536,8 @@ class Operation:
     def canonical(self):
         return {"version": CONTRACT_VERSION, "kind": self.kind,
                 "operation_id": self.operation_id, "request_id": self.request_id,
-                "queue_id": self.queue_id, "settings_id": self.settings_id,
+                "queue_id": self.queue_id, "drain_id": self.drain_id,
+                "settings_id": self.settings_id,
                 "at": self.at, "payload_digest": self.digest(),
                 "scope": self.scope.canonical(), "provenance": self.provenance}
 
@@ -517,7 +554,7 @@ class Operation:
 
 
 def _operation(kind, scope, settings, operation_id, request_id, payload, at, queue_id=None,
-               provenance=None):
+               drain_id=None, provenance=None):
     _token(kind, "kind")
     _token(operation_id, "operation_id")
     _token(request_id, "request_id")
@@ -533,7 +570,25 @@ def _operation(kind, scope, settings, operation_id, request_id, payload, at, que
     return Operation(kind=kind, operation_id=operation_id, request_id=request_id,
                      at=at, payload=payload, scope=scope,
                      settings_id=settings["settings_id"], provenance=provenance,
-                     queue_id=queue_id)
+                     queue_id=queue_id, drain_id=drain_id)
+
+
+def _settings(settings):
+    """Structural recheck of an already admitted settings value at operation start."""
+    if type(settings) is not dict:
+        _fail("INVALID_SETTINGS", "settings")
+    if type(settings.get("version")) is not int or settings["version"] != SETTINGS_VERSION:
+        _fail("UNSUPPORTED_SETTINGS_VERSION", "settings.version")
+    _object(settings, "settings", ("version", "repository", "model", "filters", "limits",
+                                   "egress", "settings_id"))
+    _digest_value(settings["settings_id"], "settings.settings_id")
+    _object(settings["limits"], "settings.limits", tuple(MAXIMA))
+    _object(settings["model"], "settings.model", ("profile_ref", "placement",
+                                                  "qualification_ref"))
+    _object(settings["filters"], "settings.filters", tuple(INITIAL_FILTERS))
+    if type(settings["egress"]) is not list:
+        _fail("INVALID_SETTINGS", "settings.egress")
+    return settings
 
 
 def _hosted(settings):
@@ -575,16 +630,53 @@ def _capture_payload(value, limits):
 
 def capture(scope, settings, *, operation_id, request_id, value, at):
     """One Participant enqueue attempt. Scope comes from the trusted badge only."""
+    _settings(settings)
     _require_scope(scope, "participant", ENQUEUE_CAPABILITY)
     payload = _capture_payload(value, settings["limits"])
     queue_id = _digest({"version": CONTRACT_VERSION, "kind": "enqueue",
+                        "project_identity": scope.project_identity,
                         "request_id": request_id, "payload": payload})
     return _operation("enqueue", scope, settings, operation_id, request_id,
                       payload, at, queue_id=queue_id)
 
 
+def _human_payload(kind, payload, limits):
+    required, optional = HUMAN_PAYLOADS[kind]
+    _object(payload, "payload", required, optional)
+    if "observed_version" in payload:
+        _digest_value(payload["observed_version"], "payload.observed_version")
+    if "source_commit" in payload:
+        _commit(payload["source_commit"], "payload.source_commit")
+    if "preview_id" in payload:
+        _token(payload["preview_id"], "payload.preview_id")
+    if "drain_id" in payload:
+        _token(payload["drain_id"], "payload.drain_id")
+    if "queue_id" in payload:
+        _digest_value(payload["queue_id"], "payload.queue_id")
+    if "reason" in payload:
+        _token(payload["reason"], "payload.reason")
+    for key in ("conclusion", "rationale"):
+        if key in payload:
+            text = _text(payload[key], "payload." + key, 2**31 - 1, multiline=True)
+            if len(text.encode("utf-8")) > limits["body_bytes"]:
+                _fail("PAYLOAD_TOO_LARGE", "payload." + key)
+    if "paths" in payload:
+        for index, path in enumerate(_array(payload["paths"], "payload.paths",
+                                            limits["scan_documents"], nonempty=True)):
+            field = f"payload.paths[{index}]"
+            if (type(path) is not str or not path or path.startswith("/") or "\\" in path
+                    or ".." in path.split("/") or posixpath.normpath(path) != path):
+                _fail("UNSAFE_PATH", field)
+    if "queue_ids" in payload:
+        for index, queue_id in enumerate(_array(payload["queue_ids"], "payload.queue_ids",
+                                                limits["batch_drafts"], nonempty=True)):
+            _digest_value(queue_id, f"payload.queue_ids[{index}]")
+    return payload
+
+
 def action(scope, settings, *, kind, operation_id, request_id, payload, at):
     """One human request through the shared typed Manager seam."""
+    _settings(settings)
     if kind not in HUMAN_KINDS:
         _fail("UNKNOWN_OPERATION", "kind")
     _require_scope(scope, "human", "library-" + kind)
@@ -593,18 +685,15 @@ def action(scope, settings, *, kind, operation_id, request_id, payload, at):
     if type(payload) is not dict:
         _fail("INVALID_CONTRACT", "payload")
     _reject_reserved(payload)
-    if kind in FENCED_KINDS:
-        _digest_value(payload.get("observed_version"), "payload.observed_version")
-    if kind in DRAIN_KINDS:
-        _token(payload.get("drain_id"), "payload.drain_id")
-    if kind in ITEM_KINDS:
-        _token(payload.get("queue_id"), "payload.queue_id")
-    return _operation(kind, scope, settings, operation_id, request_id, payload, at)
+    _human_payload(kind, payload, settings["limits"])
+    return _operation(kind, scope, settings, operation_id, request_id, payload, at,
+                      drain_id=payload.get("drain_id"))
 
 
 def settings_change(scope, settings, *, operation_id, request_id, document, at,
                     egress_approvals=()):
     """Installation-settings authority only; egress stays a separate approval."""
+    _settings(settings)
     _require_scope(scope, "operator", SETTINGS_CAPABILITY)
     if not hasattr(document, "read"):
         _fail("INVALID_SETTINGS")
@@ -613,7 +702,7 @@ def settings_change(scope, settings, *, operation_id, request_id, document, at,
         _fail("UNCHANGED_SETTINGS")
     payload = {"next_settings_id": candidate["settings_id"],
                "repository": candidate["repository"], "model": candidate["model"],
-               "limits": candidate["limits"]}
+               "filters": candidate["filters"], "limits": candidate["limits"]}
     return _operation("settings-update", scope, settings, operation_id, request_id,
                       payload, at)
 
@@ -624,10 +713,12 @@ def retry(scope, settings, previous, *, operation_id, at):
     The original submission provenance is immutable; this attempt records the
     actually authorizing actor and the configuration identity it starts under.
     """
+    _settings(settings)
     if type(previous) is not Operation or previous.kind != "enqueue":
         _fail("INVALID_OPERATION", "previous")
     _require_scope(scope, "participant", ENQUEUE_CAPABILITY)
-    if previous.scope.project_id != scope.project_id:
+    if (previous.scope.project_id != scope.project_id
+            or previous.scope.project_identity != scope.project_identity):
         _fail("FORBIDDEN", "scope.project_id")
     if operation_id == previous.operation_id:
         _fail("ID_CONFLICT", "operation_id")
@@ -635,6 +726,7 @@ def retry(scope, settings, previous, *, operation_id, at):
     if _digest(payload) != previous.digest():
         _fail("INVALID_OPERATION", "payload")
     if _digest({"version": CONTRACT_VERSION, "kind": "enqueue",
+                "project_identity": previous.scope.project_identity,
                 "request_id": previous.request_id, "payload": payload}) != previous.queue_id:
         _fail("INVALID_OPERATION", "queue_id")
     return _operation("enqueue", scope, settings, operation_id, previous.request_id,
@@ -648,6 +740,8 @@ def identity(previous, operation):
         _fail("INVALID_OPERATION")
     if previous.kind != operation.kind:
         _fail("INVALID_OPERATION", "kind")
+    if previous.scope.project_identity != operation.scope.project_identity:
+        _fail("INVALID_OPERATION", "scope")
     same_id = previous.operation_id == operation.operation_id
     same_payload = previous.digest() == operation.digest()
     if same_id:
@@ -689,8 +783,7 @@ def receipt(operation, outcome, *, at, publication=None, projection=None,
     return admit_receipt({
         "version": CONTRACT_VERSION, "operation_id": operation.operation_id,
         "kind": operation.kind, "request_id": operation.request_id,
-        "queue_id": operation.queue_id,
-        "drain_id": operation.payload.get("drain_id"),
+        "queue_id": operation.queue_id, "drain_id": operation.drain_id,
         "settings_id": operation.settings_id, "outcome": outcome, "at": at,
         "publication": publication, "projection": projection,
         "reason": reason, "retryable": retryable})
@@ -737,7 +830,10 @@ def admit_receipt(value):
                 _fail("INVALID_PUBLICATION", "publication.path")
     elif publication is not None:
         _fail("INVALID_OUTCOME", "publication")
-    if value["projection"] is not None:
+    if value["projection"] is None:
+        if outcome == "DURABLY_QUEUED":
+            _fail("PROJECTION_REQUIRED", "projection")
+    else:
         projection = value["projection"]
         if type(projection) is not dict:
             _fail("INVALID_PROJECTION", "projection")
@@ -826,6 +922,12 @@ def admit_proposal(value, *, drain_id, queue_ids, limits):
         op = item["op"]
         if op not in PROPOSAL_OPERATIONS:
             _fail("UNSAFE_PROPOSAL_OPERATION", field + ".op")
+        if op == "deprecate":
+            _object(item, field, ("op", "path", "reason"))
+            normalized.append({"op": "deprecate",
+                               "path": _concept_path(item["path"], field + ".path"),
+                               "reason": _token(item["reason"], field + ".reason")})
+            continue
         if op == "park":
             _object(item, field, ("op", "queue_id", "reason"))
             queue_id = _digest_value(item["queue_id"], field + ".queue_id")
@@ -908,6 +1010,8 @@ def _reject_content(value, field="$", depth=0):
     if depth > 8:
         _fail("INVALID_CONTRACT", field)
     if type(value) is dict:
+        if len(value) > 4096:
+            _fail("INVALID_CONTRACT", field)
         for key, item in value.items():
             if type(key) is not str or not TOKEN.fullmatch(key):
                 _fail("INVALID_CONTRACT", field)
@@ -915,6 +1019,8 @@ def _reject_content(value, field="$", depth=0):
                 _fail("CONTENT_NOT_ALLOWED", f"{field}.{key}")
             _reject_content(item, f"{field}.{key}", depth + 1)
     elif type(value) is list:
+        if len(value) > 4096:
+            _fail("INVALID_CONTRACT", field)
         for index, item in enumerate(value):
             _reject_content(item, f"{field}[{index}]", depth + 1)
     elif not (value is None or type(value) in (bool, int, float, str)):
