@@ -51,10 +51,25 @@ class VMCITriggerTests(unittest.TestCase):
                         self.assertIn(command, forge)
                     gates = jobs['gate-linux-smoke']
                     self.assertEqual(re.findall(r'^        if: (.+)$', gates, re.MULTILINE), [])
-                    self.assertIn('40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run & diff=$!', gates)
+                    self.assertIn('40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run >"$log" 2>&1 & diff=$!', gates)
                     self.assertIn('15s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/gate_forge_smoke.py & broker=$!', gates)
                     self.assertIn('30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!', gates)
-                    self.assertIn('for child in "$diff" "$broker" "$review"; do', gates)
+                    self.assertIn('log=$(mktemp) || exit 1', gates)
+                    self.assertIn('deadline=$((SECONDS + 15))', gates)
+                    self.assertIn('while (( SECONDS < deadline )); do', gates)
+                    self.assertIn('ready=false', gates)
+                    self.assertLess(gates.index('grep -Fxq'), gates.index('kill -0 "$diff"'))
+                    self.assertIn('children=("$diff")', gates)
+                    ready = gates.split('          if "$ready"; then\n', 1)[1].split('          fi\n', 1)[0]
+                    success, failure = ready.split('          else\n')
+                    for name in ('broker', 'review'):
+                        self.assertIn(f'children+=("${name}")', success)
+                    self.assertNotIn('timeout ', failure)
+                    self.assertIn('status=1', failure)
+                    self.assertIn('for child in "${children[@]}"; do', gates)
+                    self.assertIn('cat "$log" || status=1', gates)
+                    self.assertIn('rm -f "$log" || status=1', gates)
+                    self.assertNotIn('| tee', gates)
                     self.assertIn('wait "$child" || status=1', gates)
                     self.assertIn('exit "$status"', gates)
                     for job, script, seconds in (
