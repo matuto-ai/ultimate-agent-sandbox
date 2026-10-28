@@ -36,14 +36,15 @@ SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}\Z")
 
-ENQUEUE_CAPABILITY = "library-enqueue"
+ENQUEUE_CAPABILITY = "library:enqueue"
 SETTINGS_CAPABILITY = "library-settings"
 SUBJECTS = ("participant", "human", "operator")
 CAPTURE_TYPES = ("context", "decision", "research")
 OUTCOMES = {
     "DURABLY_QUEUED", "REJECTED", "NOT_DURABLE", "COMMITTED",
-    "REFUSED", "BUSY", "STALE", "UNKNOWN",
+    "CONFIGURED", "ACKNOWLEDGED", "REFUSED", "BUSY", "STALE", "UNKNOWN",
 }
+CONTENT_OUTCOMES = ("DURABLY_QUEUED", "COMMITTED")
 OBSERVATION_STATES = {"healthy", "stale", "disconnected", "unknown", "blocked"}
 FILTER_MODES = ("observe", "block")
 INITIAL_FILTERS = {"high_confidence": "block", "heuristic": "observe"}
@@ -266,7 +267,8 @@ def _git_target(value):
     if any(c in value for c in "?#"):
         _fail("UNSAFE_TARGET", "repository.target")
     user, _, host = authority.rpartition("@")
-    if scheme == "ssh" and not user:
+    if scheme == "ssh" and (not user or ":" in user
+                            or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user)):
         _fail("UNSAFE_TARGET", "repository.target")
     if scheme == "https" and (user or "@" in authority):
         _fail("UNSAFE_TARGET", "repository.target")
@@ -279,9 +281,13 @@ def _git_target(value):
 
 
 def _branch(value):
-    if (type(value) is not str or not BRANCH.fullmatch(value) or value.startswith(("-", "/", "."))
-            or value.endswith(("/", ".", ".lock")) or ".." in value or "//" in value):
+    if (type(value) is not str or not BRANCH.fullmatch(value)
+            or value.startswith(("-", "/")) or value.endswith(("/", "."))
+            or ".." in value or "//" in value):
         _fail("UNSAFE_BRANCH", "repository.branch")
+    for part in value.split("/"):
+        if not part or part.startswith(".") or part.endswith(".lock"):
+            _fail("UNSAFE_BRANCH", "repository.branch")
     return value
 
 
@@ -410,12 +416,12 @@ class LibraryScope:
     authenticated Origin, Manager HumanSession or installation-authority Origin.
     """
     __slots__ = ("subject", "actor_id", "authority_version", "capabilities",
-                 "project_id", "project_identity", "reference_root",
-                 "participant_id", "human_id")
+                 "project_id", "project_identity", "project_path",
+                 "reference_root", "participant_id", "human_id")
 
     def __init__(self, *, seal, subject, actor_id, authority_version, capabilities,
-                 project_id=None, project_identity=None, reference_root=None,
-                 participant_id=None, human_id=None):
+                 project_id=None, project_identity=None, project_path=None,
+                 reference_root=None, participant_id=None, human_id=None):
         if seal is not _SCOPE_SEAL:
             _fail("INVALID_SCOPE", "seal")
         for name, value in (("subject", subject), ("actor_id", actor_id),
@@ -428,6 +434,7 @@ class LibraryScope:
         object.__setattr__(self, "capabilities", capabilities)
         for name, value in (("project_id", project_id),
                             ("project_identity", project_identity),
+                            ("project_path", project_path),
                             ("reference_root", reference_root),
                             ("participant_id", participant_id),
                             ("human_id", human_id)):
@@ -437,13 +444,17 @@ class LibraryScope:
         _token(self.actor_id, "actor_id")
         _token(self.authority_version, "authority_version")
         if self.subject == "operator":
-            if self.project_id is not None or self.project_identity is not None:
+            if (self.project_id is not None or self.project_identity is not None
+                    or self.project_path is not None):
                 _fail("INVALID_SCOPE", "project_id")
             if SETTINGS_CAPABILITY not in self.capabilities:
                 _fail("FORBIDDEN", "capabilities")
         else:
             _identifier(self.project_id, "project_id")
             _token(self.project_identity, "project_identity")
+            path = _token(self.project_path, "project_path", 256)
+            if any(part in ("", ".", "..") for part in path.split("/")):
+                _fail("INVALID_SCOPE", "project_path")
             if self.reference_root is None or not _absolute(self.reference_root):
                 _fail("INVALID_SCOPE", "reference_root")
         if self.subject == "participant" and self.participant_id is None:
@@ -462,6 +473,7 @@ class LibraryScope:
                 "authority_version": self.authority_version,
                 "capabilities": list(self.capabilities),
                 "project_id": self.project_id, "project_identity": self.project_identity,
+                "project_path": self.project_path,
                 "reference_root": self.reference_root,
                 "participant_id": self.participant_id, "human_id": self.human_id}
 
@@ -471,12 +483,14 @@ def _absolute(value):
             and ".." not in value.split("/") and posixpath.normpath(value) == value)
 
 
-def project_binding(project):
+def project_binding(project, *, source_identity):
     """Derive the Library binding from the trusted configured Room Project.
 
-    The source identity is the configured GitHub Project identity because the
-    main product is GitHub-first. Library hosting stays independent of it: the
-    canonical target above may live on any qualifying Git host.
+    Registration identity is the source Forge host plus the immutable source
+    repository identity, so a rename or transfer keeps project identity, queue
+    identity and deduplication stable. Current ``repository`` coordinates only
+    establish the human-readable bundle path. The main product is GitHub-first,
+    so the source host is fixed; Library hosting stays independent of it.
     """
     if type(project) is not dict:
         _fail("INVALID_BINDING", "project")
@@ -490,8 +504,10 @@ def project_binding(project):
     reference = roots["reference"].rstrip("/") or "/"
     if reference == "/":
         _fail("INVALID_BINDING", "project.roots.reference")
+    identity = _token(source_identity, "source_identity", 128)
     return {"project_id": project_id,
-            "project_identity": "github.com/" + repository,
+            "project_identity": "github.com/" + identity,
+            "project_path": "github.com/" + repository,
             "reference_root": reference + "/library",
             "snapshot_path": reference + "/library.snapshot.json"}
 
@@ -506,6 +522,7 @@ def participant_scope(origin, *, binding):
                         capabilities=tuple(origin.capabilities),
                         project_id=binding["project_id"],
                         project_identity=binding["project_identity"],
+                        project_path=binding["project_path"],
                         reference_root=binding["reference_root"],
                         participant_id=origin.participant_id)
 
@@ -524,6 +541,7 @@ def human_scope(session, *, binding, kind):
                         capabilities=(action,),
                         project_id=binding["project_id"],
                         project_identity=binding["project_identity"],
+                        project_path=binding["project_path"],
                         reference_root=binding["reference_root"],
                         human_id=session.manager_id)
 
@@ -559,12 +577,16 @@ class Operation:
         return _digest(self.payload)
 
     def canonical(self):
+        # Mutable bundle coordinates are excluded: a rename must not change
+        # deduplication identity for the same immutable Project identity.
+        scope = self.scope.canonical()
+        scope.pop("project_path", None)
         return {"version": CONTRACT_VERSION, "kind": self.kind,
                 "operation_id": self.operation_id, "request_id": self.request_id,
                 "queue_id": self.queue_id, "drain_id": self.drain_id,
                 "settings_id": self.settings_id,
                 "at": self.at, "payload_digest": self.digest(),
-                "scope": self.scope.canonical(), "provenance": self.provenance}
+                "scope": scope, "provenance": self.provenance}
 
     def audit_metadata(self):
         """Safe, content-free record for ledger/audit/replay surfaces."""
@@ -574,7 +596,8 @@ class Operation:
             "settings_id": self.settings_id, "payload_sha256": self.digest(),
             "payload_bytes": _size(self.payload), "subject": self.scope.subject,
             "actor_id": self.scope.actor_id,
-            "project_id": self.scope.project_id, "at": self.at,
+            "project_id": self.scope.project_id,
+            "project_path": self.scope.project_path, "at": self.at,
         })
 
 
@@ -602,7 +625,9 @@ def _settings(settings):
     """Revalidate an admitted settings value and its identity at operation start.
 
     Values are re-admitted, not merely key-checked, and the recomputed digest
-    must equal the operation-start identity the caller passes on.
+    must equal the operation-start identity the caller passes on. Egress
+    approvals are rechecked against the currently selected model profile so a
+    later profile change cannot reuse an approval for a different one.
     """
     if type(settings) is not dict:
         _fail("INVALID_SETTINGS", "settings")
@@ -612,8 +637,15 @@ def _settings(settings):
         _fail("CONFIGURATION_MISMATCH", "settings.settings_id")
     if type(settings.get("egress")) is not list:
         _fail("INVALID_SETTINGS", "settings.egress")
+    egress = {}
     for item in settings["egress"]:
-        _egress(item)
+        approval = _egress(item)
+        if approval["model_profile_ref"] != core["model"]["profile_ref"]:
+            _fail("CONFLICTING_EGRESS", "settings.egress")
+        previous = egress.get(approval["project_id"])
+        if previous is not None and previous != approval:
+            _fail("CONFLICTING_EGRESS", "settings.egress")
+        egress[approval["project_id"]] = approval
     return settings
 
 
@@ -784,19 +816,22 @@ def identity(previous, operation):
 
 # --- Outcome and receipt contract -----------------------------------------
 
-def queue_path(project_identity, queue_id):
-    """Bundle-relative draft path derived from validated identity, no traversal."""
-    if (type(project_identity) is not str or not project_identity
-            or any(part in ("", ".", "..") for part in project_identity.split("/"))
-            or any(ord(c) < 32 or ord(c) == 127 for c in project_identity)):
-        _fail("INVALID_PROJECT_IDENTITY", "project_identity")
-    return "projects/" + project_identity + "/pending/" + _digest_value(queue_id, "queue_id") + ".md"
+def queue_path(project_path, queue_id):
+    """Bundle-relative draft path from current coordinates, no traversal."""
+    if (type(project_path) is not str or not project_path
+            or any(part in ("", ".", "..") for part in project_path.split("/"))
+            or any(ord(c) < 32 or ord(c) == 127 for c in project_path)):
+        _fail("INVALID_PROJECT_IDENTITY", "project_path")
+    return "projects/" + project_path + "/pending/" + _digest_value(queue_id, "queue_id") + ".md"
 
 
 def receipt(operation, outcome, *, at, publication=None, projection=None,
-            reason=None, retryable=None):
+            configuration=None, acknowledgement=None, reason=None, retryable=None):
     """Build the typed result for one operation; no content or secret fields.
 
+    Success evidence is outcome-specific: content publication for
+    ``DURABLY_QUEUED``/``COMMITTED``, a durable configuration version for
+    ``CONFIGURED``, and an operational acknowledgement for ``ACKNOWLEDGED``.
     ``drain_id`` is a reference read from the validated payload, never a claim.
     The returned value is re-admitted so a builder cannot emit what a receiver
     would refuse.
@@ -813,6 +848,7 @@ def receipt(operation, outcome, *, at, publication=None, projection=None,
         "queue_id": operation.queue_id, "drain_id": operation.drain_id,
         "settings_id": operation.settings_id, "outcome": outcome, "at": at,
         "publication": publication, "projection": projection,
+        "configuration": configuration, "acknowledgement": acknowledgement,
         "reason": reason, "retryable": retryable})
 
 
@@ -820,7 +856,8 @@ def admit_receipt(value):
     """Validate a received receipt; a claim is not publication or visibility."""
     _object(value, "$", ("version", "operation_id", "kind", "request_id", "queue_id",
                          "drain_id", "settings_id", "outcome", "at", "publication",
-                         "projection", "reason", "retryable"))
+                         "projection", "configuration", "acknowledgement",
+                         "reason", "retryable"))
     if type(value["version"]) is not int or value["version"] != CONTRACT_VERSION:
         _fail("UNSUPPORTED_CONTRACT_VERSION", "$.version")
     _token(value["kind"], "kind")
@@ -839,13 +876,14 @@ def admit_receipt(value):
         _fail("INVALID_OUTCOME", "retryable")
     if (outcome == "NOT_DURABLE") != value["retryable"]:
         _fail("INVALID_OUTCOME", "retryable")
-    if outcome in ("DURABLY_QUEUED", "COMMITTED"):
-        if value["reason"] is not None:
-            _token(value["reason"], "reason")
-    else:
+    if outcome in ("NOT_DURABLE", "REJECTED", "REFUSED", "BUSY", "STALE", "UNKNOWN"):
         _token(value["reason"], "reason")
-    durable = outcome in ("DURABLY_QUEUED", "COMMITTED")
+    elif value["reason"] is not None:
+        _token(value["reason"], "reason")
+    durable = outcome in CONTENT_OUTCOMES
     publication = value["publication"]
+    configuration = value["configuration"]
+    acknowledgement = value["acknowledgement"]
     if durable:
         if type(publication) is not dict:
             _fail("PUBLICATION_REQUIRED", "publication")
@@ -855,12 +893,30 @@ def admit_receipt(value):
         if outcome == "DURABLY_QUEUED" and value["queue_id"] is not None:
             if not publication["path"].endswith("/pending/" + value["queue_id"] + ".md"):
                 _fail("INVALID_PUBLICATION", "publication.path")
-    elif publication is not None:
+        if configuration is not None or acknowledgement is not None:
+            _fail("INVALID_OUTCOME", "configuration")
+    elif outcome == "CONFIGURED":
+        if publication is not None:
+            _fail("INVALID_OUTCOME", "publication")
+        if type(configuration) is not dict:
+            _fail("CONFIGURATION_REQUIRED", "configuration")
+        _object(configuration, "configuration", ("settings_id", "version"))
+        _digest_value(configuration["settings_id"], "configuration.settings_id")
+        _integer(configuration["version"], "configuration.version")
+        if acknowledgement is not None:
+            _fail("INVALID_OUTCOME", "acknowledgement")
+    elif outcome == "ACKNOWLEDGED":
+        if publication is not None or configuration is not None:
+            _fail("INVALID_OUTCOME", "publication")
+        _token(acknowledgement, "acknowledgement")
+    elif publication is not None or configuration is not None or acknowledgement is not None:
         _fail("INVALID_OUTCOME", "publication")
     if value["projection"] is None:
         if outcome == "DURABLY_QUEUED":
             _fail("PROJECTION_REQUIRED", "projection")
     else:
+        if not durable:
+            _fail("INVALID_PROJECTION", "projection.commit_sha")
         projection = value["projection"]
         if type(projection) is not dict:
             _fail("INVALID_PROJECTION", "projection")
@@ -868,10 +924,7 @@ def admit_receipt(value):
         _commit(projection["commit_sha"], "projection.commit_sha", allow_none=True)
         if type(projection["visible"]) is not bool:
             _fail("INVALID_PROJECTION", "projection.visible")
-        if projection["visible"] and not durable:
-            _fail("INVALID_PROJECTION", "projection.commit_sha")
-        if (projection["visible"]
-                and projection["commit_sha"] != publication["commit_sha"]):
+        if projection["visible"] and projection["commit_sha"] is None:
             _fail("INVALID_PROJECTION", "projection.commit_sha")
     if _size(value) > MAX_AUDIT_BYTES * 8:
         _fail("RECEIPT_TOO_LARGE")

@@ -16,9 +16,9 @@ from uas.manager_actions import HumanSession
 
 AT = "2026-10-28T22:00:00+00:00"
 FIXTURE = Path(__file__).parent / "fixtures" / "two-rooms.json"
-ORIGIN = Origin("actor-alpha", "seat-a", "inc-1", "epoch-1", ("implement", "library-enqueue"))
+ORIGIN = Origin("actor-alpha", "seat-a", "inc-1", "epoch-1", ("implement", "library:enqueue"))
 REVOKED = Origin("actor-alpha", "seat-a", "inc-1", "epoch-2", ("implement",))
-OTHER = Origin("actor-beta", "seat-b", "inc-2", "epoch-2", ("library-enqueue",))
+OTHER = Origin("actor-beta", "seat-b", "inc-2", "epoch-2", ("library:enqueue",))
 HUMAN = Origin("human", "human-seat", "inc-human", "human-epoch", ("human-control-run",))
 
 
@@ -40,9 +40,10 @@ def admit(settings=None, egress=()):
                                   egress_approvals=egress)
 
 
-def binding(project_id="alpha", repository="acme/alpha"):
+def binding(project_id="alpha", repository="acme/alpha", source="1001"):
     return library.project_binding({"id": project_id, "repository": repository,
-                                    "roots": {"reference": "/srv/" + project_id + "/reference"}})
+                                    "roots": {"reference": "/srv/" + project_id + "/reference"}},
+                                   source_identity=source)
 
 
 def session(allowed=("library-drain",), connected=True):
@@ -130,7 +131,16 @@ class SettingsAdmissionTests(unittest.TestCase):
                     with self.assertRaises(library.LibraryError) as raised:
                         admit(settings)
                     self.assertEqual("UNSAFE_TARGET", raised.exception.code)
-        for branch in ("-library", "a..b", "library/", "library//canonical"):
+        for target in ("ssh://git:fixture-password@git.example.com/library.git",
+                       "ssh://git.example.com/library.git",
+                       "ssh://g it@git.example.com/library.git"):
+            settings = document()
+            settings["repository"]["target"] = target
+            with self.subTest(target=target), self.assertRaises(library.LibraryError) as raised:
+                admit(settings)
+            self.assertEqual("UNSAFE_TARGET", raised.exception.code)
+        for branch in ("-library", "a..b", "library/", "library//canonical",
+                       "folder.lock/canonical", ".hidden/canonical"):
             settings = document()
             settings["repository"]["branch"] = branch
             with self.subTest(branch=branch), self.assertRaises(library.LibraryError) as raised:
@@ -176,6 +186,14 @@ class SettingsAdmissionTests(unittest.TestCase):
                 capture(change)
             self.assertEqual(code, raised.exception.code)
         capture(admit(egress=[EGRESS]))
+        approved = hosted(egress=[EGRESS])
+        stale = dict(approved, egress=[dict(EGRESS, model_profile_ref="synth-other")])
+        with self.assertRaises(library.LibraryError) as raised:
+            library.action(library.human_scope(session(), binding=binding(), kind="drain"),
+                           stale, kind="drain", operation_id="op-drain",
+                           request_id="request-drain", at=AT,
+                           payload={"observed_version": "a" * 64})
+        self.assertEqual("CONFLICTING_EGRESS", raised.exception.code)
 
     def test_unadmitted_settings_fail_typed_at_operation_start(self):
         for value, code in ((None, "INVALID_SETTINGS"), ({}, "UNSUPPORTED_SETTINGS_VERSION"),
@@ -204,18 +222,23 @@ class SettingsAdmissionTests(unittest.TestCase):
             admit(egress=[EGRESS, dict(EGRESS, approval_ref="egress-approval-2")])
         self.assertEqual("CONFLICTING_EGRESS", raised.exception.code)
 
-    def test_profiles_can_declare_library_capabilities(self):
+    def test_profiles_can_declare_the_specified_library_capability(self):
+        raw = json.loads(FIXTURE.read_text())
+        raw["rooms"][0]["profiles"][0]["capabilities"].append("library:enqueue")
+        admitted = deployment_config.load(io.StringIO(json.dumps(raw)))
+        self.assertEqual("hub", admitted["capability_enforcement"]["library:enqueue"])
         raw = json.loads(FIXTURE.read_text())
         raw["rooms"][0]["profiles"][0]["capabilities"].append("library-enqueue")
-        admitted = deployment_config.load(io.StringIO(json.dumps(raw)))
-        self.assertEqual("hub", admitted["capability_enforcement"]["library-enqueue"])
+        with self.assertRaises(deployment_config.ConfigError):
+            deployment_config.load(io.StringIO(json.dumps(raw)))
 
 
 class ScopeTests(unittest.TestCase):
     def test_participant_scope_requires_authenticated_capability(self):
         scope = library.participant_scope(ORIGIN, binding=binding())
-        self.assertEqual(("participant", "alpha", "github.com/acme/alpha"),
+        self.assertEqual(("participant", "alpha", "github.com/1001"),
                          (scope.subject, scope.project_id, scope.project_identity))
+        self.assertEqual("github.com/acme/alpha", scope.project_path)
         self.assertTrue(scope.reference_root.endswith("/library"))
         with self.assertRaises(library.LibraryError) as raised:
             library.participant_scope(REVOKED, binding=binding())
@@ -264,7 +287,7 @@ class CaptureOperationTests(unittest.TestCase):
         operation = capture(settings)
         self.assertEqual("enqueue", operation.kind)
         self.assertRegex(operation.queue_id, r"^[0-9a-f]{64}$")
-        path = library.queue_path(operation.scope.project_identity, operation.queue_id)
+        path = library.queue_path(operation.scope.project_path, operation.queue_id)
         self.assertEqual("projects/github.com/acme/alpha/pending/"
                          + operation.queue_id + ".md", path)
         metadata = operation.audit_metadata()
@@ -322,17 +345,32 @@ class CaptureOperationTests(unittest.TestCase):
                           first, operation_id="op-1", at=AT)
         self.assertEqual("ID_CONFLICT", raised.exception.code)
 
+    def test_queue_identity_is_immutable_while_bundle_coordinates_can_move(self):
+        settings = admit()
+        before = library.participant_scope(ORIGIN, binding=binding())
+        after = library.participant_scope(ORIGIN, binding=binding(repository="acme/renamed-alpha"))
+        first = capture(settings, scope=before)
+        renamed = capture(settings, scope=after, operation_id="op-2")
+        self.assertEqual(first.queue_id, renamed.queue_id)
+        self.assertNotEqual(library.queue_path(first.scope.project_path, first.queue_id),
+                            library.queue_path(renamed.scope.project_path, renamed.queue_id))
+        self.assertEqual("RETRY", library.identity(first, renamed))
+        retried = library.retry(after, settings, first, operation_id="op-2", at=AT)
+        self.assertEqual(first.queue_id, retried.queue_id)
+
     def test_queue_and_retry_identity_stay_inside_one_project(self):
         settings = admit()
         alpha = capture(settings)
         beta = capture(settings, scope=library.participant_scope(ORIGIN, binding=binding("beta",
-                                                                                        "acme/beta")))
+                                                                                        "acme/beta",
+                                                                                        "2002")))
         self.assertNotEqual(alpha.queue_id, beta.queue_id)
         with self.assertRaises(library.LibraryError) as raised:
             library.identity(alpha, beta)
         self.assertEqual("INVALID_OPERATION", raised.exception.code)
         with self.assertRaises(library.LibraryError) as raised:
-            library.retry(library.participant_scope(ORIGIN, binding=binding("beta", "acme/beta")),
+            library.retry(library.participant_scope(ORIGIN, binding=binding("beta", "acme/beta",
+                                                                            "2002")),
                           settings, alpha, operation_id="op-2", at=AT)
         self.assertEqual("FORBIDDEN", raised.exception.code)
 
@@ -509,6 +547,42 @@ class SettingsChangeTests(unittest.TestCase):
         self.assertEqual("UNKNOWN_FIELD", raised.exception.code)
 
 
+class NonContentSuccessTests(unittest.TestCase):
+    def test_configuration_and_acknowledgement_success_carry_no_git_commit(self):
+        settings = admit()
+        operator = library.installation_scope(
+            Origin("operator", "operator-seat", "inc-op", "epoch-op", ("library-settings",)))
+        changed = document()
+        changed["limits"]["title_chars"] = 120
+        operation = library.settings_change(
+            operator, settings, operation_id="op-settings", request_id="request-settings",
+            document=io.StringIO(json.dumps(changed)), at=AT)
+        configured = library.receipt(
+            operation, "CONFIGURED", at=AT,
+            configuration={"settings_id": operation.payload["next_settings_id"],
+                           "version": 2})
+        self.assertIsNone(configured["publication"])
+        self.assertEqual(2, configured["configuration"]["version"])
+        drain = library.action(library.human_scope(session(), binding=binding(), kind="drain"),
+                              settings, kind="drain", operation_id="op-drain",
+                              request_id="request-drain", at=AT,
+                              payload={"observed_version": "a" * 64})
+        acknowledged = library.receipt(drain, "ACKNOWLEDGED", at=AT,
+                                       acknowledgement="OPERATIONAL_ACCEPTED")
+        self.assertIsNone(acknowledged["publication"])
+        with self.assertRaises(library.LibraryError) as raised:
+            library.receipt(drain, "ACKNOWLEDGED", at=AT)
+        self.assertEqual("INVALID_IDENTIFIER", raised.exception.code)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.receipt(operation, "CONFIGURED", at=AT)
+        self.assertEqual("CONFIGURATION_REQUIRED", raised.exception.code)
+        with self.assertRaises(library.LibraryError) as raised:
+            library.receipt(operation, "CONFIGURED", at=AT,
+                            configuration={"settings_id": "a" * 64, "version": 2},
+                            publication={"commit_sha": "c" * 40, "path": "projects/x"})
+        self.assertEqual("INVALID_OUTCOME", raised.exception.code)
+
+
 class OutcomeTests(unittest.TestCase):
     def test_receipt_distinguishes_durable_visible_refused_and_uncertain(self):
         settings = admit()
@@ -525,6 +599,15 @@ class OutcomeTests(unittest.TestCase):
                                   publication=durable["publication"],
                                   projection={"commit_sha": None, "visible": False})
         self.assertFalse(pending["projection"]["visible"])
+        advanced = library.receipt(operation, "DURABLY_QUEUED", at=AT,
+                                   publication=durable["publication"],
+                                   projection={"commit_sha": "b" * 40, "visible": True})
+        self.assertEqual("b" * 40, advanced["projection"]["commit_sha"])
+        with self.assertRaises(library.LibraryError) as raised:
+            library.receipt(operation, "DURABLY_QUEUED", at=AT,
+                            publication=durable["publication"],
+                            projection={"commit_sha": None, "visible": True})
+        self.assertEqual("INVALID_PROJECTION", raised.exception.code)
         uncertain = library.receipt(operation, "NOT_DURABLE", at=AT, reason="TRANSPORT_UNKNOWN")
         self.assertTrue(uncertain["retryable"])
         self.assertIsNone(uncertain["publication"])
@@ -539,11 +622,6 @@ class OutcomeTests(unittest.TestCase):
                                 ("REJECTED", {"reason": "X", "retryable": True})):
             with self.subTest(outcome=outcome), self.assertRaises(library.LibraryError):
                 library.receipt(operation, outcome, at=AT, **kwargs)
-        with self.assertRaises(library.LibraryError) as raised:
-            library.receipt(operation, "DURABLY_QUEUED", at=AT,
-                            publication=durable["publication"],
-                            projection={"commit_sha": "d" * 40, "visible": True})
-        self.assertEqual("INVALID_PROJECTION", raised.exception.code)
         with self.assertRaises(library.LibraryError) as raised:
             library.receipt(operation, "DURABLY_QUEUED", at=AT,
                             publication={"commit_sha": sha, "path":
