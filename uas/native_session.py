@@ -2,7 +2,7 @@
 
 This composes actual owners. Serialized input selects public installation refs,
 never human authority. CLI startup attaches the pair only; an existing trusted
-HumanSession may select the separate initial-Run hosting API. Neither mode
+HumanSession may select the retained finite-Run hosting API. Neither mode
 claims complete native implementation/review/completion qualification.
 """
 from contextlib import ExitStack, closing, contextmanager
@@ -160,14 +160,23 @@ def dispatch(services, budget, *, max_packets=16):
     return {'packets': processed, 'stop': 'packet-budget-exhausted'}
 
 
-def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None):
+def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, next_request=None):
     from .native_qualification_backend import readonly_supervisor
     require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
     require(type(resources) is dict and resources.get('room_id') == plan.room['id'], 'INVALID_LAUNCH_RESOURCES')
+    if next_request is not None and human_request is None:
+        raise QualificationError('AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
     if human_request is not None:
         from .native_run_admission import NativeHumanRunRequest
         require(type(human_request) is NativeHumanRunRequest and checkout_fd is not None,
                 'AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
+        if next_request is not None:
+            require(type(next_request) is NativeHumanRunRequest
+                    and next_request.session is human_request.session
+                    and next_request.participant_id == human_request.participant_id
+                    and next_request.operation_id != human_request.operation_id
+                    and next_request.issue_number != human_request.issue_number,
+                    'EXPLICIT_NATIVE_SUCCESSOR_REQUIRED')
         session = human_request.session
         require(session.deployment_id == plan.config['deployment']['id']
                 and session.room_id == plan.room['id'] and session.instance_id == resources['instance']
@@ -241,14 +250,16 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None):
                 GateRoomBinding(room['id'],instance,room['project']['id'],room['project']['repository'],room['resources']['disk_bytes']))
             claude=recruitment.recruit('reviewer-'+hashlib.sha256(human_request.operation_id.encode()).hexdigest(),
                 activated['run_id'],activated['generation'],session=human_request.session)
-            delivery = held.deliver_one()  # Existing journal reconciles unknown injection; never re-prompt.
-            packets=dispatch((held.forge_service,claude.forge_service),budget)
-            return {'version':1,'status':'NATIVE_RUN_ACTIVE','room_id':room['id'],'instance':instance,
-                'run_id':activated['run_id'],'generation':activated['generation'],
-                'product_run_created':True,'delivery':delivery,'reviewer_attached':True,'dispatch':packets,
-                'configuration_sha256':plan.config_digest,
+            from .native_session_driver import NativeSessionDriver
+            driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request)
+            result=driver.run()
+            return {'version':1,'status':'NATIVE_RUN_SESSION_FINISHED','room_id':room['id'],'instance':instance,
+                'run_id':result['current_run'],'product_run_created':True,'reviewer_attached':True,
+                'session':result,'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
-                'lifecycle_blockers':['NATIVE_PI_RESET_UNAVAILABLE','FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
+                'lifecycle_blockers':['NATIVE_GIT_GATE_WORKER_COMPOSITION_UNAVAILABLE',
+                                      'AUTHENTICATED_MANAGER_DISPATCH_UNAVAILABLE',
+                                      'FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
                 'production_launcher':'disabled'}
         pi_recipe = NativePiRecipe.from_configuration(StringIO(plan.config_text), room['id'], pi_seat.participant_id,
             resources['pi_manifest_path'], plan.installation['pi_manifest']['sha256'], seat=pi_seat, scope=pi_scope,

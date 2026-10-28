@@ -105,7 +105,7 @@ compatibility, bounded writes/dispatch, custody, uncertain results and cleanup
 ordering. They are not evidence of an executed native image, authenticated model,
 real provider action or successful guest boundary qualification.
 
-## Initial native Run admission (trusted hosting API)
+## Native Run session (trusted hosting API)
 
 `native_session.run(..., human_request=NativeHumanRunRequest(...))` consumes an
 **existing authenticated `HumanSession`** supplied by the hosting application.
@@ -181,9 +181,9 @@ the one-shot launch marker and refuses blind relaunch. Unknown canonical
 revocation cannot become confirmed solely because all three tasks later exit.
 
 This is a live-owner, trusted-host adapter, not restart recovery or a new CLI
-login mechanism. The current initial-only Pi admission still cannot create the
-next Run using a reused Pi seat; native Pi reset remains required for repeated
-full lifecycle operation. No synthetic target Run is introduced by this adapter.
+login mechanism. The first reused Pi context and successor reviewer use the retained-owner
+[completed retirement/reset path](native-completed-retirement.md). A target Run
+is created only through canonical admission, never synthesized.
 
 ### Native admission observation and lock order
 
@@ -196,3 +196,35 @@ activation reducer. EOF, transport fencing, another request or later native even
 invalidates it. The sample is discarded on every exit; no stored receipt or
 serialized SAFE value can replace a new observation. This is bounded observational
 freshness, not a claim that the independent native process is atomically paused.
+
+
+### Retained finite session driver
+
+The authenticated `run` branch consumes `NativeSessionDriver`, not a separate
+operator-written composition. It services both Pi and Claude safe-point outboxes
+and original Forge/review channels until a canonical terminal/attention result or
+the explicit qualification budget. Idle native channels do not end the Run. An
+eligible passing/overridden submission can trigger bounded, fresh canonical human
+merge observations; the driver never performs the merge or fabricates a pass.
+Distinct observation attempts have deterministic IDs; uncertain effects stop with
+the original owner's journals and operation rather than being resubmitted.
+
+An optional `next_request=NativeHumanRunRequest(...)` must carry the same actual
+live HumanSession and a distinct explicitly selected issue/operation. After the
+first canonical completed outcome, the driver invokes completed retirement,
+opens that successor through the same owner/root handoff, and recruits the
+reviewer using the previous exact retained reset owner. It reports partial
+successor phases separately when retirement, launch or admission becomes unknown.
+No process is adopted after a host restart, and unsupported crash restoration is
+reported rather than inferred from channel closure.
+
+The driver's per-operation scheduling margin is not an aggregate deadline proof
+for nested Gate/Broker observations. The existing root-owned process deadline is
+the aggregate bound. If it expires during an effect, canonical audit/intent and
+issued-session evidence remain retained; this is not a completed scenario.
+
+The current backend still lacks the concrete controlled Git worker endpoints and
+mapped worker profile, and the Gate evaluator helper resources. Manager action
+transport also needs its existing authenticated host/audit binding. These remain
+explicit composition gaps; creating a Git journal or reading an existing Gate
+projection is not a replacement. The CLI still cannot manufacture HumanSession.

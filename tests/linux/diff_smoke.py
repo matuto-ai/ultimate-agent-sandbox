@@ -38,6 +38,7 @@ SOURCES = (
     'uas/native_qualification.py',
     'uas/native_qualification_backend.py',
     'uas/native_session.py',
+    'uas/native_session_driver.py',
     'uas/native_run_admission.py',
     'uas/native_reviewer_recruitment.py',
     'uas/native_reviewer_reset.py',

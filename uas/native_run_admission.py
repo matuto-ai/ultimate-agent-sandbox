@@ -2,7 +2,8 @@
 
 No serialized human identity grants authority. The authenticated host supplies an
 existing HumanSession; root owns checkout allocation, this host owns native tasks.
-Reset, replacement, migration and stop remain unavailable here, never fixture APIs.
+First retained reset/completed retirement are explicit native paths; replacement,
+migration and general stop remain unavailable here, never fixture APIs.
 """
 from contextlib import contextmanager
 from copy import deepcopy
@@ -14,7 +15,7 @@ import threading
 
 from .config import load
 from .context import FixtureContextHub
-from .ledger import LedgerError
+from .ledger import LedgerError, _token
 from .manager_actions import HumanSession
 from .native_admission_broker import NativeAdmissionBroker
 from .native_checkout_handoff import NativeCheckoutClient
@@ -40,6 +41,10 @@ class NativeHumanRunRequest:
     def __post_init__(self):
         if type(self.session) is not HumanSession:
             raise LedgerError('MANAGER_AUTHENTICATION_REQUIRED')
+        _token(self.operation_id);_token(self.participant_id)
+        if type(self.issue_number) is not int or not 1<=self.issue_number<=9_999_999_999:
+            raise LedgerError('INVALID_RUN_REQUEST')
+        if self.attempt_id is not None:_token(self.attempt_id)
 
 
 @dataclass(frozen=True)
