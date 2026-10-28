@@ -134,7 +134,8 @@ def main():
         if control.send(ready)!=len(ready):
             raise OriginDenied('incomplete Hub startup readiness')
         loop=AdmittedHubLoop(admissions,dispatcher,control,
-                            context_generations={s.participant_id:1 for s in seats})
+                            context_generations={s.participant_id:1 for s in seats},
+                            canonical_context_generations=True)
         stack.callback(loop.close)
         through=-1;deadline=time.monotonic()+180
         while time.monotonic()<deadline:

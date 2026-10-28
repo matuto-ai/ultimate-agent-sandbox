@@ -74,11 +74,11 @@ def admission_cleanup(admissions):
         require(not failures, 'ADMISSION_REVOCATION_UNKNOWN')
 
 
-def admit_once(admission, operation_id):
+def admit_once(admission, operation_id, *, epoch=1):
     """Only STATUS may follow an uncertain transfer; never a second ADMIT."""
     require(type(admission) is SupervisorAdmission, 'EXACT_PI_ADMISSION_REQUIRED')
     try:
-        return admission.admit(operation_id, 1)
+        return admission.admit(operation_id, epoch)
     except Exception:
         try:
             reconciled = admission.status()

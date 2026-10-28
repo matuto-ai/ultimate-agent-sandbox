@@ -31,8 +31,7 @@ class _NativeResetContexts(FixtureContextHub):
         def checked_decide(state, operation):
             owner._allowed_locked(state)
             if kind=='reset.request':
-                old=reset.previous.root
-                old.review_host.identity.seat_current(old.forge_service,state)
+                reset.old_current(state)
             return decide(state,operation)
         return self.ledger.apply(command,owner._session.human,authorize=allowed,decide=checked_decide)
 
@@ -59,9 +58,21 @@ class NativeReviewerReset:
                 or state['fixture_context']['runs'].get(preceding['run_id'],{}).get('status')!='CLOSED'
                 or state.get('runs',{}).get(preceding['run_id'],{}).get('status')!='CLOSED'):
             raise LedgerError('PRECEDING_RUN_OPEN')
-        # Context is still READY here; check attachment without requiring old Run OPEN.
-        root.review_host.identity.seat_current(root.forge_service,state)
         self.owner,self.previous=owner,previous
+        self.completed=None
+        stopped=state['runs'][preceding['run_id']].get('native_stop') or {}
+        candidate=(owner.owner._completed_retirements.get(stopped.get('operation_id'))
+                   if isinstance(stopped,dict) else None)
+        if candidate is not None:
+            from .native_completed_retirement import NativeCompletedRetirement
+            if (type(candidate) is not NativeCompletedRetirement or candidate.owner is not owner.owner
+                    or candidate.reviewer is not previous or candidate.run_id!=preceding['run_id']
+                    or candidate.owners.get(participant) is not root
+                    or type(candidate.retirements.get(participant)) is not NativeClaudeRetirement):
+                raise LedgerError('NATIVE_RESET_OWNERS_REQUIRED')
+            self.completed=candidate
+        # Proven completed retirement permits LOST, never a replacement attachment.
+        self.old_current(state)
         self.preceding=deepcopy(preceding)
         self.preceding_session=root.recipe.session_id
         epoch=root.forge_service.binding.epoch
@@ -73,9 +84,60 @@ class NativeReviewerReset:
         self.operation_id=operation_id
         self.reset_id='native-reviewer-reset-'+hashlib.sha256(operation_id.encode()).hexdigest()
         self.contexts=_NativeResetContexts(self)
-        self.retirement=NativeClaudeRetirement(root,lifecycle=owner._capability)
-        owner.launcher.stack.callback(self.retirement.close)
+        if self.completed is None:
+            self.retirement=NativeClaudeRetirement(root,lifecycle=owner._capability)
+            owner.launcher.stack.callback(self.retirement.close)
+        else:self.retirement=self.completed.retirements[participant]
         self.requested=False
+
+    def old_current(self,state,*,context_required=True):
+        root=self.previous.root
+        if self.completed is None:
+            return root.review_host.identity.seat_current(root.forge_service,state)
+        self.completed.require_completed()
+        participant=self.owner.selected['participant']
+        target=next((item for item in self.completed.targets if item['participant_id']==participant),None)
+        row=state.get('peer_traffic',{}).get('connections',{}).get(participant)
+        definition=state.get('peer_traffic',{}).get('definition',{}).get('participants',{}).get(participant)
+        context=state['fixture_context']['participants'][participant]
+        scope={'room_id':self.owner.ledger.room_id,'participant_id':participant,
+               **(context['bound_run'] or context['reserved_run'] or {}),
+               'context_generation':context['context_generation']}
+        if (not target or not row or not definition or (context_required and target['scope']!=scope)
+                or target['scope']!=root.scope or definition['actor_id']!=target['actor_id']
+                or row['incarnation_id']!=target['incarnation_id']
+                or row['attachment_id']!=target['attachment_id']):
+            raise LedgerError('NATIVE_OWNERSHIP_CHANGED')
+        self.completed.retirements[participant].require_exited(root)
+        return True
+
+    def new_root_current(self,state,root,admission):
+        from .claude_native_admission import NativeClaudeSupervisorAdmission
+        authority=root.native_admission
+        pending=getattr(root,'_prepared_initialization',None)
+        if (type(root) is not NativeClaudeRoot or type(authority) is not NativeClaudeSupervisorAdmission
+                or authority.launch is not root or not pending
+                or admission.get('operation_id')!=pending['operation_id']
+                or admission.get('epoch')!=self.next_epoch
+                or admission.get('controller')!=authority.controller
+                or admission.get('receipt')!={key:admission.get(key) for key in
+                    ('version','operation_id','epoch','controller','admission_digest')}):
+            raise LedgerError('NATIVE_RESET_ADMISSION_UNCONFIRMED')
+        authority._current()
+        participant=self.owner.selected['participant']
+        row=state['peer_traffic']['connections'].get(participant)
+        definition=state['peer_traffic']['definition']['participants'].get(participant)
+        scope={'room_id':self.owner.ledger.room_id,'participant_id':participant,
+               'run_id':self.owner._pin['run_id'],'generation':self.owner._pin['generation'],
+               'context_generation':self.next_generation}
+        if (not row or not definition or definition['actor_id']!=self.owner.selected['actor']
+                or root.scope!=scope or row['incarnation_id']!=root.incarnation
+                or row['attachment_id']!='admit-'+admission['operation_id']
+                or row.get('context_generation')!=self.next_generation or row['readiness']=='lost'
+                or not self.owner.owner.hub.contexts.permits(participant,self.next_generation,
+                    scope['run_id'],scope['generation'],state)):
+            raise LedgerError('NATIVE_OWNERSHIP_CHANGED')
+        return True
 
     def request_locked(self):
         owner=self.owner
@@ -84,6 +146,14 @@ class NativeReviewerReset:
         self.requested=True
 
     def allowed(self,state):
+        if self.completed is not None:
+            self.completed.require_completed()
+            root=self.owner.root
+            if root is None or getattr(root,'review_host',None) is None:
+                admission=None if root is None else root.admission
+                if isinstance(admission,dict) and admission.get('state')=='admitted':
+                    self.new_root_current(state,root,admission)
+                else:self.old_current(state,context_required=False)
         owner=self.owner;row=state['fixture_context']['participants'][owner.selected['participant']]
         old=state['fixture_context']['runs'].get(self.preceding['run_id'])
         run=state.get('runs',{}).get(self.preceding['run_id'])
@@ -107,7 +177,9 @@ class NativeReviewerReset:
     def retire(self):
         if not self.requested:raise LedgerError('NATIVE_RESET_REQUEST_REQUIRED')
         self.owner._allowed()
-        self.retirement.retire(timeout=self.owner.launcher.budget.remaining(10))
+        if self.completed is None:
+            self.retirement.retire(timeout=self.owner.launcher.budget.remaining(10))
+        else:self.completed.require_completed()
         self.retirement.require_exited(self.previous.root)
         self.owner._allowed()
 

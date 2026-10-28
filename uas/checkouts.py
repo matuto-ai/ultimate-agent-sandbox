@@ -348,8 +348,21 @@ class CheckoutAllocator:
         except Exception:
             return False
 
-    def allocate(self, run, participant, *, authorize=None):
-        return self._allocate(run, participant, 'allocate', authorize=authorize)
+    @staticmethod
+    def _retained_predecessor(state, run, participant, predecessor):
+        # Trusted root-owned admission policy, never a participant-supplied path.
+        if (type(predecessor) is not tuple or len(predecessor) != 2
+                or not _identifier(predecessor[0]) or predecessor[0] == run
+                or predecessor[1] != participant):
+            raise LifecycleError('CHECKOUT_PREDECESSOR_CHANGED')
+        slots = [slot for slot in state['slots'].values() if slot['run'] == predecessor[0]]
+        if (len(slots) != 1 or slots[0]['participant'] != participant
+                or slots[0]['active'] is not True or slots[0]['phase'] != 'ready'):
+            raise LifecycleError('CHECKOUT_PREDECESSOR_CHANGED')
+
+    def allocate(self, run, participant, *, authorize=None, retained_predecessor=None):
+        return self._allocate(run, participant, 'allocate', authorize=authorize,
+                              retained_predecessor=retained_predecessor)
 
     def reserve(self, run, participant):
         """Reserve while stopped; Start never reuses a released slot implicitly.
@@ -360,7 +373,7 @@ class CheckoutAllocator:
         """
         return self._allocate(run, participant, 'reserve')
 
-    def _allocate(self, run, participant, action, *, authorize=None):
+    def _allocate(self, run, participant, action, *, authorize=None, retained_predecessor=None):
         if not _identifier(run) or not _identifier(participant):
             raise LifecycleError('INVALID_CHECKOUT_BINDING')
         with self._locked(action) as state:
@@ -368,6 +381,8 @@ class CheckoutAllocator:
             # this lock. Check inside the same lock, before intent or effects.
             if authorize is not None and authorize() is not True:
                 raise LifecycleError('ADMISSION_REVOKED')
+            if retained_predecessor is not None:
+                self._retained_predecessor(state, run, participant, retained_predecessor)
             for key, slot in state['slots'].items():
                 if slot['active'] and slot['run'] == run:
                     if slot['participant'] != participant:

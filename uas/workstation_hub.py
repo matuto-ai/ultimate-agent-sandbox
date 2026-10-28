@@ -14,9 +14,10 @@ from .workstation_peer import AdmittedPeerDispatcher
 
 
 class AdmittedHubLoop:
-    def __init__(self, admissions, dispatcher, control, *, context_generations):
+    def __init__(self, admissions, dispatcher, control, *, context_generations, canonical_context_generations=False):
         if (type(admissions) is not HubAdmission or type(dispatcher) is not AdmittedPeerDispatcher
                 or dispatcher.admissions is not admissions
+                or type(canonical_context_generations) is not bool
                 or type(context_generations) is not dict
                 or set(context_generations) != set(admissions.seats)
                 or any(type(value) is not int or not 0 < value < 2**53
@@ -25,6 +26,7 @@ class AdmittedHubLoop:
         self.admissions, self.dispatcher, self.control = admissions, dispatcher, control
         admissions.bind_control(control)
         self.context_generations = MappingProxyType(dict(context_generations))
+        self.canonical_context_generations=canonical_context_generations
         self._owner = threading.get_ident()
         self._selector = selectors.DefaultSelector()
         self._registered = {}
@@ -45,7 +47,8 @@ class AdmittedHubLoop:
     def _attach(self, operation):
         binding = self.admissions.binding(operation)
         self.dispatcher.attach_current(operation,
-            context_generation=self.context_generations[binding.seat.participant_id])
+            context_generation=(None if self.canonical_context_generations else
+                                self.context_generations[binding.seat.participant_id]))
 
     def _sync(self):
         # Descriptor integers are selector readiness handles only; attribution

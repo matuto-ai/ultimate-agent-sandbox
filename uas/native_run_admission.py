@@ -91,10 +91,14 @@ class NativeRunLauncher:
         self.control, self.hub_origin, self.controller = control, hub_origin, controller
         self.control_lock, self.exec_seat, self.admission_seat = control_lock, exec_seat, admission_seat
         self.mounts, self.stack, self.admissions, self.budget = tuple(mounts), stack, admissions, budget
+        self.attempted_runs = set()
         self.started = {}  # Held objects only; journal text never restores task authority.
 
-    def launch(self, run, pending, slot, *, authorize):
+    def launch(self, run, pending, slot, *, authorize, reset=None):
         from .native_session import admit_once
+        from .native_pi_reset import NativePiReset
+        if reset is not None and (type(reset) is not NativePiReset or reset.owner.launcher is not self or reset.run!=run):
+            raise LedgerError('NATIVE_PI_RESET_OWNER_REQUIRED')
         if not callable(authorize):
             raise LedgerError('ADMISSION_REVOKED')
         def allowed():
@@ -103,25 +107,26 @@ class NativeRunLauncher:
                 if (not state or state['phase'] != 'running' or state['desired'] != 'running'
                         or state['instance_id'] != self.resources['instance'] or authorize() is not True):
                     raise LedgerError('ADMISSION_REVOKED')
+                if reset is not None:reset.allowed_locked()
             return True
         allowed()
         self.plan.require_unchanged()
         participant = self.exec_seat.participant_id
-        if pending.get('preceding_run') is not None or pending['context_generation'] != 1:
+        if reset is None and (pending.get('preceding_run') is not None or pending['context_generation'] != 1):
             raise LedgerError('NATIVE_CONTEXT_RESET_UNAVAILABLE')
         if participant in self.started:
-            held = self.started[participant]
-            if (type(held) is not SupervisorAdmission or held.launch.native_recipe.scope['run_id'] != run):
+            held=self.started[participant]
+            if type(held) is SupervisorAdmission and held.launch.native_recipe.scope['run_id']==run:
+                held._current();allowed();return held
+            if reset is None or held is not reset.old:
                 raise LedgerError('NATIVE_ADMISSION_RECONCILIATION_REQUIRED')
-            held._current()
-            allowed()
-            return held
-        scope = {'room_id': self.hub.ledger.room_id, 'participant_id': participant,
-                 'run_id': run, 'generation': 1, 'context_generation': 1}
+        scope={'room_id':self.hub.ledger.room_id,'participant_id':participant,
+               'run_id':run,'generation':1,'context_generation':pending['context_generation']}
         journal = Path(self.resources['supervisor_directory'])
         # Mark before the first native effect. Unknown launch cannot become a
         # second process on a later explicit attempt, even if no handle returned.
         self.started[participant] = None
+        self.attempted_runs.add(run)
         recipe = NativePiRecipe.from_configuration(StringIO(self.plan.config_text),
             self.plan.room['id'], participant, self.resources['pi_manifest_path'],
             self.plan.installation['pi_manifest']['sha256'], seat=self.exec_seat,
@@ -145,7 +150,10 @@ class NativeRunLauncher:
                 hub_origin=self.hub_origin, controller=self.controller, control_lock=self.control_lock)
             self.admissions.append(admission)
             allowed()
-            admit_once(admission, hashlib.sha256(('native-run-'+self.resources['instance']+run).encode()).hexdigest()[:32])
+            if reset is not None:reset.complete(admission)
+            allowed()
+            admit_once(admission, hashlib.sha256(('native-run-'+self.resources['instance']+run).encode()).hexdigest()[:32],
+                       epoch=1 if reset is None else reset.next_epoch)
             allowed()
             admission.attach_forge_service(self.forge_broker.client)
             allowed()
@@ -172,6 +180,9 @@ class NativeRunAdmission(RunAdmission):
         self.launcher, self.checkout_client = launcher, checkout_client
         self._session = None
         self._activation_observation = None
+        self._completed_retirements = {}
+        self._pi_resets = {}
+        self._retirement_owner = None
         self._owner_thread = threading.get_ident()
         config = load(StringIO(launcher.plan.config_text))
         selected = launcher.plan.seats['pi']
@@ -207,11 +218,43 @@ class NativeRunAdmission(RunAdmission):
         session = self._session
         action = ('open-run' if command.kind in {'run.human-open','run.admission-attempt','run.admission-attempt-result'}
                   else 'authorize-run-request')
+        if command.kind in {'run.human-retire-completed','run.human-retire-completed-result'}:
+            action='stop'
         return session is not None and origin == session.human and session.allowed(action)
 
     def open_human(self, operation_id, issue_number, participant_id, *, session, attempt_id=None):
         with self.human_scope(session):
             return self._open(operation_id, issue_number, participant_id, session.human, attempt_id=attempt_id)
+
+    def retire_completed(self, operation_id, run_id, generation, revision, *, session, reviewer):
+        from .native_completed_retirement import NativeCompletedRetirement
+        with self.human_scope(session):
+            if self._retirement_owner is not None:raise LedgerError('NATIVE_RETIREMENT_BUSY')
+            held=self._completed_retirements.get(operation_id)
+            if held is None:
+                if len(self._completed_retirements)>=8:raise LedgerError('NATIVE_RETIREMENT_CAPACITY')
+                held=NativeCompletedRetirement(self,reviewer,operation_id,run_id)
+                self._completed_retirements[operation_id]=held
+            elif held.reviewer is not reviewer or held.run_id!=run_id:
+                raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+            self._retirement_owner=held
+            try:return self._retire_completed(operation_id,run_id,generation,revision,human=session.human)
+            finally:self._retirement_owner=None
+
+    def _completed_retirement_targets(self,state,run):
+        return self._retirement_owner.capture(state,run)
+
+    def _stop_completed_owned(self,pending,human,command):
+        return self._retirement_owner.stop(pending,human,command)
+
+    def _verify_completed_retirement(self,pending):
+        return self._retirement_owner.verify(pending)
+
+    def _verify_completed_targets(self,state,pending):
+        return self._retirement_owner.validate(state,pending)
+
+    def _release_completed_checkout(self,run,pending,human,command):
+        return self._retirement_owner.checkout(run,pending,human,command)
 
     def _room(self):
         state = self.supervisor._read()
@@ -228,8 +271,10 @@ class NativeRunAdmission(RunAdmission):
         pending = self._pending(run)
         if pending is None or pending['participant_id'] != participant:
             raise LedgerError('ADMISSION_BINDING_MISMATCH')
-        method = (self.checkout_client.observe if participant in self.launcher.started
-                  else self.checkout_client.allocate)
+        held=self.launcher.started.get(participant)
+        already=(type(held) is SupervisorAdmission and held.launch.native_recipe.scope['run_id']==run)
+        method=(self.checkout_client.observe if already or run in getattr(self.launcher,'attempted_runs',())
+                else self.checkout_client.allocate)
         slot = method(run, pending['admission_operation'])
         if (slot['run'] != run or slot['participant'] != participant or slot['phase'] != 'ready'
                 or slot['reason'] != 'ACTIVE' or slot['observed_dirty'] is not False
@@ -330,15 +375,25 @@ class NativeRunAdmission(RunAdmission):
                 or self.seats[participant_id].actor_id != pending['actor_id']
                 or self.actors[pending['actor_id']].get('github_user_id') != pending['github_user_id']):
             raise LedgerError('ACTOR_BINDING_CHANGED')
-        if pending.get('preceding_run') is not None:
-            raise LedgerError('NATIVE_CONTEXT_RESET_UNAVAILABLE')
         def allowed():
             return authorize(human,command) and self._pending(run)['status']=='PREPARING'
         with self.supervisor._locked():
             self._room()
             if not allowed(): raise LedgerError('ADMISSION_REVOKED')
+        reset=None
+        if pending.get('preceding_run') is not None:
+            from .native_pi_reset import NativePiReset
+            reset=self._pi_resets.get(run)
+            if reset is None:
+                prior=self.ledger.snapshot()['state']['runs'].get(pending['preceding_run']['run_id'])
+                stopped={} if prior is None else prior.get('native_stop') or {}
+                retirement=self._completed_retirements.get(stopped.get('operation_id')) if isinstance(stopped,dict) else None
+                reset=NativePiReset(self,run,pending,retirement)
+                self._pi_resets[run]=reset
+            reset.request(allowed)
         slot = self._slot(run,participant_id,authorize=allowed)
-        handle = self.launcher.launch(run,pending,slot,authorize=allowed)
+        handle=(self.launcher.launch(run,pending,slot,authorize=allowed) if reset is None else
+                self.launcher.launch(run,pending,slot,authorize=allowed,reset=reset))
         return self._observe_and_activate(run,command,pending,attempt_id,terminal,
             issue_number,participant_id,human,authorize,handle,slot)
 

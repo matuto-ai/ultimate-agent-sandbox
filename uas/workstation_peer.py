@@ -148,6 +148,16 @@ class AdmittedPeerDispatcher:
                     raise OriginDenied('Hub Actor/Room does not match admitted Participant')
                 if operation in self._connections:
                     raise OriginDenied('admission connection already attached')
+                if context_generation is None:
+                    # Trusted service mode derives only canonical READY context,
+                    # never a generation claimed by the incoming ADMIT packet.
+                    state=self.hub.ledger.snapshot()['state']
+                    context=state.get('fixture_context',{}).get('participants',{}).get(binding.seat.participant_id)
+                    if (not context or context['status']!='READY'
+                            or type(context.get('context_generation')) is not int
+                            or not 0<context['context_generation']<2**53):
+                        raise OriginDenied('canonical ready context required')
+                    context_generation=context['context_generation']
                 connection = self.hub.connect('admit-' + operation,
                     binding.seat.participant_id, binding.incarnation,
                     _InboundOnlyReceiver(), context_generation=context_generation)

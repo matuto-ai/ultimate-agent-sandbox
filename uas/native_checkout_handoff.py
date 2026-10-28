@@ -65,7 +65,7 @@ def reservation(state, request, room, actors, *, initial):
             and row.get('participant_id') == seat['participant']
             and row.get('actor_id') == seat['actor']
             and row.get('github_user_id') == actors[seat['actor']].get('github_user_id')
-            and row.get('context_generation') == 1 and row.get('preceding_run') is None
+            and type(row.get('context_generation')) is int
             and row.get('authorization_consumed') is False
             and type(row.get('admission_origin')) is dict
             and type(row.get('human_origin')) is dict
@@ -83,17 +83,57 @@ def reservation(state, request, room, actors, *, initial):
     require(type(peer) is dict and peer.get('actor_id') == seat['actor'], 'CHECKOUT_SEAT_CHANGED')
     context = state.get('fixture_context', {}).get('participants', {}).get(seat['participant'])
     target = {'run_id': run, 'generation': 1}
-    require(type(context) is dict and context.get('context_generation') == 1
-            and context.get('status') == 'READY' and context.get('reset') is None
-            and ((context.get('reserved_run') == target and context.get('bound_run') is None)
-                 or (not initial and context.get('bound_run') == target and context.get('reserved_run') is None)),
-            'CHECKOUT_CONTEXT_CHANGED')
+    predecessor = row.get('preceding_run')
+    successor_pin = None
+    if predecessor is None:
+        require(row['context_generation'] == 1 and type(context) is dict
+                and context.get('context_generation') == 1
+                and context.get('status') == 'READY' and context.get('reset') is None
+                and ((context.get('reserved_run') == target and context.get('bound_run') is None)
+                     or (not initial and context.get('bound_run') == target and context.get('reserved_run') is None)),
+                'CHECKOUT_CONTEXT_CHANGED')
+    else:
+        # Qualification supports exactly the first reuse, never arbitrary generations.
+        require(row['context_generation'] == 2 and type(predecessor) is dict
+                and set(predecessor) == {'run_id', 'generation'}
+                and type(predecessor['run_id']) is str and predecessor['run_id'] != run
+                and type(predecessor['generation']) is int and predecessor['generation'] >= 1,
+                'CHECKOUT_PREDECESSOR_CHANGED')
+        old = state.get('runs', {}).get(predecessor['run_id'])
+        old_context = state.get('fixture_context', {}).get('runs', {}).get(predecessor['run_id'])
+        require(type(old) is dict and old.get('status') == 'CLOSED'
+                and old.get('participant_id') == seat['participant'] and old.get('actor_id') == seat['actor']
+                and type(old.get('native_stop')) is dict and old['native_stop'].get('status') == 'VERIFIED'
+                and old['native_stop'].get('generation') == old.get('generation')
+                and old.get('generation') == predecessor['generation']
+                and type(old_context) is dict and old_context.get('status') == 'CLOSED'
+                and old_context.get('generation') == predecessor['generation'],
+                'CHECKOUT_PREDECESSOR_CHANGED')
+        reset = context.get('reset') if type(context) is dict else None
+        reset_id = 'native-pi-reset-' + hashlib.sha256(request['operation_id'].encode()).hexdigest()
+        immutable = {'id': reset_id, 'participant_id': seat['participant'],
+                     'expected_context_generation': 1, 'next_context_generation': 2,
+                     'preceding_run': predecessor, 'target_run': target, 'reason_code': None}
+        require(type(reset) is dict and all(reset.get(k) == v for k, v in immutable.items()),
+                'CHECKOUT_RESET_CHANGED')
+        requested = (reset.get('status') == 'REQUESTED' and context.get('status') == 'RESETTING'
+            and context.get('context_generation') == 1
+            and ((context.get('bound_run') == predecessor and context.get('reserved_run') is None)
+                 or (context.get('reserved_run') == predecessor and context.get('bound_run') is None)))
+        succeeded = (not initial and reset.get('status') == 'SUCCEEDED' and context.get('status') == 'READY'
+            and context.get('context_generation') == 2
+            and ((context.get('bound_run') == target and context.get('reserved_run') is None)
+                 or (context.get('reserved_run') == target and context.get('bound_run') is None)))
+        require(requested or succeeded, 'CHECKOUT_CONTEXT_CHANGED')
+        successor_pin = {'reset': deepcopy(immutable), 'predecessor_stop': deepcopy(old['native_stop']),
+                         'predecessor_generation': old.get('generation')}
     context_run = state.get('fixture_context', {}).get('runs', {}).get(run)
     require(context_run == {'generation': 1, 'status': 'OPEN', 'terminal_fact': None}
             and run not in state.get('runs', {}), 'CHECKOUT_RESERVATION_CHANGED')
     # Attention is a diagnosis, not a new authorization; every other admission
     # field is pinned across the finite handoff, including origins and policy.
     pinned = deepcopy(row); pinned.pop('attention', None)
+    if successor_pin is not None: pinned['_successor_pin'] = successor_pin
     return seat['participant'], pinned
 
 
@@ -167,6 +207,7 @@ class RootCheckoutHandoff:
             manifest_reader_gid=HOST_UID, git_identity=(165532, 165532))
         self.actors = {a['id']: a for a in plan.config['deployment']['actors']}
         self.pin = None
+        self.pins = {}
         self.attempted = set()
         self.count = 0
         self.ledger_identity = None
@@ -211,8 +252,19 @@ class RootCheckoutHandoff:
                 and lifecycle['spec']['config_digest'] == 'sha256:' + self.plan.config_digest,
                 'CHECKOUT_ROOM_CHANGED')
         participant, pinned = reservation(self._snapshot(), request, self.plan.room, self.actors, initial=initial)
-        if self.pin is None: self.pin = (request['run_id'], participant, pinned)
-        require(self.pin == (request['run_id'], participant, pinned), 'CHECKOUT_RESERVATION_CHANGED')
+        if not hasattr(self, 'pins'): self.pins = {}
+        run = request['run_id']
+        pin = (run, participant, pinned)
+        if run not in self.pins:
+            require(len(self.pins) < 2, 'CHECKOUT_RUN_LIMIT')
+            if self.pins:
+                preceding = pinned.get('preceding_run')
+                require(preceding is not None and preceding['run_id'] in self.pins
+                        and self.pins[preceding['run_id']][2].get('context_generation') == 1,
+                        'CHECKOUT_PREDECESSOR_CHANGED')
+            self.pins[run] = pin
+        require(self.pins[run] == pin, 'CHECKOUT_RESERVATION_CHANGED')
+        self.pin = pin
         return True
 
     def operation(self, request):
@@ -220,16 +272,21 @@ class RootCheckoutHandoff:
         initial = request['kind'] == 'ALLOCATE'
         with self.owner._locked(deadline=self.deadline):
             self._authorized(request, initial=initial)
-        run, participant, _ = self.pin
+        run, participant, pinned = self.pin
+        preceding = pinned.get('preceding_run')
+        retained = (preceding['run_id'], participant) if preceding else None
         if initial:
             require(run not in self.attempted, 'CHECKOUT_ALLOCATION_RECONCILE_ONLY')
             self.attempted.add(run)  # Even failure may have written durable intent.
+            options = {'retained_predecessor': retained} if retained is not None else {}
             slot = self.allocator.allocate(run, participant,
-                authorize=lambda: self._authorized(request, initial=True))
+                authorize=lambda: self._authorized(request, initial=True), **options)
         else:
             # Read only: never call allocate/reconcile or recover creating state.
             with self.allocator._locked('status') as state:
                 self._authorized(request, initial=False)
+                if retained is not None:
+                    self.allocator._retained_predecessor(state, run, participant, retained)
                 found = [(key, value) for key, value in state['slots'].items() if value['run'] == run]
                 require(len(found) == 1 and found[0][1]['participant'] == participant,
                         'CHECKOUT_BINDING_CONFLICT')
