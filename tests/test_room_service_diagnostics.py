@@ -34,10 +34,10 @@ class DiagnosticsTests(unittest.TestCase):
     def test_bind_denial_keeps_original_exception_and_first_failure(self):
         original = RuntimeError('lineage admission deadline exceeded')
         delegate = Mock(); delegate.bind.side_effect = original
-        checks = {}; observed = ObservedAuthority(delegate, checks)
+        checks = {}; observed = ObservedAuthority(delegate, checks, lambda: None)
         with self.assertRaises(RuntimeError) as caught: observed.bind('record')
         self.assertIs(original, caught.exception)
-        self.assertEqual({'operation':'bind', 'error_type':'RuntimeError',
+        self.assertEqual({'operation':'bind', 'phase':'lineage', 'error_type':'RuntimeError',
                           'message':str(original)}, checks['authority_failure'])
         delegate.current.side_effect = ValueError('later')
         with self.assertRaises(ValueError): observed.current()
@@ -48,19 +48,20 @@ class DiagnosticsTests(unittest.TestCase):
         binding = SimpleNamespace(origin=object(), current=Mock(return_value=True),
                                   require=Mock(return_value=True), close=Mock())
         delegate = SimpleNamespace(bind=Mock(return_value=binding), close=Mock())
-        checks = {}; observed = ObservedAuthority(delegate, checks)
+        checks = {}; observed = ObservedAuthority(delegate, checks, lambda: None)
         admitted = observed.bind('record')
         self.assertIs(binding.origin, admitted.origin)
         self.assertTrue(admitted.current()); self.assertTrue(admitted.require('next'))
         admitted.close(); observed.close()
         binding.current.assert_called_once_with(); binding.require.assert_called_once_with('next')
         binding.close.assert_called_once_with(); delegate.close.assert_called_once_with()
-        self.assertEqual({}, checks)
+        self.assertNotIn('authority_failure', checks)
+        self.assertEqual(3, len({key.split('.')[0] for key in checks['authority_phases']}))
 
     def test_current_denial_bounded_without_replacing_exception(self):
         error = RuntimeError('x' * 1000)
         checks = {}; binding = Mock(); binding.current.side_effect = error
-        with self.assertRaises(RuntimeError) as caught: ObservedAuthority(binding, checks).current()
+        with self.assertRaises(RuntimeError) as caught: ObservedAuthority(binding, checks, lambda: None).current()
         self.assertIs(error, caught.exception)
         self.assertEqual(256, len(checks['authority_failure']['message']))
         self.assertEqual('current', checks['authority_failure']['operation'])

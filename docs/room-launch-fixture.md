@@ -73,6 +73,24 @@ contains the existing synthetic Go probe and no Pi/Node or native Git worker
 entrypoints. The selected Git/OpenSSH descriptors are real signed guest package
 files; help never executes either, and the credential configuration is empty.
 
+The fixture's observed authority freshly validates the full endpoint (including
+retained descriptors and labels) and private Broker before and after every
+`bind`, `current` and `require`, while the caller holds the existing lifecycle
+lock and before the result can reach disclosure. These resource checks enclose,
+not consume, the unchanged core lineage operation's absolute 50 ms budget.
+Core `seat.current` still freshly reads the Room manifest and checks active
+instance and retained bootstrap-origin liveness twice during final observation;
+there is no positive cache, removed check, retry or time-limit increase. Direct
+bootstrap and workload-release gates retain their resource checks as well.
+A post-bind resource failure closes the newly created binding before exposure,
+retaining the first failure even if cleanup also fails. Fixed phase aggregates
+(count, failures and elapsed last/max/total seconds, at most eleven keys) retain
+resource pre/post, core operation, fresh-current and failed-bind cleanup timing
+without storing requests or an unbounded history. Callback timing bookkeeping
+still participates in the core deadline. This separation is source-backed
+composition alignment, not proof of which subphase exhausted the previous
+run's deadline; final VM qualification remains required.
+
 The unrelated same-UID task negative retains caller-owned evidence before its
 fixed Docker CLI launch. Launch, accept, service and output-collection stages
 have elapsed timestamps; each output stream retains at most 4096 bytes (also

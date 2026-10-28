@@ -39,24 +39,73 @@ def require(value, message):
     if not value: raise RuntimeError(message)
 
 
+AUTHORITY_PHASES = frozenset(
+    method + '.' + phase for method in ('bind', 'current', 'require')
+    for phase in ('pre_resource', 'lineage', 'post_resource')) | {'seat.current', 'bind.cleanup'}
+
+
+def observe_authority_phase(checks, phase, call, *args):
+    """Fixed-key elapsed aggregates only; no history, payload or deadline change."""
+    if phase not in AUTHORITY_PHASES: raise ValueError('unknown authority phase')
+    started, failed = time.monotonic(), False
+    try:
+        return call(*args)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        elapsed = round(time.monotonic() - started, 6)
+        entry = checks.setdefault('authority_phases', {}).setdefault(phase,
+            {'calls': 0, 'failures': 0, 'last_seconds': 0, 'max_seconds': 0, 'total_seconds': 0})
+        entry['calls'] += 1
+        entry['failures'] += int(failed)
+        entry['last_seconds'] = elapsed
+        entry['max_seconds'] = max(entry['max_seconds'], elapsed)
+        entry['total_seconds'] = round(entry['total_seconds'] + elapsed, 6)
+
+
 class ObservedAuthority:
-    """Fixture-only delegation: retain first denial without changing admission."""
-    def __init__(self, delegate, checks):
-        self.delegate, self.checks = delegate, checks
+    """Fresh fixture resource envelope; caller holds the existing lifecycle lock.
+
+    The core still owns one absolute 50 ms lineage admission/final-observation
+    budget. Full endpoint/retained-FD and Broker checks enclose every delegated
+    operation, outside that core clock and before any result can be disclosed.
+    """
+    def __init__(self, delegate, checks, resources):
+        self.delegate, self.checks, self.resources = delegate, checks, resources
 
     @property
     def origin(self): return self.delegate.origin
 
     def _call(self, method, *args):
-        try: return getattr(self.delegate, method)(*args)
-        except Exception as error:
+        phase, result = 'pre_resource', None
+        try:
+            observe_authority_phase(self.checks, method + '.' + phase, self.resources)
+            phase = 'lineage'
+            result = observe_authority_phase(self.checks, method + '.' + phase,
+                                             getattr(self.delegate, method), *args)
+            phase = 'post_resource'
+            observe_authority_phase(self.checks, method + '.' + phase, self.resources)
+            return result
+        except BaseException as error:
             self.checks.setdefault('authority_failure', {
-                'operation': method, 'error_type': type(error).__name__,
+                'operation': method, 'phase': phase, 'error_type': type(error).__name__[:64],
                 'message': str(error)[:256]})
+            if method == 'bind' and result is not None:
+                # No caller owns the newly returned binding yet. Preserve the
+                # first denial even if closing its retained task FDs also fails.
+                cleanup = {'attempted': True, 'closed': False}
+                self.checks.setdefault('bind_cleanup', cleanup)
+                try:
+                    observe_authority_phase(self.checks, 'bind.cleanup', result.close)
+                    cleanup['closed'] = True
+                except BaseException as close_error:
+                    cleanup.update(error_type=type(close_error).__name__[:64],
+                                   message=str(close_error)[:256])
             raise
 
     def bind(self, record):
-        return ObservedAuthority(self._call('bind', record), self.checks)
+        return ObservedAuthority(self._call('bind', record), self.checks, self.resources)
 
     def current(self): return self._call('current')
     def require(self, record): return self._call('require', record)
@@ -538,14 +587,20 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         raise OriginDenied('native workers are not enabled by the Room fixture')
     def no_run(_origin, _checkout):
         raise LedgerError('ROOM_FIXTURE_HELP_ONLY')
-    def current():
-        # Called inside the lifecycle lock; all ownership objects are retained.
+    def fresh_current():
+        # Core calls this twice under the lifecycle lock; never cache manifest,
+        # instance, active state or the retained bootstrap's live held origin.
         now = supervisor._read()
         if (not active or now is None or now['phase'] != 'running' or now['instance_id'] != instance
                 or launch.origin.revoked or not alive(launch.origin.pidfd)):
             raise OriginDenied('Room preflight seat no longer current')
-        endpoint_.require(); broker.require()
         return True
+    def current():
+        return observe_authority_phase(checks, 'seat.current', fresh_current)
+    def resources():
+        # Full endpoint path, retained FD labels and live Broker stay fresh,
+        # but are separate from core process-lineage observation's 50 ms clock.
+        endpoint_.require(); broker.require()
     def control(expected):
         with receive(launch.channel) as record:
             launch.origin.require(record)
@@ -604,7 +659,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         finally: view.close()
         origin = Origin('fixture-actor', 'fixture-participant', launch.incarnation, 'fixture-epoch', ('git-read',))
         authority = GitChildAuthority((GitSeat(origin, launch.origin, current, namespace, depth),))
-        authority = ObservedAuthority(authority, checks)
+        authority = ObservedAuthority(authority, checks, resources)
         provenance = GitProvenance(private / 'provenance.db', 'alpha', 'alpha')
         metadata = private / 'metadata'; metadata.mkdir(mode=0o700)
         for name in ('objects', 'refs', 'helpers'): (metadata / name).mkdir(mode=0o700)
@@ -617,7 +672,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
             (checkout,), provenance, broker.client, no_worker, backend_fd=backend_fd, backend_sha256=backend_digest,
             lifecycle_lock=supervisor._locked, run_scope=no_run)
         with supervisor._locked():
-            current(); backend.admit(state)
+            current(); resources(); backend.admit(state)
             send(launch.channel, {'kind': 'PROVE_HELP_ONLY'})
         replies = []
         for index in range(2):
@@ -662,7 +717,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         # Final actual liveness and launch-boundary observation immediately before
         # granting the synthetic workload its release, not a cached HELLO bit.
         with supervisor._locked():
-            current(); backend.admit(state); broker.require()
+            current(); resources(); backend.admit(state); broker.require()
             send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})
         control({'kind': 'WORKLOAD_STARTED'})
         checks.update(status='passed', mounted_real_help=True, non_help_refused=True, worker_starts=effects['worker'],
