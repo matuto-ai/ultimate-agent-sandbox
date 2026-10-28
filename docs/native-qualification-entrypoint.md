@@ -131,10 +131,23 @@ its existing journal, not another prompt. Exact committed retries return the
 existing terminal receipt without allocating, launching, reading Forge or
 queueing a second Work Request.
 
-This increment admits only the initial configured Pi implementer, with an
-already-exact GitHub assignment. It does not invent self-assignment authority,
-authenticated login, native reset/replacement/stop, participant Run Request
-routing, or reviewer recruitment. Those inherited fixture effect entrypoints
-fail explicitly. Claude's bootstrap context is never relabeled as the new Run.
-The authenticated initial-Run branch records the reviewer-recruitment gap rather
-than claiming full implementation/review/completion qualification.
+The authenticated path then recruits the initially unopened configured Claude
+reviewer for that exact active Run. It reserves the generation-1 context on the
+same Room ledger before launch; a connected, previously delivered or used context
+is rejected rather than relabeled. The canonical unused-context predicate is
+shared with initial implementer admission. Human authorization, original Pi
+attachment, active Run/control revision, configured reviewer identity and the
+complete checkout source are rechecked at launch and admission cuts. Once Claude
+is attached, its exact canonical attachment/incarnation must remain current too.
+Stable retries return the held reviewer only; uncertain startup preserves its
+journal and refuses a second launch.
+
+The bounded dispatch loop now consumes both native Forge/review receivers after
+recruitment, and implementation Work Request delivery still follows canonical
+activation. This is not full implementation/review/completion qualification.
+It does not invent self-assignment authority, authenticated login, native
+reset/replacement/stop or participant Run Request routing. Reused reviewer
+contexts fail with `NATIVE_REVIEWER_RESET_REQUIRED`: reset needs independent
+proof of all old native/helper/SDK-host exits before advancing context generation.
+The default CLI remains the paired attachment check and never manufactures the
+authenticated HumanSession required by this initial-Run path.

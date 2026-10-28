@@ -102,6 +102,27 @@ class FixtureContextHub:
         return {"room_id": self.ledger.room_id, "participant_id": participant_id,
                 **run, "context_generation": row["context_generation"] if generation is None else generation}
 
+    @staticmethod
+    def unused_initial(state, participant_id, *, native_started=False):
+        """Unopened plumbing is not a previously used native conversation."""
+        row = state.get('fixture_context', {}).get('participants', {}).get(participant_id)
+        peer = state.get('peer_traffic', {})
+        return (row is not None and row['status'] == 'READY'
+                and row['context_generation'] == 1 and row['bound_run'] is None
+                and row['reset'] is None and participant_id not in peer.get('connections', {})
+                and not native_started and not any(participant_id == t['sender']
+                    or participant_id in t['recipients'] for t in peer.get('traffic', {}).values()))
+
+    @staticmethod
+    def reserve_unused_initial(state, participant_id, target_run):
+        """Pure canonical context mutation, called inside its owner's transaction."""
+        if type(target_run) is not FixtureRun or not FixtureContextHub.unused_initial(state, participant_id):
+            raise LedgerError('UNUSED_NATIVE_CONTEXT_REQUIRED')
+        target = state['fixture_context']['runs'].get(target_run.run_id)
+        if not target or target['status'] != 'OPEN' or target['generation'] != target_run.generation:
+            raise LedgerError('TARGET_RUN_UNAVAILABLE')
+        state['fixture_context']['participants'][participant_id]['reserved_run'] = target_run.document()
+
     def scope(self, participant_id):
         row = self._row(participant_id)
         if row["status"] != "READY":

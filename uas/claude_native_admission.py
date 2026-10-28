@@ -25,6 +25,12 @@ from .workstation_control import SupervisorAdmission
 from .workstation_exec import ExecLaunch, ExecUnavailable, EndpointLease, RELEASE
 
 
+def _authorized(authorize):
+    # Additional denial only; never replaces kernel/native admission authority.
+    if authorize is not None and (not callable(authorize) or authorize() is not True):
+        raise OriginDenied('native reviewer authorization revoked')
+
+
 class NativeClaudeHostLaunch(ExecLaunch):
     """Exact Engine task is the SDK host, NEVER the Participant native child."""
     def __init__(self, engine, recipe, endpoint, journal, *, timeout=10):
@@ -46,10 +52,11 @@ class NativeClaudeHostLaunch(ExecLaunch):
         document['native_child'] = None if self._native_child is None else self._native_child.document()
         return document
 
-    def launch(self, listener):
+    def launch(self, listener, *, authorize=None):
+        _authorized(authorize)
         self.recipe.require_provider_auth()
         self.recipe.validate_container(self.engine)
-        return super().launch(listener)
+        return super().launch(listener, authorize=authorize)
 
     def current(self):
         if (self.state != 'released' or type(self.origin) is not HeldOrigin
@@ -163,7 +170,7 @@ class NativeClaudeRoot:
             if task is not None:task.close()
             view.close()
 
-    def launch(self, listener, *, timeout=10):
+    def launch(self, listener, *, timeout=10, authorize=None):
         if (self.state!='new' or type(timeout) not in (int,float) or not 0<timeout<=10
                 or type(listener) is not socket.socket or listener.family!=socket.AF_UNIX
                 or listener.getsockopt(socket.SOL_SOCKET,socket.SO_TYPE)!=socket.SOCK_SEQPACKET
@@ -171,6 +178,7 @@ class NativeClaudeRoot:
             raise OriginDenied('one bounded native child rendezvous required')
         self.host_launch.inspect_current()
         self.endpoint.require()
+        _authorized(authorize)
         self.state='creating';self._save() # before any possible child release/contact
         deadline=time.monotonic()+timeout
         def remaining():
@@ -179,6 +187,7 @@ class NativeClaudeRoot:
             return value
         challenge=secrets.token_bytes(32)
         try:
+            _authorized(authorize)
             self.host_launch.transport.write(challenge,timeout=remaining())
             enable(listener);listener.settimeout(remaining())
             self.channel,_=listener.accept();enable(self.channel);self.channel.settimeout(remaining())
@@ -186,6 +195,7 @@ class NativeClaudeRoot:
             challenge=None
             self.state='bound';self._save()
             self.current();self.channel.settimeout(remaining())
+            _authorized(authorize)
             if self.channel.send(RELEASE)!=len(RELEASE):raise OriginDenied('incomplete native child release')
             self.state='released';self._save()
             return self
@@ -194,7 +204,7 @@ class NativeClaudeRoot:
             self._fail()
             raise
 
-    def _receive_helper(self, listener, timeout):
+    def _receive_helper(self, listener, timeout, *, authorize=None):
         from .native_helper import NativeDescendantLease
         self.current();self.endpoint.require()
         deadline=time.monotonic()+timeout
@@ -211,19 +221,21 @@ class NativeClaudeRoot:
             remaining=deadline-time.monotonic()
             if remaining<=0:raise OriginDenied('helper initialization expired')
             channel.settimeout(remaining)
+            _authorized(authorize)
             lease.release()
             return lease
         except BaseException:
             channel.close()
             raise
 
-    def _receive_forge_helper(self, listener, timeout):
+    def _receive_forge_helper(self, listener, timeout, *, authorize=None):
         self.current(); self.endpoint.require()
         listener.settimeout(timeout)
         forge_channel, _ = listener.accept()
         try:
             enable(forge_channel); forge_channel.settimeout(timeout)
             with receive(forge_channel) as record:
+                _authorized(authorize)
                 self.helper_lease.bind_forge(forge_channel, record)
         except BaseException:
             forge_channel.close()
@@ -231,7 +243,7 @@ class NativeClaudeRoot:
 
     def initialize_helper(self, listener, *, journal, control, hub_origin,
                           controller, control_lock, operation_id, epoch,
-                          timeout=8, control_timeout=2, forge_client=None, review_startup=None):
+                          timeout=8, control_timeout=2, forge_client=None, review_startup=None, authorize=None):
         """Concrete fresh SDK/native/helper startup, without a worker thread.
 
         The fixed host starts SDK initialization after the second challenge;
@@ -251,6 +263,7 @@ class NativeClaudeRoot:
             from .native_review_host import NativeReviewStartup
             if type(review_startup) is not NativeReviewStartup or forge_client is None:
                 raise OriginDenied('explicit native review startup and Broker required')
+        _authorized(authorize)
         self._initialize_started=True
         deadline=time.monotonic()+timeout
         def remaining():
@@ -259,22 +272,33 @@ class NativeClaudeRoot:
             return value
         transfer_attempted=False
         try:
-            self.launch(listener,timeout=remaining())
-            self._receive_helper(listener,remaining())
-            self._receive_forge_helper(listener, remaining())
+            if authorize is None:
+                self.launch(listener,timeout=remaining())
+                self._receive_helper(listener,remaining())
+                self._receive_forge_helper(listener,remaining())
+            else:
+                self.launch(listener,timeout=remaining(),authorize=authorize)
+                self._receive_helper(listener,remaining(),authorize=authorize)
+                self._receive_forge_helper(listener,remaining(),authorize=authorize)
+            _authorized(authorize)
             self.attach_native(journal=journal,timeout=remaining())
+            _authorized(authorize)
             self.native_admission=NativeClaudeSupervisorAdmission(self,self.admission_seat,
                 control,hub_origin=hub_origin,controller=controller,
                 control_lock=control_lock,timeout=min(control_timeout,remaining()))
             transfer_attempted=True
+            _authorized(authorize)
             self.native_admission.admit(operation_id,epoch)
             self.native_admission.control.settimeout(min(control_timeout,remaining()))
+            _authorized(authorize)
             self.helper_lease.admit(self.native_admission)
+            _authorized(authorize)
             if forge_client is not None:
                 from .native_host_forge import NativeHostForge
                 self.forge_service = NativeHostForge(self.helper_lease, forge_client)
             if review_startup is not None:
                 self.review_host = review_startup.attach(self.forge_service)
+            _authorized(authorize)
             remaining()
             return self
         except BaseException:

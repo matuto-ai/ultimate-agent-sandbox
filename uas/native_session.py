@@ -236,13 +236,19 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None):
                 human_request.participant_id,session=human_request.session,attempt_id=human_request.attempt_id)
             held = launcher.started.get(human_request.participant_id)
             require(type(held) is SupervisorAdmission,'NATIVE_RUN_OWNER_UNAVAILABLE')
+            from .native_reviewer_recruitment import NativeReviewerRecruitment
+            recruitment=NativeReviewerRecruitment(owner,held,provenance,source,
+                GateRoomBinding(room['id'],instance,room['project']['id'],room['project']['repository'],room['resources']['disk_bytes']))
+            claude=recruitment.recruit('reviewer-'+hashlib.sha256(human_request.operation_id.encode()).hexdigest(),
+                activated['run_id'],activated['generation'],session=human_request.session)
             delivery = held.deliver_one()  # Existing journal reconciles unknown injection; never re-prompt.
+            packets=dispatch((held.forge_service,claude.forge_service),budget)
             return {'version':1,'status':'NATIVE_RUN_ACTIVE','room_id':room['id'],'instance':instance,
                 'run_id':activated['run_id'],'generation':activated['generation'],
-                'product_run_created':True,'delivery':delivery,
+                'product_run_created':True,'delivery':delivery,'reviewer_attached':True,'dispatch':packets,
                 'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
-                'lifecycle_blockers':['NATIVE_REVIEWER_RECRUITMENT_UNAVAILABLE'],
+                'lifecycle_blockers':['NATIVE_CONTEXT_RESET_UNAVAILABLE','FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
                 'production_launcher':'disabled'}
         pi_recipe = NativePiRecipe.from_configuration(StringIO(plan.config_text), room['id'], pi_seat.participant_id,
             resources['pi_manifest_path'], plan.installation['pi_manifest']['sha256'], seat=pi_seat, scope=pi_scope,

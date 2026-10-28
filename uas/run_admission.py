@@ -263,11 +263,8 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                     if context['reset'] and context['reset']['status'] != 'SUCCEEDED':
                         raise LedgerError('CONTEXT_UNAVAILABLE')
                     preceding = deepcopy(assigned)
-                elif (context['context_generation'] != 1 or context['bound_run'] is not None
-                        or context['reset'] is not None or participant in peer['connections']
-                        or self._participant_started(participant)
-                        or any(participant == t['sender'] or participant in t['recipients']
-                               for t in peer['traffic'].values())):
+                elif not self.hub.contexts.unused_initial(state, participant,
+                        native_started=self._participant_started(participant)):
                     raise LedgerError('UNUSED_NATIVE_CONTEXT_REQUIRED')
                 if peer['definition']['participants'][participant]['actor_id'] != seat.actor_id:
                     raise LedgerError('ADMISSION_BINDING_MISMATCH')
@@ -296,7 +293,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 state['fixture_context']['runs'][run] = {
                     'generation': 1, 'status': 'OPEN', 'terminal_fact': None}
                 if preceding is None:
-                    context['reserved_run'] = {'run_id': run, 'generation': 1}
+                    self.hub.contexts.reserve_unused_initial(state, participant, FixtureRun(run))
                 FixturePeerHub._reserve_capacity(state)
                 return Transition(state, (Event('run.admission-reserved', {
                     'run_id': run, 'issue_number': number, 'participant_id': participant}),),
