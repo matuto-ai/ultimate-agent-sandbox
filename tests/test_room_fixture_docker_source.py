@@ -67,7 +67,8 @@ class FixedExecDiagnosticSourceTests(unittest.TestCase):
         exec(compile(ast.Module(body=nodes, type_ignores=[]), '<audited-fixed-exec>', 'exec'), namespace)
         return namespace, clock
 
-    def api_case(self, *, fault=None, raw=None, inspect=None, fragmented=False, slow=False):
+    def api_case(self, *, fault=None, raw=None, inspect=None, fragmented=False, slow=False,
+                 pid_after_startup=False):
         namespace, clock = self.helpers()
         checks = {}
         error = OSError('inert API ' + str(fault))
@@ -92,6 +93,8 @@ class FixedExecDiagnosticSourceTests(unittest.TestCase):
             def call(*_):
                 clock[0] += .1
                 if fault == name: raise error
+                if name == 'inspect' and pid_after_startup and content.tell() < len(raw):
+                    return {**result, 'Pid': 0}
                 return result
             return call
         api.create.side_effect = operation('create', 'e' * 64)
@@ -142,8 +145,23 @@ class FixedExecDiagnosticSourceTests(unittest.TestCase):
                 checks, caught, _, _, stream, _, _ = self.api_case(inspect=mutation)
                 self.assertIsInstance(caught, AssertionError)
                 self.assertEqual('inspect', checks['stage'])
-                self.assertEqual('', checks['multiplex_hex'])
+                self.assertTrue(checks['multiplex_hex'])
+                self.assertEqual('fixture start=2 uid=65532\n', checks['stdout'])
                 stream.close.assert_called_once()
+
+    def test_upgrade_ack_is_not_task_readiness_and_final_inspect_follows_startup_bytes(self):
+        # Models hosted Docker28.0.4's observed Running=true/Pid=0 immediately
+        # after upgrade. This is a mock sequence regression, not a daemon run.
+        checks, caught, _, api, stream, _, _ = self.api_case(
+            fragmented=True, pid_after_startup=True)
+        self.assertIsNone(caught)
+        self.assertEqual(['create', 'start', 'startup_bytes', 'inspect'], list(checks['stages']))
+        self.assertEqual(321, checks['inspect']['Pid'])
+        self.assertEqual('observed', checks['status'])
+        self.assertEqual(1, api.create.call_count)
+        api.start.assert_called_once_with('e' * 64)
+        api.inspect.assert_called_once_with('e' * 64)
+        stream.close.assert_called_once()
 
     def test_api_fragment_eof_invalid_header_oversize_and_wrong_marker_fail(self):
         frame = lambda kind, data: struct.pack('>B3sI', kind, b'\0' * 3, len(data)) + data

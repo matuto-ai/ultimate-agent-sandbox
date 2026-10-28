@@ -116,13 +116,9 @@ def observe_api_start(container, checks, deadline):
         checks['exec_id'] = exec_id
         stage('start')
         stream = api.start(exec_id)
-        stage('inspect')
-        observed = api.inspect(exec_id)
-        checks['inspect'] = {name: observed.get(name) for name in ('ID', 'ContainerID', 'Running', 'Pid')}
-        if (observed.get('ID') != exec_id or observed.get('ContainerID') != container
-                or observed.get('Running') is not True
-                or type(observed.get('Pid')) is not int or observed['Pid'] <= 0):
-            raise AssertionError('exact live diagnostic exec not observed')
+        # The Engine upgrade acknowledges transport before task creation: its
+        # inspect can temporarily say Running=true/Pid=0. Observe actual fixed
+        # startup bytes before one strict live-task inspect, never retry start.
         stage('startup_bytes')
         output = {1: bytearray(), 2: bytearray()}
         for _ in range(16):
@@ -139,6 +135,13 @@ def observe_api_start(container, checks, deadline):
                 break
         if output[2] or not re.fullmatch(rb'fixture start=[1-9][0-9]{0,8} uid=65532\n', output[1]):
             raise AssertionError('fixed Go fixture startup not observed')
+        stage('inspect')
+        observed = api.inspect(exec_id)
+        checks['inspect'] = {name: observed.get(name) for name in ('ID', 'ContainerID', 'Running', 'Pid')}
+        if (observed.get('ID') != exec_id or observed.get('ContainerID') != container
+                or observed.get('Running') is not True
+                or type(observed.get('Pid')) is not int or observed['Pid'] <= 0):
+            raise AssertionError('exact live diagnostic exec not observed')
         remaining(deadline)
         checks['status'] = 'observed'
     except BaseException as error:
