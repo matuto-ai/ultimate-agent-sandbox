@@ -262,6 +262,7 @@ class NativeReviewHost:
     def __init__(self, ingresses, ledger, provenance, resolver, binding, *, reviewers, human_mergers):
         self.identity = NativeReviewIdentity(tuple(ingresses), ledger, provenance, resolver, binding)
         self.sources = NativeReviewSources(self.identity)
+        self.gate_workflow = None
         client = self.identity.ingresses[0].client
         self.broker = ReviewBrokerClient(client)
         from .diff_target import DiffSourceResolver
@@ -299,6 +300,13 @@ class NativeReviewHost:
         scope = NativeReviewAcceptance(self,ingress,record,envelope)
         return self.reviews.submit(envelope,origin=ingress.origin,authorize=scope.authorize,
                                    admission_operation=ingress.binding.operation_id,_native_scope=scope)
+
+    def prepare_submission(self, command, origin):
+        if self.gate_workflow is not None:
+            from .native_gate_workflow import NativeGateWorkflow
+            if type(self.gate_workflow) is not NativeGateWorkflow or self.gate_workflow.host is not self:
+                raise LedgerError('EXACT_NATIVE_GATE_WORKFLOW_REQUIRED')
+            self.gate_workflow.prepare_submission(command, origin)
 
     def human_action(self, value, *, session, audit):
         """Existing authenticated Manager vocabulary; never a native tool route."""

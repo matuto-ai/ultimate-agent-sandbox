@@ -40,7 +40,7 @@ class QualificationPlan:
                     'pi_manifest', 'claude_manifest', 'boundary_manifest', 'hub_manifest',
                     'broker_manifest', 'human_mergers'}
         git_refs = {'git_manifest', 'git_broker_manifest'}
-        if type(installation) is not dict or set(installation) not in (required, required | git_refs):
+        if type(installation) is not dict or set(installation) not in (required, required | git_refs, required | git_refs | {'gate_manifest'}):
             raise QualificationError('INVALID_NATIVE_SELECTION')
         selection = installation
         if (type(selection['version']) is not int or selection['version'] != 1
@@ -74,6 +74,7 @@ class QualificationPlan:
                 raise QualificationError('RUNTIME_AUTH_REFERENCE_REQUIRED') from None
         references=('pi', 'claude', 'boundary', 'hub', 'broker')
         if 'git_manifest' in selection:references+=('git','git_broker')
+        if 'gate_manifest' in selection:references+=('gate',)
         for name in references:
             ref = _exact(selection[name + '_manifest'], ('path', 'sha256'), 'INVALID_INSTALLATION_REFERENCE')
             try:
@@ -370,7 +371,7 @@ def execute(plan):
             if git_fds:host_argv.append(str(git_fds[0]))
             child = subprocess.Popen(host_argv,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                user=165533, group=165533, extra_groups=[165531, os.stat('/run/docker.sock').st_gid],
+                user=165533, group=165533, extra_groups=[165531, os.stat('/run/docker.sock').st_gid] + ([165530] if 'gate_manifest' in plan.installation else []),
                 pass_fds=resources.pass_fds + (host_channel.fileno(), allocation_child.fileno()) + git_fds, env=environment, cwd='/')
             resources.hold_child(child)
             allocation_child.close()

@@ -18,6 +18,7 @@ import ctypes
 import subprocess
 import secrets
 import shutil
+import time
 from decimal import Decimal
 
 from .docker_fixture import DockerFixtureBackend
@@ -70,11 +71,13 @@ def fixed_docker(arguments, *, timeout, missing_ok=False):
     return result.stdout
 
 
-def command(*arguments, input=None):
+def command(*arguments, input=None, deadline=None):
     # Unlike the historical fixture helper, diagnostics on stderr also deny an
     # observation: e.g. xfs_quota skipping an inode cannot count as a clean tree.
     try:
-        result=subprocess.run(arguments,input=input,capture_output=True,text=True,timeout=30,check=False,
+        timeout=30 if deadline is None else min(30,deadline-time.monotonic())
+        require(timeout>0,'DEADLINE')
+        result=subprocess.run(arguments,input=input,capture_output=True,text=True,timeout=timeout,check=False,
             env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C','HOME':'/nonexistent'})
     except (OSError,subprocess.TimeoutExpired) as error: raise BackendUnknown() from error
     if result.returncode or result.stderr or len(result.stdout)>262144: raise BackendUnknown()
@@ -102,6 +105,58 @@ def bind_options(host, expected):
         actual.append((mount.get('Source'),mount.get('Target'),not mount.get('ReadOnly',False)))
     require(len(set(actual))==len(expected) and set(actual)==set(expected),'BIND_OPTIONS')
 
+
+def parse_gate_quota(report, hard_bytes):
+    require(type(report) is str and len(report)<=262144 and type(hard_bytes) is int
+        and hard_bytes>0 and hard_bytes%1024==0,'GATE_QUOTA_REPORT')
+    rows=[line.split() for line in report.splitlines() if line.split() and line.split()[0]=='#'+str(PROJECT_ID)]
+    require(len(rows)==1 and len(rows[0])==6,'GATE_QUOTA_REPORT')
+    row=rows[0]
+    require(all(re.fullmatch(r'[0-9]+',v) for v in row[1:4]),'GATE_QUOTA_REPORT')
+    used,soft,hard=(int(v) for v in row[1:4])
+    require(hard*1024==hard_bytes and used<=hard and soft<=hard,'GATE_QUOTA_REPORT')
+    return {'used_bytes':used*1024,'hard_bytes':hard_bytes}
+
+
+def validate_native_container(state,value,*,image_id,image_reference,limits,nano_cpus,mounts):
+    """Pure exact provider-connected declaration predicate; no admission authority."""
+    try:
+        config, host = value['Config'], value['HostConfig']
+        require(value['Image'] == image_id and config['Image'] == image_reference
+                and config['User'] == '65532:65532' and config['Entrypoint'] == ['/bin/sleep']
+                and config['Cmd'] == ['infinity'] and config['Tty'] is False, 'IMAGE_COMMAND')
+        require(host['ReadonlyRootfs'] is True and host['Privileged'] is False
+                and host['CapDrop'] == ['ALL'] and host['CapAdd'] in (None, [])
+                and host.get('GroupAdd') in (None,[]), 'CONFINEMENT')
+        require([s.replace('no-new-privileges=true','no-new-privileges') for s in host['SecurityOpt']]
+                == ['no-new-privileges', 'label=level:' + LEVEL], 'SECURITY_OPTIONS')
+        require(host['NetworkMode'] == names(state)[0]
+                and set(value['NetworkSettings']['Networks']) == {names(state)[0]}, 'NETWORK_POLICY')
+        require(all(host[k] == v for k, v in {'PidMode':'', 'IpcMode':'private', 'UTSMode':'',
+                'UsernsMode':'', 'CgroupnsMode':'private'}.items()), 'NAMESPACES')
+        require(all(host[k] in (None, []) for k in ('Devices','DeviceRequests','DeviceCgroupRules'))
+                and host['PublishAllPorts'] is False and host['PortBindings'] in (None, {}), 'DEVICES_PORTS')
+        require(host['RestartPolicy'] == {'Name':'no','MaximumRetryCount':0}, 'RESTART_POLICY')
+        expected = {'Memory':limits['memory_bytes'], 'MemorySwap':limits['memory_bytes'],
+                    'NanoCpus':nano_cpus, 'PidsLimit':limits['pids']}
+        require(all(type(host[k]) is int and host[k] == v for k, v in expected.items()), 'LIMITS')
+        require(host['LogConfig'] == {'Type':'local','Config':{'max-size':str(limits['log_bytes']),
+                'max-file':'1','compress':'false'}}, 'LOG_LIMIT')
+        require({'/proc/kcore','/proc/keys','/proc/timer_list','/sys/firmware'} <= set(host['MaskedPaths'])
+                and {'/proc/bus','/proc/fs','/proc/irq','/proc/sys','/proc/sysrq-trigger'} <=
+                set(host['ReadonlyPaths']), 'KERNEL_MASKS')
+        require(value['ProcessLabel'] == 'system_u:system_r:container_t:' + LEVEL
+                and value['MountLabel'] == 'system_u:object_r:container_file_t:' + LEVEL, 'MCS_LABELS')
+        actual = value['Mounts']
+        require(type(actual) is list and len(actual) == len(mounts)
+                and all(m['Type'] == 'bind' and type(m['RW']) is bool and m['Propagation'] == 'rprivate'
+                        for m in actual)
+                and {(m['Source'],m['Destination'],m['RW']) for m in actual} == set(mounts), 'MOUNTS')
+        require(type(value['State']['Running']) is bool, 'RUNNING_STATE')
+        bind_options(host,mounts)
+    except (KeyError, TypeError, AttributeError, ValueError) as error:
+        raise BackendUnknown('native container observation incomplete') from error
+    return True
 
 class NativeBoundaryProfile:
     """Exact finite installation declarations, independent of effect adapters."""
@@ -161,9 +216,17 @@ class NativeBoundaryProfile:
                 raise LifecycleError('NATIVE_GIT_PREPARED_IMAGE_UNAVAILABLE') from error
             require(self.git_manifest['image_id']==self.image_id, 'GIT_IMAGE_PAIRING')
             self.git_plan = plan
+        self.gate_manifest = None
+        self.gate_plan = None
+        if 'gate_manifest' in plan.installation:
+            from .native_gate_resources import selection
+            self.gate_manifest = selection(plan)
+            require(self.git_manifest is not None, 'GATE_GIT_PROFILE_REQUIRED')
+            self.gate_plan = plan
         self.digest = hashlib.sha256(canonical({'boundary': boundary, 'hub': hub,
             'config': self.config_digest, 'images': checked['images'],
-            **({'git':self.git_manifest} if self.git_manifest is not None else {})})).hexdigest()
+            **({'git':self.git_manifest} if self.git_manifest is not None else {}),
+            **({'gate':self.gate_manifest} if self.gate_manifest is not None else {})})).hexdigest()
 
     @classmethod
     def read(cls, plan):
@@ -268,6 +331,11 @@ class NativeQualificationBackend(DockerFixtureBackend):
         if self.profile.git_manifest is not None:
             result['git']=ENDPOINTS/state['instance_id']/'git'
             result['git-broker']=root/'git-broker'
+        if getattr(self.profile,'gate_manifest',None) is not None:
+            from .native_gate_resources import paths
+            selected=paths(self.profile.gate_plan,state)
+            result['gate']=selected['endpoint_root']
+            result['gate-targets']=selected['scratch_root']
         return result
 
     def _endpoint_record(self,state):
@@ -354,6 +422,9 @@ class NativeQualificationBackend(DockerFixtureBackend):
         if self.profile.git_manifest is not None:
             from .native_git_resources import git_mounts
             values += [(m.source,m.destination,not m.read_only) for m in git_mounts(self.profile.git_plan,state)]
+        if getattr(self.profile,'gate_manifest',None) is not None:
+            from .native_gate_resources import gate_mounts
+            values += [(m.source,m.destination,False) for m in gate_mounts(self.profile.gate_plan,state)]
         return values
 
     def container_arguments(self, state):
@@ -409,44 +480,9 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return value
 
     def validate_container(self, state, value):
-        """Pure exact policy check, usable by guarded declaration regressions."""
-        try:
-            config, host = value['Config'], value['HostConfig']; limits = self.profile.limits
-            require(value['Image'] == self.profile.image_id and config['Image'] == self.profile.image_reference
-                    and config['User'] == '65532:65532' and config['Entrypoint'] == ['/bin/sleep']
-                    and config['Cmd'] == ['infinity'] and config['Tty'] is False, 'IMAGE_COMMAND')
-            require(host['ReadonlyRootfs'] is True and host['Privileged'] is False
-                    and host['CapDrop'] == ['ALL'] and host['CapAdd'] in (None, [])
-                    and host.get('GroupAdd') in (None,[]), 'CONFINEMENT')
-            require([s.replace('no-new-privileges=true','no-new-privileges') for s in host['SecurityOpt']]
-                    == ['no-new-privileges', 'label=level:' + LEVEL], 'SECURITY_OPTIONS')
-            require(host['NetworkMode'] == names(state)[0]
-                    and set(value['NetworkSettings']['Networks']) == {names(state)[0]}, 'NETWORK_POLICY')
-            require(all(host[k] == v for k, v in {'PidMode':'', 'IpcMode':'private', 'UTSMode':'',
-                    'UsernsMode':'', 'CgroupnsMode':'private'}.items()), 'NAMESPACES')
-            require(all(host[k] in (None, []) for k in ('Devices','DeviceRequests','DeviceCgroupRules'))
-                    and host['PublishAllPorts'] is False and host['PortBindings'] in (None, {}), 'DEVICES_PORTS')
-            require(host['RestartPolicy'] == {'Name':'no','MaximumRetryCount':0}, 'RESTART_POLICY')
-            expected = {'Memory':limits['memory_bytes'], 'MemorySwap':limits['memory_bytes'],
-                        'NanoCpus':self.profile.nano_cpus, 'PidsLimit':limits['pids']}
-            require(all(type(host[k]) is int and host[k] == v for k, v in expected.items()), 'LIMITS')
-            require(host['LogConfig'] == {'Type':'local','Config':{'max-size':str(limits['log_bytes']),
-                    'max-file':'1','compress':'false'}}, 'LOG_LIMIT')
-            require({'/proc/kcore','/proc/keys','/proc/timer_list','/sys/firmware'} <= set(host['MaskedPaths'])
-                    and {'/proc/bus','/proc/fs','/proc/irq','/proc/sys','/proc/sysrq-trigger'} <=
-                    set(host['ReadonlyPaths']), 'KERNEL_MASKS')
-            require(value['ProcessLabel'] == 'system_u:system_r:container_t:' + LEVEL
-                    and value['MountLabel'] == 'system_u:object_r:container_file_t:' + LEVEL, 'MCS_LABELS')
-            actual = value['Mounts']
-            require(type(actual) is list and len(actual) == len(self.mounts(state))
-                    and all(m['Type'] == 'bind' and type(m['RW']) is bool and m['Propagation'] == 'rprivate'
-                            for m in actual)
-                    and {(m['Source'],m['Destination'],m['RW']) for m in actual} == set(self.mounts(state)), 'MOUNTS')
-            require(type(value['State']['Running']) is bool, 'RUNNING_STATE')
-            bind_options(host,self.mounts(state))
-        except (KeyError, TypeError, AttributeError, ValueError) as error:
-            raise BackendUnknown('native container observation incomplete') from error
-        return True
+        return validate_native_container(state,value,image_id=self.profile.image_id,
+            image_reference=self.profile.image_reference,limits=self.profile.limits,
+            nano_cpus=self.profile.nano_cpus,mounts=self.mounts(state))
 
     def stop(self, state):
         guard(self.profile.nonce, require_selinux=False)
@@ -500,10 +536,34 @@ class NativeQualificationBackend(DockerFixtureBackend):
         for key, path in layout.items():
             mode, uid, gid = ((0o700, HOST_UID, HOST_UID) if key == 'supervisor' else
                 (0o700, BROKER_UID, BROKER_UID) if key in ('broker','git-broker') else
+                (0o711, HOST_UID, HOST_UID) if key == 'gate-targets' else
+                (0o710, HOST_UID, 165530) if key == 'gate' else
                 (0o2770, HOST_UID, HUB_UID) if key == 'hub' else
                 (0o710, HOST_UID, RUNTIME_UID if key in ('peer','git') else HUB_UID))
             path.mkdir(mode=mode); os.chown(path, uid, gid); os.chmod(path, mode)
             if key not in ('supervisor','broker','git-broker'): command('chcon', '-t', 'container_file_t', '-l', LEVEL, str(path))
+        if getattr(self.profile,'gate_manifest',None) is not None:
+            from .native_gate_resources import paths
+            selected=paths(self.profile.gate_plan,state)
+            for key in ('journal_root','launch_journal_root'):
+                selected[key].mkdir(mode=0o700)
+                os.chown(selected[key],HOST_UID,HOST_UID);os.chmod(selected[key],0o700)
+            # Assign only these freshly created owned trees, never Project data.
+            for key in ('scratch_root','journal_root','launch_journal_root'):
+                path=selected[key]
+                require(path.stat().st_dev==STORAGE.stat().st_dev,'GATE_QUOTA_FILESYSTEM')
+                command('xfs_quota','-x','-D','/dev/null','-P','/dev/null','-c',
+                    f'project -s -p {path} {PROJECT_ID}',str(STORAGE))
+                require(project_attributes(path)==(PROJECT_ID,True),'GATE_QUOTA_PROVISION')
+            record={'version':1,'instance':state['instance_id'],'profile_digest':self.profile.digest,
+                'paths':{key:{'path':str(selected[key]),'identity':directory_identity(selected[key])}
+                    for key in ('scratch_root','journal_root','launch_journal_root')}}
+            fd=os.open(endpoint_root/'gate-scratch.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            try:
+                raw=canonical(record);require(os.write(fd,raw)==len(raw),'GATE_OWNERSHIP_WRITE');os.fsync(fd)
+            finally:os.close(fd)
+        # Gate socket is deliberately NOT created here: its actual creator must
+        # be Supervisor UID/GID165533 so bootstrap SO_PEERCRED is truthful.
         for path,group in ((layout['peer'] / 'pi.sock',RUNTIME_UID),(layout['control'] / 'hub.sock',HUB_UID)):
             self.listeners.append(labeled_listener(path,group))
         if self.profile.git_manifest is not None:
@@ -515,6 +575,44 @@ class NativeQualificationBackend(DockerFixtureBackend):
                 command('chcon','-R','-t','container_file_t','-l',LEVEL,str(endpoint_root/name))
             for name in ('request.sock','worker.sock'):
                 self.listeners.append(labeled_listener(layout['git']/name,RUNTIME_UID,listen=name!='request.sock'))
+
+    def observe_gate_quota(self,state,*,deadline):
+        """Fixed read-only current usage, outside lifecycle/Room locks."""
+        require(type(deadline) in (int,float) and time.monotonic()<deadline,'DEADLINE')
+        guard(self.profile.nonce,require_selinux=False);self._binding(state)
+        require(command('getenforce',deadline=deadline).strip()=='Enforcing'
+            and Path('/sys/fs/selinux/enforce').read_text().strip()=='1','SELINUX_REQUIRED')
+        require(self.profile.gate_manifest is not None,'GATE_PROFILE_REQUIRED')
+        from .native_gate_resources import paths
+        selected=paths(self.profile.gate_plan,state)
+        fd=os.open(ENDPOINTS/state['instance_id']/'gate-scratch.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        try:
+            node=os.fstat(fd)
+            require(stat.S_ISREG(node.st_mode) and node.st_uid==0 and stat.S_IMODE(node.st_mode)==0o600
+                and node.st_nlink==1 and 0<node.st_size<=4096,'GATE_OWNERSHIP')
+            raw=os.read(fd,4097);record=json.loads(raw)
+            require(canonical(record)==raw,'GATE_OWNERSHIP')
+        finally:os.close(fd)
+        def observe():
+            identities={}
+            for key in ('scratch_root','journal_root','launch_journal_root'):
+                path=selected[key];node=path.stat(follow_symlinks=False)
+                require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==HOST_UID
+                    and node.st_gid==HOST_UID and stat.S_IMODE(node.st_mode)==(0o711 if key=='scratch_root' else 0o700)
+                    and node.st_dev==STORAGE.stat().st_dev and project_attributes(path)==(PROJECT_ID,True), 'GATE_QUOTA_RESOURCE')
+                identities[key]={'path':str(path),'identity':[node.st_dev,node.st_ino]}
+            require(record=={'version':1,'instance':state['instance_id'],'profile_digest':self.profile.digest,
+                'paths':identities},'GATE_OWNERSHIP')
+            return identities
+        before=observe()
+        require(command('stat','-f','-c','%T',str(STORAGE),deadline=deadline).strip()=='xfs','XFS_REQUIRED')
+        status=command('xfs_quota','-x','-c','state -p',str(STORAGE),deadline=deadline)
+        require('Accounting: ON' in status and 'Enforcement: ON' in status,'QUOTA_REQUIRED')
+        result=parse_gate_quota(command('xfs_quota','-x','-c','report -p -b -n -N',str(STORAGE),deadline=deadline),
+            self.profile.limits['disk_bytes'])
+        require(observe()==before,'GATE_QUOTA_RESOURCE_CHANGED')
+        require(time.monotonic()<deadline,'DEADLINE')
+        return {**result,'scratch_identity':before['scratch_root']['identity']}
 
     def _hub(self, state):
         name = names(state)[0] + '-hub'
@@ -814,6 +912,13 @@ def provision(plan):
                 git_request_path=str(layout['git']/'request.sock'),git_worker_path=str(layout['git']/'worker.sock'),
                 git_request_fd=backend.listeners[2].fileno(),git_worker_fd=backend.listeners[3].fileno(),
                 git_broker_directory=str(layout['git-broker']))
+        if profile.gate_manifest is not None:
+            from .native_gate_resources import paths
+            selected=paths(plan,state)
+            target=layout['supervisor']/'gate-manifest.json'
+            copy_public_manifest(plan.installation['gate_manifest'],target)
+            data.update(gate_manifest_path=str(target),gate_endpoint_path=str(selected['endpoint_root']/'gate.sock'),
+                **{'gate_'+key:str(selected[key]) for key in ('scratch_root','journal_root','launch_journal_root')})
         resources._supervisor = owner
         resources.data = data
         resources.pass_fds = tuple(s.fileno() for s in backend.listeners) + (() if git_backend_fd is None else (git_backend_fd,))

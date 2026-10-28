@@ -37,7 +37,7 @@ class NativeClaudeRecipe:
     def scope(self): return json.loads(self._scope)
 
     def __init__(self, manifest_path, manifest_digest, *, seat, scope, checkout,
-                 home, runtime_root, endpoint, model, session_id, mounts, resume=False, provider_auth=None, git_profile=None):
+                 home, runtime_root, endpoint, model, session_id, mounts, resume=False, provider_auth=None, git_profile=None, gate_profile=None):
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat or type(resume) is not bool:
             raise NativeRecipeError('trusted typed native seat required')
@@ -71,8 +71,8 @@ class NativeClaudeRecipe:
             raise NativeRecipeError('separate canonical paths required')
         from .native_git_recipe import base_mounts
         ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
-            image_id=manifest['image_id'], image_reference=manifest['image_reference'])
-        self.git_profile = git_profile
+            image_id=manifest['image_id'], image_reference=manifest['image_reference'], gate_profile=gate_profile)
+        self.git_profile, self.gate_profile = git_profile, gate_profile
         if (type(ordinary_mounts) is not tuple or not 1<=len(ordinary_mounts)<=16 or any(type(x) is not NativeMount for x in ordinary_mounts)):
             raise NativeRecipeError('admitted immutable mount contract required')
         for i,m in enumerate(ordinary_mounts):
@@ -99,12 +99,13 @@ class NativeClaudeRecipe:
             'scope':scope,'checkout':checkout,'home':home,'runtime_root':runtime_root,'endpoint':endpoint,'model':model,
             'session_id':session_id,'resume':resume,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts]}
         if git_profile is not None: identity['git_profile_digest']=git_profile.digest
+        if gate_profile is not None: identity['gate_profile_digest']=gate_profile.digest
         identity['recipe_sha256']=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
         self._identity=json.dumps(identity,sort_keys=True); self._frozen=True
 
     @classmethod
     def from_configuration(cls, source, room_id, participant_id, manifest_path, manifest_digest,
-                           *, seat, scope, checkout, home, runtime_root, endpoint, session_id, mounts, resume=False, git_profile=None):
+                           *, seat, scope, checkout, home, runtime_root, endpoint, session_id, mounts, resume=False, git_profile=None, gate_profile=None):
         from .config import load
         config=load(source)
         room=next((r for r in config['rooms'] if r['id']==room_id),None)
@@ -115,7 +116,7 @@ class NativeClaudeRecipe:
         from .native_git_recipe import base_mounts
         ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
             image_id=None if git_profile is None else git_profile.image_id,
-            image_reference=None if git_profile is None else git_profile.image_reference)
+            image_reference=None if git_profile is None else git_profile.image_reference, gate_profile=gate_profile)
         if runtime_root!=room['state_root']+'/runtime' or len(ordinary_mounts)!=6 or any(below(room['state_root'],m.source) for m in ordinary_mounts):
             raise NativeRecipeError('dedicated runtime subtree without control-store exposure required')
         provider=next(p for p in config['deployment']['providers'] if p['id']==selected['provider'])
@@ -133,7 +134,7 @@ class NativeClaudeRecipe:
             if len(found)!=1 or found[0].read_only!=(key=='reference'): raise NativeRecipeError('configured Project mount mismatch')
         result=cls(manifest_path,manifest_digest,seat=seat,scope=scope,checkout=checkout,home=home,
             runtime_root=runtime_root,endpoint=endpoint,model=model,session_id=session_id,mounts=mounts,resume=resume,
-            provider_auth=select_reference(provider,'claude'), git_profile=git_profile)
+            provider_auth=select_reference(provider,'claude'), git_profile=git_profile, gate_profile=gate_profile)
         image=next(i for i in config['deployment']['images'] if i['id']==room['image'])
         if result.image_reference!=image['reference']: raise NativeRecipeError('selected configured image mismatch')
         return result

@@ -142,7 +142,7 @@ class NativePiRecipe:
         return json.loads(self._identity_json)
 
     def __init__(self, manifest_path, manifest_digest, *, seat, scope, checkout,
-                 runtime_root, endpoint, mounts, provider, model, provider_auth=None, git_profile=None):
+                 runtime_root, endpoint, mounts, provider, model, provider_auth=None, git_profile=None, gate_profile=None):
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat:
             raise NativeRecipeError('canonical selected seat required')
@@ -174,8 +174,8 @@ class NativePiRecipe:
         self.sessions = path(self.home + '/contexts/' + str(scope['context_generation']) + '/sessions')
         from .native_git_recipe import base_mounts
         ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
-            image_id=manifest['image_id'], image_reference=manifest['image_reference'])
-        self.git_profile = git_profile
+            image_id=manifest['image_id'], image_reference=manifest['image_reference'], gate_profile=gate_profile)
+        self.git_profile, self.gate_profile = git_profile, gate_profile
         if (type(ordinary_mounts) is not tuple or not 1 <= len(ordinary_mounts) <= 16
                 or any(type(m) is not NativeMount for m in ordinary_mounts)
                 or len({m.destination for m in ordinary_mounts}) != len(ordinary_mounts)):
@@ -206,13 +206,14 @@ class NativePiRecipe:
             'scope':dict(scope), 'recipe_sha256':hashlib.sha256(json.dumps({
                 'checkout':self.checkout,'home':self.home,'sessions':self.sessions,'endpoint':self.endpoint,
                 'provider':provider,'model':model,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts],
-                **({} if git_profile is None else {'git_profile_digest':git_profile.digest})},sort_keys=True).encode()).hexdigest()}
+                **({} if git_profile is None else {'git_profile_digest':git_profile.digest}),
+                **({} if gate_profile is None else {'gate_profile_digest':gate_profile.digest})},sort_keys=True).encode()).hexdigest()}
         self._identity_json = json.dumps(identity,sort_keys=True)
         self._frozen = True
 
     @classmethod
     def from_configuration(cls, source, room_id, participant_id, manifest_path, manifest_digest,
-                           *, seat, scope, checkout, runtime_root, endpoint, mounts, git_profile=None):
+                           *, seat, scope, checkout, runtime_root, endpoint, mounts, git_profile=None, gate_profile=None):
         """Resolve existing configuration without changing native saved settings.
 
         Only explicit Pi provider/model arguments are qualified initially. A
@@ -231,7 +232,7 @@ class NativePiRecipe:
         from .native_git_recipe import base_mounts
         ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
             image_id=None if git_profile is None else git_profile.image_id,
-            image_reference=None if git_profile is None else git_profile.image_reference)
+            image_reference=None if git_profile is None else git_profile.image_reference, gate_profile=gate_profile)
         runtime_mounts = [m for m in ordinary_mounts if m.source == runtime_root and m.destination == runtime_root and not m.read_only]
         if (len(runtime_mounts) != 1 or len(ordinary_mounts) != 6
                 or any(below(room['state_root'], m.source) for m in ordinary_mounts)):
@@ -262,7 +263,7 @@ class NativePiRecipe:
         recipe = cls(manifest_path, manifest_digest, seat=seat, scope=scope, checkout=checkout,
             runtime_root=runtime_root, endpoint=endpoint, mounts=mounts,
             provider=choices['--provider'], model=selected_model,
-            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']), git_profile=git_profile)
+            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']), git_profile=git_profile, gate_profile=gate_profile)
         image = next(i for i in config['deployment']['images'] if i['id'] == room['image'])
         if image['reference'] != recipe.image_reference:
             raise NativeRecipeError('configured image differs from selected manifest')

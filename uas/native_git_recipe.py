@@ -1,8 +1,11 @@
 """Exact opt-in Git projection, never an exception for arbitrary /opt binds."""
 
 
-def base_mounts(mounts, profile, *, seat, checkout, image_id, image_reference):
+def base_mounts(mounts, profile, *, seat, checkout, image_id, image_reference, gate_profile=None):
     from .native_pi_recipe import NativeMount, NativeRecipeError
+    if gate_profile is not None:
+        from .native_gate_recipe import strip_mounts
+        mounts = strip_mounts(mounts, gate_profile, profile, seat=seat, image_id=image_id, image_reference=image_reference)
     if profile is None:
         return mounts
     from .native_git_resources import GitMountProfile, NativeGitMount

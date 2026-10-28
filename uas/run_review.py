@@ -297,8 +297,14 @@ class RunReview:
         if ('implement' not in origin.capabilities or origin.actor_id != run['actor_id']
                 or origin.participant_id != run['participant_id']):
             raise LedgerError('REVIEW_IMPLEMENTER_REQUIRED')
+        if self.native_host is not None and getattr(self.native_host,'gate_workflow',None) is not None:
+            self.native_host.prepare_submission(command, origin)
+            state = self.ledger.snapshot()['state']; run = self._run(state, command.target, command.generation)
         target = self._target(run, payload['target']); scope = self._scope(run)
         gate_view = self._operation_gates(command.target, command.generation, 'submit-for-review', origin=origin)
+        state = self.ledger.snapshot()['state']
+        if self._scope(self._run(state, command.target, command.generation)) != scope:
+            raise LedgerError('REVIEW_RUN_STALE')
         require_operation_gates(state, gate_view)
         self._observed(self._observe(command, origin, authorize, target, attempt=observation_id), target)
         selected = self._select(state, run)
@@ -569,6 +575,10 @@ class RunReview:
             if not row.get('override_id'):
                 self._fact(run, row['reviewer']['actor_id'], row['reviewer']['authority_epoch'])
             gates = self._operation_gates(run_id, generation, 'complete', origin=origin)
+            state = self.ledger.snapshot()['state']
+            if (self._scope(self._run(state, run_id, generation)) != scope
+                    or state.get('run_reviews', {}).get(run_id, {}).get('current') != row):
+                raise LedgerError('REVIEW_COMPLETION_STALE')
             require_operation_gates(state, gates)
             response = self._observe(command, origin, authorize, target, attempt=observation_id)
             observed = response['observation']

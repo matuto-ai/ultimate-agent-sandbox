@@ -39,6 +39,11 @@ SOURCES = (
     'uas/native_qualification_backend.py',
     'uas/native_session.py',
     'uas/native_session_driver.py',
+    'uas/native_gate_workflow.py',
+    'uas/native_gate_recipe.py',
+    'uas/native_gate_resources.py',
+    'uas/native_gate_operations.py',
+    'uas/native_gate_control.py',
     'uas/git_controller.py',
     'uas/git_endpoint.py',
     'uas/git_runtime.py',
@@ -152,10 +157,10 @@ SOURCES = (
     'runtime/workstation/diff_evaluator.c',
     'runtime/workstation/artifact_protocol.h',
 )
-MAX_SOURCE_FILES=128
+# Explicit Gate closure: base126 / artifacts130 / command133 files.
+# Fixed paths only; byte budgets remain the reviewed 256KiB/file and3MiB total.
+MAX_SOURCE_FILES=136
 MAX_SOURCE_BYTES=256<<10
-# Full lazy closure measured at 2,318,983 bytes for command (128 files).
-# Keep bounded headroom; cheap closure tests enforce all three exact profiles.
 MAX_SOURCE_TOTAL=3<<20
 
 

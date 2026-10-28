@@ -254,13 +254,21 @@ class NativeGitResources:
         self.profile=GitMountProfile.from_plan(plan,state,manifest,plan.installation['git_manifest']['sha256'],
             container_id=resource_dict['workstation_id'],mapping_digest=resource_dict['mapping_digest'])
         self.container_id=self.profile.container_id;self.mapping_digest=self.profile.mapping_digest
+        self.gate_profile=None
+        if 'gate_manifest' in plan.installation:
+            from .native_gate_resources import selection as gate_selection,NativeGateMountProfile
+            gate_manifest=gate_selection(plan,filename=resource_dict['gate_manifest_path'])
+            require(gate_manifest['image_id']==self.profile.image_id
+                and gate_manifest['image_reference']==self.profile.image_reference,'Gate image pairing differs')
+            self.gate_profile=NativeGateMountProfile.from_plan(plan,state,gate_manifest,
+                plan.installation['gate_manifest']['sha256'],container_id=self.container_id,mapping_digest=self.mapping_digest)
         try:
             observed=engine.inspect_container(self.container_id)
             self._verify_container(observed,resource_dict)
             pid=observed['State']['Pid'];require(type(pid) is int and pid>0,'current container process required')
             before=process_binding(pid,self.container_id)
             self._pidfd=os.pidfd_open(pid);require(alive(self._pidfd),'container process unavailable')
-            self._task_identity=_identity(self._pidfd)
+            self._task_identity=_identity(self._pidfd);self._container_pid=pid
             require(process_binding(pid,self.container_id)==before,'container task changed during capture')
             maps={name:Path('/proc/'+str(pid)+'/'+name).read_text() for name in ('uid_map','gid_map')}
             require(all(v.split()==['0','100000','65536'] for v in maps.values()),'observed mapping differs')
@@ -299,6 +307,9 @@ class NativeGitResources:
         runtime=self.plan.room['state_root']+'/runtime';peer=str(Path(resources['peer_path']).parent)
         require(peer==str(ENDPOINT_ROOT/self.profile.instance_id/'peer'),'peer mount differs')
         expected=set(base+[(runtime,runtime,True),(peer,peer,False)]+list(self.profile.mount_tuples()))
+        if 'gate_manifest' in self.plan.installation:
+            from .native_gate_resources import gate_mounts
+            expected.update((m.source,m.destination,False) for m in gate_mounts(self.plan,{'instance_id':self.profile.instance_id}))
         require(type(value) is dict and value.get('Id')==self.container_id
             and value.get('Image')==self.profile.image_id and value.get('Config',{}).get('Image')==self.profile.image_reference
             and value.get('State',{}).get('Running') is True,'observed image differs')
@@ -391,8 +402,8 @@ def archive_records(raw):
                     while read<member.size:
                         block=stream.read(min(65536,member.size-read));require(block,'truncated Engine file')
                         digest.update(block);read+=len(block)
-                        if member.size<=8192:small.extend(block)
-                    item.update(sha256=digest.hexdigest(),size=read,data=bytes(small) if member.size<=8192 else None)
+                        if len(small)<8192:small.extend(block[:8192-len(small)])
+                    item.update(sha256=digest.hexdigest(),size=read,data=bytes(small) if member.size<=8192 else None,prefix=bytes(small))
                 records[name]=item
         return records
     except (tarfile.TarError,EOFError,ValueError) as error:

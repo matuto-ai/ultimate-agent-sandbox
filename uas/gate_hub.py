@@ -94,7 +94,7 @@ class GateHub(ArtifactGateHub):
                           {'target': target, 'expected_binding': expected_binding})
         if type(generation) is not int or not 1 <= generation < 2**53:
             raise LedgerError('INVALID_GATE_TARGET_BINDING')
-        receipt = self.ledger.exact_receipt(command, origin, authorize=self.authorize_target)
+        receipt = self._receipt_native(command, origin, authorize=self.authorize_target)
         if receipt is not None:
             return deepcopy(self.ledger.snapshot()['state']['gate_target_bindings'][command.id]['result'])
         if self.forge is None: raise LedgerError('GATE_FORGE_UNAVAILABLE')
@@ -136,7 +136,7 @@ class GateHub(ArtifactGateHub):
             return Transition(state, (Event('gate.target-binding-started', {'operation_id': command.id,
                 'run_id': run_id, 'generation': generation, 'target': target, 'source': source,
                 'dependency_digest': dependency}),), {'operation_id': command.id})
-        self.ledger.apply(command, origin, authorize=self.authorize_target, decide=reserve)
+        self._apply_native(command, origin, authorize=self.authorize_target, decide=reserve)
         if not created:
             return deepcopy(self.ledger.snapshot()['state']['gate_target_bindings'][command.id]['result'])
         def authorized():
@@ -164,14 +164,18 @@ class GateHub(ArtifactGateHub):
             fresh_source = None
             reason = reason or self._error_code(invalid)
         terminal = Command('gate-target-result-' + _digest(command.canonical()), 'gate.target-bound', run_id, generation, {})
+        native_denied = False
         def finish(state, _):
             error = reason
-            try:
-                row = current(state, fresh_source)
-                if self.authorize_target(origin, command) is not True:
-                    raise LedgerError('GATE_AUTHORITY_REVOKED')
-            except Exception as invalid:
-                error = self._error_code(invalid)
+            # Failed native fence is error-only custody recording. Never enter
+            # lifecycle/source authority from inside this Room transaction.
+            if not native_denied:
+                try:
+                    row = current(state, fresh_source)
+                    if self.authorize_target(origin, command) is not True:
+                        raise LedgerError('GATE_AUTHORITY_REVOKED')
+                except Exception as invalid:
+                    error = self._error_code(invalid)
             result = {'operation_id': command.id, 'status': 'ERROR' if error else 'BOUND',
                 'target': target, 'binding_digest': _digest(target), 'reason': error,
                 'audit_reference': audit_reference, 'observation': observation}
@@ -183,7 +187,11 @@ class GateHub(ArtifactGateHub):
                     'source': source, 'policy_digest': _digest(row['policy']), 'generation': generation, 'audit_reference': audit_reference}
             _capacity(state)
             return Transition(state, (Event('gate.target-bound' if error is None else 'gate.target-binding-error', result),), result)
-        return self.ledger.apply(terminal, origin, authorize=lambda *_: True, decide=finish)['result']
+        def native_error(code):
+            nonlocal reason, native_denied
+            native_denied = True
+            reason = reason or code
+        return self._apply_native(terminal, origin, authorize=lambda *_: True, decide=finish, error_sink=native_error)['result']
 
     def recover_target_binding(self, operation_id):
         """After old Hub fencing, retire uncertain binding without provider replay."""
@@ -204,7 +212,7 @@ class GateHub(ArtifactGateHub):
     def evaluate(self, operation_id, run_id, generation, gate_id, *, origin):
         self._require_owner()
         command = self._command(operation_id, run_id, generation, gate_id)
-        receipt = self.ledger.exact_receipt(command, origin, authorize=self.authorize)
+        receipt = self._receipt_native(command, origin, authorize=self.authorize)
         if receipt is not None:
             return self._view(self._row(receipt['result']['evaluation_id']))
         _, _, gate = self._definition(self.ledger.snapshot()['state'], command)
@@ -381,7 +389,7 @@ class GateHub(ArtifactGateHub):
             rows[evaluation_id] = row; _capacity(state); created = True
             return Transition(state, (Event('gate.started', {key: row[key] for key in
                 ('evaluation_id', 'scope', 'source', 'target', 'started')}),), {'evaluation_id': evaluation_id})
-        self.ledger.apply(command, origin, authorize=self.authorize, decide=reserve)
+        self._apply_native(command, origin, authorize=self.authorize, decide=reserve)
         if not created: return self._view(self._row(evaluation_id))
         observation = None; audit_reference = None; reason = None
         def authorized():
@@ -412,16 +420,18 @@ class GateHub(ArtifactGateHub):
         except Exception as invalid:
             fresh_source = None
             reason = reason or self._error_code(invalid)
+        native_denied = False
         def decide(state, _):
             row = state['gate_evaluations'][evaluation_id]
             if row['result'] is not None: raise LedgerError('EVALUATION_ALREADY_TERMINAL')
             changed = []; error = reason
             try: self._external_current(state, command, row, current_source=fresh_source)
             except Exception as invalid: changed.append(self._error_code(invalid))
-            try:
-                if self.authorize(origin, command) is not True: error = 'GATE_AUTHORITY_REVOKED'
-            except Exception:
-                error = 'GATE_AUTHORITY_REVOKED'
+            if not native_denied:
+                try:
+                    if self.authorize(origin, command) is not True: error = 'GATE_AUTHORITY_REVOKED'
+                except Exception:
+                    error = 'GATE_AUTHORITY_REVOKED'
             reduced = (adjudicate_forge_state(observation, row['target'], row['config'])
                        if observation is not None and error is None else
                        {'checks': [{'item': 'forge-state', 'ok': False, 'note': 'verification-incomplete',
@@ -439,7 +449,11 @@ class GateHub(ArtifactGateHub):
             row.update(result=result, phase='TERMINAL'); row['reservation']['projection'] = ''
             _capacity(state)
             return Transition(state, (Event('gate.completed', result),), {'evaluation_id': evaluation_id})
-        self.ledger.apply(terminal, origin, authorize=lambda *_: True, decide=decide)
+        def native_error(code):
+            nonlocal reason, native_denied
+            native_denied = True
+            reason = reason or code
+        self._apply_native(terminal, origin, authorize=lambda *_: True, decide=decide, error_sink=native_error)
         return self._view(self._row(evaluation_id))
 
     def _external_projection(self, state, command, run, policy, gate, origin):

@@ -182,7 +182,8 @@ class NativeReviewerRecruitment:
             checkout=self._pin['checkout']['path'],home=room['state_root']+'/runtime/seat-b/contexts/'+str(self._context_generation)+'/home',
             runtime_root=room['state_root']+'/runtime',endpoint=resources['peer_path'],session_id=str(uuid.uuid4()),
             mounts=launch.mounts,
-            **({} if getattr(launch,'git_resources',None) is None else {'git_profile':launch.git_resources.profile}))
+            **({} if getattr(launch,'git_resources',None) is None else {'git_profile':launch.git_resources.profile}),
+            **({} if getattr(launch,'gate_profile',None) is None else {'gate_profile':launch.gate_profile}))
         if recipe.scope!=scope or recipe.checkout!=self._pin['checkout']['path']:
             raise LedgerError('NATIVE_REVIEWER_BINDING')
         host=NativeClaudeHostLaunch(launch.engine,recipe,launch.endpoint,self.journal,timeout=launch.budget.remaining(10))

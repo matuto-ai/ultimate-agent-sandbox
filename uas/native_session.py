@@ -160,6 +160,34 @@ def dispatch(services, budget, *, max_packets=16):
     return {'packets': processed, 'stop': 'packet-budget-exhausted'}
 
 
+def _gate_listener(resources):
+    """Actual Supervisor-created fixed listener; root only provisions its parent."""
+    import stat
+    from .artifact_helper import GateEndpointLease
+    instance=resources.get('instance')
+    require(type(instance) is str and len(instance)==32 and all(c in '0123456789abcdef' for c in instance),
+            'GATE_ENDPOINT_UNAVAILABLE')
+    filename=Path(resources['gate_endpoint_path'])
+    expected=Path('/run/uas-native')/instance/'gate'/'gate.sock'
+    require(filename==expected and not os.path.lexists(filename),'GATE_ENDPOINT_UNAVAILABLE')
+    parent=filename.parent;info=parent.lstat()
+    require(parent.resolve()==parent and stat.S_ISDIR(info.st_mode)
+        and info.st_uid==HOST_UID and info.st_gid==165530 and stat.S_IMODE(info.st_mode)==0o710
+        and os.getuid()==HOST_UID and 165530 in os.getgroups(),'GATE_ENDPOINT_OWNER_REQUIRED')
+    channel=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+    try:
+        enable(channel);channel.bind(str(filename))
+        os.chown(filename,HOST_UID,165530);os.chmod(filename,0o620)
+        channel.listen(8)
+        # Observe stock policy outcome, never install a type/domain transition.
+        require(os.getxattr(filename,'security.selinux',follow_symlinks=False).rstrip(b'\0')
+            == b'system_u:object_r:container_file_t:s0:c301,c302','GATE_ENDPOINT_MAC_UNAVAILABLE')
+        GateEndpointLease(filename,owner=HOST_UID,group=165530).require()
+        return channel
+    except BaseException:
+        channel.close();raise
+
+
 def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None):
     from .native_qualification_backend import readonly_supervisor
     require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
@@ -226,7 +254,13 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
             NativeMount(room['state_root'] + '/runtime', room['state_root'] + '/runtime', False),
             NativeMount(str(Path(resources['peer_path']).parent), str(Path(resources['peer_path']).parent), True))
         if git_resources is not None:mounts+=git_resources.profile.mounts
+        gate_profile=None if git_resources is None else getattr(git_resources,'gate_profile',None)
+        gate_listener=None
+        if gate_profile is not None:
+            mounts+=gate_profile.mounts
+            gate_listener=_gate_listener(resources);stack.callback(gate_listener.close)
         git_options={} if git_resources is None else {'git_profile':git_resources.profile}
+        if gate_profile is not None:git_options['gate_profile']=gate_profile
         receiver = ReceiverIdentity(65532, 65532, 'hub-' + instance, resources['mapping_digest'])
         control_lock = threading.Lock()
         def seats(runtime, slot):
@@ -254,7 +288,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 engine=engine,endpoint=peer_lease,listener=peer,control=control,
                 hub_origin=hub_origin,controller=ready['controller'],control_lock=control_lock,
                 exec_seat=pi_seat,admission_seat=pi_admit,mounts=mounts,stack=stack,
-                admissions=admissions,budget=budget,git_resources=git_resources)
+                admissions=admissions,budget=budget,git_resources=git_resources,gate_profile=gate_profile)
             owner = NativeRunAdmission(launcher,allocator,checkout_client)
             activated = owner.open_human(human_request.operation_id,human_request.issue_number,
                 human_request.participant_id,session=human_request.session,attempt_id=human_request.attempt_id)
@@ -271,6 +305,18 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 from .native_git_operations import NativeGitOperations
                 git_operations=NativeGitOperations(owner,recruitment,git_resources,git_broker)
                 stack.callback(git_operations.close)
+            gate_operations=None
+            if gate_profile is not None:
+                from .native_gate_resources import NativeGateResources
+                from .native_gate_operations import NativeGateOperations
+                from .native_gate_workflow import NativeGateWorkflow
+                gate_resources=NativeGateResources.from_session(plan,resources,engine,supervisor=supervisor,
+                    listener=gate_listener,git_resources=git_resources,gate_profile=gate_profile,
+                    review_host=recruitment.root.review_host,quota_client=checkout_client,deadline=budget.deadline)
+                stack.callback(gate_resources.close)
+                gate_operations=NativeGateOperations(recruitment.root.review_host,gate_resources)
+                stack.callback(gate_operations.close)
+                NativeGateWorkflow(recruitment.root.review_host,gate_operations.control)
             driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request,
                                        git_operations=git_operations)
             result=driver.run()
@@ -278,8 +324,11 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 'run_id':result['current_run'],'product_run_created':True,'reviewer_attached':True,
                 'session':result,'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
-                'lifecycle_blockers':(['NATIVE_GATE_WORKER_COMPOSITION_UNAVAILABLE',
-                                       'NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE'] if git_operations is not None else
+                'lifecycle_blockers':((['NATIVE_COMMAND_DIFF_GATE_PROFILES_UNAVAILABLE',
+                                        'NATIVE_COMPLETION_GATE_TRIGGER_UNAVAILABLE',
+                                        'NATIVE_GATE_IDENTITY_TRANSPORT_UNAVAILABLE'] if gate_operations is not None else
+                                       ['NATIVE_GATE_WORKER_COMPOSITION_UNAVAILABLE'])+
+                                      ['NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE'] if git_operations is not None else
                                       ['NATIVE_GIT_GATE_WORKER_COMPOSITION_UNAVAILABLE'])+
                                      ['AUTHENTICATED_MANAGER_DISPATCH_UNAVAILABLE',
                                       'FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],

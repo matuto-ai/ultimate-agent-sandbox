@@ -60,8 +60,8 @@ class StagedSourceClosureTests(unittest.TestCase):
                        and isinstance(node.targets[0], ast.Name)
                        and node.targets[0].id in ('MAX_SOURCE_FILES','MAX_SOURCE_BYTES','MAX_SOURCE_TOTAL')}
         self.assertEqual(expressions, {name: ast.dump(ast.parse(value, mode='eval').body)
-            for name,value in {'MAX_SOURCE_FILES':'128','MAX_SOURCE_BYTES':'256<<10','MAX_SOURCE_TOTAL':'3<<20'}.items()})
-        limits = {'MAX_SOURCE_FILES':128,'MAX_SOURCE_BYTES':256<<10,'MAX_SOURCE_TOTAL':3<<20}
+            for name,value in {'MAX_SOURCE_FILES':'136','MAX_SOURCE_BYTES':'256<<10','MAX_SOURCE_TOTAL':'3<<20'}.items()})
+        limits = {'MAX_SOURCE_FILES':136,'MAX_SOURCE_BYTES':256<<10,'MAX_SOURCE_TOTAL':3<<20}
         sizes = [(ROOT/name).stat().st_size for name in sources]
         self.assertLessEqual(len(sizes),limits['MAX_SOURCE_FILES'])
         self.assertTrue(all(size <= limits['MAX_SOURCE_BYTES'] for size in sizes))

@@ -1,6 +1,6 @@
 """Finite root-owned checkout handoff for the fixed qualification host only.
 
-Not a root command service: two exact operations, one configured implementer,
+Not a root command service: exact checkout operations and read-only Gate quota,
 canonical PREPARING reservation, and the existing CheckoutAllocator. No caller
 paths, Actor identities, commands, permission changes or lifecycle mutations.
 """
@@ -19,7 +19,7 @@ import time
 
 from .checkouts import CheckoutAllocator
 from .kernel_origin import _identity, alive, enable, receive
-from .ledger import RoomLedger, LedgerError, _token
+from .ledger import RoomLedger, LedgerError, Command, _token
 from .lifecycle import Supervisor, LifecycleError
 from .native_image_package import canonical
 from .workstation_admission import _unique
@@ -43,6 +43,12 @@ def remaining(deadline):
 
 
 def request_value(value):
+    if type(value) is dict and value.get('kind') == 'GATE_QUOTA':
+        require(set(value) == {'version', 'kind', 'evaluation_id'}
+                and type(value['version']) is int and value['version'] == 1,
+                'GATE_QUOTA_REQUEST_INVALID')
+        _token(value['evaluation_id'])
+        return value
     require(type(value) is dict and set(value) == {'version', 'kind', 'run_id', 'operation_id'}
             and type(value['version']) is int and value['version'] == 1
             and value['kind'] in ('ALLOCATE', 'OBSERVE'), 'CHECKOUT_REQUEST_INVALID')
@@ -137,6 +143,46 @@ def reservation(state, request, room, actors, *, initial):
     return seat['participant'], pinned
 
 
+def gate_quota_binding(ledger, state, binding, evaluation):
+    """Read-only canonical validators; never adjudicate, reserve or launch."""
+    from .gate_evaluation import ArtifactGateHub, SCRATCH_BYTES, MAX_EVALUATIONS
+    from .artifact_protocol import ArtifactError
+    try:
+        rows = state.get('gate_evaluations', {})
+        require(type(rows) is dict and len(rows) <= MAX_EVALUATIONS, 'GATE_QUOTA_ROWS_INVALID')
+        row = rows.get(evaluation)
+        require(type(row) is dict and row.get('evaluation_id') == evaluation
+                and row.get('phase') == 'STARTED' and row.get('target') is None
+                and row.get('result') is None and row.get('evaluator') == 'artifacts',
+                'GATE_QUOTA_RESERVATION_CHANGED')
+        hub = ArtifactGateHub(ledger, binding, None, authorize=lambda *_: False)
+        command = Command(**row['command'])
+        require(command.kind == 'gate.evaluate' and hub.evaluation_id(command.id) == evaluation,
+                'GATE_QUOTA_RESERVATION_CHANGED')
+        run, policy, gate = hub._definition(state, command)
+        require(gate['evaluator'] == 'artifacts' and row['config'] == gate['config']
+                and row['scope'] == hub._scope(command, run, policy, gate)
+                and row['source'] == hub._source(row['source'], run)
+                and row['checkout_digest'] == hub._checkout_digest(run),
+                'GATE_QUOTA_RESERVATION_CHANGED')
+        outstanding = []
+        for key, item in sorted(rows.items()):
+            _token(key)
+            amount = item['reservation']['scratch_bytes']
+            require(type(amount) is int and 0 <= amount < 2**53
+                    and item['evaluation_id'] == key, 'GATE_QUOTA_ROWS_INVALID')
+            if amount: outstanding.append({'evaluation_id': key, 'scratch_bytes': amount})
+        amount = row['reservation']['scratch_bytes']
+        require(type(amount) is int and amount == SCRATCH_BYTES, 'GATE_QUOTA_RESERVATION_CHANGED')
+        return deepcopy({'version': 1, 'instance': binding.room_instance, 'evaluation_id': evaluation,
+            'scope': row['scope'], 'scope_digest': hashlib.sha256(canonical(row['scope'])).hexdigest(),
+            'source': row['source'], 'checkout_digest': row['checkout_digest'],
+            'reservation_bytes': amount, 'outstanding': outstanding,
+            'total_reserved_bytes': sum(x['scratch_bytes'] for x in outstanding)})
+    except (KeyError, TypeError, ValueError, ArtifactError) as error:
+        raise LifecycleError('GATE_QUOTA_ROWS_INVALID') from error
+
+
 def ready_slot(slot, run, participant):
     require(type(slot) is dict and slot.get('run') == run and slot.get('participant') == participant
             and slot.get('active') is True and slot.get('phase') == 'ready'
@@ -159,9 +205,10 @@ class NativeCheckoutClient:
         self.closed = True
         self.channel.close()
 
-    def _call(self, kind, run, operation_id):
+    def _call(self, kind, run=None, operation_id=None, *, evaluation_id=None):
         require(not self.closed, 'CHECKOUT_CHANNEL_FENCED')
-        request = request_value({'version': 1, 'kind': kind, 'run_id': run, 'operation_id': operation_id})
+        request = request_value({'version': 1, 'kind': kind, 'evaluation_id': evaluation_id} if kind == 'GATE_QUOTA'
+            else {'version': 1, 'kind': kind, 'run_id': run, 'operation_id': operation_id})
         try:
             self.channel.settimeout(remaining(self.deadline))
             raw = canonical(request)
@@ -177,12 +224,16 @@ class NativeCheckoutClient:
                         and type(reply['error']) is str and len(reply['error']) <= 96,
                         'CHECKOUT_REPLY_INVALID')
                 raise LifecycleError(reply['error'])
-            require(set(reply) == set(request) | {'status', 'slot'} and reply['status'] == 'OK',
+            field = 'quota' if kind == 'GATE_QUOTA' else 'slot'
+            require(set(reply) == set(request) | {'status', field} and reply['status'] == 'OK',
                     'CHECKOUT_REPLY_INVALID')
-            return reply['slot']
+            return reply[field]
         except BaseException:
             self.close()
             raise
+
+    def observe_gate_quota(self, evaluation_id):
+        return self._call('GATE_QUOTA', evaluation_id=evaluation_id)
 
     def allocate(self, run, operation_id):
         return self._call('ALLOCATE', run, operation_id)
@@ -229,7 +280,7 @@ class RootCheckoutHandoff:
         require(self.child.poll() is None and self.pidfd >= 0 and alive(self.pidfd)
                 and _identity(self.pidfd) == self.identity, 'CHECKOUT_HOST_EXITED')
 
-    def _snapshot(self):
+    def _snapshot(self, project=None):
         path = Path(self.resources.data['hub_ledger_path'])
         info = path.lstat()
         require(path.resolve() == path and stat.S_ISREG(info.st_mode)
@@ -240,6 +291,7 @@ class RootCheckoutHandoff:
         with RoomLedger.open_reader(path, self.plan.room['id']) as ledger:
             ledger._connection().execute('PRAGMA busy_timeout=' + str(max(1, int(min(5, remaining(self.deadline)) * 1000))))
             state = ledger.snapshot()['state']
+            if project is not None: state = project(ledger, state)
         after = path.lstat()
         require((after.st_dev, after.st_ino) == identity, 'CHECKOUT_ROOM_STORE_CHANGED')
         return state
@@ -267,8 +319,56 @@ class RootCheckoutHandoff:
         self.pin = pin
         return True
 
+    def _quota_snapshot(self, evaluation):
+        from .gate_evaluation import GateRoomBinding
+        self._held()
+        lifecycle = self.owner._read()
+        require(lifecycle is not None and lifecycle['phase'] == 'running'
+                and lifecycle['instance_id'] == self.resources.data['instance']
+                and lifecycle['spec']['config_digest'] == 'sha256:' + self.plan.config_digest,
+                'GATE_QUOTA_ROOM_CHANGED')
+        room = self.plan.room
+        binding = GateRoomBinding(room['id'], lifecycle['instance_id'], room['project']['id'],
+            room['project']['repository'], room['resources']['disk_bytes'])
+        projection = self._snapshot(lambda ledger, state:
+            {'public': gate_quota_binding(ledger, state, binding, evaluation),
+             'row': deepcopy(state['gate_evaluations'][evaluation])})
+        return deepcopy(lifecycle), projection
+
+    def _gate_quota(self, evaluation):
+        from .native_qualification_backend import NativeQualificationBackend
+        backend = self.owner.backend
+        require(type(backend) is NativeQualificationBackend, 'GATE_QUOTA_BACKEND_REQUIRED')
+        with self.owner._locked(deadline=self.deadline):
+            lifecycle, before = self._quota_snapshot(evaluation)
+            pins = getattr(self, '_gate_evaluation_pins', {})
+            require(evaluation not in pins or pins[evaluation] == before['row'],
+                    'GATE_QUOTA_RESERVATION_CHANGED')
+            require(evaluation in pins or len(pins) < MAX_REQUESTS, 'CHECKOUT_REQUEST_LIMIT')
+            pins[evaluation] = deepcopy(before['row'])
+            self._gate_evaluation_pins = pins
+        # OS quota observation is never under lifecycle or Room transactions.
+        observation = backend.observe_gate_quota(lifecycle, deadline=self.deadline)
+        require(type(observation) is dict and set(observation) ==
+                {'used_bytes', 'hard_bytes', 'scratch_identity'}
+                and all(type(observation[k]) is int and 0 <= observation[k] < 2**63
+                        for k in ('used_bytes', 'hard_bytes'))
+                and observation['hard_bytes'] == self.plan.room['resources']['disk_bytes']
+                and type(observation['scratch_identity']) is list and len(observation['scratch_identity']) == 2
+                and all(type(v) is int and 0 <= v < 2**64 for v in observation['scratch_identity']),
+                'GATE_QUOTA_OBSERVATION_INVALID')
+        with self.owner._locked(deadline=self.deadline):
+            after_lifecycle, after = self._quota_snapshot(evaluation)
+            require(after_lifecycle == lifecycle and after == before, 'GATE_QUOTA_RESERVATION_CHANGED')
+            previous = getattr(self, '_gate_scratch_identity', observation['scratch_identity'])
+            require(previous == observation['scratch_identity'], 'GATE_QUOTA_SCRATCH_CHANGED')
+            self._gate_scratch_identity = list(observation['scratch_identity'])
+        remaining(self.deadline)
+        return {**before['public'], **observation}
+
     def operation(self, request):
         request_value(request)
+        if request['kind'] == 'GATE_QUOTA': return self._gate_quota(request['evaluation_id'])
         initial = request['kind'] == 'ALLOCATE'
         with self.owner._locked(deadline=self.deadline):
             self._authorized(request, initial=initial)
@@ -306,7 +406,8 @@ class RootCheckoutHandoff:
             request = request_value(json.loads(record.data, object_pairs_hook=_unique))
         try:
             slot = self.operation(request)
-            reply = {**request, 'status': 'OK', 'slot': slot}
+            field = 'quota' if request['kind'] == 'GATE_QUOTA' else 'slot'
+            reply = {**request, 'status': 'OK', field: slot}
         except (LifecycleError, LedgerError) as error:
             reply = {**request, 'status': 'ERROR', 'error': error.code}
         raw = canonical(reply)
