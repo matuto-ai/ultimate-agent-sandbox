@@ -13,7 +13,7 @@ import socket
 import stat
 
 from .guest_fixture import (BLOCK_KIB, INODES, WORKSTATION_HOST_UID,
-                            GuestBoundaryBackend, command, guard)
+                            GuestBoundaryBackend, _admission_guard, command, guard)
 from .kernel_origin import OriginDenied, OriginUnavailable, enable, probe
 from .lifecycle import FixtureSpec, LifecycleError
 from .workstation_exec import EndpointLease, ExecUnavailable
@@ -199,6 +199,9 @@ class RoomLaunchFixtureBackend(GuestBoundaryBackend):
     def _preflight(self, state):
         self._profile(state)
         guard(self.nonce)
+        self._preflight_checked(state)
+
+    def _preflight_checked(self, state):
         try:
             self._egress()
         except (OSError, ValueError, TypeError, KeyError) as error:
@@ -210,8 +213,11 @@ class RoomLaunchFixtureBackend(GuestBoundaryBackend):
             raise LifecycleError('ROOM_FIXTURE_ENDPOINT_UNAVAILABLE') from error
 
     def admit(self, state):
-        self._preflight(state)
-        return super().admit(state)
+        self._profile(state)
+        require = _admission_guard(self.nonce)
+        require()
+        self._preflight_checked(state)
+        return self._admit_guarded(state, require)
 
     def create(self, state, kind):
         self._preflight(state)

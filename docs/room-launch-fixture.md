@@ -84,12 +84,27 @@ there is no positive cache, removed check, retry or time-limit increase. Direct
 bootstrap and workload-release gates retain their resource checks as well.
 A post-bind resource failure closes the newly created binding before exposure,
 retaining the first failure even if cleanup also fails. Fixed phase aggregates
-(count, failures and elapsed last/max/total seconds, at most eleven keys) retain
+(count, failures and elapsed last/max/total seconds, at most seventeen keys) retain
 resource pre/post, core operation, fresh-current and failed-bind cleanup timing
-without storing requests or an unbounded history. Callback timing bookkeeping
+without storing requests or an unbounded history. The six fixed release phases
+also retain lock acquisition, current authority, resources, full admission,
+final Broker check and the release write; their accounting never restarts either
+five-second phase or the core 50 ms budget. Callback timing bookkeeping
 still participates in the core deadline. This separation is source-backed
 composition alignment, not proof of which subphase exhausted the previous
 run's deadline; final VM qualification remains required.
+
+One admission now shares only its duplicate command observations: the same owned
+firewall document supplies existence and rule checks, and one fixed Docker-info
+projection supplies typed security options and the remapped root. An admission-
+local SELinux command observation is discarded on return or failure; every
+original nonce/root/sysfs guard and all three storage-manifest validations still
+run. Standalone helpers retain their complete fresh guards, and each later
+admission starts from fresh commands. No caller evidence, backend cache or
+cross-call reuse is introduced. A file/mock-only full-chain comparison observes
+23 baseline commands versus 15 after consolidation. This is not a runtime
+latency guarantee or VM qualification; endpoint and Broker pre/post checks,
+including the final Broker check after slow admission, remain mandatory.
 
 The unrelated same-UID task negative retains caller-owned evidence before its
 fixed Docker CLI launch. Launch, accept, service and output-collection stages

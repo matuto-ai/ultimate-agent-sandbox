@@ -1,5 +1,6 @@
 """Inert CLI/pipe/clock diagnostics tests; no real process, socket or SELinux."""
 import ast
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,7 @@ VM = Path(__file__).parent / 'vm'
 sys.path.insert(0, str(VM))
 try:
     import room_service
+    import guest_room
 finally:
     sys.path.pop(0)
 
@@ -20,7 +22,7 @@ finally:
 class CLIDiagnosticsTests(TestCase):
     def exercise(self, fault=None, *, noisy=False, startup=.1, lock_cost=0, check_cost=0,
                  gate_fault=None, delivery_lag=0, child_schedule=0, compose=False,
-                 startup_chunks=None, after_startup=b'inert stderr\n', bookkeeping_cost=0):
+                 startup_chunks=None, after_startup=b'inert stderr\n', bookkeeping_cost=0, release_bookkeeping_cost=0):
         checks = {}
         clock = [0.0]
         calls = {'select': [], 'read': 0, 'wait': 0, 'killed': False, 'order': [], 'launcher': 0}
@@ -149,14 +151,18 @@ class CLIDiagnosticsTests(TestCase):
                 callback = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'release_unrelated')
                 class Lock:
                     def __enter__(inner):
-                        calls['order'].append('lock'); clock[0] += lock_cost; calls['locked'] = True
+                        calls['order'].append('lock'); clock[0] += lock_cost
+                        if gate_fault == 'lock': raise error
+                        calls['locked'] = True
                     def __exit__(inner, *args):
                         calls['order'].append('unlock'); calls['locked'] = False
                 def gate(name):
                     self.assertTrue(calls['locked'])
                     calls['order'].append(name); clock[0] += check_cost
                     if gate_fault == name: raise error
-                env = dict(supervisor=SimpleNamespace(_locked=Lock), current=lambda: gate('current'),
+                env = dict(ExitStack=room_service.ExitStack, checks=checks,
+                           observe_authority_phase=room_service.observe_authority_phase,
+                           supervisor=SimpleNamespace(_locked=Lock), current=lambda: gate('current'),
                            resources=lambda: gate('resources'), backend=SimpleNamespace(admit=lambda state: gate('admit')),
                            state=object(), broker=SimpleNamespace(require=lambda: gate('broker')))
                 exec(compile(ast.Module(body=[callback], type_ignores=[]), '<actual release callback>', 'exec'), env)
@@ -170,6 +176,10 @@ class CLIDiagnosticsTests(TestCase):
                     and not calls.get('bookkeeping_spent')):
                 calls['bookkeeping_spent'] = True
                 clock[0] += bookkeeping_cost
+            if (release_bookkeeping_cost and 'release.broker' in checks.get('authority_phases', {})
+                    and not calls.get('release_bookkeeping_spent')):
+                calls['release_bookkeeping_spent'] = True
+                clock[0] += release_bookkeeping_cost
             return clock[0]
         result = caught = None
         with patch.object(room_service.time, 'monotonic', side_effect=observed_clock), \
@@ -341,9 +351,12 @@ class CLIDiagnosticsTests(TestCase):
         callback=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='release_unrelated')
         self.assertEqual(1,len(callback.body));self.assertIsInstance(callback.body[0],ast.With)
         text=ast.unparse(callback.body[0])
-        for gate in ('current()','resources()','backend.admit(state)','broker.require()'):
-            self.assertLess(text.index(gate),text.index('write()'))
-        self.assertIn('with supervisor._locked()',text)
+        self.assertIn('with ExitStack() as stack:',text)
+        self.assertIn('stack.enter_context(supervisor._locked())',text)
+        phases = ['release.' + name for name in ('lock','current','resources','admission','broker','write')]
+        self.assertEqual(phases, [node.value for node in ast.walk(callback)
+                         if isinstance(node, ast.Constant) and node.value in phases])
+
 
 
     def test_parent_and_child_release_phases_compose_without_spending_startup_twice(self):
@@ -483,3 +496,90 @@ class CLIDiagnosticsTests(TestCase):
                 self.assertFalse(checks['startup']['release_sent'])
                 self.assertNotIn('release', checks); self.assertNotIn('write_stage', calls)
                 serve.assert_not_called(); self.assertTrue(checks['cleanup']['reaped'])
+
+
+    def test_release_gate_timings_are_fixed_success_aggregates_under_same_lock(self):
+        checks, result, caught, _, _, _, calls = self.exercise(
+            compose=True, lock_cost=.25, check_cost=.5)
+        self.assertIsNone(caught); self.assertIsNotNone(result)
+        self.assertEqual(['lock','current','resources','admit','broker','G','unlock'], calls['order'])
+        phases = checks['authority_phases']
+        expected = {'lock':.25, 'current':.5, 'resources':.5, 'admission':.5, 'broker':.5, 'write':0}
+        self.assertEqual({'release.' + name for name in expected}, set(phases))
+        for name, elapsed in expected.items():
+            self.assertEqual(dict(calls=1, failures=0, last_seconds=elapsed,
+                                  max_seconds=elapsed, total_seconds=elapsed), phases['release.' + name])
+
+    def test_release_timings_retain_completed_and_failing_gate_without_G(self):
+        gates = ['lock','current','resources','admit','broker']
+        for index, gate in enumerate(gates):
+            with self.subTest(gate=gate):
+                checks, result, caught, original, _, serve, calls = self.exercise(
+                    compose=True, gate_fault=gate, lock_cost=.25, check_cost=.5)
+                self.assertIs(original, caught); self.assertIsNone(result)
+                names = ['release.' + ('admission' if name == 'admit' else name) for name in gates[:index+1]]
+                self.assertEqual(names, list(checks['authority_phases']))
+                for name in names:
+                    self.assertEqual(int(name == names[-1]), checks['authority_phases'][name]['failures'])
+                self.assertEqual(.25 if gate == 'lock' else .5,
+                                 checks['authority_phases'][names[-1]]['last_seconds'])
+                self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
+                self.assertEqual(['lock'] if gate == 'lock' else ['lock',*gates[1:index+1],'unlock'], calls['order'])
+                serve.assert_not_called(); self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_release_write_failure_retains_all_timings_and_unlocks(self):
+        checks, result, caught, original, _, serve, calls = self.exercise('release-write', compose=True)
+        self.assertIs(original, caught); self.assertIsNone(result)
+        self.assertEqual(1, checks['authority_phases']['release.write']['failures'])
+        self.assertFalse(calls['locked']); self.assertEqual('unlock', calls['order'][-1])
+        self.assertFalse(checks['startup']['release_sent']); serve.assert_not_called()
+        self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_release_timing_bookkeeping_cannot_make_late_G_eligible(self):
+        checks, result, caught, _, _, serve, calls = self.exercise(
+            compose=True, check_cost=1, release_bookkeeping_cost=1)
+        self.assertIsNotNone(caught); self.assertIsNone(result)
+        self.assertTrue(calls['release_bookkeeping_spent'])
+        self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
+        self.assertEqual(1, checks['authority_phases']['release.write']['failures'])
+        self.assertFalse(checks['startup']['release_sent']); self.assertFalse(calls['locked'])
+        serve.assert_not_called(); self.assertTrue(checks['cleanup']['reaped'])
+
+
+    def test_release_timings_survive_normal_and_overflow_report_with_primary_cleanup(self):
+        phases = {'release.' + name: dict(calls=1, failures=int(name == 'broker'),
+                  last_seconds=.5, max_seconds=.5, total_seconds=.5)
+                  for name in ('lock','current','resources','admission','broker')}
+        endpoint = dict(status='failed', authority_phases=phases,
+                        cleanup=dict(status='failed', errors=[dict(owner='broker', error_type='OSError')]))
+        report = dict(version=1, nonce='inert', profile=guest_room.PROFILE,
+                      production_enabled=False, failure=dict(error_type='PrimaryFailure'),
+                      checks=dict(endpoint_service=endpoint))
+        self.assertEqual(report, json.loads(guest_room.encode_report(report)))
+        report['padding'] = 'x' * 65536
+        encoded = guest_room.encode_report(report)
+        self.assertLessEqual(len(encoded), 65536)
+        compact = json.loads(encoded)
+        self.assertEqual(phases, compact['checks']['endpoint_service']['authority_phases'])
+        self.assertEqual('PrimaryFailure', compact['primary_failure']['error_type'])
+        self.assertEqual('ReportBudgetExceeded', compact['failure']['error_type'])
+        self.assertEqual(endpoint['cleanup'], compact['checks']['endpoint_service']['cleanup'])
+        self.assertTrue(compact['report_overflow']); self.assertTrue(compact['evidence_omitted'])
+
+    def test_release_overflow_projection_drops_unknown_malformed_and_unbounded_fields(self):
+        phases = {'payload': 'secret' * 20000, 'release.lock': 'not a timing',
+                  'release.current': dict(calls=2**100, failures=True, last_seconds=float('nan'),
+                                          max_seconds=float('inf'), total_seconds=-1),
+                  'release.resources': dict(calls=1, failures=0, last_seconds=.25,
+                                            max_seconds=.25, total_seconds=.25, payload='secret')}
+        report = dict(version=1, nonce='inert', profile=guest_room.PROFILE,
+                      production_enabled=False, checks=dict(endpoint_service=dict(
+                          status='failed', authority_phases=phases)))
+        encoded = guest_room.encode_report(report)
+        self.assertLessEqual(len(encoded), 65536)
+        compact = json.loads(encoded)
+        self.assertEqual({'release.resources':dict(calls=1, failures=0, last_seconds=.25,
+                          max_seconds=.25, total_seconds=.25)},
+                         compact['checks']['endpoint_service']['authority_phases'])
+        self.assertTrue(compact['report_overflow'])
+        self.assertNotIn('secret', encoded); self.assertNotIn('NaN', encoded); self.assertNotIn('Infinity', encoded)

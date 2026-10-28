@@ -51,19 +51,19 @@ class RoomFixtureTests(unittest.TestCase):
                     patch.object(room,'guard') as guard:
                 self.backend.admit(state)
             guard.assert_not_called()
-        with patch.object(room,'guard'),patch.object(room,'probe'), \
+        with patch.object(room,'_admission_guard',return_value=lambda:None),patch.object(room,'probe'), \
                 patch.object(room.RoomEndpoint,'require',side_effect=RuntimeError('endpoint replaced')), \
-                patch.object(room.GuestBoundaryBackend,'admit') as admit:
+                patch.object(room.GuestBoundaryBackend,'_admit_guarded') as admit:
             with self.assertRaisesRegex(RuntimeError,'endpoint replaced'):self.backend.admit(self.state)
             admit.assert_not_called()
 
     def test_guest_kernel_endpoint_and_existing_backend_are_ordered_before_start(self):
         events=[]
         self.egress.side_effect=lambda:events.append('egress')
-        with patch.object(room,'guard',side_effect=lambda *_:events.append('guest')), \
+        with patch.object(room,'_admission_guard',return_value=lambda:events.append('guest')), \
                 patch.object(room,'probe',side_effect=lambda:events.append('kernel')), \
                 patch.object(room.RoomEndpoint,'require',side_effect=lambda:events.append('endpoint')), \
-                patch.object(room.GuestBoundaryBackend,'admit',side_effect=lambda *_:events.append('existing')):
+                patch.object(room.GuestBoundaryBackend,'_admit_guarded',side_effect=lambda *_:events.append('existing')):
             self.backend.admit(self.state)
         self.assertEqual(['guest','egress','kernel','endpoint','existing'],events)
         with patch.object(room,'guard'),patch.object(room,'probe',side_effect=RuntimeError('unsupported kernel')), \

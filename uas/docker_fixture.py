@@ -139,6 +139,10 @@ class DockerFixtureBackend:
                           "DAEMON_SECCOMP")
         except (TypeError, ValueError) as error:
             raise BackendUnknown() from error
+        return self._admit_resources(state)
+
+    def _admit_resources(self, state):
+        # Private body: public admission always observes paths and daemon policy.
         volume = self._inspect_object(state, "volume")
         resource = self._inspect_object(state, "container")
         if volume is None or resource is None:

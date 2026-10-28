@@ -6,6 +6,7 @@ credentials, executable-child capability or network creation. This is not the
 native Git worker/RuntimeView profile or the native Pi/Hub topology.
 """
 import ctypes
+from contextlib import ExitStack
 import errno
 import hashlib
 import json
@@ -41,7 +42,8 @@ def require(value, message):
 
 AUTHORITY_PHASES = frozenset(
     method + '.' + phase for method in ('bind', 'current', 'require')
-    for phase in ('pre_resource', 'lineage', 'post_resource')) | {'seat.current', 'bind.cleanup'}
+    for phase in ('pre_resource', 'lineage', 'post_resource')) | {'seat.current', 'bind.cleanup'} | {
+    'release.' + phase for phase in ('lock', 'current', 'resources', 'admission', 'broker', 'write')}
 
 
 def observe_authority_phase(checks, phase, call, *args):
@@ -799,9 +801,17 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         checks['stage'] = 'unrelated_task_refusal'
         checks['unrelated_task'] = {}
         def release_unrelated(write):
-            with supervisor._locked():
-                current(); resources(); backend.admit(state); broker.require()
-                write()
+            # Measure acquisition, not the whole locked body. The stack retains
+            # the same lifecycle lock through every prerequisite and the final
+            # deadline-guarded G write, including timing bookkeeping.
+            with ExitStack() as stack:
+                observe_authority_phase(checks, 'release.lock',
+                    lambda: stack.enter_context(supervisor._locked()))
+                observe_authority_phase(checks, 'release.current', current)
+                observe_authority_phase(checks, 'release.resources', resources)
+                observe_authority_phase(checks, 'release.admission', backend.admit, state)
+                observe_authority_phase(checks, 'release.broker', broker.require)
+                observe_authority_phase(checks, 'release.write', write)
         denied, stdout, stderr = observe_unrelated_cli(listener, container,
             lambda channel: serve_one(channel, service, authority, lifecycle_lock=supervisor._locked),
             checks=checks['unrelated_task'], release=release_unrelated)
