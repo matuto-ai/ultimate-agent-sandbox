@@ -77,6 +77,12 @@ class RoomEndpoint:
                 raise LifecycleError('ROOM_FIXTURE_ENDPOINT_ANCESTRY')
         from .guest_fixture import ROOMS
         expected_label = ('system_u:object_r:container_file_t:' + ROOMS[self.room][3]).encode()
+        expected_socket_label = ('system_u:system_r:container_t:' + ROOMS[self.room][3]).encode()
+        for listener in self.listeners:
+            # sockfs exposes the retained listener's SID, not its pathname or
+            # an accepted child whose MLS range may follow the connecting peer.
+            if os.getxattr(listener.fileno(), 'security.selinux').removesuffix(b'\0') != expected_socket_label:
+                raise LifecycleError('ROOM_FIXTURE_LISTENER_LABEL')
         names = set()
         for lease in self.leases:
             if (lease.path.parent != self.parent or lease.owner != SUPERVISOR_UID

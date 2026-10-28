@@ -38,7 +38,8 @@ SOURCES = tuple('uas/' + name + '.py' for name in ROOM_MODULES) + (
     'tests/vm/fedora-image.json', 'tests/vm/boundary_fixture.go',
     'tests/vm/guest_boundary.py', 'tests/vm/guest_workstation.py',
     'tests/vm/native_rootfs.py', 'tests/vm/native_trust.py',
-    'tests/vm/room_profile.py', 'tests/vm/room_service.py', 'tests/vm/guest_room.py')
+    'tests/vm/room_profile.py', 'tests/vm/room_service.py', 'tests/vm/guest_room.py',
+    'tests/vm/room_policy_diagnostics.py')
 
 
 def _nonce(value):

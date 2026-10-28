@@ -32,17 +32,25 @@ The listener reuses `guest_workstation.labeled_listener`: trusted setup selects
 the exact `container_t`/Room MCS **socket-object** SID with `setsockcreatecon`,
 then resets the creation context; the Supervisor process label is not changed.
 The socket pathname and directory separately carry `container_file_t`/Room MCS.
-The held bootstrap observes the listener socket SID through client-side
-`SO_PEERSEC`; the Supervisor observes the connecting Participant socket SID
-on its accepted sockets. These observations do not infer either process label
+Every canonical admission observes the retained listener's exact socket SID via
+`security.selinux` on its open descriptor; missing, foreign or malformed labels
+fail closed. Connected `SO_PEERSEC` observations alone cannot establish the
+listener's original MCS because an accepted child may inherit the client's MLS
+range. The Supervisor separately observes connecting Participant socket SIDs
+on accepted sockets. These observations do not infer either process label
 from a filesystem `chcon`; actual process labels are recorded separately.
 
 After the held bootstrap's pidfd signals exit and service/Broker teardown has
 completed, a locked negative temporarily parks the original leased socket inode
 outside its mounted directory. A disposable Beta-SID socket occupies the same
-Alpha pathname, with an Alpha filesystem label. A trusted local connection
-observes its Beta socket SID; Alpha's connect must be denied and the replacement
-must fail the original endpoint lease. The disposable socket is removed and the
+Alpha pathname, with an Alpha filesystem label. The held descriptor establishes
+its Beta socket SID; Alpha's raw connect must still return exactly `EACCES`.
+The replacement must fail both the original inode lease and canonical admission
+with a fresh lease. Caller-owned evidence retains actual labels and the bounded
+probe return code, timeout, stdout/stderr and decoded result before assertions.
+A bounded read-only diagnostic records fixed libselinux decisions and actual
+loaded/installed policy metadata; it never repairs policy or substitutes for the
+raw denial. Unavailable diagnostics do not skip that probe. The disposable socket is removed and the
 exact original inode/lease restored in `finally`, or qualification fails without
 further admission. A separate negative changes only the pathname MCS. No new
 mount, policy allow rule, permissive mode or Supervisor process transition is

@@ -125,10 +125,11 @@ class RoomFixtureTests(unittest.TestCase):
         lease.path=endpoint.parent/'request.sock';lease.owner=room.SUPERVISOR_UID
         lease.group=room.WORKSTATION_HOST_UID;lease.expected=(1,2,3,4)
         listener=Mock(family=socket.AF_UNIX)
+        listener.fileno.return_value=123
         listener.getsockname.return_value=str(lease.path)
         listener.getsockopt.side_effect=lambda level,kind: socket.SOCK_SEQPACKET if kind==socket.SO_TYPE else 1
         endpoint.listeners=(listener,);endpoint.leases=(lease,)
-        def check(*,label=None,extra=False,mode=None,owner=0):
+        def check(*,label=None,socket_label=b'system_u:system_r:container_t:s0:c101,c102',extra=False,mode=None,owner=0):
             def node(path):
                 selected=0o755 if path==room.ENDPOINT_ROOT else 0o711
                 return SimpleNamespace(st_mode=stat.S_IFDIR|(selected if mode is None else mode),st_uid=owner,st_gid=0)
@@ -136,15 +137,32 @@ class RoomFixtureTests(unittest.TestCase):
                 stack.enter_context(patch.object(Path,'lstat',node))
                 stack.enter_context(patch.object(Path,'iterdir',return_value=[lease.path]+([endpoint.parent/'host-secret'] if extra else [])))
                 stack.enter_context(patch.object(room.EndpointLease,'require'))
-                stack.enter_context(patch.object(room.os,'getxattr',return_value=label or b'system_u:object_r:container_file_t:s0:c101,c102'))
+                def xattr(target, attribute, **options):
+                    self.assertEqual('security.selinux',attribute)
+                    if type(target) is int:
+                        self.assertEqual(123,target);self.assertEqual({},options)
+                        if isinstance(socket_label,Exception):raise socket_label
+                        return socket_label
+                    self.assertIn(target,(endpoint.parent,lease.path))
+                    self.assertEqual({'follow_symlinks':False},options)
+                    return label if label is not None else b'system_u:object_r:container_file_t:s0:c101,c102'
+                stack.enter_context(patch.object(room.os,'getxattr',side_effect=xattr))
                 enable=stack.enter_context(patch.object(room,'enable'))
                 endpoint.require()
                 self.assertEqual([unittest.mock.call(listener)],enable.call_args_list)
         check()
+        check(socket_label=b'system_u:system_r:container_t:s0:c101,c102\0')
         for values in ({'label':b'system_u:object_r:container_file_t:s0:c103,c104'},
                        {'label':b'system_u:object_r:container_file_t:s0:c101.c104'},
-                       {'extra':True},{'mode':0o777},{'owner':65532}):
+                       {'extra':True},{'mode':0o777},{'owner':65532},
+                       {'socket_label':b''},
+                       {'socket_label':b'system_u:system_r:container_t:s0:c103,c104'},
+                       {'socket_label':b'system_u:object_r:container_file_t:s0:c101,c102'},
+                       {'socket_label':b'unconfined_u:system_r:container_t:s0:c101,c102'},
+                       {'socket_label':b'system_u:system_r:container_t:s0:c101.c104'},
+                       {'socket_label':b'system_u:system_r:container_t:s0:c101,c102\0\0'}):
             with self.subTest(values=values),self.assertRaises(LifecycleError):check(**values)
+        with self.assertRaises(OSError):check(socket_label=OSError('unsupported held descriptor label'))
         lease.owner=0
         with self.assertRaisesRegex(LifecycleError,'ENDPOINT_SCOPE'):check()
         lease.owner=room.SUPERVISOR_UID
@@ -153,6 +171,12 @@ class RoomFixtureTests(unittest.TestCase):
 
     def test_real_observer_failure_becomes_lifecycle_failure_without_effect(self):
         with patch.object(room,'guard'),patch.object(room,'probe',side_effect=room.OriginUnavailable('missing')), \
+                patch.object(room.GuestBoundaryBackend,'create') as create:
+            with self.assertRaisesRegex(LifecycleError,'ENDPOINT_UNAVAILABLE'):
+                self.backend.create(self.state,'volume')
+            create.assert_not_called()
+        with patch.object(room,'guard'),patch.object(room,'probe'), \
+                patch.object(room.RoomEndpoint,'require',side_effect=OSError('listener label unavailable')), \
                 patch.object(room.GuestBoundaryBackend,'create') as create:
             with self.assertRaisesRegex(LifecycleError,'ENDPOINT_UNAVAILABLE'):
                 self.backend.create(self.state,'volume')

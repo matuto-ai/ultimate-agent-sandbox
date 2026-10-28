@@ -266,7 +266,7 @@ def endpoint(room, run):
         listener.close(); raise
 
 
-def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run):
+def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run, checks, diagnostic):
     """Destructive negative only after the held bootstrap and service exit.
 
     Keep every original socket object/inode; replace only the pathname during
@@ -277,19 +277,24 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run):
     from guest_boundary import require_process_label
     from guest_workstation import labeled_listener
     from uas.guest_fixture import ROOMS, WORKSTATION_HOST_UID
-    from uas.workstation_exec import ExecUnavailable
+    from uas.lifecycle import LifecycleError
+    from uas.room_fixture import RoomEndpoint, SUPERVISOR_UID
+    from uas.workstation_exec import EndpointLease, ExecUnavailable
+    checks.update(status='in_progress', stage='original_admission')
     require(endpoint_.room == 'alpha' and len(endpoint_.leases) == 1, 'exact Alpha endpoint required')
     with supervisor._locked():
         endpoint_.require()
         lease = endpoint_.leases[0]
         path = lease.path
         original = lease.expected
+        checks['original_lease'] = list(original)
         parking = endpoint_.parent.parent / 'git-sid-negative'
         parking.mkdir(mode=0o700)  # Exclusive owned destination; never adopt one.
         saved = parking / 'request.sock'
         foreign = foreign_inode = None
         parked = False
         try:
+            checks['stage'] = 'foreign_listener_creation'
             path.rename(saved); parked = True
             foreign = labeled_listener(path, WORKSTATION_HOST_UID, level=ROOMS['beta'][3])
             node = path.lstat(); foreign_inode = (node.st_dev, node.st_ino)
@@ -297,25 +302,51 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run):
             # object carries Beta. Parent, DAC and mounted path stay Alpha.
             run('chcon', '-t', 'container_file_t', '-l', ROOMS['alpha'][3], str(path))
             file_label = os.getxattr(path, 'security.selinux', follow_symlinks=False).rstrip(b'\0').decode()
+            checks['pathname_label'] = file_label
             require(file_label == 'system_u:object_r:container_file_t:' + ROOMS['alpha'][3],
                     'foreign-SID negative pathname must remain Alpha')
             try: endpoint_.require()
-            except ExecUnavailable: pass
+            except ExecUnavailable: checks['replacement_lease_denied'] = True
             else: raise RuntimeError('replacement socket passed original endpoint lease')
             # SO_PEERSEC reports the accepted connection's SID, whose MLS
             # range SELinux copies from the connecting client. It does NOT
             # measure this listener's original MCS. Query the retained socket
             # descriptor's sockfs inode instead, not its relabeled pathname.
             foreign_label = os.getxattr(foreign.fileno(), 'security.selinux').decode()
+            checks.update(socket_object_label=foreign_label,
+                          socket_label_source='held-listener-fd-security.selinux')
             require_process_label(foreign_label, ROOMS['beta'][3])
             foreign_label = foreign_label.removesuffix('\0')
-            denied = probe('alpha', 'endpoint')
-            require(denied == {'connected': False, 'error': 'EACCES'},
+            checks['socket_object_label'] = foreign_label
+            # A fresh lease must not hide a foreign SID behind the correct DAC,
+            # pathname label and inode. Exercise canonical admission itself.
+            checks['stage'] = 'foreign_listener_admission'
+            fresh = EndpointLease(path, owner=SUPERVISOR_UID, group=WORKSTATION_HOST_UID)
+            try: RoomEndpoint('alpha', 'git', (foreign,), (fresh,))
+            except LifecycleError as error:
+                require(str(error) == 'ROOM_FIXTURE_LISTENER_LABEL',
+                        'foreign listener rejected for a different admission invariant')
+                checks['fresh_lease_foreign_listener_denied'] = True
+            else: raise RuntimeError('foreign listener passed fresh canonical admission')
+            checks['stage'] = 'loaded_policy_diagnostic'
+            try: checks['policy_diagnostic'] = diagnostic()
+            except Exception as error:
+                # Read-only diagnostics cannot suppress the decisive raw probe.
+                checks['policy_diagnostic'] = {'status': 'unavailable', 'error_type': type(error).__name__}
+            checks['stage'] = 'foreign_socket_connect'
+            checks['raw_probe'] = probe('alpha', 'endpoint')
+            raw = checks['raw_probe']
+            denied = raw.get('decoded')
+            checks['denied'] = denied
+            require(raw.get('returncode') == 0 and raw.get('timeout') is False
+                    and raw.get('status') != 'unavailable' and raw.get('cleanup_errors') == []
+                    and raw.get('stdout', {}).get('truncated') is False
+                    and raw.get('stderr', {}).get('truncated') is False
+                    and denied == {'connected': False, 'error': 'EACCES'},
                     'foreign socket SID with same-Room pathname was not denied')
-            result = {'socket_object_label': foreign_label, 'pathname_label': file_label,
-                      'socket_label_source': 'held-listener-fd-security.selinux',
-                      'denied': denied, 'replacement_lease_denied': True,
-                      'original_lease': list(original)}
+        except BaseException as error:
+            checks.update(status='failed', error_type=type(error).__name__)
+            raise
         finally:
             cleanup_errors = []
             if foreign is not None:
@@ -338,9 +369,11 @@ def prove_foreign_socket_sid(supervisor, endpoint_, probe, *, run):
                 parking.rmdir()
             except BaseException as error: cleanup_errors.append(error)
             if cleanup_errors:
+                checks.update(status='failed', cleanup_errors=[type(error).__name__ for error in cleanup_errors])
                 raise RuntimeError('foreign-SID negative cleanup failed; no further admission') from cleanup_errors[0]
-        result['original_lease_restored'] = True
-        return result
+            checks['original_lease_restored'] = True
+        checks.update(status='passed', stage='complete')
+        return checks
 
 
 def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None):

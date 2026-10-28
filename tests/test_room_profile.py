@@ -298,7 +298,10 @@ class RoomProfileTests(unittest.TestCase):
         self.assertNotIn('SO_PEERSEC', ast.unparse(negative))
         self.assertNotIn('foreign.accept()', text)
         self.assertIn('except ExecUnavailable:',text)
-        self.assertIn("'original_lease': list(original)",text)
+        self.assertIn("checks['original_lease'] = list(original)",text)
+        self.assertIn("RoomEndpoint('alpha', 'git', (foreign,), (fresh,))",text)
+        self.assertIn("str(error) == 'ROOM_FIXTURE_LISTENER_LABEL'",text)
+        self.assertLess(text.index("checks['raw_probe'] = probe("),text.index("denied == {'connected': False, 'error': 'EACCES'}"))
         cleanup=next(node.finalbody for node in ast.walk(negative)
                      if isinstance(node,ast.Try) and any(isinstance(child,ast.Assign) and
                         any(isinstance(target,ast.Name) and target.id=='cleanup_errors' for target in child.targets)
@@ -311,14 +314,17 @@ class RoomProfileTests(unittest.TestCase):
         self.assertIn('no further admission',final)
         scenario=(VM/'guest_room.py').read_text()
         self.assertLess(scenario.index("['held_bootstrap_exit_observed'] is True"),
-                        scenario.index("= prove_foreign_socket_sid("))
+                        scenario.index("prove_foreign_socket_sid(supervisors['alpha']"))
+        self.assertLess(scenario.index("['foreign_socket_sid'] = {}"),
+                        scenario.index("prove_foreign_socket_sid(supervisors['alpha']"))
         prove=next(node for node in source.body if isinstance(node,ast.FunctionDef) and node.name=='prove_service')
         self.assertIn('not alive(launch.origin.pidfd)',ast.unparse(prove))
 
     def test_foreign_socket_sid_restores_exact_lease_on_success_and_probe_or_close_failure(self):
         from contextlib import nullcontext
         from uas.workstation_exec import ExecUnavailable
-        for fault in (None,'probe','close','helper','wrong-mcs','wrong-type','extra-nul','fd-read'):
+        from uas.lifecycle import LifecycleError
+        for fault in (None,'probe','close','helper','wrong-mcs','wrong-type','extra-nul','fd-read','diagnostic','timeout','nonzero','malformed','admission','capture-error','capture-cleanup'):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory() as temporary:
                 directory=Path(temporary)/'alpha/git';directory.mkdir(parents=True)
                 path=directory/'request.sock';path.write_bytes(b'original inert file')
@@ -349,24 +355,45 @@ class RoomProfileTests(unittest.TestCase):
                     self.assertEqual(path, target)
                     self.assertEqual({'follow_symlinks':False}, options)
                     return ('system_u:object_r:container_file_t:'+native_guest.LEVEL).encode()
-                probe=Mock(return_value={'connected':True} if fault=='probe' else {'connected':False,'error':'EACCES'})
+                decoded={'connected':True} if fault=='probe' else {'connected':False,'error':'EACCES'}
+                capture={'returncode':1 if fault=='nonzero' else 0,'timeout':fault=='timeout',
+                         'cleanup_errors':['OSError'] if fault=='capture-cleanup' else [],
+                         'stdout':{'output':'inert','bytes':5,'truncated':False},
+                         'stderr':{'output':'','bytes':0,'truncated':False},
+                         'decoded':None if fault=='malformed' else decoded}
+                if fault=='capture-error':capture['status']='unavailable'
+                probe=Mock(return_value=capture)
+                diagnostic=Mock(return_value={'status':'inert-read-only-diagnostic'})
+                if fault=='diagnostic':diagnostic.side_effect=OSError('unavailable')
+                checks={}
                 with patch.object(native_guest,'labeled_listener',side_effect=create), \
                      patch.object(room_service.socket,'socket',side_effect=AssertionError('observer connection forbidden')), \
-                     patch.object(room_service.os,'getxattr',side_effect=label):
-                    action=lambda:room_service.prove_foreign_socket_sid(SimpleNamespace(_locked=nullcontext),endpoint,probe,run=Mock())
+                     patch.object(room_service.os,'getxattr',side_effect=label), \
+                     patch('uas.workstation_exec.EndpointLease') as fresh, \
+                     patch('uas.room_fixture.RoomEndpoint',side_effect=None if fault=='admission' else LifecycleError('ROOM_FIXTURE_LISTENER_LABEL')) as admission:
+                    action=lambda:room_service.prove_foreign_socket_sid(SimpleNamespace(_locked=nullcontext),endpoint,probe,run=Mock(),checks=checks,diagnostic=diagnostic)
                     if fault in ('wrong-mcs','wrong-type','extra-nul'):
                         with self.assertRaisesRegex(AssertionError,'actual SELinux label'):action()
                         probe.assert_not_called()
                     elif fault == 'fd-read':
                         with self.assertRaisesRegex(OSError,'fd label unavailable'):action()
                         probe.assert_not_called()
-                    elif fault:
-                        with self.assertRaisesRegex(RuntimeError,'cleanup failed' if fault in ('close','helper') else 'not denied'):action()
+                    elif fault not in (None,'diagnostic'):
+                        expected='cleanup failed' if fault in ('close','helper') else ('passed fresh canonical' if fault=='admission' else 'not denied')
+                        with self.assertRaisesRegex(RuntimeError,expected):action()
                     else:
                         result=action();self.assertTrue(result['original_lease_restored'])
                         self.assertEqual(list(original),result['original_lease'])
                         self.assertEqual('system_u:system_r:container_t:'+native_guest.SIBLING_LEVEL,result['socket_object_label'])
                         self.assertEqual('held-listener-fd-security.selinux',result['socket_label_source'])
+                        self.assertTrue(result['fresh_lease_foreign_listener_denied'])
+                        fresh.assert_called_once_with(path,owner=165533,group=165532)
+                        admission.assert_called_once_with('alpha','git',(foreign,),(fresh.return_value,))
+                        if fault=='diagnostic':self.assertEqual('unavailable',result['policy_diagnostic']['status'])
+                if fault in ('probe','timeout','nonzero','malformed','capture-error','capture-cleanup'):
+                    self.assertEqual(capture,checks['raw_probe'])
+                    self.assertEqual('failed',checks['status'])
+                    self.assertTrue(checks['original_lease_restored'])
                 if fault=='helper':
                     self.assertEqual(b'original inert file',(directory.parent/'git-sid-negative/request.sock').read_bytes())
                     self.assertEqual(b'inert replacement',path.read_bytes())

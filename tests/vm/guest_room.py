@@ -72,6 +72,7 @@ def scenario(nonce, manifest, boot_network, checks):
     sys.path.insert(0, str(boundary.ROOT)); sys.path.insert(0, str(boundary.ROOT / 'tests/vm'))
     from native_rootfs import build_room_rootfs
     from room_service import endpoint, prove_service, prove_foreign_socket_sid
+    from room_policy_diagnostics import capture_endpoint_probe, capture_policy_diagnostic
     from uas.guest_fixture import CONTROL, ROOMS, STORAGE, prepare_storage, network_names, firewall_document, command
     from uas.lifecycle import Supervisor
     from uas.room_fixture import RoomFixtureLimits, RoomLaunchFixtureBackend
@@ -166,14 +167,30 @@ def scenario(nonce, manifest, boot_network, checks):
                       run=run, checks=checks['endpoint_service'])
         require(checks['endpoint_service']['held_bootstrap_exit_observed'] is True,
                 'held workload must exit before destructive endpoint negatives')
-        checks['endpoint_service']['foreign_socket_sid'] = prove_foreign_socket_sid(
-            supervisors['alpha'], endpoints['alpha'], python_probe, run=run)
+        checks['endpoint_service']['foreign_socket_sid'] = {}
+        def raw_endpoint_probe(room, mode):
+            require(room == 'alpha' and mode == 'endpoint', 'fixed Alpha endpoint probe required')
+            return capture_endpoint_probe(containers[room])
+        prove_foreign_socket_sid(supervisors['alpha'], endpoints['alpha'], raw_endpoint_probe,
+            run=run, checks=checks['endpoint_service']['foreign_socket_sid'],
+            diagnostic=capture_policy_diagnostic)
         # Actual stock SELinux denial, not an invented receipt or off-host policy.
         directory, leaf = endpoints['alpha'].parent, endpoints['alpha'].leases[0].path
+        checks['endpoint_service']['foreign_room_mcs'] = {}
+        pathname_checks = checks['endpoint_service']['foreign_room_mcs']
         try:
             run('chcon', '-l', ROOMS['beta'][3], str(directory), str(leaf))
-            denied = python_probe('alpha', 'endpoint')
-            require(denied == {'connected': False, 'error': 'EACCES'}, 'foreign Room MCS endpoint not denied')
+            pathname_checks['directory_label'] = os.getxattr(directory, 'security.selinux', follow_symlinks=False).decode()
+            pathname_checks['pathname_label'] = os.getxattr(leaf, 'security.selinux', follow_symlinks=False).decode()
+            pathname_checks['socket_object_label'] = os.getxattr(endpoints['alpha'].listeners[0].fileno(), 'security.selinux').decode()
+            raw = raw_endpoint_probe('alpha', 'endpoint')
+            pathname_checks['raw_probe'] = raw
+            denied = raw.get('decoded')
+            require(raw.get('returncode') == 0 and raw.get('timeout') is False
+                    and raw.get('status') != 'unavailable' and raw.get('cleanup_errors') == []
+                    and raw.get('stdout', {}).get('truncated') is False
+                    and raw.get('stderr', {}).get('truncated') is False
+                    and denied == {'connected': False, 'error': 'EACCES'}, 'foreign Room MCS endpoint not denied')
         finally: run('chcon', '-l', ROOMS['alpha'][3], str(directory), str(leaf))
         endpoints['alpha'].require()
         checks['endpoint_service']['foreign_room_mcs_denied'] = denied
