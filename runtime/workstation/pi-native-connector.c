@@ -43,10 +43,16 @@ static void exact_read(int fd, void *target, size_t size) {
 int main(int argc, char **argv) {
     /* This precedes challenge input and all runtime/user-state loading. */
     if (prctl(PR_SET_DUMPABLE, 0) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) fail();
-    if ((argc != 7 && argc != 8) || !safe_path(argv[1]) || !safe_path(argv[2]) || !safe_path(argv[3])
-        || !safe_path(argv[4]) || !choice(argv[5]) || !choice(argv[6]) || (argc==8 && !safe_path(argv[7]))) fail();
+    if ((argc != 7 && argc != 8 && argc != 10) || !safe_path(argv[1]) || !safe_path(argv[2]) || !safe_path(argv[3])
+        || !safe_path(argv[4]) || !choice(argv[5]) || !choice(argv[6]) || (argc>=8 && !safe_path(argv[7]))) fail();
     size_t home_len = strlen(argv[3]);
     if (strncmp(argv[4],argv[3],home_len) || strncmp(argv[4]+home_len,"/contexts/",10)) fail();
+    if (argc == 10) {
+        size_t sessions_len = strlen(argv[4]);
+        if (!safe_path(argv[8]) || !choice(argv[9]) || strpbrk(argv[9], ":/")
+            || strncmp(argv[8],argv[4],sessions_len) || argv[8][sessions_len]!='/'
+            || strchr(argv[8]+sessions_len+1,'/')) fail();
+    }
     alarm(15);
     int peer = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     if (peer < 0) fail();
@@ -86,9 +92,9 @@ int main(int argc, char **argv) {
         "--session-dir",argv[4],NULL};
     if (chdir(argv[2])) fail();
     alarm(0);
-    if (argc == 8) {
+    if (argc == 8 || argc == 10) {
         char *native_args[]={UAS_ROOT "/node/bin/node",UAS_ROOT "/runtime/pi/native-entry.mjs",
-            argv[2],argv[4],argv[5],argv[6],argv[7],NULL};
+            argv[2],argv[4],argv[5],argv[6],argv[7],argc==10?argv[8]:NULL,argc==10?argv[9]:NULL,NULL};
         execve(native_args[0],native_args,environment);
     } else execve(arguments[0], arguments, environment);
     fail();

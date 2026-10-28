@@ -42,6 +42,19 @@ def below(value, root):
     return value == root or value.startswith(root + '/')
 
 
+@dataclass(frozen=True)
+class NativePiResume:
+    """Exact prior native facts supplied by the retained owner, never authority."""
+    session_file: str
+    session_id: str
+
+    def __post_init__(self):
+        path(self.session_file)
+        if (not self.session_file.endswith('.jsonl') or type(self.session_id) is not str
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', self.session_id)):
+            raise NativeRecipeError('exact prior Pi session required')
+
+
 def unique(pairs):
     result = {}
     for key, value in pairs:
@@ -142,7 +155,8 @@ class NativePiRecipe:
         return json.loads(self._identity_json)
 
     def __init__(self, manifest_path, manifest_digest, *, seat, scope, checkout,
-                 runtime_root, endpoint, mounts, provider, model, provider_auth=None, git_profile=None, gate_profile=None):
+                 runtime_root, endpoint, mounts, provider, model, provider_auth=None, git_profile=None, gate_profile=None,
+                 resume=None):
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat:
             raise NativeRecipeError('canonical selected seat required')
@@ -172,6 +186,10 @@ class NativePiRecipe:
             raise NativeRecipeError('Unix endpoint path too long')
         self.home = path(runtime_root) + '/' + seat.slot
         self.sessions = path(self.home + '/contexts/' + str(scope['context_generation']) + '/sessions')
+        if resume is not None and (type(resume) is not NativePiResume
+                or str(Path(resume.session_file).parent) != self.sessions or provider_auth is None):
+            raise NativeRecipeError('exact same-context authenticated Pi resume required')
+        self.resume = resume
         from .native_git_recipe import base_mounts
         ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
             image_id=manifest['image_id'], image_reference=manifest['image_reference'], gate_profile=gate_profile)
@@ -206,6 +224,7 @@ class NativePiRecipe:
             'scope':dict(scope), 'recipe_sha256':hashlib.sha256(json.dumps({
                 'checkout':self.checkout,'home':self.home,'sessions':self.sessions,'endpoint':self.endpoint,
                 'provider':provider,'model':model,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts],
+                **({} if resume is None else {'resume':{'session_file':resume.session_file,'session_id':resume.session_id}}),
                 **({} if git_profile is None else {'git_profile_digest':git_profile.digest}),
                 **({} if gate_profile is None else {'gate_profile_digest':gate_profile.digest})},sort_keys=True).encode()).hexdigest()}
         self._identity_json = json.dumps(identity,sort_keys=True)
@@ -213,7 +232,8 @@ class NativePiRecipe:
 
     @classmethod
     def from_configuration(cls, source, room_id, participant_id, manifest_path, manifest_digest,
-                           *, seat, scope, checkout, runtime_root, endpoint, mounts, git_profile=None, gate_profile=None):
+                           *, seat, scope, checkout, runtime_root, endpoint, mounts, git_profile=None, gate_profile=None,
+                           resume=None):
         """Resolve existing configuration without changing native saved settings.
 
         Only explicit Pi provider/model arguments are qualified initially. A
@@ -263,7 +283,8 @@ class NativePiRecipe:
         recipe = cls(manifest_path, manifest_digest, seat=seat, scope=scope, checkout=checkout,
             runtime_root=runtime_root, endpoint=endpoint, mounts=mounts,
             provider=choices['--provider'], model=selected_model,
-            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']), git_profile=git_profile, gate_profile=gate_profile)
+            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']), git_profile=git_profile,
+            gate_profile=gate_profile, resume=resume)
         image = next(i for i in config['deployment']['images'] if i['id'] == room['image'])
         if image['reference'] != recipe.image_reference:
             raise NativeRecipeError('configured image differs from selected manifest')
@@ -299,7 +320,9 @@ class NativePiRecipe:
     def exec_spec(self):
         return {'AttachStdin':True,'AttachStdout':True,'AttachStderr':True,'Tty':False,
             'Privileged':False,'User':'65532:65532','WorkingDir':self.checkout,
-            'Cmd':[CONNECTOR,self.endpoint,self.checkout,self.home,self.sessions,self.provider,self.model] + ([] if self.provider_auth is None else [self.auth_path]), 'Env':[]}
+            'Cmd':[CONNECTOR,self.endpoint,self.checkout,self.home,self.sessions,self.provider,self.model]
+                + ([] if self.provider_auth is None else [self.auth_path])
+                + ([] if self.resume is None else [self.resume.session_file,self.resume.session_id]), 'Env':[]}
 
     def require_provider_auth(self):
         return require_reference(self.provider_auth, 'pi')

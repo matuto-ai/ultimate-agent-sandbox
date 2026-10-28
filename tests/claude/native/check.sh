@@ -14,3 +14,4 @@ node tests/claude/native/provider-auth.mjs
 node --check runtime/pi/provider-store.mjs
 
 node tests/claude/native/pi-startup.mjs
+node tests/claude/native/pi-resume.mjs
