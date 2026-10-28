@@ -29,6 +29,9 @@ ROOT=Path(__file__).resolve().parents[2]
 HOST_SUPERVISOR=165533
 HOST_HELPER=165530
 DEADLINE_SECONDS=30
+# Host fixture setup only: share the previous two five-second compile allowances.
+# Includes setup/hash bookkeeping; no evaluator/security or outer budget changes.
+BUILD_SECONDS=10
 CASES=('positive','wrong-root','mutated-after-exit','cleanup-identity-loss','symlink-before-launch','missing-ack')
 EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 
@@ -389,14 +392,22 @@ def namespace_helper(rootfs,targets,endpoint):
 
 
 def build(root, *, source_root=ROOT):
+    deadline=time.monotonic()+BUILD_SECONDS
+    def remaining():
+        value=deadline-time.monotonic()
+        if value<=0:raise TimeoutError('fixed diff builds exceeded shared setup budget')
+        return value
     installed=root/'binaries';installed.mkdir(mode=0o755)
     digests={}
     for name in ('diff_bootstrap','diff_evaluator'):
         output=installed/name.replace('_','-')
         subprocess.run(['/usr/bin/gcc','-std=c11','-Wall','-Wextra','-Werror','-O2',
             '-fstack-protector-strong','-static','-Wl,-z,noexecstack','-Wl,-z,relro','-Wl,-z,now',
-            str(Path(source_root)/'runtime/workstation'/(name+'.c')),'-o',str(output)],check=True,timeout=5)
+            str(Path(source_root)/'runtime/workstation'/(name+'.c')),'-o',str(output)],check=True,timeout=remaining())
+        remaining()
         output.chmod(0o555);digests[name]=hashlib.sha256(output.read_bytes()).hexdigest()
+        remaining()
+    remaining()  # No ready marker after late final compile/hash bookkeeping.
     return installed,digests
 
 
