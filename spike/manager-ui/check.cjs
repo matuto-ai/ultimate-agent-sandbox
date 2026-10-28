@@ -113,6 +113,10 @@ async function ownershipContract(){
   assert.deepEqual(trace,['Browser.close','remove /owned']);
   const stuck=fake(22),stuckState=trackChild(stuck,()=>{}),signals=[];stuck.kill=signal=>signals.push(signal);
   await assert.rejects(closeOwnedBrowser(stuck,stuckState,async()=>{throw Error('broken pipe');},'/owned',{wait:async()=>{},remove:()=>{throw Error('must not remove live profile');}}),/close unconfirmed/);assert.deepEqual(signals,['SIGTERM','SIGKILL']);
+  const exited=fake(23),openPipes=trackChild(exited,()=>{});exited.kill=()=>{throw Error('must not signal exited PID');};
+  exited.emit('exit',0,null);
+  await assert.rejects(closeOwnedBrowser(exited,openPipes,()=>{throw Error('must not command exited browser');},'/owned',
+    {wait:async()=>{},remove:()=>{throw Error('must retain profile while pipes remain open');}}),/close unconfirmed/);
   await assert.rejects(closeOwnedBrowser(null,null,null,'/owned',{remove:()=>{throw Error('ENOTEMPTY');}}),/ENOTEMPTY/);
 
 }
@@ -235,11 +239,43 @@ function diagnosticsContract(){
   assert(!JSON.stringify(writes.snapshot()).includes('opaque-payload'),'never record CDP payload');
 }
 
+// Use the installed browser ELF, not the distribution shell wrapper. Chromium's
+// wrapper starts stdout/stderr cat children which can inherit the CDP pipes.
+// Puppeteer's system stable-channel path is the same fixed executable. This
+// removes wrapper lifetime ambiguity; it does not diagnose every startup stall.
+function chromeExecutable(io=fs){
+  const executable='/opt/google/chrome/chrome';
+  let fd;
+  try{
+    fd=io.openSync(executable,io.constants.O_RDONLY|io.constants.O_NOFOLLOW|io.constants.O_NONBLOCK);
+    const stat=io.fstatSync(fd),header=Buffer.alloc(4);
+    if(!stat.isFile()||(stat.mode&0o111)===0||io.readSync(fd,header,0,4,0)!==4||!header.equals(Buffer.from([0x7f,0x45,0x4c,0x46])))
+      throw Error('Preinstalled Chrome must be an executable regular ELF; wrapper fallback forbidden');
+    return executable;
+  }finally{if(fd!==undefined)io.closeSync(fd);}
+}
+function executableContract(){
+  const expected='/opt/google/chrome/chrome';
+  for(const scenario of ['elf','script','short','nonregular','nonexecutable','missing','symlink']){
+    let opens=0,closes=0,reads=0;
+    const io={constants:{O_RDONLY:0,O_NOFOLLOW:1,O_NONBLOCK:2},
+      openSync(file,flags){opens++;assert.equal(file,expected);assert.equal(flags,3);
+        if(scenario==='missing'||scenario==='symlink')throw Error(scenario);return 19;},
+      fstatSync(fd){assert.equal(fd,19);return {isFile:()=>scenario!=='nonregular',mode:scenario==='nonexecutable'?0o644:0o755};},
+      readSync(fd,buffer,offset,length,position){reads++;assert.deepEqual([fd,offset,length,position],[19,0,4,0]);
+        Buffer.from(scenario==='script'?'#!/b':'\x7fELF','binary').copy(buffer);return scenario==='short'?3:4;},
+      closeSync(fd){assert.equal(fd,19);closes++;}};
+    if(scenario==='elf')assert.equal(chromeExecutable(io),expected);
+    else assert.throws(()=>chromeExecutable(io));
+    assert.equal(opens,1);assert.equal(closes,['missing','symlink'].includes(scenario)?0:1);
+    if(['missing','symlink','nonregular','nonexecutable'].includes(scenario))assert.equal(reads,0);
+  }
+}
+
 async function browserCheck(){
   if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Linux'||process.env.UAS_MANAGER_BROWSER_TEST!=='1')throw Error('Explicit hosted Linux browser guard required');
   const os=require('node:os'),{spawn}=require('node:child_process');
-  const chrome=['/usr/bin/google-chrome','/usr/bin/chromium'].find(file=>fs.existsSync(file));
-  if(!chrome)throw Error('Preinstalled Chrome unavailable; download and sandbox bypass forbidden');
+  const chrome=chromeExecutable();
   const output=path.join(root,'browser-proof'),pending=new Map();
   const started=Date.now(),diagnostics=browserDiagnostics(chrome,process.version);let phase='spawn',failurePhase=null,failureElapsed=null,failureDiagnostics=null;
   let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='',graceful=null,failure=null;
@@ -340,6 +376,7 @@ async function browserCheck(){
   fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed',diagnostics:diagnostics.snapshot()},null,2));
   console.log(`manager real-browser proof: ${proof.routes.length} routes; ${proof.browser.product}; ${output}/receipt.json`);
 }
+executableContract();
 timerContract();
 diagnosticsContract();
 ownershipContract().then(actionContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
