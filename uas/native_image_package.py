@@ -49,12 +49,15 @@ def envelope(selected_payload, *, image_reference, image_id):
             'payload_manifest_digest': hashlib.sha256(canonical(expected)).hexdigest()}
 
 
-def dockerfile(*, node_image, compiler_image):
+def dockerfile(*, node_image, compiler_image, git_packages=None):
     """linux/amd64 only; version and immutable content identity both mandatory."""
     for value, name in ((node_image, 'node:24.22.1-bookworm-slim'),
                         (compiler_image, 'gcc:14-bookworm')):
         if type(value) is not str or not re.fullmatch(re.escape(name) + r'@sha256:[0-9a-f]{64}', value):
             raise ValueError('select exact official version and digest before build')
+    if git_packages is not None:
+        return combined_dockerfile(node_image=node_image, compiler_image=compiler_image,
+                                   git_packages=git_packages)
     return f'''# Generated installation build input; no default digest, no credential mounts.
 FROM --platform=linux/amd64 {compiler_image} AS compiler
 COPY runtime/workstation/pi-native-connector.c /src/pi-native-connector.c
@@ -85,3 +88,59 @@ CMD []
 def build_inventory():
     return {runtime: {'version': 1, 'runtime': runtime, **VERSIONS[runtime],
                       'paths': sorted(inventory(runtime))} for runtime in VERSIONS}
+
+
+def combined_dockerfile(*, node_image, compiler_image, git_packages):
+    """Opt-in build INPUT, not ABI qualification or permission to execute."""
+    if (type(git_packages) is not dict
+            or set(git_packages) != {'python_package', 'git_package', 'python_version'}
+            or any(type(git_packages[k]) is not str or not re.fullmatch(
+                r'[0-9][A-Za-z0-9.+:~\-]{0,127}', git_packages[k])
+                for k in ('python_package', 'git_package'))
+            or type(git_packages['python_version']) is not str
+            or not re.fullmatch(r'3\.11\.[0-9]{1,3}', git_packages['python_version'])):
+        raise ValueError('select exact Debian package versions and Python patch')
+    source = dockerfile(node_image=node_image, compiler_image=compiler_image)
+    # Keep the native package/compiler pins and the original payload unchanged.
+    source = source[:source.index('USER 65532:65532')]
+    source = source.replace('COPY runtime/claude/mcp-connector.c /src/claude-mcp-connector.c',
+        'COPY runtime/claude/mcp-connector.c /src/claude-mcp-connector.c\n'
+        'COPY runtime/workstation/git_worker_connector.c /src/git-worker-connector.c')
+    source = source.replace('claude-native-bootstrap claude-mcp-connector; do',
+                            'claude-native-bootstrap claude-mcp-connector git-worker-connector; do')
+    # Export is a separate target, never copied back into the Workstation image.
+    source += f"""
+USER 0:0
+RUN apt-get update && apt-get install -y --no-install-recommends python3.11={git_packages['python_package']} git={git_packages['git_package']} && rm -rf /var/lib/apt/lists/*
+COPY runtime/git/ /build/runtime/git/
+COPY uas/*.py /build/uas/
+COPY runtime/native/prepare-git.py /build/prepare-git.py
+RUN /usr/bin/python3.11 -I /build/prepare-git.py {git_packages['python_version']}
+FROM scratch AS git-backend-export
+COPY --from=payload /build/git-export/ /
+FROM payload AS combined
+RUN rm -rf /build
+USER 65532:65532
+ENTRYPOINT []
+CMD []
+# Build --target git-backend-export separately to retrieve the matching trusted backend.
+# Default final target contains only the controlled public Git entries, never the raw backend.
+"""
+    return source
+
+
+def git_envelope(selected_payload, *, image_reference, image_id, nonce):
+    """Bind build-observed Git metadata to the SAME observed final native image."""
+    from .native_git_resources import validate_selection
+    from types import SimpleNamespace
+    if (type(selected_payload) is not dict or set(selected_payload) != {
+            'version', 'profile', 'python_version', 'artifacts', 'abi_artifacts',
+            'uas_tree_sha256', 'backend_sha256'}
+            or type(nonce) is not str or not re.fullmatch(r'[0-9a-f]{32}', nonce)):
+        raise ValueError('exact build-observed Git payload and installation nonce required')
+    result = {**selected_payload, 'image_reference': image_reference, 'image_id': image_id,
+              'backend_path': '/mnt/uas-native/' + nonce + '/git-backend'}
+    plan = SimpleNamespace(config={'deployment': {'images': [{'id': 'selected', 'reference': image_reference}]}},
+                           room={'image': 'selected'}, installation={'nonce': nonce})
+    validate_selection(result, plan)
+    return result

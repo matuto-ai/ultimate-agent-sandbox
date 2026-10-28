@@ -61,3 +61,63 @@ hash requirement.
 Source/pure-test results do not prove a built image, C execution, native provider
 access, isolated deployment or the real #78 lifecycle. A separately authorized
 build and exact artifact readback remain required before installation selection.
+
+## Opt-in combined controlled-Git image
+
+For the existing `native-git-primary-v1` prerequisite, pass `git_packages` to
+`dockerfile(...)`, with exactly `python_package`, `git_package` (explicit Debian
+package versions), and `python_version` (the expected `3.11.<patch>` runtime).
+These selections have no defaults; examples in tests are synthetic and must not
+be used as installation choices. Existing Pi/Claude-only rendering is unchanged.
+No Hub, optional Gate helper, account or installation configuration is added.
+
+The combined recipe retains the selected Node Bookworm base and its reviewed
+Pi/Claude payload. Its build installs the two explicitly selected package
+versions, compiles the existing fixed Git connector, and checks the actual
+Python patch. Debian dependency resolution remains a build input: this is not
+a claim of reproducible builds or pinned transitive package versions. Repository
+availability or incompatible package choices must fail the build, not fall back.
+
+`runtime/native/prepare-git.py` is a build-stage-only script. It stages the exact
+controlled public entries as regular copied files at all three existing prefix
+locations, removes upstream `git-core`, supplies the worker/shim/hook and a
+bounded AST-derived UAS source closure, and preserves the existing worker-only
+hook directory and sealed-FD helper link contracts. No Project code is imported.
+The source closure conservatively includes conditional imports; it is not a new
+Runtime authority boundary. Root-owned files are not group/world writable.
+
+Before replacing public Git, the build records the matching raw package backend
+in a **separate `git-backend-export` target**, together with `git-payload.json`.
+The default final `combined` target removes `/build`, so the raw backend is not
+reachable in its filesystem. Build layers/exports are trusted installation
+artifacts, not secrets. The exported backend is never mounted into the native
+Workstation: existing setup must select it at the fixed trusted-host path, and
+existing admission seals it in a memfd. No copy into that host path occurs here.
+
+The payload records actual Python/Git fixed-file hashes, UAS source-tree hash,
+backend hash, and loader/library hashes obtained from the package Python, Git
+and Python standard-library extension dependencies. Missing dependencies, foreign
+ABI paths, symlink escapes/depth and inventory overflow fail closed. A stdlib
+extension's `ldd` “statically linked” result is accepted only after a bounded
+ELF64 x86-64 shared-object inspection finds a terminated dynamic table with no
+`DT_NEEDED` and no program interpreter; Python and Git get no such exception.
+The [ELF dynamic-section contract](https://gabi.xinuos.com/elf/08-dynamic.html#dynamic-section)
+defines the dependency entries and termination. This is
+observed dependency metadata, not execution proof: real ABI compatibility,
+stock MAC/kernel constraints and native Git behavior still need qualification.
+
+After independently observing the **final combined image** ID and digest-pinned
+reference, call `git_envelope(payload, image_reference=..., image_id=...,
+nonce=...)`. It validates through the existing Git selection contract and adds
+only the observed image identities and fixed installation backend path. Use
+that same final image identity in both Pi/Claude envelopes; never select the
+intermediate payload or export target as the Workstation. The exported backend
+and payload must come from the same build, with its digest checked during
+installation. Do not invent an image digest, package version or nonce.
+
+The canonical `verify_engine_payload` still independently reads the actual
+selected container. Build metadata, static layout tests and controlled archive
+fixtures cannot replace that readback. No build, package download, compiler,
+image/VM/native process, credentials or live lifecycle is exercised by
+`python tests/run_native_combined_image_source.py`; its finite inventory installs
+process/socket/thread/native-loader/privilege guards before repository imports.
