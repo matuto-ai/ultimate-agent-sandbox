@@ -40,7 +40,7 @@ class QualificationPlan:
                     'pi_manifest', 'claude_manifest', 'boundary_manifest', 'hub_manifest',
                     'broker_manifest', 'human_mergers'}
         git_refs = {'git_manifest', 'git_broker_manifest'}
-        if type(installation) is not dict or set(installation) not in (required, required | git_refs, required | git_refs | {'gate_manifest'}):
+        if type(installation) is not dict or set(installation) - {'human_host_manifest'} not in (required, required | git_refs, required | git_refs | {'gate_manifest'}):
             raise QualificationError('INVALID_NATIVE_SELECTION')
         selection = installation
         if (type(selection['version']) is not int or selection['version'] != 1
@@ -75,6 +75,7 @@ class QualificationPlan:
         references=('pi', 'claude', 'boundary', 'hub', 'broker')
         if 'git_manifest' in selection:references+=('git','git_broker')
         if 'gate_manifest' in selection:references+=('gate',)
+        if 'human_host_manifest' in selection:references+=('human_host',)
         for name in references:
             ref = _exact(selection[name + '_manifest'], ('path', 'sha256'), 'INVALID_INSTALLATION_REFERENCE')
             try:
@@ -89,6 +90,9 @@ class QualificationPlan:
         self.installation_digest = installation_digest
         self.config_digest = hashlib.sha256(config_text.encode()).hexdigest()
         self._declarations = canonical({'configuration': self.config, 'installation': self.installation})
+        if 'human_host_manifest' in selection:
+            from .native_human_launch import reference
+            reference(self)
 
     def require_unchanged(self):
         if (hashlib.sha256(self.config_text.encode()).hexdigest() != self.config_digest
@@ -144,7 +148,8 @@ class QualificationPlan:
             'missing_prerequisites': problems,
             'unobserved': ['disposable-guest-boundary', 'owned-runtime-resources',
                            'provider-authentication', 'native-process-admission'],
-            'lifecycle_blockers': ['AUTHENTICATED_NATIVE_RUN_HOST_UNAVAILABLE']}
+            'lifecycle_blockers': ['AUTHENTICATED_NATIVE_RUN_HOST_UNOBSERVED' if 'human_host_manifest' in self.installation
+                                   else 'AUTHENTICATED_NATIVE_RUN_HOST_UNAVAILABLE']}
 
     def preflight(self):
         result = self.check()
@@ -275,7 +280,7 @@ def write_startup(stream, raw, deadline):
         stream.close()
 
 
-def execute(plan):
+def execute(plan, *, human_channel=None):
     """Root owns the fixed child processes and exact disposable cleanup.
 
     No automatic retry: failure preserves unknown native journals for the owner.
@@ -309,7 +314,8 @@ def execute(plan):
         valid = False
     if not valid:
         raise QualificationError('PROTECTED_BROKER_CREDENTIAL_UNAVAILABLE')
-    with provision(plan) as resources:
+    from .native_human_launch import launch_input, validate_result
+    with launch_input(plan, human_channel) as human_launch, provision(plan) as resources:
         private = Path(resources.data['supervisor_directory']).parent / 'broker'
         node = private.lstat()
         if (private.resolve() != private or not stat.S_ISDIR(node.st_mode)
@@ -365,21 +371,29 @@ def execute(plan):
                 resources.hold_git_broker(git_broker)
                 write_startup(git_broker.stdin,raw,deadline)
                 git_broker_channel.close()
-            resources.expect_child()
-            host_argv=[sys.executable,'-m','uas.native_session',str(host_channel.fileno()),str(allocation_child.fileno())]
+            human_selection = None if human_launch is None else human_launch.transfer(resources.data, deadline=deadline)
+            human_fds = () if human_selection is None else (human_selection['raw_fd'], human_selection['grant_fd'])
+            host_module = 'uas.native_session' if human_selection is None else 'uas.native_human_entry'
+            host_argv=[sys.executable,'-m',host_module,str(host_channel.fileno()),str(allocation_child.fileno())]
             git_fds=() if git_host_channel is None else (git_host_channel.fileno(),)
             if git_fds:host_argv.append(str(git_fds[0]))
+            resources.expect_child()
             child = subprocess.Popen(host_argv,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 user=165533, group=165533, extra_groups=[165531, os.stat('/run/docker.sock').st_gid] + ([165530] if 'gate_manifest' in plan.installation else []),
-                pass_fds=resources.pass_fds + (host_channel.fileno(), allocation_child.fileno()) + git_fds, env=environment, cwd='/')
+                pass_fds=resources.pass_fds + (host_channel.fileno(), allocation_child.fileno()) + git_fds + human_fds, env=environment, cwd='/')
             resources.hold_child(child)
+            # Exact child adoption precedes closing parent descriptor copies.
+            # The final host becomes the sole socket owner; uncertain Popen is
+            # never retried with this one-shot transfer object.
+            if human_launch is not None: human_launch.close()
             allocation_child.close()
             handoff = RootCheckoutHandoff(plan, resources, child, allocation_root, deadline=deadline)
             host_channel.close()
             if git_host_channel is not None:git_host_channel.close()
             startup = canonical({'configuration': plan.config_text, 'installation': plan.installation,
-                'installation_digest': plan.installation_digest, 'resources': resources.data})
+                'installation_digest': plan.installation_digest, 'resources': resources.data,
+                **({} if human_selection is None else {'human_host':human_selection})})
             if len(startup) > 2 * 1048576: raise QualificationError('HOST_STARTUP_TOO_LARGE')
             write_startup(child.stdin, startup, deadline)
             output = collect_child(child, handoff, deadline=deadline)
@@ -391,7 +405,9 @@ def execute(plan):
                 if type(code) is not str or len(code) > 96 or not code.replace('_', '').isalnum():
                     code = 'UNKNOWN'
                 raise QualificationError('NATIVE_PAIR_STARTUP_FAILED_' + code)
-            if (type(result) is not dict or result.get('status') != 'NATIVE_PAIR_ATTACHED'
+            if human_selection is not None:
+                validate_result(plan, resources.data, result)
+            elif (type(result) is not dict or result.get('status') != 'NATIVE_PAIR_ATTACHED'
                     or result.get('instance') != resources.data['instance']
                     or result.get('configuration_sha256') != plan.config_digest
                     or result.get('installation_sha256') != plan.installation_digest):

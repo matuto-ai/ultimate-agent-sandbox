@@ -432,6 +432,7 @@ class NativePiRestoreSourceTests(unittest.TestCase):
 
     def test_driver_effect_failure_cannot_enter_restore_catch(self):
         c = self.fixture(); driver = object.__new__(NativeSessionDriver)
+        driver.human_control = None  # Explicitly absent optional authenticated transport.
         driver.started = False; driver.owner = c.owner; driver.request = c.request; driver.budget = c.budget
         driver.next_request = None; driver.next_delivery = 0; driver.next_completion = 10**30
         driver.pi_restoration = N(preflight=Mock(return_value=False), phase='ready')
@@ -444,6 +445,7 @@ class NativePiRestoreSourceTests(unittest.TestCase):
 
     def test_driver_unknown_human_comment_suppresses_restoration(self):
         c = self.fixture(); driver = object.__new__(NativeSessionDriver)
+        driver.human_control = None  # Explicitly absent optional authenticated transport.
         driver.started = False; driver.owner = c.owner; driver.request = c.request; driver.budget = c.budget
         driver.next_request = None; driver.pi_restoration = N(preflight=Mock(), phase='ready')
         driver._session = Mock(); driver._row = lambda: c.state['runs'][c.scope['run_id']]

@@ -188,11 +188,21 @@ def _gate_listener(resources):
         channel.close();raise
 
 
-def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None, human_actions=None):
+def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None, human_actions=None, human_control=None):
     from .native_qualification_backend import readonly_supervisor
     require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
     require(type(resources) is dict and resources.get('room_id') == plan.room['id'], 'INVALID_LAUNCH_RESOURCES')
     require(('git_manifest' in plan.installation)==(git_fd is not None),'GIT_BROKER_CHANNEL_REQUIRED')
+    if human_control is not None:
+        from .native_human_control import NativeHumanControl
+        from .native_run_admission import NativeHumanRunRequest
+        require(type(human_control) is NativeHumanControl and type(human_request) is NativeHumanRunRequest
+                and human_actions is None and next_request is None
+                and human_control.session is human_request.session and human_control._first_taken
+                and human_control._first is not None
+                and (human_request.operation_id, human_request.issue_number) ==
+                    (human_control._first.operation_id, human_control._first.issue_number),
+                'EXACT_NATIVE_HUMAN_CONTROL_REQUIRED')
     if human_actions is not None:
         from .native_session_driver import NativeHumanReviewInbox
         from .native_run_admission import NativeHumanRunRequest
@@ -220,6 +230,9 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
     os.umask(0o007)  # Shared Room SQLite files only; private owners use explicit0600.
     probe()
     budget = SessionBudget(plan.installation['timeout_seconds'])
+    if human_control is not None:
+        budget.deadline = min(budget.deadline, human_control._deadline)
+        budget.remaining()
     supervisor = readonly_supervisor(plan, resources)
     room, instance = plan.room, resources['instance']
     journal = Path(resources['supervisor_directory'])
@@ -236,6 +249,13 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
         broker = ReadBrokerClient(broker_channel, supervisor, binding, instance,
                                   worker_uid=BROKER_UID, worker_gid=BROKER_UID)
         stack.callback(broker.close)
+        if human_control is not None:
+            from .native_broker_audit import NativeBrokerAudit
+            from .native_session_driver import NativeHumanReviewInbox
+            # The original private Broker client is created here, not supplied
+            # by a transport thread or replaced with a host-local audit DB.
+            human_actions = NativeHumanReviewInbox(human_request.session,
+                                                   NativeBrokerAudit(broker, human_request.session))
         git_broker=None
         if git_fd is not None:
             from .git_service import GitBrokerClient
@@ -330,11 +350,12 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                 NativePiSameRunRestore(owner,recruitment,human_request,budget,git_operations=git_operations))
             driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request,
                                        git_operations=git_operations,human_actions=human_actions,
-                                       pi_restoration=pi_restoration)
+                                       pi_restoration=pi_restoration,human_control=human_control)
             result=driver.run()
             return {'version':1,'status':'NATIVE_RUN_SESSION_FINISHED','room_id':room['id'],'instance':instance,
                 'run_id':result['current_run'],'product_run_created':True,'reviewer_attached':True,
                 'session':result,'human_review_actions_attached':human_actions is not None,
+                'human_host_attached':human_control is not None,
                 'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
                 'lifecycle_blockers':((['NATIVE_COMMAND_DIFF_GATE_PROFILES_UNAVAILABLE',
@@ -342,8 +363,8 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
                                        ['NATIVE_GATE_WORKER_COMPOSITION_UNAVAILABLE'])+
                                       ['NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE'] if git_operations is not None else
                                       ['NATIVE_GIT_GATE_WORKER_COMPOSITION_UNAVAILABLE'])+
-                                     ['AUTHENTICATED_MANAGER_DISPATCH_UNAVAILABLE',
-                                      'FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
+                                     ([] if human_control is not None else ['AUTHENTICATED_MANAGER_DISPATCH_UNAVAILABLE'])+
+                                     ['FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
                 'production_launcher':'disabled'}
         pi_recipe = NativePiRecipe.from_configuration(StringIO(plan.config_text), room['id'], pi_seat.participant_id,
             resources['pi_manifest_path'], plan.installation['pi_manifest']['sha256'], seat=pi_seat, scope=pi_scope,

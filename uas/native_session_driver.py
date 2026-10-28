@@ -97,7 +97,7 @@ class NativeSessionDriver:
     Unknown effects stop this invocation with their original owners/journals intact.
     """
     def __init__(self, owner, recruitment, request, budget, *, next_request=None, git_operations=None, human_actions=None,
-                 pi_restoration=None):
+                 pi_restoration=None, human_control=None):
         from .native_session import SessionBudget
         if (type(owner) is not NativeRunAdmission or type(recruitment) is not NativeReviewerRecruitment
                 or recruitment.owner is not owner or type(request) is not NativeHumanRunRequest
@@ -127,6 +127,16 @@ class NativeSessionDriver:
                 or request.session.instance_id!=recruitment.binding.room_instance
                 or next_request is not None):
             raise LedgerError('EXACT_NATIVE_HUMAN_ACTION_OWNER_REQUIRED')
+        if human_control is not None:
+            from .native_human_control import NativeHumanControl
+            from .native_broker_audit import NativeBrokerAudit
+            if (type(human_control) is not NativeHumanControl or human_actions is None
+                    or human_control.session is not request.session
+                    or type(human_actions.audit) is not NativeBrokerAudit
+                    or human_actions.audit.client is not owner.broker.client
+                    or budget.deadline > human_control._deadline):
+                raise LedgerError('EXACT_NATIVE_HUMAN_CONTROL_REQUIRED')
+        self.human_control, self._human_view = human_control, None
         self.human_actions=human_actions
         if pi_restoration is not None:
             from .native_pi_restore import NativePiSameRunRestore
@@ -190,6 +200,31 @@ class NativeSessionDriver:
 
     def _restore_unknown(self):
         return self.pi_restoration is not None and self.pi_restoration.phase == 'unknown'
+
+    def _human_transport(self, *, observe=True):
+        """Drain authenticated data and publish bounded views outside owner locks."""
+        control = self.human_control
+        if control is None: return
+        self._session()
+        for value in control.drain_commands():
+            self.human_actions.enqueue(value)
+        if observe and control.take_observation_request():
+            from .manager_actions import current_run
+            operation = self.human_actions.audit.observation()
+            with operation.prepare_manager_guard():
+                with self.owner.supervisor._locked():
+                    self.owner._room()
+                    with operation.manager_action_guard(self.owner.ledger.room_id,
+                            self.human_actions.audit.binding.repository) as forge:
+                        self._session()
+                        state = self.owner.ledger.snapshot()['state']
+                        operation.require_current()
+                        view = current_run(state, self.owner.run_id(self.request.operation_id), forge)
+                        self._human_view = None if view is None else {key:view[key] for key in (
+                            'run_id','generation','status','observed_version','review_stage','submission_id','forge_uncertain')}
+        statuses = tuple({'operation_id':item['operation_id'], 'status':item['status']}
+                         for item in self.human_actions.snapshot())
+        control.publish(self._human_view, statuses)
 
     def _human_action(self,row):
         inbox=self.human_actions
@@ -273,7 +308,7 @@ class NativeSessionDriver:
             while True:
                 # Scheduling margin only: the outer root deadline bounds aggregate work.
                 # Expiry during an effect retains its canonical unknown intent/audit.
-                self._session();row=self._row()
+                self._session();self._human_transport();row=self._row()
                 self.last_observed={key:row.get(key) for key in ('run_id','generation','status','outcome')}
                 if row['status']=='CLOSED':
                     if row.get('outcome')!='completed':return self._result('attention','canonical-run-closed')
@@ -293,6 +328,7 @@ class NativeSessionDriver:
                         self.next_delivery=self.next_completion=0.
                 self._current()
                 self._human_action(row)
+                self._human_transport(observe=False)
                 if self._pending_comments():
                     # No native/Git/provider work while a human comment is
                     # unresolved. Only a supplied explicit reconciliation may run.

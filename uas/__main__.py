@@ -6,6 +6,7 @@ import sys
 from .config import ConfigError, load
 from .launch import check_launch
 from .lifecycle import LifecycleError, BackendUnknown, OwnershipConflict
+from .ledger import LedgerError
 
 
 def main(argv=None):
@@ -25,6 +26,7 @@ def main(argv=None):
     native.add_argument('--installation', required=True, help='private immutable installation-reference JSON')
     native.add_argument('--installation-sha256', required=True, help='independently selected exact installation digest')
     native.add_argument('--execute-qualification', action='store_true', help='explicit disposable qualification only')
+    native.add_argument('--human-stream-fd', type=int, help='explicit inherited accepted raw stream; requires selected protected human grant and execution')
     args = parser.parse_args(argv)
     def inspect(source):
         if args.command == 'qualify-native':
@@ -32,7 +34,15 @@ def main(argv=None):
             plan = QualificationPlan.read(source.read(1048577), args.installation, args.installation_sha256)
             if args.execute_qualification:
                 from .native_qualification import execute
-                return execute(plan)
+                if args.human_stream_fd is None: return execute(plan)
+                if args.human_stream_fd < 3: raise QualificationError('NATIVE_HUMAN_RAW_STREAM_REQUIRED')
+                if 'human_host_manifest' not in plan.installation:
+                    raise QualificationError('NATIVE_HUMAN_EXPLICIT_GRANT_REQUIRED')
+                import socket
+                with socket.socket(fileno=args.human_stream_fd) as channel:
+                    return execute(plan, human_channel=channel)
+            if args.human_stream_fd is not None:
+                raise QualificationError('NATIVE_HUMAN_STREAM_REQUIRES_EXECUTION')
             return plan.preflight()
         if args.command == "check-launch":
             return check_launch(source, args.room, broker_socket=args.broker_socket,
@@ -47,6 +57,9 @@ def main(argv=None):
     except ConfigError as error:
         print(json.dumps({"error": "INVALID_CONFIG", "field": error.field, "reason": error.reason}), file=sys.stderr)
         return 2
+    except LedgerError as error:
+        print(json.dumps({'error': error.code, 'production_launcher': 'disabled'}), file=sys.stderr)
+        return 3
     except (OSError, UnicodeError):
         print(json.dumps({"error": "CONFIG_UNREADABLE", "field": "$", "reason": "cannot read UTF-8 configuration"}), file=sys.stderr)
         return 2

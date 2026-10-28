@@ -23,6 +23,7 @@ from .lifecycle import _unique_object
 
 KIND = 'NATIVE_MANAGER_AUDIT'
 ACTIONS = frozenset({'request-changes', 'reconcile-changes'})
+AUDIT_ACTIONS = ACTIONS | {'observe'}
 _SHA = re.compile(r'[0-9a-f]{64}\Z')
 _REQUEST = re.compile(r'[0-9a-f]{32}\Z')
 
@@ -46,7 +47,7 @@ def _scope(packet, broker):
             or packet['room_id'] != broker.binding.room_id
             or packet['room_instance'] != broker.room_instance
             or packet['repository'] != broker.binding.repository
-            or packet['action'] not in ACTIONS
+            or packet['action'] not in AUDIT_ACTIONS
             or type(packet['request_digest']) is not str or not _SHA.fullmatch(packet['request_digest'])):
         raise LedgerError('NATIVE_AUDIT_SCOPE_INVALID')
     _token(packet['operation_id'])
@@ -56,7 +57,8 @@ def _scope(packet, broker):
             or type(origin['capabilities']) is not list):
         raise LedgerError('NATIVE_AUDIT_ORIGIN_REQUIRED')
     human = Origin(**{**origin, 'capabilities': tuple(origin['capabilities'])})
-    if human.canonical() != origin or 'human-control-run' not in human.capabilities:
+    required = 'human-open-run' if packet['action'] == 'observe' else 'human-control-run'
+    if human.canonical() != origin or required not in human.capabilities:
         raise LedgerError('NATIVE_AUDIT_ORIGIN_REQUIRED')
     return hashlib.sha256(_json(packet).encode()).hexdigest()
 
@@ -158,6 +160,17 @@ class NativeBrokerAudit:
         self.binding, self.instance = client.binding, client.room_instance
         self.owner_thread = threading.get_ident()
         self.failed = False
+
+    def observation(self):
+        """One read-only view cut over the original audit and local Hub snapshot.
+
+        This fixed operation creates no provider request or Manager mutation.
+        Its scope is constructed by the retained host, never a browser selector.
+        """
+        return NativeAuditOperation(self, {'version': 1, 'action': 'observe',
+            'operation_id': 'native-human-observation', 'deployment_id': self.deployment_id,
+            'room_id': self.binding.room_id, 'instance_id': self.instance,
+            'repository': self.binding.repository})
 
     def bind(self, value, session):
         from .manager_actions import request

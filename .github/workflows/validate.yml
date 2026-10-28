@@ -363,7 +363,7 @@ jobs:
       - name: Check two-Room HTTPS replay and certificate isolation
         env:
           UAS_MANAGER_TLS_TEST: "1"
-        run: timeout --signal=TERM --kill-after=2s 40s python3 -m unittest discover -s tests -p test_manager_tls.py -v
+        run: PYTHONPATH=tests timeout --signal=TERM --kill-after=2s 40s python3 -m unittest test_manager_tls test_native_human_tls -v
 
   manager-field-notes:
     # Reuses the existing check entrypoint and runner's installed Chrome.

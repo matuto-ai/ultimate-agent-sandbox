@@ -39,6 +39,12 @@ SOURCES = (
     'uas/native_qualification_backend.py',
     'uas/native_session.py',
     'uas/native_session_driver.py',
+    'uas/human_mtls.py',
+    'uas/manager_stream.py',
+    'uas/manager_transport.py',
+    'uas/native_human_control.py',
+    'uas/native_human_launch.py',
+    'uas/native_human_entry.py',
     'uas/native_gate_workflow.py',
     'uas/native_gate_recipe.py',
     'uas/native_gate_resources.py',
@@ -160,9 +166,9 @@ SOURCES = (
     'runtime/workstation/diff_evaluator.c',
     'runtime/workstation/artifact_protocol.h',
 )
-# Explicit Gate closure: base130 / artifacts134 / command137 files.
+# Explicit Gate closure: base136 / artifacts140 / command143 files.
 # Fixed paths only; byte budgets remain the reviewed 256KiB/file and3MiB total.
-MAX_SOURCE_FILES=137
+MAX_SOURCE_FILES=143
 MAX_SOURCE_BYTES=256<<10
 MAX_SOURCE_TOTAL=3<<20
 
