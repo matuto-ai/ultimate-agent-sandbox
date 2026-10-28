@@ -31,8 +31,23 @@ class AdmittedPeerDispatcher:
         self.host_forge_binding = None
         self.admissions, self.hub = admissions, hub
         self._connections = {}
+        self._pending_connections = {}
         self._delivery_offers = {}
         self._delivery_confirmed = set()
+        admissions.bind_revocations(self)
+
+    def lost(self, operation):
+        """Admission-lock → Room transaction; only the original attachment."""
+        connection = self._connections.get(operation) or self._pending_connections.get(operation)
+        if connection is None:
+            return
+        current = self.hub._state()['connections'].get(connection.participant_id, {})
+        exact = (current.get('attachment_id') == connection.attachment_id
+                 and current.get('incarnation_id') == connection.incarnation_id
+                 and current.get('context_generation') == connection.context_generation)
+        if not exact or current.get('readiness') == Readiness.LOST.value:
+            return  # Never mark a replacement attachment lost.
+        self.hub.observe(connection, Readiness.LOST)
 
     def attach_host_forge_binding(self, binding):
         """Immutable trusted startup Project binding, never credentials/authority."""
@@ -122,11 +137,16 @@ class AdmittedPeerDispatcher:
                 connection = self.hub.connect('admit-' + operation,
                     binding.seat.participant_id, binding.incarnation,
                     _InboundOnlyReceiver(), context_generation=context_generation)
+                self._pending_connections[operation] = connection
                 self.admissions.recheck(operation, None)
                 self.attach(operation, connection)
+                self._pending_connections.pop(operation, None)
                 return connection
         except BaseException:
-            self.admissions.revoke(operation)
+            try:
+                self.admissions.revoke(operation)
+            finally:
+                self._pending_connections.pop(operation, None)
             raise
 
     def attach(self, operation, connection):

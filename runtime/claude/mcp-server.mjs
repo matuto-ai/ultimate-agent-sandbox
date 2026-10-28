@@ -40,7 +40,7 @@ async function handle(r) {
   if (active) return error(id,-32000,'tool call in progress');
   if (!r.params || Object.keys(r.params).some(k=>!['name','arguments','_meta'].includes(k))) return error(id,-32602,'invalid call');
   active=true;
-  try { write({jsonrpc:'2.0',id,result:await invoke(r.params.name === 'gh' ? forgeChannel : channel,r.params.name,r.params.arguments)}); }
+  try { write({jsonrpc:'2.0',id,result:await invoke(['gh','uas_review'].includes(r.params.name) ? forgeChannel : channel,r.params.name,r.params.arguments)}); }
   catch { error(id,-32000,(channel.fenced || forgeChannel.fenced) ? 'channel outcome uncertain; reconcile through canonical owner' : 'invalid tool request'); }
   finally { active=false; if (channel.fenced || forgeChannel.fenced) stop(); }
 }

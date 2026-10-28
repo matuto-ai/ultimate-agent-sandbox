@@ -231,7 +231,7 @@ class NativeClaudeRoot:
 
     def initialize_helper(self, listener, *, journal, control, hub_origin,
                           controller, control_lock, operation_id, epoch,
-                          timeout=8, control_timeout=2, forge_client=None):
+                          timeout=8, control_timeout=2, forge_client=None, review_startup=None):
         """Concrete fresh SDK/native/helper startup, without a worker thread.
 
         The fixed host starts SDK initialization after the second challenge;
@@ -247,6 +247,10 @@ class NativeClaudeRoot:
                 or type(operation_id) is not str or not OPERATION.fullmatch(operation_id)
                 or type(epoch) is not int or not 1<=epoch<2**53):
             raise OriginDenied('one bounded fresh helper initialization required')
+        if review_startup is not None:
+            from .native_review_host import NativeReviewStartup
+            if type(review_startup) is not NativeReviewStartup or forge_client is None:
+                raise OriginDenied('explicit native review startup and Broker required')
         self._initialize_started=True
         deadline=time.monotonic()+timeout
         def remaining():
@@ -269,6 +273,8 @@ class NativeClaudeRoot:
             if forge_client is not None:
                 from .native_host_forge import NativeHostForge
                 self.forge_service = NativeHostForge(self.helper_lease, forge_client)
+            if review_startup is not None:
+                self.review_host = review_startup.attach(self.forge_service)
             remaining()
             return self
         except BaseException:

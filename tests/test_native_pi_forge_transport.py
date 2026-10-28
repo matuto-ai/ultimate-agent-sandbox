@@ -70,15 +70,15 @@ class NativePiForgeTransportTests(unittest.TestCase):
             run=json.loads(peer.recv(65537));self.assertEqual(run['envelope'],{'id':'stable-run','kind':'run-propose','payload':{}})
             self.assertEqual(select.select([forge],[],[],0)[0],[],'Run proposal must stay on Hub channel')
             peer.sendall(json.dumps({'request_id':run['request_id'],'ok':True,'receipt':{}}).encode())
-            submit=json.loads(peer.recv(65537))
+            submit=json.loads(forge.recv(65537))
             self.assertEqual(submit['envelope'],{'id':'stable-submit','kind':'submit-for-review','run_id':'run','generation':1,
                 'payload':{'target':{'head_sha':'a'*40},'evidence':['evidence:test']},'observation_id':'observation'})
-            self.assertEqual(select.select([forge],[],[],0)[0],[],'review submission stays on Hub')
-            peer.sendall(json.dumps({'request_id':submit['request_id'],'ok':True,'receipt':{'stage':'REVIEWING'}}).encode())
-            review=json.loads(peer.recv(65537));self.assertEqual(review['envelope'],{'id':'stable-review','kind':'review-result',
+            self.assertEqual(select.select([peer],[],[],0)[0],[],'review submission uses trusted host')
+            forge.sendall(json.dumps({'request_id':submit['request_id'],'ok':True,'receipt':{'stage':'REVIEWING'}}).encode())
+            review=json.loads(forge.recv(65537));self.assertEqual(review['envelope'],{'id':'stable-review','kind':'review-result',
                 'run_id':'run','generation':1,'payload':{'verdict':'pass','evidence':['evidence:test']}})
-            self.assertEqual(select.select([forge],[],[],0)[0],[],'review verdict stays on Hub')
-            peer.sendall(json.dumps({'request_id':review['request_id'],'ok':False,'error':'REVIEWER_NOT_INDEPENDENT'}).encode())
+            self.assertEqual(select.select([peer],[],[],0)[0],[],'review verdict uses trusted host')
+            forge.sendall(json.dumps({'request_id':review['request_id'],'ok':False,'error':'REVIEWER_NOT_INDEPENDENT'}).encode())
             stdout,stderr=process.communicate(timeout=3)
             self.assertEqual(process.returncode,0,stderr.decode());self.assertEqual(stdout,b'direct-pi-routing-ok\n')
             # Oversize failed before either record; shutdown closed both FDs.

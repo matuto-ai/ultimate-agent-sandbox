@@ -71,8 +71,8 @@ class ContributionOwner:
                               {'report_id': cmd.id})
         return self.ledger.apply(command, origin, authorize=permitted, decide=decide)
 
-    def known(self, run):
-        snapshot = self.ledger.snapshot()['state']
+    def known(self, run, *, state=None):
+        snapshot = self.ledger.snapshot()['state'] if state is None else state
         current = snapshot.get('runs', {}).get(run['run_id'])
         if (current is None or current['generation'] != run['generation']
                 or current['project_id'] != self.binding.project_id or current['repository'] != self.binding.repository):

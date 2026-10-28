@@ -1,6 +1,6 @@
 """Pure canonical Hub helper authority transitions; no sockets/processes."""
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 import unittest
 from uas import workstation_admission as m
 
@@ -24,6 +24,7 @@ class HelperAdmissionTests(unittest.TestCase):
     def make(self):
         hub=object.__new__(m.HubAdmission)
         hub._lock=Lock();hub._authorization=SimpleNamespace(depth=0)
+        hub.db=SimpleNamespace(execute=Mock())
         hub._closed=hub._fenced=False;hub.controller='c'*32
         hub.supervisor=Origin((1,2));hub.endpoint=SimpleNamespace(require=lambda:True)
         root=m._Offer({},Channel(),Origin((3,4)))

@@ -73,3 +73,12 @@ command still returns its exact terminal receipt without contacting providers.
 A confirmed comment whose target refresh is temporarily unavailable remains
 `confirmed-awaiting-target`; an explicit reconciliation read can route that same
 comment once, without posting it again.
+
+For isolated native composition, `NativeReviewHost` runs this same reducer on the
+trusted host with an ordinary connection to the same canonical Room database.
+Original native review records arrive at its retained FD4 receiver, not as
+Hub-forwarded Actor claims. Peer/Run transport remains in the isolated Hub. Native
+preparation observes providers outside locks; consumption rechecks exact source,
+Gate refresh cut and native identity under lifecycle → Git → Room lock order.
+The existing in-process fixture path is unchanged. See `native-host-forge.md` for
+startup inputs, human controls and qualification limits.

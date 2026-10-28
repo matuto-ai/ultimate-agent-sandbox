@@ -7,6 +7,7 @@ A restarted owner cannot reconstruct live task authority from these records.
 import hashlib
 from _thread import LockType
 import json
+import select
 import threading
 import uuid
 
@@ -50,6 +51,18 @@ class SupervisorAdmission:
         return self.forge_service.receive_once()
 
     def _current(self):
+        # poll reports HUP even with unread replies queued; PEEK alone cannot.
+        # Observation only: no control bytes consumed, no authority lock taken.
+        try:
+            poll = select.poll()
+            flags = select.POLLHUP | select.POLLERR | select.POLLNVAL | getattr(select, 'POLLRDHUP', 0)
+            poll.register(self.control, flags)
+            lost = any(events & flags for _, events in poll.poll(0))
+        except (OSError, ValueError):
+            lost = True
+        if lost:
+            self._fenced = True
+            raise OriginDenied('Supervisor control channel unavailable')
         if (self._fenced or self.hub_origin.revoked or not alive(self.hub_origin.pidfd)
                 or self.launch.origin is None or self.launch.origin.revoked
                 or not alive(self.launch.origin.pidfd) or self.launch.state != 'active'):

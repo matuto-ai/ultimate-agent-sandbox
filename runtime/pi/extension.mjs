@@ -70,8 +70,8 @@ export default function (pi) {
         throw Error('invalid-review-proposal');
       if (Buffer.byteLength(JSON.stringify({request_id:'0'.repeat(32),envelope})) > 65536)
         throw Error('single-record-request-limit');
-      // Peer/Run review authority stays on FD3. Never select the Forge channel.
-      const reply = await channel.request(envelope, { signal, timeoutMs: 45000 });
+      // Native reviews reach the trusted original-record receiver; fixtures retain FD3.
+      const reply = await forgeChannel.request(envelope, { signal, timeoutMs: 45000 });
       return { content: [{ type: 'text', text: JSON.stringify(reply) }], details: reply, isError: !reply.ok };
     },
   });

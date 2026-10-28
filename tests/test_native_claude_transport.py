@@ -91,6 +91,14 @@ class NativeClaudeTransportTests(unittest.TestCase):
             self.assertEqual(select.select([parent],[],[],0)[0],[],'Hub must not receive Forge request')
             forge_parent.sendall(json.dumps({'request_id':direct['request_id'],'ok':True,'receipt':{'observation':{'completeness':'complete'}}}).encode())
             self.assertFalse(reply()['result']['isError'])
+            review={'id':'direct-review','kind':'review-result','run_id':'run','generation':1,
+                    'payload':{'submission_id':'submitted','verdict':'pass','review_reference':'reference',
+                               'lenses':['Standards','Specification','Runtime']}}
+            send({'jsonrpc':'2.0','id':101,'method':'tools/call','params':{'name':'uas_review','arguments':review}})
+            reviewed=json.loads(forge_parent.recv(65537));self.assertEqual(reviewed['envelope'],review)
+            self.assertEqual(select.select([parent],[],[],0)[0],[],'review original bytes must reach trusted host only')
+            forge_parent.sendall(json.dumps({'request_id':reviewed['request_id'],'ok':False,'error':'REVIEWER_REQUIRED'}).encode())
+            self.assertTrue(reply()['result']['isError'])
             # Oversized writes fail before even the first channel packet.
             send({'jsonrpc':'2.0','id':100,'method':'tools/call','params':{'name':'gh','arguments':{
                 'id':'large','argv':['pr','comment','1','--body-file','-'],'body':'x'*65536}}})

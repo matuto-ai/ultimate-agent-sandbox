@@ -23,6 +23,7 @@ class AdmittedHubLoop:
                        for value in context_generations.values())):
             raise OriginDenied('trusted Hub control/context configuration required')
         self.admissions, self.dispatcher, self.control = admissions, dispatcher, control
+        admissions.bind_control(control)
         self.context_generations = MappingProxyType(dict(context_generations))
         self._owner = threading.get_ident()
         self._selector = selectors.DefaultSelector()

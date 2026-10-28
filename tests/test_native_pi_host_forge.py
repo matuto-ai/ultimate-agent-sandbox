@@ -30,6 +30,9 @@ class Channel:
 
 class NativePiForgeTests(unittest.TestCase):
     def typed(self):
+        poll_patch=patch('uas.workstation_control.select.poll',return_value=N(register=Mock(),poll=Mock(return_value=[])))
+        poll_patch.start();self.addCleanup(poll_patch.stop)
+
         # Actual exact classes, inert fields; constructor checks must not accept
         # duck-typed authority. Kernel liveness is explicitly controlled below.
         launch=object.__new__(ExecLaunch)
@@ -116,13 +119,13 @@ class NativePiForgeTests(unittest.TestCase):
         self.assertIn('"UAS_PI_NATIVE=1"',bootstrap);self.assertIn('close_range(5',bootstrap)
         self.assertIn('argc == 8',bootstrap);self.assertIn('native-entry.mjs',bootstrap)
 
-    def test_only_gh_selects_direct_forge_transport(self):
+    def test_only_gh_and_review_select_direct_host_transport(self):
         root=Path(__file__).resolve().parents[1]
         text=(root/'runtime/pi/extension.mjs').read_text()
-        run=text[text.index("name: 'uas_run'"):text.index("name: 'gh'")]
+        run=text[text.index("name: 'uas_run'"):text.index("name: 'uas_review'")]
         self.assertIn('await channel.request',run)
         self.assertNotIn('forgeChannel.request',run)
-        self.assertEqual(text.count('await forgeChannel.request'),1)
+        self.assertEqual(text.count('await forgeChannel.request'),2)
 
     def test_review_tool_uses_canonical_hub_schema_and_no_forge_authority(self):
         root=Path(__file__).resolve().parents[1]
@@ -130,8 +133,8 @@ class NativePiForgeTests(unittest.TestCase):
         section=text[text.index("name: 'uas_review'"):text.index("name: 'gh'")]
         self.assertIn("['submit-for-review','review-result']",section)
         self.assertIn("['id','run_id','generation','kind','payload']",section)
-        self.assertIn('await channel.request(envelope, { signal, timeoutMs: 45000 })',section)
-        self.assertNotIn('forgeChannel',section)
+        self.assertIn('await forgeChannel.request(envelope, { signal, timeoutMs: 45000 })',section)
+        self.assertNotIn('await channel.request',section)
         self.assertIn('isError: !reply.ok',section)
         self.assertNotIn('actor_id:',section)
 

@@ -44,6 +44,7 @@ SOURCES = (
     'uas/native_claude_runtime.py',
     'uas/native_helper.py',
     'uas/native_host_forge.py',
+    'uas/native_review_host.py',
     'uas/workstation_admission.py',
     'uas/workstation_control.py',
     'uas/workstation_peer.py',

@@ -304,10 +304,13 @@ class GateHub(ArtifactGateHub):
                 result.update(state='stale', changed_dependencies=[self._error_code(error)])
             state['gate_evaluations'][row['evaluation_id']]['refresh'] = {
                 'operation_id': operation, 'phase': 'TERMINAL', 'projection': result, 'audit_reference': reference}
+            self._native_refresh_capture(state['gate_evaluations'][row['evaluation_id']], operation)
             return Transition(state, (Event('gate.refreshed', {**result, 'audit_reference': reference,
                 'subject_observation': proof}),), result)
         terminal = Command(operation + '-done', 'gate.refreshed', row['evaluation_id'], None, {})
-        return self.ledger.apply(terminal, origin, authorize=lambda *_: True, decide=finish)['result']
+        receipt = self.ledger.apply(terminal, origin, authorize=lambda *_: True, decide=finish)['result']
+        self._native_refresh_finished(row['evaluation_id'], operation)
+        return receipt
 
     def _external_target(self, run, gate):
         if gate['evaluator'] not in ('forge-state', 'diff-claims'):
@@ -508,9 +511,11 @@ class GateHub(ArtifactGateHub):
             current['gate_evaluations'][row['evaluation_id']]['refresh'] = {
                 'operation_id': operation, 'phase': 'TERMINAL', 'projection': result,
                 'audit_reference': audit_reference}
+            self._native_refresh_capture(current['gate_evaluations'][row['evaluation_id']], operation)
             return Transition(current, (Event('gate.refreshed', {**result,
                 'audit_reference': audit_reference}),), result)
         self.ledger.apply(terminal, origin, authorize=lambda *_: True, decide=finish)
+        self._native_refresh_finished(row['evaluation_id'], operation)
         return result
 
     def recover_interrupted(self, evaluation_id):
@@ -693,7 +698,7 @@ class GateHub(ArtifactGateHub):
         self.ledger.apply(terminal, _CONTROL, authorize=lambda *_: True, decide=decide)
         return self._view(self._row(evaluation_id))
 
-    def _identity_projection(self, state, command, run, policy, gate, origin):
+    def _identity_projection(self, state, command, run, policy, gate, origin, *, supplied_state=False):
         current = self._identity_scope(command, run, policy, gate)
         rows = [row for row in state.get('gate_evaluations', {}).values()
                 if row['scope']['run_id'] == run['run_id'] and row['scope']['gate_id'] == gate['id']]
@@ -719,7 +724,7 @@ class GateHub(ArtifactGateHub):
                 'state': 'stale' if changed else 'in-flight' if result is None else result['verdict'],
                 'changed_dependencies': changed})
         try:
-            closing_state = self.ledger.snapshot()['state']
+            closing_state = state if supplied_state else self.ledger.snapshot()['state']
             closing_run, closing_policy, closing_gate = self._definition(closing_state, command, require_active=False)
             closing_scope = self._identity_scope(command, closing_run, closing_policy, closing_gate)
             closing_rows = [row for row in closing_state.get('gate_evaluations', {}).values()
@@ -762,6 +767,75 @@ class GateHub(ArtifactGateHub):
             projected = self.diff_hub.projection(run_id, generation, gate_id, origin=origin)
             return self._refresh_diff_projection(projected, command, origin) if projected['state'] == 'passed' else projected
         return self._external_projection(state, command, run, policy, gate, origin)
+
+    def _native_refresh_capture(self, row, operation):
+        scope = getattr(self, '_native_preparation', None)
+        if scope is not None:
+            scope.capture_refresh(row, operation)
+
+    def _native_refresh_finished(self, evaluation, operation):
+        scope = getattr(self, '_native_preparation', None)
+        if scope is not None:
+            scope.finish_refresh(evaluation, operation)
+
+    def prepare_native_operation(self, run_id, generation, operation, *, origin, acceptance):
+        """Same canonical projections, with an invocation-owned exact observation cut.
+
+        This is preparation only. NativeReviewAcceptance must revalidate it under
+        lifecycle -> Git -> Room locks; no returned dictionary grants authority.
+        """
+        from .native_review_host import NativeReviewAcceptance
+        if (type(acceptance) is not NativeReviewAcceptance or acceptance.gates is not self
+                or getattr(self, '_native_preparation', None) is not None):
+            raise LedgerError('INVALID_NATIVE_REVIEW_SCOPE')
+        acceptance.require_observing()
+        self._require_owner()
+        state = self.ledger.snapshot()['state']
+        run = state.get('runs', {}).get(run_id)
+        if run is None or run['generation'] != generation:
+            raise LedgerError('REVIEW_RUN_STALE')
+        ids = run['policy'].get('protected_operations', {}).get(operation)
+        if operation not in ('submit-for-review', 'complete') or type(ids) is not list or not ids:
+            raise LedgerError('INVALID_GATE_POLICY')
+        projections, rows = [], {}
+        self._native_preparation = acceptance
+        try:
+            for gate in ids:
+                before = {key: deepcopy(row) for key, row in self.ledger.snapshot()['state'].get('gate_evaluations', {}).items()
+                          if row['scope']['run_id'] == run_id and row['scope']['gate_id'] == gate}
+                projection = self.projection(run_id, generation, gate, origin=origin)
+                after = {key: deepcopy(row) for key, row in self.ledger.snapshot()['state'].get('gate_evaluations', {}).items()
+                         if row['scope']['run_id'] == run_id and row['scope']['gate_id'] == gate}
+                expected = acceptance.refreshed_rows(before)
+                if after != expected:
+                    raise LedgerError('GATE_OPERATION_STALE')
+                rows.update(after); projections.append(projection)
+        finally:
+            self._native_preparation = None
+        blockers = [p for p in projections if p['state'] != 'passed']
+        view = {'operation': operation, 'run_id': run_id, 'generation': generation,
+                'gates_satisfied': not blockers, 'blockers': blockers, 'gates': projections,
+                'policy_digest': _digest(run['policy']), 'run_dependency_digest': _run_dependency_digest(run),
+                'contribution_digest': _contribution_digest(state, run_id)}
+        acceptance.capture_gates(view, rows, origin)
+        return view
+
+    def validate_native_operation(self, state, view, rows, *, origin):
+        """Pure final local revalidation; no refresh, new transaction or RPC."""
+        require_operation_gates(state, view)
+        current = {key: row for key, row in state.get('gate_evaluations', {}).items()
+                   if row['scope']['run_id'] == view['run_id']
+                   and row['scope']['gate_id'] in [g['gate_id'] for g in view['gates']]}
+        if current != rows:
+            raise LedgerError('GATE_OPERATION_STALE')
+        for projection in view['gates']:
+            command = self._command('gate-projection', view['run_id'], view['generation'], projection['gate_id'])
+            run, policy, gate = self._definition(state, command, require_active=False)
+            if gate['kind'] != 'mechanical':
+                fresh = self._identity_projection(state, command, run, policy, gate, origin, supplied_state=True)
+                if fresh != projection or fresh['state'] != 'passed':
+                    raise LedgerError('GATE_OPERATION_STALE')
+        return deepcopy(view)
 
     def operation_gates(self, run_id, generation, operation, *, origin):
         """Fresh blocking facts only; never a reusable authorization/merge token.

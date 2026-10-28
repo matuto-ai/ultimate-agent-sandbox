@@ -163,7 +163,7 @@ class DirectForgeTests(unittest.TestCase):
     def test_source_routes_gh_away_from_hub_and_keeps_credential_free_env(self):
         root=Path(__file__).resolve().parents[1]
         server=(root/'runtime/claude/mcp-server.mjs').read_text()
-        self.assertIn("r.params.name === 'gh' ? forgeChannel : channel",server)
+        self.assertIn("['gh','uas_review'].includes(r.params.name) ? forgeChannel : channel",server)
         self.assertIn('seqpacketChannel(4',server)
         connector=(root/'runtime/claude/mcp-connector.c').read_text()
         self.assertIn('close_range(5',connector)

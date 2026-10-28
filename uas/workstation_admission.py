@@ -349,6 +349,9 @@ class HubAdmission:
         self._active = {}
         self._helpers = {}
         self._helper_history = {}
+        self._revocation_dispatcher = None
+        self._control = None
+        self._revocation_failed = set()
         self._fenced = False
         self._closed = False
         path = Path(journal)
@@ -385,12 +388,38 @@ class HubAdmission:
                 os.close(lease)
             raise
 
+    def bind_control(self, control):
+        """Trusted startup/serve seam; never selected by a peer packet."""
+        with self._lock:
+            if self._closed or self._fenced:
+                raise OriginDenied('Hub control is fenced')
+            previous = getattr(self, '_control', None)
+            if previous is not None and previous is not control:
+                raise OriginDenied('Hub control channel changed')
+            self._control = control
+
+    def bind_revocations(self, dispatcher):
+        from .workstation_peer import AdmittedPeerDispatcher
+        with self._lock:
+            if (type(dispatcher) is not AdmittedPeerDispatcher
+                    or dispatcher.admissions is not self
+                    or getattr(self, '_revocation_dispatcher', None) is not None):
+                raise OriginDenied('one trusted revocation dispatcher required')
+            self._revocation_dispatcher = dispatcher
+
+    def _fence_control(self):
+        self._fenced = True
+        control, self._control = getattr(self, '_control', None), None
+        if control is not None:
+            control.close()
+
     def _install(self, operation, offer, binding):
         self._active[operation] = (offer, binding)
 
     def admit(self, control):
         # Never hold the authority/ledger lock over a blocking transport read.
         # Revoke and control-loss must be able to fence a stalled receiver.
+        self.bind_control(control)
         controller, supervisor = self.controller, self.supervisor
         try:
             offer = _receive_offer(control, supervisor, self.seats)
@@ -461,6 +490,7 @@ class HubAdmission:
         kind, receipt=None) is also Hub-local and runs outside the admission
         lock; its dispatcher must acquire current authorization itself.
         """
+        self.bind_control(control)
         controller, supervisor = self.controller, self.supervisor
         try:
             packet = _receive_offer(control, supervisor, self.seats, commands=True, roots=self._active)
@@ -609,11 +639,12 @@ class HubAdmission:
                     'helper_digest':digest}
 
     def revoke_helper(self, operation):
+        # The fixed helper is the native Participant transport. Losing it loses
+        # its root attachment, not merely an invisible auxiliary descriptor.
         with self._lock:
-            offer = self._helpers.pop(operation, None)
+            offer = self._helpers.get(operation)
             if offer is not None:
-                offer.origin.revoke()
-                offer.close()
+                self.revoke(offer.document['root_operation'])
 
     def status(self, operation):
         """Read-only reconciliation for the trusted control loop; never relaunch."""
@@ -684,29 +715,54 @@ class HubAdmission:
 
     def revoke(self, operation):
         with self._lock:
-            for helper, offer in tuple(self._helpers.items()):
-                if offer.document['root_operation'] == operation:
-                    self.revoke_helper(helper)
+            if operation in getattr(self, '_revocation_failed', ()):
+                raise OriginDenied('revocation publication failed; controller fenced')
             active = self._active.pop(operation, None)
-            if active is not None:
-                active[0].origin.revoke()
-                try:
+            helpers = [self._helpers.pop(key) for key, offer in tuple(self._helpers.items())
+                       if offer.document['root_operation'] == operation]
+            error = None
+            try:
+                for offer in helpers:
+                    offer.origin.revoke()
+                if active is not None:
+                    active[0].origin.revoke()
+                    dispatcher = getattr(self, '_revocation_dispatcher', None)
+                    if dispatcher is not None:
+                        dispatcher.lost(operation)
                     self.db.execute("UPDATE admissions SET state='revoked' WHERE operation=?", (operation,))
+            except BaseException as failure:
+                error = failure
+            finally:
+                # A close failure must not strand another owned descriptor.
+                for offer in helpers + ([active[0]] if active is not None else []):
+                    try:
+                        offer.close()
+                    except BaseException as failure:
+                        error = error or failure
+            if error is not None:
+                # LOST may not have committed. Never acknowledge success; the
+                # host-visible fence is separate, not rollback of another commit.
+                if not hasattr(self, '_revocation_failed'):
+                    self._revocation_failed = set()
+                self._revocation_failed.add(operation)
+                try:
+                    self._fence_control()
                 except BaseException:
-                    self._fenced = True
-                    raise
-                finally:
-                    active[0].close()
+                    pass  # Keep the decisive original failure.
+                raise error
 
     def control_lost(self):
         with self._lock:
-            self._fenced = True
             error = None
+            try:
+                self._fence_control()
+            except BaseException as failure:
+                error = failure
             for operation in tuple(self._active):
                 try:
                     self.revoke(operation)
                 except BaseException as failure:
-                    error = failure
+                    error = error or failure
             if error is not None:
                 raise error
 

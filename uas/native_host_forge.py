@@ -137,24 +137,37 @@ class NativeHostForge:
                     self._current(record)
                 frame = AdmittedPeerDispatcher._decode(record.data)
                 request_id, envelope = frame['request_id'], frame['envelope']
-                if envelope.get('kind') not in {'forge-read','forge-write','forge-reconcile'}:
-                    raise LedgerError('INVALID_FORGE_ENVELOPE')
-                digest = self._reserve(envelope)
-                with self.client.supervisor._locked():
-                    self._current(record)
-                    # Only our decoded original packet reaches prepare. Hub's
-                    # response cannot replace bytes, Actor, endpoint or capability.
-                    if hashlib.sha256(_canonical(envelope)).hexdigest() != digest:
-                        raise OriginDenied('original Forge bytes changed')
-                    def guard():
-                        try:
-                            return self._current(record)
-                        except (OriginDenied, OriginUnavailable, LedgerError):
-                            return False
-                    packet = self.client.prepare(envelope, self.origin, authorize=guard)
-                receipt = self.client.perform(packet)
-                with self.client.supervisor._locked():
-                    self._current(record)
+                if envelope.get('kind') in ('submit-for-review','review-result'):
+                    from .native_review_host import NativeReviewHost
+                    owner = getattr(self,'review_host',None)
+                    if type(owner) is not NativeReviewHost:
+                        raise LedgerError('REVIEW_UNAVAILABLE')
+                    # Review owns its ordinary main ID and hashed intents in the
+                    # same Room ledger; Forge's external reservation is different.
+                    receipt = owner.submit(self,record,envelope)
+                    with self.client.supervisor._locked():
+                        self._current(record)
+                        owner.identity.seat_current(self,owner.identity.ledger.snapshot()['state'],
+                                                    envelope['run_id'],envelope['generation'])
+                else:
+                    if envelope.get('kind') not in {'forge-read','forge-write','forge-reconcile'}:
+                        raise LedgerError('INVALID_FORGE_ENVELOPE')
+                    digest = self._reserve(envelope)
+                    with self.client.supervisor._locked():
+                        self._current(record)
+                        # Only our decoded original packet reaches prepare. Hub's
+                        # response cannot replace bytes, Actor, endpoint or capability.
+                        if hashlib.sha256(_canonical(envelope)).hexdigest() != digest:
+                            raise OriginDenied('original Forge bytes changed')
+                        def guard():
+                            try:
+                                return self._current(record)
+                            except (OriginDenied, OriginUnavailable, LedgerError):
+                                return False
+                        packet = self.client.prepare(envelope, self.origin, authorize=guard)
+                    receipt = self.client.perform(packet)
+                    with self.client.supervisor._locked():
+                        self._current(record)
                 result = {'request_id':request_id,'ok':True,'receipt':receipt}
         except LedgerError as error:
             result = {'request_id':request_id,'ok':False,'error':error.code}

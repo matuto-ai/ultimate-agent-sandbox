@@ -2,8 +2,8 @@
 
 The fixed Claude MCP helper has two same-task seqpacket connections:
 
-* FD3: admitted peer/review traffic, transferred to the isolated Hub.
-* FD4: Forge only, retained by the trusted Supervisor. The Hub never receives
+* FD3: admitted peer/Run traffic, transferred to the isolated Hub.
+* FD4: Forge and native review traffic, retained by the trusted Supervisor. The Hub never receives
   this descriptor. Native provider credentials are cleared before the helper's
   fixed Node entrypoint, as before.
 
@@ -57,9 +57,8 @@ queued pre-admission data and lost responses. The hosted-only Node transport tes
 now supplies distinct FD3/FD4 and checks `gh` goes only to FD4. These are not real
 native Claude/SDK, account, namespace or complete-lifecycle qualification.
 
-Isolated Git provenance/target fencing, typed
-human control, full isolated RunReview composition and the trusted deployment
-launcher still need integration. The old same-process `attach_read_service`
+Native review acceptance is now composed on the trusted host as described below.
+The deployment launcher and live end-to-end qualification still need integration. The old same-process `attach_read_service`
 remains a controlled test seam, not permission to mount a Supervisor store in Hub.
 
 ## Native Pi direct route
@@ -79,7 +78,7 @@ Claude helper authority. `RESERVE_PI_FORGE` uses canonical direct Hub admission
 and ledger reservation; its acknowledgment still grants no authority. Pi's Origin
 hash preserves the existing omitted native-payload field, rather than adding null.
 
-The shared extension routes native `gh` only to FD4 and bounds the whole request
+The shared extension routes native `gh` and `uas_review` to FD4 and bounds the whole request
 before contact; peer tools stay on FD3. Hosted-only Node transport tests use a
 fake SDK tool registry to verify routing, oversize rejection, both-channel cleanup
 and missing-native-FD denial without executing a model or contacting accounts.
@@ -90,10 +89,59 @@ This completes the equivalent source route, not its native runtime qualification
 
 Pi now exposes `uas_review` with the same submit-for-review/review-result schema
 as Claude. It preserves stable operation IDs, Run/generation, observation and
-payload fields and sends them only to Hub FD3. Malformed/oversized envelopes are
+payload fields. Native mode sends original review records to trusted host FD4;
+the existing fixture mode retains Hub FD3. Malformed/oversized envelopes are
 rejected before either transport. Hub rejection remains a tool error; the tool
 never infers role, reviewer independence, current revision or a successful verdict.
-Those remain canonical AdmittedPeerDispatcher/RunReview decisions. The hosted
+Those remain canonical native admission/RunReview decisions. The hosted
 controlled routing test compares the tool schemas, checks both review operations
 and verifies rejected requests leave both channels empty. This adds a callable
-proposal path, not the missing isolated RunReview deployment owner.
+proposal path; live runtime qualification remains separate.
+
+## Native trusted-host review acceptance
+
+`NativeReviewStartup` is an explicit trusted argument to the existing
+`NativeClaudeRoot.initialize_helper`. It pairs the already admitted Pi direct
+receiver with Claude's admitted helper receiver and constructs `NativeReviewHost`.
+It requires the host connection to the **same existing Hub Room database**, the
+canonical controlled Git provenance owner, actual source resolver, fixed reviewer
+Forge IDs and authorized human merger IDs. Missing inputs fail closed. It neither
+creates another workflow store nor mounts Supervisor-private state in the Hub.
+No credentials or permissions are changed by this source composition.
+
+Original `uas_review` records travel on FD4. Native identity comes only from the
+retained exact root/helper/SDK-host admission and controller. Current canonical
+peer attachment, incarnation, context, Run generation and LOST state are also
+required. Unlike Forge external operations, review uses RunReview's existing main
+operation ID and hashed durable observation intents directly in the same Room
+ledger; it does not consume that ID with a fake Forge reservation first.
+
+Provider/Gate observations run without lifecycle or Git locks. Final acceptance
+uses the existing writer order: **lifecycle → Git history → Room transaction**.
+An owner-bound lifecycle capability permits the existing resolver to read without
+reacquiring flock. Full source equality includes head SHA and worktree binding.
+The invocation records exact Gate evaluation rows and terminal refresh IDs at
+the canonical refresh finish, then rejects replacement even when a dependency
+digest happens to match. Local identity/independence is recomputed with current
+fenced contribution history. The same RunReview reducers commit the transition;
+no provider RPC happens in their transaction.
+
+The transient invocation scope cannot be deserialized or reused. Existing read
+attempt IDs, explicit fresh observation IDs and uncertain comment reconciliation
+remain unchanged. Exact completed command receipts do not trigger another read.
+Known Git history is not proof about unreported raw filesystem edits.
+
+Authenticated Manager actions use the existing `HumanSession` and `OwnerFence`
+through RunReview's normal Manager entrypoints. Eligibility is read-only. Native
+packets cannot become human actions. The trusted host's `observe_completion`
+uses the existing review service identity to observe an already performed human
+GitHub merge; configured User ID, method, exact reviewed candidate and integration
+SHA checks remain canonical. No new merge endpoint exists.
+
+The host Gate composition includes canonical command/diff projection owners with
+read-only actual source adapters. It consumes existing evaluations; it does not
+implicitly launch evaluators or replace their existing trusted launch owners.
+Hosted Node tests cover native review routing, not model inference. Guarded tests
+use real SQLite and explicitly controlled provider/kernel seams; neither those
+nor source composition establish installed permissions, live credentials,
+container isolation, native startup or complete real lifecycle qualification.
