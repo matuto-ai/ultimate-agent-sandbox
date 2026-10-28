@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import json, unittest
 import test_run_review as fixture
-from test_native_helper_admission import HelperAdmissionTests
+import test_native_helper_admission as helper_fixture
 from uas import workstation_admission as admission, workstation_peer as transport
 from uas.kernel_origin import ReceiverIdentity
 
@@ -13,7 +13,7 @@ class CombinedSeamTests(unittest.TestCase):
     def setUp(self):
         self.f=fixture.RunReviewTests('test_submission_uses_real_peer_outbox_and_exact_retry'); self.f.setUp();self.addCleanup(self.f.doCleanups)
         self.live=patch.object(admission,'alive',return_value=True);self.live.start();self.addCleanup(self.live.stop)
-        self.hub,self.offer=HelperAdmissionTests().make()
+        self.hub,self.offer=helper_fixture.HelperAdmissionTests().make()
         root,binding=self.hub._active['a'*32]
         seat=admission.AdmissionSeat('room','instance','builder-seat','builder','profile',('peer-traffic','implement'),ReceiverIdentity(1000,1000,'hub','0'*64))
         self.binding=replace(binding,seat=seat)
@@ -67,3 +67,19 @@ class CombinedSeamTests(unittest.TestCase):
         before=self.f.state()
         with self.assertRaises(admission.OriginDenied):self.send(self.envelope)
         self.assertEqual(self.f.state(),before)
+
+
+class TargetedDiscoveryTests(unittest.TestCase):
+    def test_owner_fixture_import_does_not_duplicate_admission_tests(self):
+        # Inspect only these two already audited modules; never broad discovery.
+        import importlib
+        from ci_unit import leaves, partition_suite
+        owner = importlib.import_module('test_native_helper_owner')
+        loader = unittest.TestLoader()
+        owned = list(leaves(loader.loadTestsFromModule(owner)))
+        self.assertTrue(owned)
+        self.assertTrue(all(case.__class__.__module__ == owner.__name__ for case in owned))
+        suite = unittest.TestSuite((loader.loadTestsFromModule(helper_fixture),
+                                   loader.loadTestsFromModule(owner)))
+        cases, groups = partition_suite(suite)
+        self.assertEqual(len(cases), len({case.id() for case in cases}))
