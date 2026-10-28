@@ -3,17 +3,21 @@
 No shell, credentials, arbitrary paths, destinations or commands. This is test
 image functionality, not a Participant API or an installed production launcher.
 """
-import ctypes
-import errno
-import hashlib
-import json
 import os
+import sys
+
+DENIED_HELP_ENTRY = b'UAS_ROOM_PYTHON_ENTRY\n'
+# This fixed diagnostic precedes optional/module imports, never grants authority.
+if __name__ == '__main__' and sys.argv[1:] == ['denied-help-ready']:
+    if os.write(2, DENIED_HELP_ENTRY) != len(DENIED_HELP_ENTRY):
+        raise RuntimeError('incomplete Python entry diagnostic')
+
+import errno
+import json
 from pathlib import Path
 import re
 import socket
 import select
-import ssl
-import sys
 import time
 
 ENDPOINT = '/uas/git/request.sock'
@@ -52,6 +56,8 @@ def public_head():
     A bounded HTTP header is enough to demonstrate real public egress. No body,
     redirect following, DNS discovery, account, key, fallback or retry occurs.
     """
+    import hashlib
+    import ssl
     started = time.monotonic()
     def remaining():
         value = 5 - (time.monotonic() - started)
@@ -110,6 +116,7 @@ def private_paths():
 
 
 def bootstrap():
+    import ctypes
     from uas.git_endpoint import EndpointPeer
     from uas.kernel_origin import enable, receive
     from uas.git_service import decode, send
@@ -171,13 +178,26 @@ def bootstrap():
 
 
 DENIED_HELP_READY = b'UAS_ROOM_DENIED_HELP_READY\n'
+DENIED_HELP_PROBE_IMPORTED = b'UAS_ROOM_PROBE_IMPORTED\n'
+DENIED_HELP_LAUNCHER_IMPORTED = b'UAS_ROOM_LAUNCHER_IMPORTED\n'
+DENIED_HELP_STARTUP_STEPS = (
+    ('python_entry', DENIED_HELP_ENTRY),
+    ('probe_imported', DENIED_HELP_PROBE_IMPORTED),
+    ('launcher_imported', DENIED_HELP_LAUNCHER_IMPORTED),
+    ('ready', DENIED_HELP_READY),
+)
+DENIED_HELP_STARTUP = b''.join(marker for _, marker in DENIED_HELP_STARTUP_STEPS)
 DENIED_HELP_RELEASE = b'G'
 DENIED_HELP_SETUP_SECONDS = 5
 
 
 def denied_help_ready():
     """Fixture preparation barrier only; the real launcher still proves origin."""
+    require(os.write(2, DENIED_HELP_PROBE_IMPORTED) == len(DENIED_HELP_PROBE_IMPORTED),
+            'incomplete probe import diagnostic')
     from uas.git_launcher import main as git
+    require(os.write(2, DENIED_HELP_LAUNCHER_IMPORTED) == len(DENIED_HELP_LAUNCHER_IMPORTED),
+            'incomplete launcher import diagnostic')
     # Imports happen in this fresh task before the diagnostic marker. No
     # supplied module, PID, callback, endpoint or readiness flag grants access.
     require(os.write(2, DENIED_HELP_READY) == len(DENIED_HELP_READY), 'incomplete readiness marker')

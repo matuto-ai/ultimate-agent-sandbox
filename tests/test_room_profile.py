@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import socket
+import ssl
 import stat
 import sys
 import tempfile
@@ -184,7 +185,7 @@ class RoomProfileTests(unittest.TestCase):
         context.wrap_socket.return_value=channel
         channel.recv.side_effect=[b'HTTP/1.1 200 OK\r\nServer: fixture\r\n\r\nDO_NOT_RETAIN_BODY']
         with patch.object(room_probe.socket,'socket',return_value=raw) as create, \
-             patch.object(room_probe.ssl,'create_default_context',return_value=context) as verified, \
+             patch.object(ssl,'create_default_context',return_value=context) as verified, \
              patch.object(room_probe.time,'monotonic',return_value=10):
             result=room_probe.public_head()
         create.assert_called_once_with(socket.AF_INET,socket.SOCK_STREAM)
@@ -200,7 +201,7 @@ class RoomProfileTests(unittest.TestCase):
     def test_public_probe_rechecks_deadline_before_connect_and_every_receive(self):
         raw=Mock();raw.__enter__=Mock(return_value=raw);raw.__exit__=Mock(return_value=False)
         with patch.object(room_probe.socket,'socket',return_value=raw), \
-             patch.object(room_probe.ssl,'create_default_context'), \
+             patch.object(ssl,'create_default_context'), \
              patch.object(room_probe.time,'monotonic',side_effect=[10,16]):
             with self.assertRaisesRegex(RuntimeError,'deadline'):room_probe.public_head()
         raw.connect.assert_not_called()
@@ -516,7 +517,7 @@ class RoomProfileTests(unittest.TestCase):
                     stream.__enter__=Mock(return_value=stream);stream.__exit__=Mock(return_value=False)
                 context.wrap_socket.return_value=channel;channel.recv.side_effect=fragments
                 with patch.object(room_probe.socket,'socket',return_value=raw), \
-                        patch.object(room_probe.ssl,'create_default_context',return_value=context), \
+                        patch.object(ssl,'create_default_context',return_value=context), \
                         patch.object(room_probe.time,'monotonic',return_value=10):
                     if message:
                         with self.assertRaisesRegex(RuntimeError,message):room_probe.public_head()
@@ -531,7 +532,7 @@ class RoomProfileTests(unittest.TestCase):
                 primary=OSError('synthetic '+operation)
                 {'connect':raw.connect,'tls':context.wrap_socket,'send':channel.sendall,'recv':channel.recv}[operation].side_effect=primary
                 with patch.object(room_probe.socket,'socket',return_value=raw), \
-                        patch.object(room_probe.ssl,'create_default_context',return_value=context), \
+                        patch.object(ssl,'create_default_context',return_value=context), \
                         patch.object(room_probe.time,'monotonic',return_value=10):
                     with self.assertRaises(OSError) as caught:room_probe.public_head()
                 self.assertIs(primary,caught.exception);raw.__exit__.assert_called_once()
@@ -547,7 +548,7 @@ class RoomProfileTests(unittest.TestCase):
             return b'HTTP/1.1 200 OK\r\n\r\n'
         channel.recv.side_effect=receive
         with patch.object(room_probe.socket,'socket',return_value=raw), \
-                patch.object(room_probe.ssl,'create_default_context',return_value=context), \
+                patch.object(ssl,'create_default_context',return_value=context), \
                 patch.object(room_probe.time,'monotonic',side_effect=lambda:now[0]):
             with self.assertRaisesRegex(RuntimeError,'deadline'):room_probe.public_head()
         raw.__exit__.assert_called_once();channel.__exit__.assert_called_once()
@@ -559,8 +560,10 @@ class RoomProfileTests(unittest.TestCase):
             with self.subTest(fault=fault):
                 calls=[];now=[0.0]
                 def write(fd,data):
-                    calls.append('marker');self.assertEqual((2,room_probe.DENIED_HELP_READY),(fd,data))
-                    return 0 if fault=='short-marker' else len(data)
+                    calls.append(data);self.assertEqual(2,fd)
+                    self.assertIn(data, (room_probe.DENIED_HELP_PROBE_IMPORTED,
+                                       room_probe.DENIED_HELP_LAUNCHER_IMPORTED, room_probe.DENIED_HELP_READY))
+                    return 0 if fault=='short-marker' and data == room_probe.DENIED_HELP_READY else len(data)
                 def select(readers,writers,errors,timeout):
                     calls.append('wait');self.assertEqual([0],readers);self.assertEqual(5,timeout)
                     if fault=='late-select':now[0]=5
@@ -581,7 +584,83 @@ class RoomProfileTests(unittest.TestCase):
                         launch.assert_not_called()
                     else:
                         self.assertEqual({'code':128},room_probe.denied_help_ready())
-                        self.assertEqual(['marker','wait','release','git'],calls)
+                        self.assertEqual([room_probe.DENIED_HELP_PROBE_IMPORTED, room_probe.DENIED_HELP_LAUNCHER_IMPORTED,
+                                          room_probe.DENIED_HELP_READY,'wait','release','git'],calls)
+
+
+    def test_earliest_entry_is_fixed_main_only_and_precedes_other_imports(self):
+        tree = ast.parse((Path(__file__).parents[1]/'uas/room_probe.py').read_text())
+        entry = next(n for n in tree.body if isinstance(n, ast.If) and
+                     'DENIED_HELP_ENTRY' in ast.unparse(n))
+        prior = tree.body[:tree.body.index(entry)]
+        imports = [alias.name for n in prior if isinstance(n, ast.Import) for alias in n.names]
+        self.assertEqual(['os', 'sys'], imports)
+        assignment = next(n for n in prior if isinstance(n, ast.Assign) and
+                          ast.unparse(n.targets[0]) == 'DENIED_HELP_ENTRY')
+        code = compile(ast.Module(body=[assignment, entry], type_ignores=[]), '<fixed entry>', 'exec')
+        for module, args, expected in (
+                ('__main__', ['probe', 'denied-help-ready'], True),
+                ('uas.room_probe', ['probe', 'denied-help-ready'], False),
+                ('__main__', ['probe', 'denied-help-ready', 'extra'], False),
+                ('__main__', ['probe', 'bootstrap'], False),
+                ('__main__', ['probe'], False)):
+            writes = []
+            env = {'__name__': module, 'sys': SimpleNamespace(argv=args),
+                   'os': SimpleNamespace(write=lambda fd, data: writes.append((fd,data)) or len(data))}
+            exec(code, env)
+            self.assertEqual([(2, room_probe.DENIED_HELP_ENTRY)] if expected else [], writes)
+        with self.assertRaisesRegex(RuntimeError, 'entry diagnostic'):
+            exec(code, {'__name__':'__main__', 'sys':SimpleNamespace(argv=['probe','denied-help-ready']),
+                        'os':SimpleNamespace(write=lambda *_:0)})
+
+    def test_optional_probe_imports_stay_in_their_original_modes(self):
+        tree = ast.parse((Path(__file__).parents[1]/'uas/room_probe.py').read_text())
+        imports = {alias.name for n in tree.body if isinstance(n, ast.Import) for alias in n.names}
+        self.assertFalse({'ctypes','hashlib','ssl'} & imports)
+        functions = {n.name:n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for module, function in (('ctypes','bootstrap'), ('hashlib','public_head'), ('ssl','public_head')):
+            owners = {name for name,node in functions.items() for child in ast.walk(node)
+                      if isinstance(child, ast.Name) and child.id == module}
+            self.assertEqual({function}, owners)
+            self.assertIn('import ' + module, ast.unparse(functions[function]))
+        barrier = ast.unparse(functions['denied_help_ready'])
+        self.assertLess(barrier.index('DENIED_HELP_PROBE_IMPORTED'), barrier.index('from uas.git_launcher import main as git'))
+        self.assertLess(barrier.index('from uas.git_launcher import main as git'), barrier.index('DENIED_HELP_LAUNCHER_IMPORTED'))
+        self.assertLess(barrier.index('DENIED_HELP_LAUNCHER_IMPORTED'), barrier.index('os.write(2, DENIED_HELP_READY)'))
+        self.assertLess(barrier.index('os.write(2, DENIED_HELP_READY)'), barrier.index('deadline ='))
+        self.assertLess(barrier.index("os.read(0, 2) == DENIED_HELP_RELEASE"), barrier.index("git(['--help']"))
+
+    def test_each_import_milestone_short_write_stops_before_readiness_or_launcher_call(self):
+        import uas.git_launcher as launcher
+        for marker in (room_probe.DENIED_HELP_PROBE_IMPORTED, room_probe.DENIED_HELP_LAUNCHER_IMPORTED):
+            writes = []
+            def write(fd, data):
+                writes.append(data)
+                return 0 if data == marker else len(data)
+            with patch.object(room_probe.os, 'write', side_effect=write), \
+                    patch.object(room_probe.select, 'select') as wait, \
+                    patch.object(launcher, 'main') as launch:
+                with self.assertRaisesRegex(RuntimeError, 'diagnostic'): room_probe.denied_help_ready()
+                wait.assert_not_called(); launch.assert_not_called()
+            self.assertNotIn(room_probe.DENIED_HELP_READY, writes)
+
+
+    def test_launcher_import_failure_retains_probe_milestone_but_never_ready(self):
+        import builtins
+        original = builtins.__import__
+        writes = []
+        primary = ImportError('inert launcher import failure')
+        def importing(name, *args, **kwargs):
+            if name == 'uas.git_launcher':
+                self.assertEqual([room_probe.DENIED_HELP_PROBE_IMPORTED], writes)
+                raise primary
+            return original(name, *args, **kwargs)
+        with patch.object(builtins, '__import__', side_effect=importing), \
+                patch.object(room_probe.os, 'write', side_effect=lambda fd,data:writes.append(data) or len(data)), \
+                patch.object(room_probe.select, 'select') as wait:
+            with self.assertRaises(ImportError) as caught: room_probe.denied_help_ready()
+            self.assertIs(primary, caught.exception); wait.assert_not_called()
+        self.assertEqual([room_probe.DENIED_HELP_PROBE_IMPORTED], writes)
 
 
 if __name__=='__main__':unittest.main()

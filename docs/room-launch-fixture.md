@@ -95,6 +95,19 @@ The unrelated same-UID task negative retains caller-owned evidence before its
 fixed Docker CLI launch. Launch, accept, service and output-collection stages
 have elapsed timestamps; each output stream retains at most 4096 bytes (also
 bounded after JSON escaping), with total byte counts and EOF/truncation state.
+Preparation has one fixed, ordered diagnostic sequence: Python entry (after
+only os/sys imports), probe-module imports complete, actual launcher imports
+complete, then READY. Entry is emitted only for the exact standalone unrelated
+probe mode; ordinary imports and all other modes emit none of these entry bytes.
+The bounded parent receipt records complete milestone observation times, not
+child execution durations or authority. No milestone substitutes for READY or
+a real authority refusal. Missing, malformed, reordered or duplicate markers
+fail closed; fragments/coalescence do not restart the clock. No new process,
+transport, thread, positive cache or scheduling assumption is introduced.
+Mode-only ctypes and HTTPS imports are local to their existing consumers; the
+actual launcher import still completes before READY. This is dependency cleanup
+and observability, not a measured startup performance fix.
+
 Preparation has a five-second marker-readiness phase and a separate five-second
 parent release phase, started once on validating the complete marker, before
 lock acquisition and every fresh release check. The hosted smoke follows the

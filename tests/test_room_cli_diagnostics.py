@@ -3,7 +3,8 @@ import ast
 from pathlib import Path
 import subprocess
 import sys
-from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE
+from uas.room_probe import (DENIED_HELP_READY, DENIED_HELP_RELEASE,
+                            DENIED_HELP_STARTUP, DENIED_HELP_STARTUP_STEPS)
 from unittest import TestCase
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -18,7 +19,8 @@ finally:
 
 class CLIDiagnosticsTests(TestCase):
     def exercise(self, fault=None, *, noisy=False, startup=.1, lock_cost=0, check_cost=0,
-                 gate_fault=None, delivery_lag=0, child_schedule=0, compose=False):
+                 gate_fault=None, delivery_lag=0, child_schedule=0, compose=False,
+                 startup_chunks=None, after_startup=b'inert stderr\n', bookkeeping_cost=0):
         checks = {}
         clock = [0.0]
         calls = {'select': [], 'read': 0, 'wait': 0, 'killed': False, 'order': [], 'launcher': 0}
@@ -33,13 +35,14 @@ class CLIDiagnosticsTests(TestCase):
         listener.accept.return_value = (channel, None)
         if fault == 'accept-call': listener.accept.side_effect = error
         payload = b'x' * 65536 if noisy else b'{"code":128}\n'
-        chunks = {21: [payload, b''], 22: [DENIED_HELP_READY, b'inert stderr\n', b'']}
-        if fault=='startup-fragmented':chunks[22]=[DENIED_HELP_READY[:8],DENIED_HELP_READY[8:],b'inert stderr\n',b'']
+        chunks = {21: [payload, b''], 22: [DENIED_HELP_STARTUP, after_startup, b'']}
+        if fault=='startup-fragmented':chunks[22]=[DENIED_HELP_STARTUP[:8],DENIED_HELP_STARTUP[8:],after_startup,b'']
         if fault=='startup-malformed':chunks[22]=[b'not-the-marker\n',b'']
         if fault=='startup-duplicate':chunks[22]=[DENIED_HELP_READY*2,b'']
         if fault=='startup-eof':chunks[22]=[b'']
         if fault=='startup-oversized':chunks[22]=[b'x'*65536,b'']
         if fault=='startup-flood':chunks[22]=[b'U']*10
+        if startup_chunks is not None: chunks[22] = list(startup_chunks)
         if fault in ('flood', 'collect-flood'): chunks[21] = [b'x'] * 20 + [b'']
         def select(readers, _write, _error, timeout):
             calls['select'].append((listener in readers, timeout))
@@ -161,8 +164,15 @@ class CLIDiagnosticsTests(TestCase):
             if fault=='release-gate':raise error
             if fault=='release-timeout':clock[0]+=5
             if fault!='no-release':write_fixed()
+        def observed_clock():
+            if (bookkeeping_cost and checks.get('stage') == 'startup'
+                    and len(checks['startup']['milestones_observed_elapsed_seconds']) == 4
+                    and not calls.get('bookkeeping_spent')):
+                calls['bookkeeping_spent'] = True
+                clock[0] += bookkeeping_cost
+            return clock[0]
         result = caught = None
-        with patch.object(room_service.time, 'monotonic', side_effect=lambda: clock[0]), \
+        with patch.object(room_service.time, 'monotonic', side_effect=observed_clock), \
              patch.object(room_service.subprocess, 'Popen', side_effect=launch), \
              patch.object(room_service.select, 'select', side_effect=select), \
              patch.object(room_service.os, 'set_blocking', side_effect=setup), \
@@ -177,7 +187,7 @@ class CLIDiagnosticsTests(TestCase):
     def test_complete_capture_is_not_itself_an_authority_refusal(self):
         checks, result, error, _, process, serve, _ = self.exercise()
         self.assertIsNone(error)
-        self.assertEqual((None, b'{"code":128}\n', DENIED_HELP_READY+b'inert stderr\n'), result)
+        self.assertEqual((None, b'{"code":128}\n', DENIED_HELP_STARTUP+b'inert stderr\n'), result)
         self.assertEqual('collected', checks['status'])
         self.assertTrue(checks['connected'])
         self.assertNotIn('authority_refusal_proved', checks)
@@ -396,3 +406,80 @@ class CLIDiagnosticsTests(TestCase):
         self.assertIsNotNone(caught); self.assertIsNone(result)
         self.assertNotIn('release', checks); self.assertNotIn('write_stage', calls)
         serve.assert_not_called()
+
+    def test_each_fixed_milestone_is_observed_without_granting_readiness(self):
+        through = b''
+        for index, (name, marker) in enumerate(DENIED_HELP_STARTUP_STEPS[:-1]):
+            through += marker
+            with self.subTest(name=name):
+                checks, result, caught, _, _, serve, calls = self.exercise(startup_chunks=[through, b''])
+                self.assertIsNotNone(caught); self.assertIsNone(result)
+                observed = checks['startup']['milestones_observed_elapsed_seconds']
+                self.assertEqual([step for step, _ in DENIED_HELP_STARTUP_STEPS[:index+1]], list(observed))
+                self.assertTrue(all(value == .1 for value in observed.values()))
+                self.assertFalse(checks['startup']['marker_observed'])
+                self.assertFalse(checks['startup']['release_sent'])
+                self.assertNotIn('write_stage', calls); serve.assert_not_called()
+                self.assertNotIn('authority_refusal_proved', checks)
+                self.assertTrue(checks['stderr']['output'].startswith(through.decode()))
+                self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_every_fragment_boundary_and_coalesced_sequence_keep_same_protocol(self):
+        for split in range(1, len(DENIED_HELP_STARTUP)):
+            with self.subTest(split=split):
+                checks, result, caught, _, _, serve, _ = self.exercise(startup_chunks=[
+                    DENIED_HELP_STARTUP[:split], DENIED_HELP_STARTUP[split:], b'inert stderr\n', b''])
+                self.assertIsNone(caught); self.assertEqual(b'{"code":128}\n', result[1])
+                self.assertEqual([name for name, _ in DENIED_HELP_STARTUP_STEPS],
+                    list(checks['startup']['milestones_observed_elapsed_seconds']))
+                serve.assert_called_once()
+
+    def test_missing_reordered_corrupt_and_duplicate_milestones_never_release(self):
+        markers = [marker for _, marker in DENIED_HELP_STARTUP_STEPS]
+        invalid = [DENIED_HELP_READY, b''.join(reversed(markers))]
+        for index, marker in enumerate(markers):
+            invalid.extend((b''.join(markers[:index] + markers[index+1:]),
+                            b''.join(markers[:index] + [marker, marker] + markers[index+1:]),
+                            b''.join(markers[:index]) + b'BAD\n'))
+        for raw in invalid:
+            with self.subTest(raw=raw):
+                checks, result, caught, _, _, serve, calls = self.exercise(startup_chunks=[raw, b''])
+                self.assertIsNotNone(caught); self.assertIsNone(result)
+                self.assertFalse(checks['startup']['release_sent'])
+                self.assertNotIn('write_stage', calls); serve.assert_not_called()
+                self.assertTrue(checks['cleanup']['reaped'])
+
+    def test_milestone_fragments_and_stalls_never_restart_startup_deadline(self):
+        markers = [marker for _, marker in DENIED_HELP_STARTUP_STEPS]
+        checks, result, caught, _, _, serve, calls = self.exercise(startup_chunks=markers, startup=1.25)
+        self.assertIsNotNone(caught); self.assertIsNone(result)
+        self.assertEqual([5, 3.75, 2.5, 1.25],
+                         [t for listener, t in calls['select'] if listener and t > 0])
+        self.assertFalse(checks['startup']['release_sent']); serve.assert_not_called()
+        self.assertEqual(['python_entry', 'probe_imported', 'launcher_imported'],
+                         list(checks['startup']['milestones_observed_elapsed_seconds']))
+        self.assertEqual(5, checks['cleanup']['started_elapsed_seconds'])
+
+    def test_all_late_duplicate_diagnostics_fail_without_becoming_refusal(self):
+        for name, marker in DENIED_HELP_STARTUP_STEPS:
+            with self.subTest(name=name):
+                checks, result, caught, _, _, _, _ = self.exercise(after_startup=marker)
+                self.assertIsNotNone(caught); self.assertIsNone(result)
+                self.assertEqual('failed', checks['status'])
+                self.assertNotIn('authority_refusal_proved', checks)
+                self.assertEqual([step for step, _ in DENIED_HELP_STARTUP_STEPS],
+                                 list(checks['startup']['milestones_observed_elapsed_seconds']))
+                self.assertLessEqual(len(checks['stderr']['output']), 4096)
+
+
+    def test_startup_bookkeeping_cannot_make_late_ready_eligible_for_release(self):
+        for cost in (4.9, 5):
+            with self.subTest(cost=cost):
+                checks, result, caught, _, _, serve, calls = self.exercise(bookkeeping_cost=cost)
+                self.assertIsNotNone(caught); self.assertIsNone(result)
+                self.assertTrue(calls['bookkeeping_spent'])
+                self.assertEqual(4, len(checks['startup']['milestones_observed_elapsed_seconds']))
+                self.assertFalse(checks['startup']['marker_observed'])
+                self.assertFalse(checks['startup']['release_sent'])
+                self.assertNotIn('release', checks); self.assertNotIn('write_stage', calls)
+                serve.assert_not_called(); self.assertTrue(checks['cleanup']['reaped'])

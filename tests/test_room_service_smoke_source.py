@@ -45,6 +45,7 @@ def no_native_effects():
 
 # All import-time target effects are trapped before the first source instruction.
 with no_native_effects():
+    from uas.room_probe import DENIED_HELP_STARTUP, DENIED_HELP_STARTUP_STEPS
     spec = importlib.util.spec_from_file_location('room_service_smoke_source', SCRIPT)
     smoke = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(smoke)
@@ -140,6 +141,8 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         self.assertIn("'/opt/uas/uas/room_probe.py', 'denied-help-ready'", self.source)
         self.assertIn('from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE, DENIED_HELP_SETUP_SECONDS',
                       self.source)
+        self.assertIn('sibling, DENIED_HELP_STARTUP,', self.source)
+        self.assertIn('all(marker not in stderr for _, marker in DENIED_HELP_STARTUP_STEPS)', self.source)
         self.assertNotIn('from uas.git_launcher import main as git', self.source)
         self.assertIn('DIAGNOSTIC_ONLY_NOT_AUTHORITY', self.source)
         self.assertIn('fresh_digest == digest', self.source)
@@ -161,21 +164,21 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         source = ast.parse((ROOT / 'uas/room_probe.py').read_text())
         constants = {n.targets[0].id: ast.literal_eval(n.value) for n in source.body
                      if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
-                     and n.targets[0].id.startswith('DENIED_HELP_')}
+                     and n.targets[0].id in ('DENIED_HELP_READY', 'DENIED_HELP_RELEASE', 'DENIED_HELP_SETUP_SECONDS')}
         self.assertEqual(constants, {'DENIED_HELP_READY': b'UAS_ROOM_DENIED_HELP_READY\n',
             'DENIED_HELP_RELEASE': b'G', 'DENIED_HELP_SETUP_SECONDS': 5})
 
     def test_fragmented_ready_marker_is_accepted_without_real_pipes(self):
-        marker = b'UAS_ROOM_DENIED_HELP_READY\n'
+        marker = DENIED_HELP_STARTUP
         child = Mock(); child.observation.return_value = None
         with patch.object(smoke.time, 'monotonic', return_value=0), \
                 patch.object(smoke.select, 'select', side_effect=[([30], [], []), ([30], [], []), ([], [], [])]), \
                 patch.object(smoke.os, 'read', side_effect=[marker[:8], marker[8:]]) as read:
             self.assertEqual(0, smoke.read_probe_ready(10, 20, 30, child, marker, 5))
-        self.assertEqual(read.call_args_list[0].args, (30, 65))
+        self.assertEqual(read.call_args_list[0].args, (30, len(marker) + 1))
 
     def test_readiness_rejects_early_socket_stdout_exit_bad_duplicate_eof_and_timeout(self):
-        marker = b'UAS_ROOM_DENIED_HELP_READY\n'
+        marker = DENIED_HELP_STARTUP
         cases = (([10], b''), ([20], b''), ([], b''), ([30], b''),
                  ([30], b'wrong\n'), ([30], marker * 2))
         for ready, raw in cases:
@@ -210,7 +213,7 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'deadline'): smoke.collect_probe_output(20, 30, 5)
 
     def test_last_ready_marker_and_final_ready_observation_cannot_cross_deadline(self):
-        marker = b'UAS_ROOM_DENIED_HELP_READY\n'
+        marker = DENIED_HELP_STARTUP
         for clock in ([0, 5], [0, 0, 5], [0, 0, 0, 5]):
             with self.subTest(clock=clock), patch.object(smoke.time, 'monotonic', side_effect=clock), \
                     patch.object(smoke.select, 'select', side_effect=[([30], [], []), ([], [], [])]), \

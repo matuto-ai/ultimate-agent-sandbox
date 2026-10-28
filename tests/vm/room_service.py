@@ -468,12 +468,14 @@ def observe_unrelated_cli(listener, container, serve, *, checks, release):
     """
     from room_policy_diagnostics import _output
     from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE, DENIED_HELP_SETUP_SECONDS
+    from uas.room_probe import DENIED_HELP_STARTUP, DENIED_HELP_STARTUP_STEPS
     started = time.monotonic()
     checks.update(status='in_progress', stage='launch', stage_elapsed_seconds={},
                   connected=False, returncode=None, capture_limit_bytes=4096,
                   timeout_seconds={'startup': DENIED_HELP_SETUP_SECONDS, 'release': DENIED_HELP_SETUP_SECONDS,
                                    'accept': 5, 'collect': 5, 'cleanup': 5},
-                  startup={'marker_observed': False, 'release_sent': False, 'marker_bytes': 0})
+                  startup={'marker_observed': False, 'release_sent': False, 'marker_bytes': 0,
+                           'milestones_observed_elapsed_seconds': {}})
     buffers = {name: bytearray() for name in ('stdout', 'stderr')}
     counts = {name: 0 for name in buffers}
     eof = {name: False for name in buffers}
@@ -497,7 +499,8 @@ def observe_unrelated_cli(listener, container, serve, *, checks, release):
             counts[name] += len(data)
             buffers[name].extend(data[:max(0, 4096 - len(buffers[name]))])
             if name == 'stderr':
-                require(bytes(buffers[name]).count(DENIED_HELP_READY) <= 1, 'duplicate unrelated CLI readiness marker')
+                for _, marker in DENIED_HELP_STARTUP_STEPS:
+                    require(bytes(buffers[name]).count(marker) <= 1, 'duplicate unrelated CLI readiness marker')
     def collect(deadline):
         while streams:
             remaining = deadline - time.monotonic()
@@ -526,12 +529,22 @@ def observe_unrelated_cli(listener, container, serve, *, checks, release):
             require(listener not in ready, 'unrelated CLI connected before preparation release')
             require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
             prefix = bytes(buffers['stderr'])
-            require(counts['stdout'] == 0 and counts['stderr'] <= len(DENIED_HELP_READY)
-                    and DENIED_HELP_READY.startswith(prefix), 'malformed unrelated CLI readiness marker')
+            # Retain completed diagnostic prefixes even if a later byte is bad.
+            # These are parent observation times, not child phase durations.
+            through = b''
+            for name, marker in DENIED_HELP_STARTUP_STEPS:
+                through += marker
+                if prefix.startswith(through):
+                    checks['startup']['milestones_observed_elapsed_seconds'].setdefault(
+                        name, round(time.monotonic() - started, 6))
+            require(counts['stdout'] == 0 and counts['stderr'] <= len(DENIED_HELP_STARTUP)
+                    and DENIED_HELP_STARTUP.startswith(prefix), 'malformed unrelated CLI readiness marker')
             require(not eof['stdout'] and not eof['stderr'] and process.poll() is None,
                     'unrelated CLI exited before preparation release')
-            if prefix == DENIED_HELP_READY:
-                checks['startup'].update(marker_observed=True, marker_bytes=len(prefix), marker=prefix.decode('ascii'))
+            if prefix == DENIED_HELP_STARTUP:
+                require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
+                checks['startup'].update(marker_observed=True, marker_bytes=len(DENIED_HELP_READY),
+                                         marker=DENIED_HELP_READY.decode('ascii'))
                 break
         # Start once at the validated marker, before lock acquisition and all
         # fresh checks. This guards G eligibility, not callback wall runtime.

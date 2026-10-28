@@ -151,11 +151,11 @@ def read_probe_ready(listener, stdout, stderr, child, expected, deadline):
         require(time.monotonic() < deadline, 'unrelated readiness deadline')
         require(stderr in ready and listener not in ready and stdout not in ready,
                 'unrelated request/stdout/exit preceded readiness')
-        raw = os.read(stderr, 65)
+        raw = os.read(stderr, len(expected) + 1)
         require(time.monotonic() < deadline, 'unrelated readiness deadline')
         require(bool(raw), 'unrelated readiness EOF')
         data.extend(raw)
-        require(len(data) <= 64 and expected.startswith(data), 'invalid or duplicate unrelated readiness marker')
+        require(len(data) <= len(expected) and expected.startswith(data), 'invalid or duplicate unrelated readiness marker')
     require(child.observation() is None
             and not select.select([listener, stdout, stderr], [], [], 0)[0],
             'unexpected activity after unrelated readiness')
@@ -196,6 +196,7 @@ def protocol(root, jail, endpoint):
     from uas.kernel_origin import OriginDenied, _identity, alive, receive
     from uas.ledger import LedgerError, Origin
     from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE, DENIED_HELP_SETUP_SECONDS
+    from uas.room_probe import DENIED_HELP_STARTUP, DENIED_HELP_STARTUP_STEPS
     from uas.workstation_exec import EndpointLease, ExecLaunch, ExecSeat
     room = load_source('room_protocol_actual_service', Path('/opt/uas/room_service.py'))
     # Explicit path relocation only. Broker confinement/handshake remain real.
@@ -318,7 +319,7 @@ def protocol(root, jail, endpoint):
         sibling = helper.OwnedChild(pid)
         for fd in (go_r, out_w, err_w): close_pipe(fd)
         for fd in (out_r, err_r): os.set_blocking(fd, False)
-        marker_observed = read_probe_ready(listener, out_r, err_r, sibling, DENIED_HELP_READY,
+        marker_observed = read_probe_ready(listener, out_r, err_r, sibling, DENIED_HELP_STARTUP,
                          time.monotonic() + DENIED_HELP_SETUP_SECONDS)
         # Same parent phase contract as the VM: marker observation, then lock
         # and every fresh check, then G; the child's own deadline still rules.
@@ -346,7 +347,7 @@ def protocol(root, jail, endpoint):
         with channel: denied = serve_one(channel, service, authority, lifecycle_lock=lambda: lock)
         stdout, stderr = collect_probe_output(out_r, err_r, time.monotonic() + 5)
         require(denied is None and json.loads(stdout) == {'code': 128}
-                and DENIED_HELP_READY not in stderr, 'fresh same-UID task was not refused cleanly')
+                and all(marker not in stderr for _, marker in DENIED_HELP_STARTUP_STEPS), 'fresh same-UID task was not refused cleanly')
         deadline = time.monotonic() + 2
         while sibling.observation() is None and time.monotonic() < deadline: time.sleep(.005)
         require(sibling.observation() is not None, 'unrelated task exit not observed')
