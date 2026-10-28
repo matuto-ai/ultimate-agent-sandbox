@@ -17,6 +17,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 
 from uas.git_controller import GitCoordinator
 from uas.git_policy import parse_git
@@ -381,6 +382,127 @@ def prove_foreign_listener_admission(supervisor, endpoint_, probe, *, run, check
         return checks
 
 
+def observe_unrelated_cli(listener, container, serve, *, checks):
+    """Bounded evidence around the existing fixed same-UID negative, not denial.
+
+    Draining output never extends either five-second deadline. Killing this
+    owned docker CLI does not prove its daemon-owned container task stopped;
+    the caller's exact Room teardown remains mandatory on every failure.
+    """
+    from room_policy_diagnostics import _output
+    started = time.monotonic()
+    checks.update(status='in_progress', stage='launch', stage_elapsed_seconds={},
+                  connected=False, returncode=None, capture_limit_bytes=4096,
+                  timeout_seconds={'accept': 5, 'collect': 5, 'cleanup': 5})
+    buffers = {name: bytearray() for name in ('stdout', 'stderr')}
+    counts = {name: 0 for name in buffers}
+    eof = {name: False for name in buffers}
+    streams = {}
+    process = None
+    failure = None
+    def stage(name):
+        checks['stage'] = name
+        checks['stage_elapsed_seconds'][name] = round(time.monotonic() - started, 6)
+    def drain(ready):
+        for stream in ready:
+            if stream not in streams: continue
+            name = streams[stream]
+            try: data = os.read(stream.fileno(), 65536)
+            except BlockingIOError: continue
+            if not data:
+                eof[name] = True
+                del streams[stream]
+                continue
+            counts[name] += len(data)
+            buffers[name].extend(data[:max(0, 4096 - len(buffers[name]))])
+    def collect(deadline):
+        while streams:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError('unrelated CLI output deadline')
+            ready, _, _ = select.select(list(streams), [], [], remaining)
+            drain(ready)
+    try:
+        stage('launch')
+        process = subprocess.Popen(['docker', 'exec', container, '/usr/bin/python3', '-I',
+            '/opt/uas/uas/room_probe.py', 'denied-help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        checks['pid'] = process.pid  # Diagnostic CLI PID, never request authority.
+        stage('pipe_setup')
+        for name in buffers:
+            stream = getattr(process, name)
+            os.set_blocking(stream.fileno(), False)
+            streams[stream] = name
+        stage('accept')
+        deadline = time.monotonic() + 5
+        listener.settimeout(5)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0: raise TimeoutError('unrelated CLI connection deadline')
+            ready, _, _ = select.select([listener, *streams], [], [], remaining)
+            drain(ready)
+            if listener in ready:
+                # Recheck the same deadline after draining; never add another
+                # five seconds to a late listener-readiness notification.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: raise TimeoutError('unrelated CLI connection deadline')
+                listener.settimeout(remaining)
+                channel, _ = listener.accept()
+                break
+        checks['connected'] = True
+        stage('serve')
+        with channel: denied = serve(channel)
+        stage('collect')
+        deadline = time.monotonic() + 5
+        collect(deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0: raise TimeoutError('unrelated CLI exit deadline')
+        checks['returncode'] = process.wait(timeout=remaining)
+        stage('complete')
+        checks['status'] = 'collected'  # The caller must still prove refusal.
+        return denied, bytes(buffers['stdout']), bytes(buffers['stderr'])
+    except BaseException as error:
+        failure = error
+        checks.update(status='failed', error_type=type(error).__name__)
+        raise
+    finally:
+        cleanup = {'kill_attempted': False, 'reaped': False, 'errors': [],
+                   'started_elapsed_seconds': round(time.monotonic() - started, 6)}
+        checks['cleanup'] = cleanup
+        if process is not None:
+            try:
+                code = process.poll()
+                checks['pre_cleanup_poll'] = {'status': 'observed', 'returncode': code}
+            except BaseException as error:
+                checks['pre_cleanup_poll'] = {'status': 'unavailable', 'error_type': type(error).__name__}
+                cleanup['errors'].append({'operation': 'poll', 'error_type': type(error).__name__})
+            if process.returncode is None:
+                cleanup['kill_attempted'] = True
+                try: process.kill()
+                except BaseException as error:
+                    cleanup['errors'].append({'operation': 'kill', 'error_type': type(error).__name__})
+            # Drain buffered evidence even after accept/serve fails or the CLI
+            # has already exited, with one bounded cleanup collection window.
+            deadline = time.monotonic() + 5
+            try: collect(deadline)
+            except BaseException as error:
+                cleanup['errors'].append({'operation': 'drain', 'error_type': type(error).__name__})
+            try:
+                checks['returncode'] = process.wait(timeout=max(0, deadline - time.monotonic()))
+                cleanup['reaped'] = True
+            except BaseException as error:
+                cleanup['errors'].append({'operation': 'wait', 'error_type': type(error).__name__})
+            for name in buffers:
+                try: getattr(process, name).close()
+                except BaseException as error:
+                    cleanup['errors'].append({'operation': name + '_close', 'error_type': type(error).__name__})
+        for name in buffers:
+            checks[name] = _output(buffers[name], counts[name], 4096)
+            checks[name]['eof_observed'] = eof[name]
+        checks['elapsed_seconds'] = round(time.monotonic() - started, 6)
+        if cleanup['errors'] and failure is None:
+            checks.update(status='failed', error_type='RuntimeError', stage='cleanup')
+            raise RuntimeError('unrelated CLI cleanup incomplete')
+
+
 def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None):
     """Preflight service/lineage, then recheck actual boundary before release."""
     from uas.docker_exec_api import DockerExecAPI
@@ -527,20 +649,16 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         # An unrelated Engine exec has the same numeric UID and mount but no
         # ancestry to the held bootstrap. The real service must reject it.
         checks['stage'] = 'unrelated_task_refusal'
-        unrelated = subprocess.Popen(['docker', 'exec', container, '/usr/bin/python3', '-I',
-            '/opt/uas/uas/room_probe.py', 'denied-help'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            listener.settimeout(5); channel, _ = listener.accept()
-            with channel: denied = serve_one(channel, service, authority, lifecycle_lock=supervisor._locked)
-            stdout, stderr = unrelated.communicate(timeout=5)
-            require(unrelated.returncode == 0 and denied is None and json.loads(stdout) == {'code':128}
-                    and len(stderr) <= 4096 and effects['worker'] == 0, 'same-UID unrelated task admitted')
-        finally:
-            if unrelated.returncode is None:
-                # Closing the owned CLI is not claimed to kill its container
-                # task. The scenario always destroys that exact owned Room.
-                unrelated.kill(); unrelated.wait(timeout=5)
-            for stream in (unrelated.stdout, unrelated.stderr): stream.close()
+        checks['unrelated_task'] = {}
+        denied, stdout, stderr = observe_unrelated_cli(listener, container,
+            lambda channel: serve_one(channel, service, authority, lifecycle_lock=supervisor._locked),
+            checks=checks['unrelated_task'])
+        observed = checks['unrelated_task']
+        require(not observed['stdout']['truncated'] and not observed['stderr']['truncated'],
+                'unrelated CLI evidence exceeded capture bound')
+        require(observed['returncode'] == 0 and denied is None and json.loads(stdout) == {'code':128}
+                and len(stderr) <= 4096 and effects['worker'] == 0, 'same-UID unrelated task admitted')
+        observed['authority_refusal_proved'] = True
         # Final actual liveness and launch-boundary observation immediately before
         # granting the synthetic workload its release, not a cached HELLO bit.
         with supervisor._locked():

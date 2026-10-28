@@ -73,6 +73,20 @@ contains the existing synthetic Go probe and no Pi/Node or native Git worker
 entrypoints. The selected Git/OpenSSH descriptors are real signed guest package
 files; help never executes either, and the credential configuration is empty.
 
+The unrelated same-UID task negative retains caller-owned evidence before its
+fixed Docker CLI launch. Launch, accept, service and output-collection stages
+have elapsed timestamps; each output stream retains at most 4096 bytes (also
+bounded after JSON escaping), with total byte counts and EOF/truncation state.
+The accept and collection deadlines remain five seconds each, and draining
+output does not restart them. A timeout or early client exit is incomplete
+evidence, never an authority refusal. Pre-cleanup process state is distinct
+from a forced-kill return code; output and cleanup errors survive failures
+without masking the original exception. Cleanup has a shared five-second
+drain/reap bound and must succeed. Killing the owned CLI does not establish
+that its daemon-owned in-container task died: exact Room teardown remains
+mandatory. Qualification still requires an actual connected `serve_one`
+authority rejection, client exit zero with code 128, and zero worker effects.
+
 ## Selected privilege and namespace profile (qualification pending)
 
 The accepted boundary keeps the Supervisor and Docker authority outside the
