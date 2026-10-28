@@ -231,13 +231,39 @@ jobs:
         shell: bash
         run: |
           set +e
-          timeout --signal=TERM --kill-after=2s 40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run & diff=$!
-          timeout --signal=TERM --kill-after=2s 15s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/gate_forge_smoke.py & broker=$!
-          timeout --signal=TERM --kill-after=2s 30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!
+          # Avoid overlapping the two fixed GCC builds with process-heavy Brokers.
+          # This mitigates possible contention; the previous timeout's cause is unproven.
+          log=$(mktemp) || exit 1
+          trap 'rm -f "$log"' EXIT
+          timeout --signal=TERM --kill-after=2s 40s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,GITHUB_SHA /usr/bin/python3 tests/linux/diff_smoke.py --run >"$log" 2>&1 & diff=$!
           status=0
-          for child in "$diff" "$broker" "$review"; do
+          ready=false
+          deadline=$((SECONDS + 15))
+          while (( SECONDS < deadline )); do
+            # Check the marker first: a completed diff may already have emitted it.
+            if grep -Fxq '{"stage": "build-ready"}' "$log"; then ready=true; break; fi
+            kill -0 "$diff" 2>/dev/null || break
+            sleep .05
+          done
+          children=("$diff")
+          if "$ready"; then
+            timeout --signal=TERM --kill-after=2s 15s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/gate_forge_smoke.py & broker=$!
+            children+=("$broker")
+            timeout --signal=TERM --kill-after=2s 30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!
+            children+=("$review")
+          else
+            echo 'Diff build barrier failed; Broker siblings were not started.'
+            status=1
+          fi
+          # No build marker is qualification: retain every launched final status.
+          # Nominal overlap: max(diff 40s, barrier 15s + review 30s) =45s.
+          # Kill grace, polling and setup add time; the existing 1min job cap rules.
+          for child in "${children[@]}"; do
             wait "$child" || status=1
           done
+          cat "$log" || status=1
+          rm -f "$log" || status=1
+          trap - EXIT
           exit "$status"
 
   gate-command-native:

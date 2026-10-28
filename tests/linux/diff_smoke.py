@@ -433,6 +433,8 @@ def main():
         script=payload/'tests/linux/diff_smoke.py'
         emit({'stage':'source-staged','source_sha256':source_hashes})
         installed,digests=build(root,source_root=payload)
+        # Scheduling hint only: final exit and cleanup still determine success.
+        emit({'stage':'build-ready'})
         for index,case in enumerate(CASES):
             case_root=root/('case-'+str(index));case_root.mkdir(mode=0o755);os.chown(case_root,HOST_SUPERVISOR,HOST_SUPERVISOR)
             env={'PATH':'/usr/bin:/bin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'}
