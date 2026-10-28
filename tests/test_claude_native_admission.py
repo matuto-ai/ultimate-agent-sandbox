@@ -143,18 +143,19 @@ class NativeClaudeAdmissionTests(unittest.TestCase):
         root.helper_lease=Mock()
         root.helper_lease.admit.side_effect=lambda *a:events.append('helper-admit')
         root._receive_helper=Mock(side_effect=lambda *a:events.append('helper-release'))
+        root._receive_forge_helper=Mock(side_effect=lambda *a:events.append('forge-release'))
         root.attach_native=Mock(side_effect=lambda **k:events.append('native-proof'))
         with patch.object(m,'NativeClaudeSupervisorAdmission') as admission:
             admission.return_value.admit.side_effect=lambda *a:events.append('root-admit')
             args=dict(journal='/unused',control=None,hub_origin=None,controller='f'*32,
                 control_lock=None,operation_id='a'*32,epoch=1)
             self.assertIs(root.initialize_helper(None,**args),root)
-            self.assertEqual(events,['native-release','helper-release','native-proof','root-admit','helper-admit'])
+            self.assertEqual(events,['native-release','helper-release','forge-release','native-proof','root-admit','helper-admit'])
             with self.assertRaises(OriginDenied):root.initialize_helper(None,**args)
             admission.return_value.admit.assert_called_once_with('a'*32,1)
 
     def test_initializer_has_one_deadline(self):
-        root=fixture();root.launch=Mock();root._receive_helper=Mock();root._fail=Mock()
+        root=fixture();root.launch=Mock();root._receive_helper=Mock();root._receive_forge_helper=Mock();root._fail=Mock()
         with patch.object(m.time,'monotonic',side_effect=[0,0,9]):
             with self.assertRaises(TimeoutError):root.initialize_helper(None,journal='/unused',
                 control=None,hub_origin=None,controller='f'*32,control_lock=None,
@@ -171,7 +172,7 @@ class NativeClaudeAdmissionTests(unittest.TestCase):
         channel.close.assert_called_once()
 
     def test_initializer_unknown_transfer_preserves_owner_for_status(self):
-        root=fixture();root.launch=Mock();root._receive_helper=Mock();root.attach_native=Mock()
+        root=fixture();root.launch=Mock();root._receive_helper=Mock();root._receive_forge_helper=Mock();root.attach_native=Mock()
         root._fail=Mock();root.helper_lease=Mock()
         with patch.object(m,'NativeClaudeSupervisorAdmission') as admission:
             admission.return_value.admit.side_effect=TimeoutError('unknown')
@@ -182,7 +183,7 @@ class NativeClaudeAdmissionTests(unittest.TestCase):
             self.assertIs(root.native_admission,admission.return_value)
 
     def test_initializer_proof_failure_never_transfers(self):
-        root=fixture();root.launch=Mock();root._receive_helper=Mock()
+        root=fixture();root.launch=Mock();root._receive_helper=Mock();root._receive_forge_helper=Mock()
         root.attach_native=Mock(side_effect=OriginDenied('not fresh'));root._fail=Mock()
         with patch.object(m,'NativeClaudeSupervisorAdmission') as admission:
             with self.assertRaises(OriginDenied):root.initialize_helper(None,journal='/unused',

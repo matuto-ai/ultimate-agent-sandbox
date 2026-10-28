@@ -28,10 +28,41 @@ class AdmittedPeerDispatcher:
         self.contributions = contributions
         self.reviews = None
         self.read_service = None
+        self.host_forge_binding = None
         self.admissions, self.hub = admissions, hub
         self._connections = {}
         self._delivery_offers = {}
         self._delivery_confirmed = set()
+
+    def attach_host_forge_binding(self, binding):
+        """Immutable trusted startup Project binding, never credentials/authority."""
+        from .forge import ForgeBinding
+        if (type(binding) is not ForgeBinding or binding.room_id != self.hub.ledger.room_id
+                or self.host_forge_binding is not None):
+            raise OriginDenied('one canonical Room Forge binding required')
+        self.host_forge_binding = binding
+
+    def reserve_host_forge(self, operation, helper, envelope, digest):
+        """Private Supervisor control only; namespace reservation is not a grant.
+
+        Caller was authenticated by HubAdmission. Host received original helper
+        bytes separately; Hub cannot manufacture that kernel record or its Origin.
+        """
+        from .forge_read_service import reserve_forge_operation
+        if self.host_forge_binding is None:
+            raise LedgerError('FORGE_UNAVAILABLE')
+        if hashlib.sha256(_canonical(envelope)).hexdigest() != digest:
+            raise LedgerError('INVALID_FORGE_ENVELOPE')
+        with self.admissions.authorize_descendant(helper, None) as binding:
+            connection = self._connections.get(operation)
+            if (binding.operation_id != operation or connection is None
+                    or not self.hub._current(connection)):
+                raise LedgerError('STALE_CONNECTION')
+            guard = lambda: (self.admissions.recheck_descendant(helper, None)
+                             and self.hub._current(connection))
+            reserve_forge_operation(self.hub.ledger, self.host_forge_binding,
+                                    envelope, self._origin(binding), guard)
+            return {'status':'RESERVED', 'digest':digest}
 
     def attach_read_service(self, client):
         """Attach the existing trusted Broker client, never a peer-selected URL.

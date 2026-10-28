@@ -1,3 +1,4 @@
+from .runtime_provider import ProviderAuthReference, select_reference, require_reference
 """Immutable installation-selected Claude SDK/native payload; not Actor admission.
 
 A native child owner must use the separate kernel rendezvous. This recipe cannot
@@ -9,7 +10,7 @@ import re
 import uuid
 from pathlib import Path
 from .native_pi_recipe import (NativeRecipeError, NativeMount, NativePiRecipe,
-                               read_manifest, path, below, SHA, CHOICE)
+                               read_manifest, path, below, SHA, CHOICE, verify_payload_manifest)
 
 ROOT = '/opt/uas'
 HOST = ROOT + '/runtime/claude/native-host.mjs'
@@ -22,7 +23,7 @@ ARTIFACTS = frozenset((HOST, HOST_BOOTSTRAP, BOOTSTRAP, HELPER, BINARY, ROOT+'/n
     ROOT+'/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
     *(ROOT+'/runtime/claude/'+name for name in ('native-policy.mjs','mcp-server.mjs',
        'mcp-tools.mjs','sdk-policy.mjs','sdk-resources.mjs','sdk-diagnostics.mjs')),
-    ROOT+'/runtime/pi/channel.mjs'))
+    ROOT+'/runtime/pi/channel.mjs',ROOT+'/runtime/provider-auth.mjs'))
 
 
 class NativeClaudeRecipe:
@@ -36,13 +37,13 @@ class NativeClaudeRecipe:
     def scope(self): return json.loads(self._scope)
 
     def __init__(self, manifest_path, manifest_digest, *, seat, scope, checkout,
-                 home, runtime_root, endpoint, model, session_id, mounts, resume=False):
+                 home, runtime_root, endpoint, model, session_id, mounts, resume=False, provider_auth=None):
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat or type(resume) is not bool:
             raise NativeRecipeError('trusted typed native seat required')
         manifest = read_manifest(manifest_path,manifest_digest)
         if (type(manifest) is not dict or set(manifest) != {'version','runtime','runtime_version',
-                'sdk_version','image_reference','image_id','artifacts'}
+                'sdk_version','image_reference','image_id','artifacts','payload_manifest_digest'}
                 or type(manifest['version']) is not int or manifest['version'] != 1
                 or manifest['runtime'] != 'claude' or manifest['runtime_version'] != '2.1.310'
                 or manifest['sdk_version'] != '0.3.310'
@@ -52,6 +53,7 @@ class NativeClaudeRecipe:
                 or type(manifest['artifacts']) is not dict or set(manifest['artifacts']) != ARTIFACTS
                 or any(type(x) is not str or not SHA.fullmatch(x) for x in manifest['artifacts'].values())):
             raise NativeRecipeError('invalid selected Claude manifest')
+        self.payload_manifest_digest = verify_payload_manifest(manifest)
         if (type(scope) is not dict or set(scope) != {'room_id','participant_id','run_id','generation','context_generation'}
                 or scope['room_id'] != seat.room_id or scope['participant_id'] != seat.participant_id
                 or type(scope['run_id']) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',scope['run_id'])
@@ -81,14 +83,17 @@ class NativeClaudeRecipe:
                 or selected[0].source!=selected[0].destination
                 or selected[1].source!=runtime_root or selected[1].destination!=runtime_root):
             raise NativeRecipeError('separate writable checkout/runtime mounts required')
+        if provider_auth is not None: require_reference(provider_auth, 'claude')
+        self.provider_auth = provider_auth
+        self.auth_path = None if provider_auth is None else provider_auth.path(runtime_root)
         self.seat,self.mounts,self.model,self.session_id,self.resume=seat,mounts,model,session_id,resume
         self.manifest_path,self.manifest_digest=path(str(manifest_path)),manifest_digest
         self.image_id,self.image_reference=manifest['image_id'],manifest['image_reference']
         self._scope=json.dumps(scope,sort_keys=True)
         identity={'runtime':'claude','runtime_version':'2.1.310','sdk_version':'0.3.310',
-            'manifest_digest':manifest_digest,'image_id':self.image_id,'image_reference':self.image_reference,
+            'manifest_digest':manifest_digest,'payload_manifest_digest':self.payload_manifest_digest,'image_id':self.image_id,'image_reference':self.image_reference,
             'scope':scope,'checkout':checkout,'home':home,'runtime_root':runtime_root,'endpoint':endpoint,'model':model,
-            'session_id':session_id,'resume':resume,'mounts':[m.__dict__ for m in mounts]}
+            'session_id':session_id,'resume':resume,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts]}
         identity['recipe_sha256']=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
         self._identity=json.dumps(identity,sort_keys=True); self._frozen=True
 
@@ -118,7 +123,8 @@ class NativeClaudeRecipe:
             found=[m for m in mounts if m.source==roots[key] and m.destination==roots[key]]
             if len(found)!=1 or found[0].read_only!=(key=='reference'): raise NativeRecipeError('configured Project mount mismatch')
         result=cls(manifest_path,manifest_digest,seat=seat,scope=scope,checkout=checkout,home=home,
-            runtime_root=runtime_root,endpoint=endpoint,model=model,session_id=session_id,mounts=mounts,resume=resume)
+            runtime_root=runtime_root,endpoint=endpoint,model=model,session_id=session_id,mounts=mounts,resume=resume,
+            provider_auth=select_reference(provider,'claude'))
         image=next(i for i in config['deployment']['images'] if i['id']==room['image'])
         if result.image_reference!=image['reference']: raise NativeRecipeError('selected configured image mismatch')
         return result
@@ -138,4 +144,7 @@ class NativeClaudeRecipe:
         return {'AttachStdin':True,'AttachStdout':True,'AttachStderr':True,'Tty':False,
             'Privileged':False,'User':'65532:65532','WorkingDir':self.checkout,
             'Cmd':[HOST_BOOTSTRAP,self.endpoint,self.checkout,self.home,self.model,
-                self.session_id,'1' if self.resume else '0',manifest_in_image,self.manifest_digest], 'Env':[]}
+                self.session_id,'1' if self.resume else '0',manifest_in_image,self.payload_manifest_digest] + ([] if self.provider_auth is None else [self.auth_path]), 'Env':[]}
+
+    def require_provider_auth(self):
+        return require_reference(self.provider_auth, 'claude')

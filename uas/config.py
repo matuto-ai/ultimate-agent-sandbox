@@ -245,7 +245,7 @@ def _normalize(config, available_credentials):
     creds = _named(d["credentials"], "$.deployment.credentials")
     for c, p in creds.values():
         _object(c, p, ("id", "kind"))
-        if c["kind"] not in ("git", "forge", "manager-client", "manager-trust"):
+        if c["kind"] not in ("git", "forge", "manager-client", "manager-trust", "runtime-provider"):
             raise ConfigError(p + ".kind", "unsupported credential kind")
     available = set()
     for i, name in enumerate(available_credentials):
@@ -292,9 +292,15 @@ def _normalize(config, available_credentials):
         _image(image["reference"], p + ".reference")
     providers = _named(d["providers"], "$.deployment.providers")
     for provider, p in providers.values():
-        _object(provider, p, ("id", "runtime"), ("model", "endpoint"))
+        _object(provider, p, ("id", "runtime"), ("model", "endpoint", "auth"))
         if provider["runtime"] not in ("pi", "claude"):
             raise ConfigError(p + ".runtime", "unsupported Runtime")
+        if "auth" in provider:
+            auth = _object(provider["auth"], p + ".auth", ("credential_ref", "method"))
+            credential(auth["credential_ref"], p + ".auth.credential_ref", "runtime-provider")
+            from .runtime_provider import METHODS
+            if type(auth["method"]) is not str or auth["method"] not in METHODS[provider["runtime"]]:
+                raise ConfigError(p + ".auth.method", "unsupported Runtime authentication method")
         if "model" in provider:
             _text(provider["model"], p + ".model", 256)
         if "endpoint" in provider:

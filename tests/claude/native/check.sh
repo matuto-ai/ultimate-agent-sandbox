@@ -8,3 +8,7 @@ done
 node --check runtime/claude/native-host.mjs
 node --check runtime/claude/mcp-server.mjs
 node tests/claude/native/policy.mjs
+node --check runtime/provider-auth.mjs
+node --check runtime/pi/native-entry.mjs
+node tests/claude/native/provider-auth.mjs
+node --check runtime/pi/provider-store.mjs

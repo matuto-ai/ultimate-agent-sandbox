@@ -194,6 +194,7 @@ class ExecLaunch:
         # No engine mutation before actual platform and endpoint checks.
         if getattr(self, 'native_recipe', None) is not None:
             self.native_recipe.validate_container(self.engine)
+            self.native_recipe.require_provider_auth()
         probe(); self.endpoint.require(); enable(listener)
         self.state = 'creating'
         self._save(first=True)

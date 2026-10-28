@@ -11,7 +11,7 @@
 #include <errno.h>
 static void fail(void) { _exit(125); }
 int main(int argc,char **argv) {
-    if (argc!=9 || argv[1][0]!='/' || strlen(argv[1])>=sizeof(((struct sockaddr_un *)0)->sun_path)) fail();
+    if ((argc!=9 && argc!=10) || argv[1][0]!='/' || strlen(argv[1])>=sizeof(((struct sockaddr_un *)0)->sun_path)) fail();
     if (prctl(PR_SET_DUMPABLE,0) || prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)) fail();
     alarm(15);
     unsigned char packet[36]={'U','A','S','1'}; size_t offset=0;
@@ -27,6 +27,6 @@ int main(int argc,char **argv) {
     if(close_range(3,~0U,0)) fail();
     char *env[]={"PATH=/opt/uas/node/bin:/usr/bin:/bin","LANG=C.UTF-8",NULL};
     char *args[]={"/opt/uas/node/bin/node","/opt/uas/runtime/claude/native-host.mjs",
-        argv[2],argv[3],argv[1],argv[4],argv[5],argv[6],argv[7],argv[8],NULL};
+        argv[2],argv[3],argv[1],argv[4],argv[5],argv[6],argv[7],argv[8],argc==10?argv[9]:NULL,NULL};
     alarm(0); execve(args[0],args,env); fail();
 }

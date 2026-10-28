@@ -1,3 +1,4 @@
+from uas.native_image_package import envelope
 """Pure recipe/source contracts only; no native launch or kernel evidence."""
 import copy
 from pathlib import Path
@@ -13,6 +14,9 @@ class NativeClaudeRecipeTests(unittest.TestCase):
         self.manifest={'version':1,'runtime':'claude','runtime_version':'2.1.310','sdk_version':'0.3.310',
             'image_reference':'registry/image@sha256:'+'a'*64,'image_id':'sha256:'+'b'*64,
             'artifacts':{key:'c'*64 for key in ARTIFACTS}}
+        self.manifest = envelope({key: value for key, value in self.manifest.items()
+            if key not in ('image_reference', 'image_id')},
+            image_reference=self.manifest['image_reference'], image_id=self.manifest['image_id'])
         self.args=dict(seat=ExecSeat('room','instance','reviewer','actor','seat-b','d'*64,65532,65532),
             scope={'room_id':'room','participant_id':'reviewer','run_id':'run','generation':1,'context_generation':1},
             checkout='/project/repo',home='/runtime/seat-b/contexts/1/home',runtime_root='/runtime',endpoint='/transport/claude.sock',
@@ -23,6 +27,16 @@ class NativeClaudeRecipeTests(unittest.TestCase):
         args={**self.args,**changes}
         with patch('uas.native_claude_recipe.read_manifest',return_value=copy.deepcopy(self.manifest)):
             return NativeClaudeRecipe('/trusted/manifest.json','a'*64,**args)
+    def test_provider_reference_does_not_share_native_context(self):
+        from uas.runtime_provider import ProviderAuthReference
+        ref=ProviderAuthReference('claude','chosen','subscription','claude-oauth-token')
+        recipe=self.make(provider_auth=ref)
+        self.assertEqual(recipe.require_provider_auth(),ref)
+        self.assertIn('/providers/subscription/token',recipe.auth_path)
+        self.assertNotIn('/contexts/',recipe.auth_path)
+        self.assertEqual(recipe.host_spec(manifest_in_image='/opt/uas/claude-manifest.json')['Cmd'][-1],recipe.auth_path)
+        with self.assertRaises(ValueError):self.make().require_provider_auth()
+
     def test_explicit_fixed_host_no_secret(self):
         recipe=self.make(); spec=recipe.host_spec(manifest_in_image='/opt/uas/claude-manifest.json')
         self.assertEqual(spec['Cmd'][:2],['/opt/uas/bin/claude-host-bootstrap','/transport/claude.sock'])
@@ -62,7 +76,7 @@ class NativeClaudeRecipeTests(unittest.TestCase):
         self.assertNotIn('...process.env',policy.replace('// No spread of ambient process.env',''))
     def test_helper_does_not_accept_identity(self):
         source=(ROOT/'runtime/claude/mcp-connector.c').read_text()
-        self.assertIn('UAS-CLAUDE-MCP-1',source); self.assertIn('close_range(4,~0U,0)',source)
+        self.assertIn('UAS-CLAUDE-MCP-1',source); self.assertIn('close_range(5,~0U,0)',source)
         self.assertIn('execve(args[0],args,env)',source)
         self.assertNotIn('getenv(',source); self.assertNotIn('fork(',source)
     def test_complete_configuration_repo_and_checkout(self):
@@ -94,3 +108,15 @@ class NativeClaudeRecipeTests(unittest.TestCase):
         self.assertIn('mkdirSync(home,{mode:0o700})',source)
         self.assertLess(source.index('mkdirSync(home,'),source.index('query=createQuery('))
         self.assertIn('exclusive-new-home-explicit-session-no-input',source)
+
+    def test_baked_payload_digest_mismatch_rejected(self):
+        self.manifest['payload_manifest_digest'] = '0' * 64
+        with self.assertRaisesRegex(NativeRecipeError, 'baked payload'):
+            self.make()
+
+    def test_host_gets_payload_not_external_envelope_digest(self):
+        recipe = self.make()
+        spec = recipe.host_spec(manifest_in_image='/opt/uas/claude-manifest.json')
+        self.assertEqual(spec['Cmd'][-1], recipe.payload_manifest_digest)
+        self.assertEqual(recipe.identity['manifest_digest'], 'a' * 64)
+        self.assertNotEqual(recipe.manifest_digest, recipe.payload_manifest_digest)

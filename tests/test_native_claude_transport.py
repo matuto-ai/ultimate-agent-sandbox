@@ -21,16 +21,18 @@ class NativeClaudeTransportTests(unittest.TestCase):
         node=shutil.which('node')
         self.assertIsNotNone(node,'hosted Node runtime is required, not a skipped test')
         parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+        forge_parent,forge_child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+        forge_parent.settimeout(2)
         parent.settimeout(2)
         # Fixed FD3 handoff in an owned child. No preexec callback in a threaded
         # test runner; the shim execs only the selected local Node and fixed file.
-        shim='import os,sys; fd=int(sys.argv[1]); os.dup2(fd,3); os.close(fd) if fd!=3 else None; os.set_inheritable(3,True); os.set_blocking(3,False); os.execve(sys.argv[2],[sys.argv[2],sys.argv[3]],{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"})'
+        shim='import os,sys,fcntl; a=fcntl.fcntl(int(sys.argv[1]),fcntl.F_DUPFD_CLOEXEC,10); b=fcntl.fcntl(int(sys.argv[2]),fcntl.F_DUPFD_CLOEXEC,10); os.dup2(a,3); os.dup2(b,4); os.close(a); os.close(b); [os.close(fd) for fd in (int(sys.argv[1]),int(sys.argv[2])) if fd not in (3,4)]; os.set_inheritable(3,True); os.set_inheritable(4,True); os.set_blocking(3,False); os.set_blocking(4,False); os.execve(sys.argv[3],[sys.argv[3],sys.argv[4]],{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"})'
         process=None; buffer=bytearray(); deadline=time.monotonic()+7
         try:
-            process=subprocess.Popen([sys.executable,'-c',shim,str(child.fileno()),node,
-                str(ROOT/'runtime/claude/mcp-server.mjs')],pass_fds=(child.fileno(),),
+            process=subprocess.Popen([sys.executable,'-c',shim,str(child.fileno()),str(forge_child.fileno()),node,
+                str(ROOT/'runtime/claude/mcp-server.mjs')],pass_fds=(child.fileno(),forge_child.fileno()),
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,cwd=ROOT)
-            child.close()
+            child.close(); forge_child.close()
             os.set_blocking(process.stdin.fileno(),False)
             def send(value):
                 wire=(json.dumps(value)+'\n').encode(); offset=0
@@ -60,6 +62,9 @@ class NativeClaudeTransportTests(unittest.TestCase):
             request={'jsonrpc':'2.0','id':3,'method':'tools/call','params':{'name':'uas_peer','arguments':payload}}
             send(request); self.assertIn('error',reply())
             self.assertEqual(select.select([parent],[],[],0)[0],[],'pre-admission call must not reach owner')
+            send({'jsonrpc':'2.0','id':30,'method':'tools/call','params':{'name':'gh','arguments':{'id':'pre-admit','argv':['pr','view','1']}}})
+            self.assertEqual(reply().get('error',{}).get('message'),'native helper not admitted')
+            self.assertEqual(select.select([parent,forge_parent],[],[],0)[0],[],'pre-admission gh cannot reach either owner')
             parent.sendall(b'UAS-HELPER-ACTIVE-1\n')
             # An explicit pre-admission refusal is known-no-effect, not an
             # uncertain request. Retry only those refusals with stable op ID.
@@ -80,14 +85,21 @@ class NativeClaudeTransportTests(unittest.TestCase):
             parent.sendall(json.dumps({'request_id':frame['request_id'],'ok':True,'receipt':{'stored':'controlled'}}).encode())
             result=reply()['result']; self.assertFalse(result['isError'])
             self.assertEqual(json.loads(result['content'][0]['text'])['receipt'],{'stored':'controlled'})
+            send({'jsonrpc':'2.0','id':99,'method':'tools/call','params':{'name':'gh','arguments':{'id':'direct-forge','argv':['pr','view','1']}}})
+            direct=json.loads(forge_parent.recv(65537))
+            self.assertEqual(direct['envelope'],{'id':'direct-forge','kind':'forge-read','argv':['pr','view','1']})
+            self.assertEqual(select.select([parent],[],[],0)[0],[],'Hub must not receive Forge request')
+            forge_parent.sendall(json.dumps({'request_id':direct['request_id'],'ok':True,'receipt':{'observation':{'completeness':'complete'}}}).encode())
+            self.assertFalse(reply()['result']['isError'])
             # Oversized writes fail before even the first channel packet.
             send({'jsonrpc':'2.0','id':100,'method':'tools/call','params':{'name':'gh','arguments':{
                 'id':'large','argv':['pr','comment','1','--body-file','-'],'body':'x'*65536}}})
-            self.assertIn('error',reply()); self.assertEqual(select.select([parent],[],[],0)[0],[])
+            self.assertIn('error',reply()); self.assertEqual(select.select([parent,forge_parent],[],[],0)[0],[])
             process.stdin.close(); process.wait(timeout=min(2,max(.001,deadline-time.monotonic())))
             self.assertEqual(parent.recv(1),b'','stdio EOF must close the inherited channel')
+            self.assertEqual(forge_parent.recv(1),b'','stdio EOF must close the private Forge channel')
         finally:
-            child.close(); parent.close()
+            child.close(); forge_child.close(); parent.close(); forge_parent.close()
             if process is not None:
                 if process.poll() is None: process.kill(); process.wait(timeout=2)
                 for stream in (process.stdin,process.stdout,process.stderr):
@@ -96,18 +108,20 @@ class NativeClaudeTransportTests(unittest.TestCase):
     def test_wrong_or_extra_activation_record_closes_without_effect(self):
         node=shutil.which('node'); self.assertIsNotNone(node)
         parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET); parent.settimeout(2)
-        shim='import os,sys; fd=int(sys.argv[1]); os.dup2(fd,3); os.close(fd) if fd!=3 else None; os.set_inheritable(3,True); os.set_blocking(3,False); os.execve(sys.argv[2],[sys.argv[2],sys.argv[3]],{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"})'
+        forge_parent,forge_child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET); forge_parent.settimeout(2)
+        shim='import os,sys,fcntl; a=fcntl.fcntl(int(sys.argv[1]),fcntl.F_DUPFD_CLOEXEC,10); b=fcntl.fcntl(int(sys.argv[2]),fcntl.F_DUPFD_CLOEXEC,10); os.dup2(a,3); os.dup2(b,4); os.close(a); os.close(b); [os.close(fd) for fd in (int(sys.argv[1]),int(sys.argv[2])) if fd not in (3,4)]; os.set_inheritable(3,True); os.set_inheritable(4,True); os.set_blocking(3,False); os.set_blocking(4,False); os.execve(sys.argv[3],[sys.argv[3],sys.argv[4]],{"PATH":"/usr/bin:/bin","LANG":"C.UTF-8"})'
         process=None
         try:
-            process=subprocess.Popen([sys.executable,'-c',shim,str(child.fileno()),node,
-                str(ROOT/'runtime/claude/mcp-server.mjs')],pass_fds=(child.fileno(),),
+            process=subprocess.Popen([sys.executable,'-c',shim,str(child.fileno()),str(forge_child.fileno()),node,
+                str(ROOT/'runtime/claude/mcp-server.mjs')],pass_fds=(child.fileno(),forge_child.fileno()),
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,cwd=ROOT)
-            child.close(); parent.sendall(b'UAS-HELPER-ACTIVE-1\nextra')
+            child.close(); forge_child.close(); parent.sendall(b'UAS-HELPER-ACTIVE-1\nextra')
             process.wait(timeout=2)
             self.assertEqual(process.returncode,1)
             self.assertEqual(parent.recv(65537),b'','malformed activation cannot emit a request')
+            self.assertEqual(forge_parent.recv(65537),b'','malformed activation cannot emit Forge traffic')
         finally:
-            child.close(); parent.close()
+            child.close(); forge_child.close(); parent.close(); forge_parent.close()
             if process is not None:
                 if process.poll() is None: process.kill(); process.wait(timeout=2)
                 for stream in (process.stdin,process.stdout,process.stderr):

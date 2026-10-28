@@ -8,17 +8,18 @@ export function requireMcp(statuses) {
   if (!Array.isArray(statuses) || statuses.length !== 1 || statuses[0]?.name !== SERVER
       || statuses[0]?.status !== 'connected') throw Error('native-mcp-unavailable');
 }
-export function nativeOptions({binary, cwd, home, model, sessionId, helper, endpoint, resume = false}) {
+export function nativeOptions({binary, cwd, home, model, sessionId, helper, endpoint, resume = false, providerToken}) {
   if (binary !== '/opt/uas/claude/claude' || helper !== '/opt/uas/bin/claude-mcp-connector'
       || typeof model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)
       || ![cwd, home, endpoint].every(x => typeof x === 'string' && x.startsWith('/')
         && !x.includes('/../') && !x.includes('/./') && !x.includes('//') && !/[\x00-\x20\x7f]/.test(x))
-      || typeof resume !== 'boolean') throw Error('native-profile-invalid');
+      || typeof resume !== 'boolean' || (providerToken !== undefined && (typeof providerToken !== 'string' || !/^[\x21-\x7e]{16,8192}$/.test(providerToken)))) throw Error('native-profile-invalid');
   // No spread of ambient process.env, user settings, plugins or caller tools.
   return {pathToClaudeCodeExecutable: binary, cwd,
     env: {PATH:'/opt/uas/node/bin:/usr/bin:/bin', HOME:home, CLAUDE_CONFIG_DIR:home + '/config',
+      ...(providerToken === undefined ? {} : {CLAUDE_CODE_OAUTH_TOKEN:providerToken}),
       LANG:'C.UTF-8', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1', CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS:'1'},
-    tools:[], mcpServers:{uas:{type:'stdio',command:helper,args:[endpoint]}},
+    tools:[], mcpServers:{uas:{type:'stdio',command:helper,args:[endpoint],env:{PATH:'/opt/uas/node/bin:/usr/bin:/bin',LANG:'C.UTF-8'}}},
     strictMcpConfig:true, settingSources:[], allowedTools:[...TOOL_NAMES], permissionMode:'default', maxTurns:16, model,
     ...(resume ? {resume:sessionId} : {sessionId}),
     extraArgs:{bare:null, restricted:null, 'replay-user-messages':null}};

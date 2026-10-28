@@ -97,7 +97,8 @@ class AdmittedHubLoop:
                         if not select.select([self.control], [], [], 0)[0]:
                             break
                         self.admissions.serve_once(self.control, on_admitted=self._attach,
-                                                   on_delivery=self.dispatcher.delivery)
+                                                   on_delivery=self.dispatcher.delivery,
+                                                   on_forge_reserve=self.dispatcher.reserve_host_forge)
                     control_pending = bool(select.select([self.control], [], [], 0)[0])
                 elif kind == 'helper-task':
                     self.admissions.revoke_helper(operation)

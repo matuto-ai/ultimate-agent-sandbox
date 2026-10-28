@@ -47,6 +47,7 @@ class NativeClaudeHostLaunch(ExecLaunch):
         return document
 
     def launch(self, listener):
+        self.recipe.require_provider_auth()
         self.recipe.validate_container(self.engine)
         return super().launch(listener)
 
@@ -104,7 +105,7 @@ class NativeClaudeRoot:
         self._native_readiness_json = None
         self.admission = None
         self.cleanup_incomplete = False
-        self.helper_lease = self.native_admission = None
+        self.helper_lease = self.native_admission = self.forge_service = None
         self._initialize_started = False
         host_launch._native_child = self
 
@@ -216,9 +217,21 @@ class NativeClaudeRoot:
             channel.close()
             raise
 
+    def _receive_forge_helper(self, listener, timeout):
+        self.current(); self.endpoint.require()
+        listener.settimeout(timeout)
+        forge_channel, _ = listener.accept()
+        try:
+            enable(forge_channel); forge_channel.settimeout(timeout)
+            with receive(forge_channel) as record:
+                self.helper_lease.bind_forge(forge_channel, record)
+        except BaseException:
+            forge_channel.close()
+            raise
+
     def initialize_helper(self, listener, *, journal, control, hub_origin,
                           controller, control_lock, operation_id, epoch,
-                          timeout=8, control_timeout=2):
+                          timeout=8, control_timeout=2, forge_client=None):
         """Concrete fresh SDK/native/helper startup, without a worker thread.
 
         The fixed host starts SDK initialization after the second challenge;
@@ -244,6 +257,7 @@ class NativeClaudeRoot:
         try:
             self.launch(listener,timeout=remaining())
             self._receive_helper(listener,remaining())
+            self._receive_forge_helper(listener, remaining())
             self.attach_native(journal=journal,timeout=remaining())
             self.native_admission=NativeClaudeSupervisorAdmission(self,self.admission_seat,
                 control,hub_origin=hub_origin,controller=controller,
@@ -252,6 +266,9 @@ class NativeClaudeRoot:
             self.native_admission.admit(operation_id,epoch)
             self.native_admission.control.settimeout(min(control_timeout,remaining()))
             self.helper_lease.admit(self.native_admission)
+            if forge_client is not None:
+                from .native_host_forge import NativeHostForge
+                self.forge_service = NativeHostForge(self.helper_lease, forge_client)
             remaining()
             return self
         except BaseException:
@@ -259,6 +276,11 @@ class NativeClaudeRoot:
             # A possibly stored ADMIT is reconciled through native_admission.status
             # or helper_lease.status, not replaced by a fresh initialization.
             raise
+
+    def receive_forge_once(self):
+        if self.forge_service is None:
+            raise OriginDenied('trusted Forge service unavailable')
+        return self.forge_service.receive_once()
 
     def current(self):
         if (self.state not in ('bound','released','active') or type(self.origin) is not HeldOrigin

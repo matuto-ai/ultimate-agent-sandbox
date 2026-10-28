@@ -1,3 +1,4 @@
+from .runtime_provider import ProviderAuthReference, select_reference, require_reference
 """Opt-in trusted installation recipe consumed by the canonical exact exec owner.
 
 No configuration is loaded from a Participant. The selected manifest binds an
@@ -18,10 +19,13 @@ class NativeRecipeError(ValueError):
 
 
 CONNECTOR = '/opt/uas/bin/pi-native-connector'
-ARTIFACTS = frozenset((CONNECTOR, '/opt/uas/node/bin/node',
+ARTIFACTS = frozenset(('/opt/uas/runtime/pi/provider-store.mjs',
+    '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js', CONNECTOR, '/opt/uas/node/bin/node',
     '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/package.json',
     '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
-    '/opt/uas/runtime/pi/extension.mjs', '/opt/uas/runtime/pi/channel.mjs'))
+    '/opt/uas/runtime/pi/extension.mjs', '/opt/uas/runtime/pi/channel.mjs',
+    '/opt/uas/runtime/pi/native-entry.mjs', '/opt/uas/runtime/provider-auth.mjs',
+    '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.js'))
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 CHOICE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 
@@ -104,6 +108,18 @@ def read_manifest(filename, expected_digest):
     return json.loads(data, object_pairs_hook=unique)
 
 
+def verify_payload_manifest(manifest):
+    """External image envelope commits to one non-circular baked payload."""
+    keys = ('version', 'runtime', 'runtime_version', 'artifacts')
+    baked = {key: manifest[key] for key in keys}
+    if manifest['runtime'] == 'claude': baked['sdk_version'] = manifest['sdk_version']
+    digest = hashlib.sha256(json.dumps(baked, sort_keys=True,
+        separators=(',', ':'), ensure_ascii=True).encode('ascii')).hexdigest()
+    if manifest.get('payload_manifest_digest') != digest:
+        raise NativeRecipeError('image envelope and baked payload digest differ')
+    return digest
+
+
 class NativePiRecipe:
     """Installation-only opt-in; no generic executable or credential fields.
 
@@ -126,13 +142,13 @@ class NativePiRecipe:
         return json.loads(self._identity_json)
 
     def __init__(self, manifest_path, manifest_digest, *, seat, scope, checkout,
-                 runtime_root, endpoint, mounts, provider, model):
+                 runtime_root, endpoint, mounts, provider, model, provider_auth=None):
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat:
             raise NativeRecipeError('canonical selected seat required')
         manifest = read_manifest(manifest_path, manifest_digest)
         if (type(manifest) is not dict or set(manifest) != {'version','runtime','runtime_version',
-                'image_reference','image_id','artifacts'} or type(manifest['version']) is not int
+                'image_reference','image_id','artifacts','payload_manifest_digest'} or type(manifest['version']) is not int
                 or manifest['version'] != 1 or manifest['runtime'] != 'pi'
                 or manifest['runtime_version'] != '1.4.0'
                 or type(manifest['image_reference']) is not str
@@ -141,6 +157,7 @@ class NativePiRecipe:
                 or type(manifest['artifacts']) is not dict or set(manifest['artifacts']) != ARTIFACTS
                 or any(type(v) is not str or not SHA.fullmatch(v) for v in manifest['artifacts'].values())):
             raise NativeRecipeError('invalid selected native image manifest')
+        self.payload_manifest_digest = verify_payload_manifest(manifest)
         if (type(scope) is not dict or set(scope) != {'room_id','participant_id','run_id','generation','context_generation'}
                 or scope['room_id'] != seat.room_id or scope['participant_id'] != seat.participant_id
                 or type(scope['run_id']) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',scope['run_id'])
@@ -173,14 +190,18 @@ class NativePiRecipe:
                 or homes[0].destination != runtime_root or len(peers)!=1
                 or project[0] in homes or peers[0] in homes or project[0] in peers):
             raise NativeRecipeError('separate admitted Project/runtime/endpoint mounts required')
+        if provider_auth is not None: require_reference(provider_auth, 'pi')
+        self.provider_auth = provider_auth
+        self.auth_path = None if provider_auth is None else provider_auth.path(runtime_root)
         self.mounts, self.provider, self.model = mounts, provider, model
         self.manifest_digest = manifest_digest
         self.image_id, self.image_reference = manifest['image_id'], manifest['image_reference']
         identity = {'runtime':'pi','runtime_version':'1.4.0','manifest_digest':manifest_digest,
             'image_id':self.image_id,'image_reference':self.image_reference,
+            'payload_manifest_digest':self.payload_manifest_digest,
             'scope':dict(scope), 'recipe_sha256':hashlib.sha256(json.dumps({
                 'checkout':self.checkout,'home':self.home,'sessions':self.sessions,'endpoint':self.endpoint,
-                'provider':provider,'model':model,'mounts':[m.__dict__ for m in mounts]},sort_keys=True).encode()).hexdigest()}
+                'provider':provider,'model':model,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts]},sort_keys=True).encode()).hexdigest()}
         self._identity_json = json.dumps(identity,sort_keys=True)
         self._frozen = True
 
@@ -231,7 +252,8 @@ class NativePiRecipe:
                 raise NativeRecipeError('configured Project mount contract differs')
         recipe = cls(manifest_path, manifest_digest, seat=seat, scope=scope, checkout=checkout,
             runtime_root=runtime_root, endpoint=endpoint, mounts=mounts,
-            provider=choices['--provider'], model=selected_model)
+            provider=choices['--provider'], model=selected_model,
+            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']))
         image = next(i for i in config['deployment']['images'] if i['id'] == room['image'])
         if image['reference'] != recipe.image_reference:
             raise NativeRecipeError('configured image differs from selected manifest')
@@ -267,4 +289,7 @@ class NativePiRecipe:
     def exec_spec(self):
         return {'AttachStdin':True,'AttachStdout':True,'AttachStderr':True,'Tty':False,
             'Privileged':False,'User':'65532:65532','WorkingDir':self.checkout,
-            'Cmd':[CONNECTOR,self.endpoint,self.checkout,self.home,self.sessions,self.provider,self.model], 'Env':[]}
+            'Cmd':[CONNECTOR,self.endpoint,self.checkout,self.home,self.sessions,self.provider,self.model] + ([] if self.provider_auth is None else [self.auth_path]), 'Env':[]}
+
+    def require_provider_auth(self):
+        return require_reference(self.provider_auth, 'pi')

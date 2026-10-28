@@ -20,6 +20,8 @@ from .workstation_admission import _canonical, _unique
 
 HELLO = b'UAS-CLAUDE-MCP-1\n'
 RELEASE = b'UAS-RELEASE-1\n'
+FORGE_HELLO = b'UAS-CLAUDE-FORGE-1\n'
+FORGE_RELEASE = b'UAS-FORGE-RELEASE-1\n'
 
 
 class NativeDescendantLease:
@@ -39,6 +41,7 @@ class NativeDescendantLease:
         channel.getpeername()  # Reject an unconnected/listening socket.
         root.current()
         self.root, self.channel = root, channel
+        self.forge_channel = None
         self.origin = self._lineage = self._authority = None
         self.operation_id = uuid.uuid4().hex
         self.state = 'new'
@@ -64,6 +67,26 @@ class NativeDescendantLease:
         except BaseException:
             self.close()
             raise
+
+    def bind_forge(self, channel, record):
+        """Second channel from the SAME fixed helper, retained by Supervisor.
+
+        Release permits MCP initialization only. The direct Forge owner requires
+        both root and helper ADMIT acknowledgments before any request effect.
+        """
+        if (self.state != 'released' or self.forge_channel is not None
+                or type(channel) is not socket.socket or type(record) is not Record
+                or channel.family != socket.AF_UNIX
+                or channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_SEQPACKET
+                or record.data != FORGE_HELLO):
+            raise OriginDenied('one exact helper Forge channel required')
+        self.current()
+        self.origin.require(record)
+        channel.getpeername()
+        self.forge_channel = channel
+        if channel.send(FORGE_RELEASE) != len(FORGE_RELEASE):
+            self.close()
+            raise OriginDenied('partial helper Forge release')
 
     def current(self):
         if (self.state not in ('bound','released','intent','unknown','admitted','revoking')
@@ -104,6 +127,15 @@ class NativeDescendantLease:
             raise OriginDenied('helper root admission epoch changed')
         return self.root.admission
 
+    def _empty_forge_channel(self):
+        if self.forge_channel is None:
+            raise OriginDenied('private helper Forge channel missing')
+        try:
+            self.forge_channel.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except BlockingIOError:
+            return
+        raise OriginDenied('premature Forge traffic or closed Forge channel')
+
     def _empty_channel(self):
         # EOF is not an empty queue. No pre-admission application record may be
         # transferred for later replay. Fixed helper additionally gates calls.
@@ -124,6 +156,7 @@ class NativeDescendantLease:
                 root = self._ready(admission)
                 self._lineage.current()
                 self._empty_channel()
+                self._empty_forge_channel()
                 exchange = uuid.uuid4().hex
                 document = {'version':1,'kind':'ADMIT_NATIVE_HELPER',
                     'operation_id':self.operation_id,'exchange_id':exchange,
@@ -206,7 +239,7 @@ class NativeDescendantLease:
                 self._admission.control_lost()
             except BaseException as failure:
                 error = failure
-        for name in ('origin','channel','_lineage','_authority'):
+        for name in ('origin','channel','forge_channel','_lineage','_authority'):
             resource = getattr(self,name,None)
             setattr(self,name,None)
             if resource is not None:

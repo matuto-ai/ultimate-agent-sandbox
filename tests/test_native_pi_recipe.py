@@ -1,3 +1,4 @@
+from uas.native_image_package import envelope
 """Pure native recipe/Engine binding contracts; no native or network execution."""
 from copy import deepcopy
 from types import SimpleNamespace as NS
@@ -15,6 +16,9 @@ class NativePiRecipeTests(unittest.TestCase):
         self.manifest = {'version':1,'runtime':'pi','runtime_version':'1.4.0',
             'image_reference':'selected/image@sha256:'+'a'*64,'image_id':'sha256:'+'b'*64,
             'artifacts':{p:'d'*64 for p in ARTIFACTS}}
+        self.manifest = envelope({key: value for key, value in self.manifest.items()
+            if key not in ('image_reference', 'image_id')},
+            image_reference=self.manifest['image_reference'], image_id=self.manifest['image_id'])
         self.mounts = (NativeMount('/project','/project',False),NativeMount('/runtime/room','/runtime/room',False),
             NativeMount('/control/peer','/peer',True),NativeMount('/references','/references',True))
         self.kw = dict(seat=self.seat,scope=self.scope,checkout='/project/checkouts/main',
@@ -27,6 +31,23 @@ class NativePiRecipeTests(unittest.TestCase):
     def recipe(self, **changes):
         with patch('uas.native_pi_recipe.read_manifest',return_value=deepcopy(self.manifest)):
             return NativePiRecipe('/private/native.json','e'*64,**(self.kw|changes))
+    def test_provider_reference_is_persistent_and_bound_into_recipe(self):
+        from uas.runtime_provider import ProviderAuthReference
+        ref=ProviderAuthReference('pi','chosen','subscription','pi-oauth-json')
+        recipe=self.recipe(provider_auth=ref)
+        self.assertEqual(recipe.require_provider_auth(),ref)
+        self.assertEqual(recipe.auth_path,'/runtime/room/providers/subscription/auth.json')
+        self.assertNotEqual(recipe.identity['recipe_sha256'],self.recipe().identity['recipe_sha256'])
+        with self.assertRaises(ValueError):self.recipe().require_provider_auth()
+
+    def test_missing_auth_blocks_before_native_process_or_probe(self):
+        recipe=self.recipe()
+        engine=Mock();engine.inspect_container.return_value=deepcopy(self.value)
+        launch=ExecLaunch(engine,self.seat,NS(path='/peer/pi.sock'),'/private/launch.json',native_recipe=recipe)
+        with patch('uas.workstation_exec.probe',side_effect=AssertionError('no native probe')):
+            with self.assertRaisesRegex(ValueError,'authentication unavailable'):launch.launch(Mock())
+        engine.create.assert_not_called()
+
     def test_consumed_native_spec_preserves_choices_and_canonical_scope(self):
         recipe=self.recipe()
         launch=ExecLaunch(Mock(),self.seat,NS(path='/peer/pi.sock'),'/private/launch.json',native_recipe=recipe)
@@ -146,3 +167,8 @@ class NativePiRecipeTests(unittest.TestCase):
         launch=ExecLaunch(Mock(),seat,NS(path='/peer/pi.sock'),'/private/launch.json',native_recipe=recipe)
         self.assertEqual(launch._create_spec()['WorkingDir'],roots['repo'])
         self.assertEqual(launch._create_spec()['Cmd'][-2:],['anthropic','chosen-model'])
+
+    def test_baked_payload_digest_mismatch_rejected(self):
+        self.manifest['payload_manifest_digest'] = '0' * 64
+        with self.assertRaisesRegex(NativeRecipeError, 'baked payload'):
+            self.recipe()

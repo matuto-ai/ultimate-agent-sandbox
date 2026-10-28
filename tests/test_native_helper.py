@@ -38,7 +38,7 @@ class NativeHelperTests(unittest.TestCase):
             native_readiness={'digest':'x'},admission={'state':'admitted','controller':'c'*32,
             'operation_id':'r'*32,'epoch':3})
         lease.root=root; lease.origin=SimpleNamespace(identity=(4,5),pidfd=20,revoked=False,close=lambda:None)
-        lease.channel=Channel(); lease.state='released'; lease.operation_id='h'*32
+        lease.channel=Channel(); lease.forge_channel=Channel(); lease.state='released'; lease.operation_id='h'*32
         lease._root_identity=(1,2); lease._root_incarnation=root.incarnation
         lease._manifest_digest='d'*64; lease._lineage=SimpleNamespace(current=lambda:True,close=lambda:None)
         lease._authority=None; lease._document=lease._digest=lease._admission=None

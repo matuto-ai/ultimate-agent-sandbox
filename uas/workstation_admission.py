@@ -189,7 +189,7 @@ def _validate_document(document, seat):
 
 
 def _receive_offer(control, supervisor, seats, *, commands=False, roots=None):
-    data, ancillary, flags, _ = control.recvmsg(LIMIT,
+    data, ancillary, flags, _ = control.recvmsg(MAX_PACKET,
         socket.CMSG_SPACE(12) + socket.CMSG_SPACE(4) + socket.CMSG_SPACE(253*4),
         socket.MSG_CMSG_CLOEXEC)
     installed, credentials, pidfds, rights = [], [], [], []
@@ -214,10 +214,14 @@ def _receive_offer(control, supervisor, seats, *, commands=False, roots=None):
         # Authenticate actual sender before accepting its asserted metadata.
         supervisor.require(Record(data, credentials[0], pidfds[0]))
         document = json.loads(data.decode('utf-8'), object_pairs_hook=_unique)
-        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE', 'POLL_DELIVERY', 'CONFIRM_DELIVERY', 'STATUS_NATIVE_HELPER', 'REVOKE_NATIVE_HELPER'):
+        if len(data) > LIMIT and not (commands and type(document) is dict and document.get('kind') == 'RESERVE_FORGE'):
+            raise OriginDenied('oversized private control packet')
+        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE', 'POLL_DELIVERY', 'CONFIRM_DELIVERY', 'STATUS_NATIVE_HELPER', 'REVOKE_NATIVE_HELPER', 'RESERVE_FORGE'):
             expected_fields = {'version', 'kind', 'operation_id', 'controller', 'exchange_id'}
             if document['kind'] == 'CONFIRM_DELIVERY':
                 expected_fields.add('receipt')
+            if document['kind'] == 'RESERVE_FORGE':
+                expected_fields.update(('helper_operation','envelope','digest'))
             if (rights or set(document) != expected_fields
                     or type(document['version']) is not int or document['version'] != 1
                     or type(document['operation_id']) is not str
@@ -229,6 +233,11 @@ def _receive_offer(control, supervisor, seats, *, commands=False, roots=None):
             if document['kind'] == 'CONFIRM_DELIVERY':
                 if type(document['receipt']) is not dict or len(_canonical(document['receipt'])) > LIMIT:
                     raise OriginDenied('bounded native receipt object required')
+            if document['kind'] == 'RESERVE_FORGE':
+                if (type(document['helper_operation']) is not str or not OPERATION.fullmatch(document['helper_operation'])
+                        or type(document['envelope']) is not dict or type(document['digest']) is not str
+                        or hashlib.sha256(_canonical(document['envelope'])).hexdigest() != document['digest']):
+                    raise OriginDenied('invalid Forge reservation packet')
             return document
         native = type(document) is dict and document.get('kind') == 'ADMIT_NATIVE_CLAUDE'
         if len(rights) != (3 if native else 2):
@@ -440,7 +449,7 @@ class HubAdmission:
             if not installed:
                 offer.close()
 
-    def serve_once(self, control, *, on_admitted=None, on_delivery=None):
+    def serve_once(self, control, *, on_admitted=None, on_delivery=None, on_forge_reserve=None):
         """One authenticated bounded control packet; I/O never owns authority lock.
 
         The hosting loop serializes packets and must call control_lost on EOF or
@@ -475,12 +484,20 @@ class HubAdmission:
                     self.endpoint.require()
                     if packet['kind'] == 'REVOKE_NATIVE_HELPER':
                         self.revoke_helper(operation)
-                    if packet['kind'] in ('STATUS_NATIVE_HELPER','REVOKE_NATIVE_HELPER'):
+                    if packet['kind'] in ('STATUS_NATIVE_HELPER','REVOKE_NATIVE_HELPER', 'RESERVE_FORGE'):
                         result = self.helper_status(operation)
                     if packet['kind'] == 'REVOKE':
                         self.revoke(operation)
                     if packet['kind'] in ('STATUS', 'REVOKE'):
                         result = self.status(operation)
+                if packet['kind'] == 'RESERVE_FORGE':
+                    try:
+                        if on_forge_reserve is None:
+                            raise LedgerError('FORGE_UNAVAILABLE')
+                        result = on_forge_reserve(operation, packet['helper_operation'],
+                                                  packet['envelope'], packet['digest'])
+                    except LedgerError as error:
+                        result = {'error': error.code}
                 if packet['kind'] in ('POLL_DELIVERY', 'CONFIRM_DELIVERY'):
                     # No admission lock across application work or any native
                     # effects. The dispatcher owns the phase's authorization.

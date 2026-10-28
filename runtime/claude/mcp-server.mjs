@@ -3,10 +3,11 @@ import {readSync} from 'node:fs';
 import {seqpacketChannel} from '../pi/channel.mjs';
 import {TOOLS,invoke,negotiateProtocol} from './mcp-tools.mjs';
 const channel=seqpacketChannel(3,{maxQueued:1});
+const forgeChannel=seqpacketChannel(4,{maxQueued:1});
 let buffer=Buffer.alloc(0), initialized=false, active=false, closed=false, pendingOutput=0;
 let admitted=false, activationTimer; const activationDeadline=Date.now()+30000;
 const LIMIT=1114112;
-function stop() { if (closed) return; closed=true; clearTimeout(activationTimer); channel.close(); process.stdin.destroy(); process.exitCode=1; }
+function stop() { if (closed) return; closed=true; clearTimeout(activationTimer); channel.close(); forgeChannel.close(); process.stdin.destroy(); process.exitCode=1; }
 function write(value) {
   if (closed) return;
   const wire=JSON.stringify(value)+'\n'; const size=Buffer.byteLength(wire);
@@ -39,9 +40,9 @@ async function handle(r) {
   if (active) return error(id,-32000,'tool call in progress');
   if (!r.params || Object.keys(r.params).some(k=>!['name','arguments','_meta'].includes(k))) return error(id,-32602,'invalid call');
   active=true;
-  try { write({jsonrpc:'2.0',id,result:await invoke(channel,r.params.name,r.params.arguments)}); }
-  catch { error(id,-32000,channel.fenced ? 'channel outcome uncertain; reconcile through canonical owner' : 'invalid tool request'); }
-  finally { active=false; if (channel.fenced) stop(); }
+  try { write({jsonrpc:'2.0',id,result:await invoke(r.params.name === 'gh' ? forgeChannel : channel,r.params.name,r.params.arguments)}); }
+  catch { error(id,-32000,(channel.fenced || forgeChannel.fenced) ? 'channel outcome uncertain; reconcile through canonical owner' : 'invalid tool request'); }
+  finally { active=false; if (channel.fenced || forgeChannel.fenced) stop(); }
 }
 process.stdin.on('data',data=>{
   if (closed) return;

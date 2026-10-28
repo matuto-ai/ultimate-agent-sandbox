@@ -63,9 +63,12 @@ trusted service, Forge is unavailable, not simulated as successful.
 
 This attachment is **trusted-host, same-process composition only**. The existing
 client owns a Supervisor lifecycle object; it cannot be serialized into a separately
-isolated Hub or justify mounting its control store there. A separate-Hub deployment
-remains blocked until its owned boundary is wired. Exact Python type is not deployment
-authority.
+isolated Hub or justify mounting its control store there. The separate [direct helper Forge path](native-host-forge.md) now retains
+original helper packets on Supervisor-owned FD4; Hub FD3 handles peer workflow
+traffic only. It reuses canonical Broker preparation/audit/reconciliation and
+does not transfer Supervisor control-store access into Hub. This is a distinct
+source composition, not qualification of a full isolated deployment. Exact
+Python type is not deployment authority.
 
 Requests are limited to one 64 KiB encoded frame before any effect; larger Forge
 writes are unsupported on this route. Replies reuse the existing bounded chunked

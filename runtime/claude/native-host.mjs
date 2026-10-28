@@ -8,10 +8,11 @@ import path from 'node:path';
 import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID, NativeState, listingState} from './sdk-policy.mjs';
 import {closeOwned, collectListing, validateLoopback, nativeDeadline, CONTROL_DEADLINE} from './sdk-resources.mjs';
 
+import {readProviderAuth} from '../provider-auth.mjs';
 import {nativeOptions, NativeToolState, requireMcp} from './native-policy.mjs';
 import {writeHostDiagnostic, nativeDiagnostic, lifecycleDiagnostic} from './sdk-diagnostics.mjs';
 
-const [cwd, home, endpoint, model, sessionId, resume, manifestFile, manifestDigest] = process.argv.slice(2);
+const [cwd, home, endpoint, model, sessionId, resume, manifestFile, manifestDigest, authPath] = process.argv.slice(2);
 const sdkRoot='/opt/uas/claude-sdk', binary='/opt/uas/claude/claude';
 const bootstrap='/opt/uas/bin/claude-native-bootstrap', helper='/opt/uas/bin/claude-mcp-connector';
 
@@ -105,7 +106,7 @@ async function sample(env) {
     liveness: 'fresh-public-mcpServerStatus', revision: state.revision};
 }
 async function main() {
-  if (process.argv.length !== 10 || !UUID.test(sessionId) || !['0','1'].includes(resume)
+  if (![10,11].includes(process.argv.length) || !UUID.test(sessionId) || !['0','1'].includes(resume)
       || !/^[0-9a-f]{64}$/.test(manifestDigest)) throw Error('invalid-native-configuration');
   if (manifestFile!=='/opt/uas/claude-manifest.json') throw Error('invalid-manifest-path');
   const fd=openSync(manifestFile,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
@@ -127,7 +128,7 @@ async function main() {
       '/opt/uas/runtime/claude/native-host.mjs','/opt/uas/runtime/claude/native-policy.mjs',
       '/opt/uas/runtime/claude/mcp-server.mjs','/opt/uas/runtime/claude/mcp-tools.mjs',
       '/opt/uas/runtime/claude/sdk-policy.mjs','/opt/uas/runtime/claude/sdk-resources.mjs',
-      '/opt/uas/runtime/claude/sdk-diagnostics.mjs','/opt/uas/runtime/pi/channel.mjs']) {
+      '/opt/uas/runtime/claude/sdk-diagnostics.mjs','/opt/uas/runtime/pi/channel.mjs','/opt/uas/runtime/provider-auth.mjs']) {
     if (realpathSync(file)!==file || !lstatSync(file).isFile() || lstatSync(file).mode & 0o022)
       throw Error('mutable-native-payload');
     const digest=createHash('sha256'); for await (const data of createReadStream(file)) digest.update(data);
@@ -154,7 +155,8 @@ async function main() {
   if (!parent.isDirectory() || parent.uid!==process.getuid() || parent.mode & 0o077) throw Error('private-context-parent-required');
   mkdirSync(home,{mode:0o700}); // EEXIST (including symlinks) is terminal for this attempt.
   const {query: createQuery} = await import(pathToFileURL(path.join(packageRoot, 'sdk.mjs')));
-  const options=nativeOptions({binary,cwd,home,model,sessionId,helper,endpoint,resume:resume==='1'});
+  const providerToken=authPath === undefined ? undefined : readProviderAuth(authPath,'claude-oauth-token');
+  const options=nativeOptions({binary,cwd,home,model,sessionId,helper,endpoint,resume:resume==='1',providerToken});
   const env=options.env;
   state=new NativeToolState(sessionId); input=makeInput();
   phase='native-initialize'; initializationStart=performance.now();

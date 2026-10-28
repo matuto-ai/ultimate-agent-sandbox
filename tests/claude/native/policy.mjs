@@ -38,3 +38,8 @@ assert.throws(()=>negotiateProtocol(null));
 let contacted=false, refused=false;
 try { await invoke({request:async()=>{contacted=true;}},'gh',{id:'large',argv:['pr','comment','1','--body-file','-'],body:'x'.repeat(65536)}); } catch { refused=true; }
 assert.equal(refused,true); assert.equal(contacted,false);
+
+// Provider token remains native-only; fixed MCP environment is not a spread.
+const authenticated=nativeOptions({binary:'/opt/uas/claude/claude',cwd:'/project',home:'/runtime',model:'claude-sonnet-4-6',sessionId:session,helper:'/opt/uas/bin/claude-mcp-connector',endpoint:'/transport/peer',providerToken:'fixture-token-not-real-123'});
+assert.equal(authenticated.env.CLAUDE_CODE_OAUTH_TOKEN,'fixture-token-not-real-123');
+assert.equal(authenticated.mcpServers.uas.env.CLAUDE_CODE_OAUTH_TOKEN,undefined);
