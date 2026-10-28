@@ -71,7 +71,8 @@ class VMCITriggerTests(unittest.TestCase):
                         self.assertNotIn('tests/vm/', jobs[job])
                     manager = jobs['manager-mtls']
                     self.assertIn('UAS_MANAGER_TLS_TEST: "1"', manager)
-                    self.assertIn('timeout --signal=TERM --kill-after=2s 40s python3 -m unittest discover -s tests -p test_manager_tls.py -v', manager)
+                    self.assertEqual(re.findall(r'^        run: (.+)$', manager, re.MULTILINE), [
+                        'PYTHONPATH=tests timeout --signal=TERM --kill-after=2s 40s python3 -m unittest test_manager_tls test_native_human_tls -v'])
                     self.assertNotIn('sudo', manager)
                     room = jobs['room-control-plane']
                     self.assertIn("UAS_ROOM_CONTROL_TEST: '1'", room)
