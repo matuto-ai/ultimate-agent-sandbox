@@ -160,10 +160,11 @@ def dispatch(services, budget, *, max_packets=16):
     return {'packets': processed, 'stop': 'packet-budget-exhausted'}
 
 
-def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, next_request=None):
+def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None):
     from .native_qualification_backend import readonly_supervisor
     require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
     require(type(resources) is dict and resources.get('room_id') == plan.room['id'], 'INVALID_LAUNCH_RESOURCES')
+    require(('git_manifest' in plan.installation)==(git_fd is not None),'GIT_BROKER_CHANNEL_REQUIRED')
     if next_request is not None and human_request is None:
         raise QualificationError('AUTHENTICATED_NATIVE_RUN_REQUEST_REQUIRED')
     if human_request is not None:
@@ -201,17 +202,31 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, nex
         broker = ReadBrokerClient(broker_channel, supervisor, binding, instance,
                                   worker_uid=BROKER_UID, worker_gid=BROKER_UID)
         stack.callback(broker.close)
+        git_broker=None
+        if git_fd is not None:
+            from .git_service import GitBrokerClient
+            git_channel=socket.socket(fileno=git_fd);stack.callback(git_channel.close)
+            git_broker=GitBrokerClient(git_channel,binding,instance,broker_uid=BROKER_UID,broker_gid=BROKER_UID)
+            stack.callback(git_broker.close)
         # Same database mounted into Hub. No snapshot copy and no private state.
         require(Path(resources['hub_ledger_path']).is_file(), 'CANONICAL_ROOM_LEDGER_UNAVAILABLE')
         ledger = RoomLedger(resources['hub_ledger_path'], room['id']); stack.callback(ledger.close)
         provenance = GitProvenance(journal / 'git-history.db', room['id'], room['project']['id'])
         stack.callback(provenance.close)
+        git_resources=None
+        if git_broker is not None:
+            from .native_git_resources import NativeGitResources
+            stack.callback(os.close,resources['git_backend_fd'])
+            git_resources=NativeGitResources.from_session(plan,resources,engine,supervisor=supervisor,deadline=budget.deadline)
+            stack.callback(git_resources.close)
         allocator = CheckoutAllocator(supervisor, StringIO(plan.config_text))
         source = ArtifactSourceResolver(supervisor, allocator)
         mounts = tuple(NativeMount(room['project']['roots'][key], room['project']['roots'][key], key == 'reference')
                        for key in ('repo', 'workspace', 'reference', 'checkouts')) + (
             NativeMount(room['state_root'] + '/runtime', room['state_root'] + '/runtime', False),
             NativeMount(str(Path(resources['peer_path']).parent), str(Path(resources['peer_path']).parent), True))
+        if git_resources is not None:mounts+=git_resources.profile.mounts
+        git_options={} if git_resources is None else {'git_profile':git_resources.profile}
         receiver = ReceiverIdentity(65532, 65532, 'hub-' + instance, resources['mapping_digest'])
         control_lock = threading.Lock()
         def seats(runtime, slot):
@@ -239,7 +254,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, nex
                 engine=engine,endpoint=peer_lease,listener=peer,control=control,
                 hub_origin=hub_origin,controller=ready['controller'],control_lock=control_lock,
                 exec_seat=pi_seat,admission_seat=pi_admit,mounts=mounts,stack=stack,
-                admissions=admissions,budget=budget)
+                admissions=admissions,budget=budget,git_resources=git_resources)
             owner = NativeRunAdmission(launcher,allocator,checkout_client)
             activated = owner.open_human(human_request.operation_id,human_request.issue_number,
                 human_request.participant_id,session=human_request.session,attempt_id=human_request.attempt_id)
@@ -251,20 +266,28 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, nex
             claude=recruitment.recruit('reviewer-'+hashlib.sha256(human_request.operation_id.encode()).hexdigest(),
                 activated['run_id'],activated['generation'],session=human_request.session)
             from .native_session_driver import NativeSessionDriver
-            driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request)
+            git_operations=None
+            if git_resources is not None:
+                from .native_git_operations import NativeGitOperations
+                git_operations=NativeGitOperations(owner,recruitment,git_resources,git_broker)
+                stack.callback(git_operations.close)
+            driver=NativeSessionDriver(owner,recruitment,human_request,budget,next_request=next_request,
+                                       git_operations=git_operations)
             result=driver.run()
             return {'version':1,'status':'NATIVE_RUN_SESSION_FINISHED','room_id':room['id'],'instance':instance,
                 'run_id':result['current_run'],'product_run_created':True,'reviewer_attached':True,
                 'session':result,'configuration_sha256':plan.config_digest,
                 'installation_sha256':plan.installation_digest,
-                'lifecycle_blockers':['NATIVE_GIT_GATE_WORKER_COMPOSITION_UNAVAILABLE',
-                                      'AUTHENTICATED_MANAGER_DISPATCH_UNAVAILABLE',
+                'lifecycle_blockers':(['NATIVE_GATE_WORKER_COMPOSITION_UNAVAILABLE',
+                                       'NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE'] if git_operations is not None else
+                                      ['NATIVE_GIT_GATE_WORKER_COMPOSITION_UNAVAILABLE'])+
+                                     ['AUTHENTICATED_MANAGER_DISPATCH_UNAVAILABLE',
                                       'FULL_NATIVE_RUN_COMPLETION_UNQUALIFIED'],
                 'production_launcher':'disabled'}
         pi_recipe = NativePiRecipe.from_configuration(StringIO(plan.config_text), room['id'], pi_seat.participant_id,
             resources['pi_manifest_path'], plan.installation['pi_manifest']['sha256'], seat=pi_seat, scope=pi_scope,
             checkout=room['project']['roots']['repo'], runtime_root=room['state_root'] + '/runtime',
-            endpoint=resources['peer_path'], mounts=mounts)
+            endpoint=resources['peer_path'], mounts=mounts, **git_options)
         pi = ExecLaunch(engine, pi_seat, peer_lease, journal / 'pi-launch.json', native_recipe=pi_recipe,
                         timeout=budget.remaining(10))
         stack.callback(pi.close); pi.launch(peer)
@@ -280,7 +303,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, nex
             resources['claude_manifest_path'], plan.installation['claude_manifest']['sha256'], seat=claude_seat,
             scope=claude_scope, checkout=room['project']['roots']['repo'], home=room['state_root'] + '/runtime/seat-b/contexts/1/home',
             runtime_root=room['state_root'] + '/runtime', endpoint=resources['peer_path'],
-            session_id=str(uuid.uuid4()), mounts=mounts)
+            session_id=str(uuid.uuid4()), mounts=mounts, **git_options)
         host = NativeClaudeHostLaunch(engine, claude_recipe, peer_lease, journal / 'claude-launch.json', timeout=budget.remaining(10))
         stack.callback(host.close); host.launch(peer)
         claude = NativeClaudeRoot(host, claude_admit); stack.callback(claude.close)
@@ -319,7 +342,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, *, human_request=None, nex
 
 
 def main():
-    require(len(sys.argv) == 3 and all(x.isdigit() and int(x) >= 3 for x in sys.argv[1:]),
+    require(len(sys.argv) in (3,4) and all(x.isdigit() and int(x) >= 3 for x in sys.argv[1:]),
             'INHERITED_BROKER_CHANNEL_REQUIRED')
     raw = sys.stdin.buffer.read(2 * 1048576 + 1)
     require(len(raw) <= 2 * 1048576, 'BOUNDED_TRUSTED_STARTUP_REQUIRED')
@@ -329,7 +352,8 @@ def main():
     plan = QualificationPlan(value['configuration'], value['installation'], installation_digest=value['installation_digest'])
     # No serialized human grant. Authenticated hosting may call run(..., human_request=...)
     # after constructing the existing exact HumanSession; CLI remains pair-only.
-    result = run(plan, value['resources'], int(sys.argv[1]), int(sys.argv[2]))
+    arguments=(plan,value['resources'],int(sys.argv[1]),int(sys.argv[2]))
+    result = run(*arguments) if len(sys.argv)==3 else run(*arguments,int(sys.argv[3]))
     print(json.dumps(result, sort_keys=True))
 
 

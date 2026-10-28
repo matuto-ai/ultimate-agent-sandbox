@@ -151,8 +151,19 @@ class NativeBoundaryProfile:
         require(not checked['missing_prerequisites'], 'IMAGE_MANIFESTS_REQUIRED')
         self.image_id = checked['images']['pi']['image_id']
         self.image_reference = checked['images']['pi']['image_reference']
+        self.git_manifest = None
+        self.git_plan = None
+        if 'git_manifest' in plan.installation:
+            from .native_git_resources import selection
+            from .kernel_origin import OriginDenied
+            try:self.git_manifest = selection(plan)
+            except (OSError,ValueError,OriginDenied) as error:
+                raise LifecycleError('NATIVE_GIT_PREPARED_IMAGE_UNAVAILABLE') from error
+            require(self.git_manifest['image_id']==self.image_id, 'GIT_IMAGE_PAIRING')
+            self.git_plan = plan
         self.digest = hashlib.sha256(canonical({'boundary': boundary, 'hub': hub,
-            'config': self.config_digest, 'images': checked['images']})).hexdigest()
+            'config': self.config_digest, 'images': checked['images'],
+            **({'git':self.git_manifest} if self.git_manifest is not None else {})})).hexdigest()
 
     @classmethod
     def read(cls, plan):
@@ -254,6 +265,9 @@ class NativeQualificationBackend(DockerFixtureBackend):
         root = self.profile.state_root / 'instances' / state['instance_id'] / 'native'
         result={name: root / name for name in ('supervisor', 'hub', 'broker')}
         result.update({name:ENDPOINTS/state['instance_id']/name for name in ('peer','control')})
+        if self.profile.git_manifest is not None:
+            result['git']=ENDPOINTS/state['instance_id']/'git'
+            result['git-broker']=root/'git-broker'
         return result
 
     def _endpoint_record(self,state):
@@ -335,8 +349,12 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return [x for k, v in self._labels(state, kind).items() for x in ('--label', k + '=' + v)]
 
     def mounts(self, state):
-        return [(p, p, key != 'reference') for key, p in self.profile.paths.items()] + [
+        values = [(p, p, key != 'reference') for key, p in self.profile.paths.items()] + [
             (str(self.layout(state)['peer']), str(self.layout(state)['peer']), False)]
+        if self.profile.git_manifest is not None:
+            from .native_git_resources import git_mounts
+            values += [(m.source,m.destination,not m.read_only) for m in git_mounts(self.profile.git_plan,state)]
+        return values
 
     def container_arguments(self, state):
         self._binding(state)
@@ -420,7 +438,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
             require(value['ProcessLabel'] == 'system_u:system_r:container_t:' + LEVEL
                     and value['MountLabel'] == 'system_u:object_r:container_file_t:' + LEVEL, 'MCS_LABELS')
             actual = value['Mounts']
-            require(type(actual) is list and len(actual) == 6
+            require(type(actual) is list and len(actual) == len(self.mounts(state))
                     and all(m['Type'] == 'bind' and type(m['RW']) is bool and m['Propagation'] == 'rprivate'
                             for m in actual)
                     and {(m['Source'],m['Destination'],m['RW']) for m in actual} == set(self.mounts(state)), 'MOUNTS')
@@ -481,13 +499,22 @@ class NativeQualificationBackend(DockerFixtureBackend):
         finally:os.close(descriptor)
         for key, path in layout.items():
             mode, uid, gid = ((0o700, HOST_UID, HOST_UID) if key == 'supervisor' else
-                (0o700, BROKER_UID, BROKER_UID) if key == 'broker' else
+                (0o700, BROKER_UID, BROKER_UID) if key in ('broker','git-broker') else
                 (0o2770, HOST_UID, HUB_UID) if key == 'hub' else
-                (0o710, HOST_UID, RUNTIME_UID if key == 'peer' else HUB_UID))
+                (0o710, HOST_UID, RUNTIME_UID if key in ('peer','git') else HUB_UID))
             path.mkdir(mode=mode); os.chown(path, uid, gid); os.chmod(path, mode)
-            if key not in ('supervisor','broker'): command('chcon', '-t', 'container_file_t', '-l', LEVEL, str(path))
+            if key not in ('supervisor','broker','git-broker'): command('chcon', '-t', 'container_file_t', '-l', LEVEL, str(path))
         for path,group in ((layout['peer'] / 'pi.sock',RUNTIME_UID),(layout['control'] / 'hub.sock',HUB_UID)):
             self.listeners.append(labeled_listener(path,group))
+        if self.profile.git_manifest is not None:
+            from .native_git_resources import prepare_views
+            journal=layout['supervisor']/'git-launches'
+            journal.mkdir(mode=0o700);os.chown(journal,HOST_UID,HOST_UID);os.chmod(journal,0o700)
+            prepare_views(self.profile.git_plan,state)
+            for name in ('git-views','git-fixed','git-workspace'):
+                command('chcon','-R','-t','container_file_t','-l',LEVEL,str(endpoint_root/name))
+            for name in ('request.sock','worker.sock'):
+                self.listeners.append(labeled_listener(layout['git']/name,RUNTIME_UID,listen=name!='request.sock'))
 
     def _hub(self, state):
         name = names(state)[0] + '-hub'
@@ -558,7 +585,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return True
 
 
-def labeled_listener(path, group):
+def labeled_listener(path, group, *, listen=True):
     """Existing disposable fixed socket-context seam, not a domain transition."""
     original = Path('/proc/self/attr/current').read_text()
     require('container_t' not in original, 'ROOT_SETUP_DOMAIN')
@@ -570,7 +597,9 @@ def labeled_listener(path, group):
     listener = None
     try:
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        listener.bind(str(path)); listener.listen(4); listener.settimeout(3)
+        listener.bind(str(path))
+        if listen: listener.listen(4)
+        listener.settimeout(3)
         os.chown(path, HOST_UID, group); os.chmod(path, 0o620)
     except BaseException:
         if listener is not None: listener.close()
@@ -594,8 +623,10 @@ class LaunchResources:
     pass_fds: tuple
     _child: object = None
     _broker: object = None
+    _git_broker: object = None
     _child_expected: bool = False
     _broker_expected: bool = False
+    _git_broker_expected: bool = False
     _preserve: bool = False
     retained_evidence: object = None
     _supervisor: object = None  # Root-only owner reference; never serialized.
@@ -613,6 +644,17 @@ class LaunchResources:
         self._broker_expected=True
         self._preserve=True
 
+    def expect_git_broker(self):
+        require(not self._git_broker_expected,'GIT_BROKER_CUSTODY')
+        self._git_broker_expected=True
+        self._preserve=True
+
+    def hold_git_broker(self,process):
+        require(type(process) is subprocess.Popen and self._git_broker is None,'GIT_BROKER_CUSTODY')
+        self._git_broker_expected=True
+        self._preserve=True
+        self._git_broker=process
+
     def hold_child(self, process):
         require(type(process) is subprocess.Popen and self._child is None, 'CHILD_CUSTODY')
         self._child_expected=True
@@ -629,7 +671,7 @@ class LaunchResources:
         # No PID lookup, serialized receipt, generic truthy callback, or claim
         # that channel closure undoes already accepted Broker/provider work.
         return all(not expected or process is not None and process.poll() is not None
-                   for expected,process in ((self._child_expected,self._child),(self._broker_expected,self._broker)))
+                   for expected,process in ((self._child_expected,self._child),(self._broker_expected,self._broker),(self._git_broker_expected,self._git_broker)))
 
 
 class NativeQualificationObserver(DockerFixtureBackend):
@@ -708,6 +750,7 @@ def provision(plan):
                        authorize=authorize,revoke=resources.issuer_exited)
     state = None
     handed_off = False
+    git_backend_fd = None
     # Existing canonical state, including a failed or destroyed prior attempt,
     # requires its own explicit reconciliation path; never adopt it here.
     with owner._locked():
@@ -762,9 +805,18 @@ def provision(plan):
               'peer_path':str(layout['peer']/'pi.sock'),'control_path':str(layout['control']/'hub.sock'),
               'peer_fd':backend.listeners[0].fileno(),'control_fd':backend.listeners[1].fileno(),
               'mapping_digest':mapping_digest,**manifests}
+        if profile.git_manifest is not None:
+            from .native_git_resources import seal_backend
+            git_backend_fd=seal_backend(profile.git_manifest)
+            target=layout['supervisor']/'git-manifest.json'
+            copy_public_manifest(plan.installation['git_manifest'],target)
+            data.update(git_manifest_path=str(target),git_backend_fd=git_backend_fd,
+                git_request_path=str(layout['git']/'request.sock'),git_worker_path=str(layout['git']/'worker.sock'),
+                git_request_fd=backend.listeners[2].fileno(),git_worker_fd=backend.listeners[3].fileno(),
+                git_broker_directory=str(layout['git-broker']))
         resources._supervisor = owner
         resources.data = data
-        resources.pass_fds = tuple(s.fileno() for s in backend.listeners)
+        resources.pass_fds = tuple(s.fileno() for s in backend.listeners) + (() if git_backend_fd is None else (git_backend_fd,))
         handed_off=True
         yield resources
     except BaseException:
@@ -772,6 +824,9 @@ def provision(plan):
         raise
     finally:
         errors=[]
+        if git_backend_fd is not None:
+            try:os.close(git_backend_fd)
+            except BaseException as error:errors.append(error)
         for listener in backend.listeners:
             try: listener.close()
             except BaseException as error: errors.append(error)

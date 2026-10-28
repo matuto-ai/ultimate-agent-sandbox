@@ -181,7 +181,8 @@ class NativeReviewerRecruitment:
             resources['claude_manifest_path'],plan.installation['claude_manifest']['sha256'],seat=seat,scope=scope,
             checkout=self._pin['checkout']['path'],home=room['state_root']+'/runtime/seat-b/contexts/'+str(self._context_generation)+'/home',
             runtime_root=room['state_root']+'/runtime',endpoint=resources['peer_path'],session_id=str(uuid.uuid4()),
-            mounts=launch.mounts)
+            mounts=launch.mounts,
+            **({} if getattr(launch,'git_resources',None) is None else {'git_profile':launch.git_resources.profile}))
         if recipe.scope!=scope or recipe.checkout!=self._pin['checkout']['path']:
             raise LedgerError('NATIVE_REVIEWER_BINDING')
         host=NativeClaudeHostLaunch(launch.engine,recipe,launch.endpoint,self.journal,timeout=launch.budget.remaining(10))

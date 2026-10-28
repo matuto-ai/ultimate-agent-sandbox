@@ -36,9 +36,13 @@ class QualificationPlan:
             raise QualificationError('CONFIGURATION_REQUIRED')
         self.config_text = config_text
         self.config = load(StringIO(config_text))
-        selection = _exact(installation, ('version', 'profile', 'room_id', 'nonce',
-            'timeout_seconds', 'pi_manifest', 'claude_manifest', 'boundary_manifest',
-            'hub_manifest', 'broker_manifest', 'human_mergers'), 'INVALID_NATIVE_SELECTION')
+        required = {'version', 'profile', 'room_id', 'nonce', 'timeout_seconds',
+                    'pi_manifest', 'claude_manifest', 'boundary_manifest', 'hub_manifest',
+                    'broker_manifest', 'human_mergers'}
+        git_refs = {'git_manifest', 'git_broker_manifest'}
+        if type(installation) is not dict or set(installation) not in (required, required | git_refs):
+            raise QualificationError('INVALID_NATIVE_SELECTION')
+        selection = installation
         if (type(selection['version']) is not int or selection['version'] != 1
                 or selection['profile'] != 'disposable-native-v1'
                 or type(selection['nonce']) is not str or len(selection['nonce']) != 32
@@ -68,7 +72,9 @@ class QualificationPlan:
                 require_reference(select_reference(provider, runtime), runtime)
             except ValueError:
                 raise QualificationError('RUNTIME_AUTH_REFERENCE_REQUIRED') from None
-        for name in ('pi', 'claude', 'boundary', 'hub', 'broker'):
+        references=('pi', 'claude', 'boundary', 'hub', 'broker')
+        if 'git_manifest' in selection:references+=('git','git_broker')
+        for name in references:
             ref = _exact(selection[name + '_manifest'], ('path', 'sha256'), 'INVALID_INSTALLATION_REFERENCE')
             try:
                 path(ref['path'])
@@ -153,6 +159,10 @@ class QualificationPlan:
             broker_selection(self)
         except (OSError, ValueError, TypeError):
             result['missing_prerequisites'].append('BROKER_INSTALLATION_UNAVAILABLE')
+        if 'git_manifest' in self.installation:
+            try:git_broker_selection(self)
+            except (OSError,ValueError,TypeError):
+                result['missing_prerequisites'].append('GIT_BROKER_INSTALLATION_UNAVAILABLE')
         result['missing_prerequisites'] = sorted(set(result['missing_prerequisites']))
         return result
 
@@ -185,6 +195,56 @@ def broker_selection(plan):
                 or any(type(label) is not str or not 1 <= len(label) <= 64 for label in value['work_labels'])):
             raise QualificationError('INVALID_BROKER_MUTATION_POLICY')
     return value
+
+
+def git_broker_selection(plan):
+    """Digest-bound public existing SSH references; never read credential bytes."""
+    from .git_transport import GitTransportConfig, SshActorCredential, GitTransportError
+    plan.require_unchanged()
+    ref=plan.installation.get('git_broker_manifest')
+    if ref is None:raise QualificationError('GIT_BROKER_INSTALLATION_UNAVAILABLE')
+    value=read_manifest(ref['path'],ref['sha256'])
+    _exact(value,('version','ssh_executable','ssh_sha256','credentials'),'INVALID_GIT_BROKER_INSTALLATION')
+    expected={seat['actor'] for seat in plan.seats.values()}
+    if (type(value['version']) is not int or value['version']!=1
+            or type(value['credentials']) is not list or len(value['credentials'])!=len(expected)):
+        raise QualificationError('INVALID_GIT_BROKER_INSTALLATION')
+    rows=[_exact(row,('actor_id','key_path','known_hosts_path'),'INVALID_GIT_BROKER_INSTALLATION')
+          for row in value['credentials']]
+    if {row['actor_id'] for row in rows}!=expected:
+        raise QualificationError('INVALID_GIT_BROKER_ACTORS')
+    path(value['ssh_executable'])
+    try:
+        GitTransportConfig(value['ssh_executable'],value['ssh_sha256'],
+                           tuple(SshActorCredential(**row) for row in rows))
+    except GitTransportError:
+        raise QualificationError('INVALID_GIT_BROKER_INSTALLATION') from None
+    mounted=list(plan.room['project']['roots'].values())+[plan.room['state_root']+'/runtime']
+    for row in rows:
+        for name in ('key_path','known_hosts_path'):
+            path(row[name])
+            if any(row[name]==root or row[name].startswith(root+'/') for root in mounted):
+                raise QualificationError('GIT_CREDENTIAL_INSIDE_WORKSTATION')
+    return value
+
+
+def check_git_credentials(plan,selection):
+    """Root metadata check only; canonical Broker reopens/rechecks before each use."""
+    import stat
+    from pathlib import Path
+    mounted=[Path(value).resolve(strict=True) for value in plan.room['project']['roots'].values()]
+    mounted.append(Path(plan.room['state_root']+'/runtime').resolve(strict=True))
+    # Every additional fixed Git/peer projection is below this root; none may
+    # become a credential source even if its public-file mode were changed.
+    mounted.append(Path('/run/uas-native'))
+    for row in selection['credentials']:
+        for name in ('key_path','known_hosts_path'):
+            candidate=Path(row[name]);resolved=candidate.resolve(strict=True);info=candidate.lstat()
+            if (candidate!=resolved or any(candidate==root or root in candidate.parents for root in mounted)
+                    or not stat.S_ISREG(info.st_mode) or info.st_uid!=165534 or info.st_nlink!=1
+                    or info.st_mode & 0o177 or not info.st_mode & 0o400
+                    or not 0<info.st_size<=1048576):
+                raise QualificationError('GIT_CREDENTIAL_UNAVAILABLE')
 
 
 def write_startup(stream, raw, deadline):
@@ -237,6 +297,8 @@ def execute(plan):
     if checked['missing_prerequisites']:
         raise QualificationError('NATIVE_INSTALLATION_INPUTS_UNAVAILABLE')
     selected = broker_selection(plan)
+    git_selected = git_broker_selection(plan) if 'git_manifest' in plan.installation else None
+    if git_selected is not None:check_git_credentials(plan,git_selected)
     credential = Path(selected['credential_path'])
     try:
         info = credential.lstat()
@@ -255,7 +317,8 @@ def execute(plan):
         result_root = private / 'results'; result_root.mkdir(mode=0o700); os.chown(result_root, 165534, 165534)
         host_channel, broker_channel = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         allocation_root, allocation_child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-        broker = child = handoff = None
+        broker = child = handoff = git_broker = None
+        git_host_channel = git_broker_channel = None
         deadline = time.monotonic() + plan.installation['timeout_seconds']
         def left():
             remaining = deadline - time.monotonic()
@@ -273,22 +336,47 @@ def execute(plan):
             resources.expect_broker()
             broker = subprocess.Popen([sys.executable, '-m', 'uas.forge_read_service', str(broker_channel.fileno())],
                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                user=165534, group=165534, extra_groups=[], pass_fds=(broker_channel.fileno(),), env=environment)
+                user=165534, group=165534, extra_groups=[], pass_fds=(broker_channel.fileno(),), env=environment, cwd='/')
             resources.hold_broker(broker)
             # Only bounded public startup metadata, never credential contents.
             raw = canonical(configuration) + b'\n'
             if len(raw) > 16384: raise QualificationError('BROKER_STARTUP_TOO_LARGE')
             write_startup(broker.stdin, raw, deadline)
             broker_channel.close()
+            if git_selected is not None:
+                git_private=private.parent/'git-broker'
+                node=git_private.lstat()
+                if (git_private.resolve()!=git_private or not stat.S_ISDIR(node.st_mode)
+                        or node.st_uid!=165534 or stat.S_IMODE(node.st_mode)!=0o700):
+                    raise QualificationError('GIT_BROKER_PRIVATE_DIRECTORY_UNAVAILABLE')
+                git_host_channel,git_broker_channel=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+                git_configuration={'binding':{'room_id':plan.room['id'],'project_id':plan.room['project']['id'],
+                    'repository':plan.room['project']['repository'],'host':'github.com'},
+                    'room_instance':resources.data['instance'],'deployment_id':plan.config['deployment']['id'],
+                    'audit_path':str(git_private/'audit.db'),'supervisor_uid':165533,'supervisor_gid':165533,
+                    **{k:v for k,v in git_selected.items() if k!='version'}}
+                raw=canonical(git_configuration)+b'\n'
+                if len(raw)>16384:raise QualificationError('GIT_BROKER_STARTUP_TOO_LARGE')
+                resources.expect_git_broker()
+                git_broker=subprocess.Popen([sys.executable,'-m','uas.git_service',str(git_broker_channel.fileno())],
+                    stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                    user=165534,group=165534,extra_groups=[],pass_fds=(git_broker_channel.fileno(),),env=environment,cwd='/')
+                resources.hold_git_broker(git_broker)
+                write_startup(git_broker.stdin,raw,deadline)
+                git_broker_channel.close()
             resources.expect_child()
-            child = subprocess.Popen([sys.executable, '-m', 'uas.native_session', str(host_channel.fileno()), str(allocation_child.fileno())],
+            host_argv=[sys.executable,'-m','uas.native_session',str(host_channel.fileno()),str(allocation_child.fileno())]
+            git_fds=() if git_host_channel is None else (git_host_channel.fileno(),)
+            if git_fds:host_argv.append(str(git_fds[0]))
+            child = subprocess.Popen(host_argv,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 user=165533, group=165533, extra_groups=[165531, os.stat('/run/docker.sock').st_gid],
-                pass_fds=resources.pass_fds + (host_channel.fileno(), allocation_child.fileno()), env=environment)
+                pass_fds=resources.pass_fds + (host_channel.fileno(), allocation_child.fileno()) + git_fds, env=environment, cwd='/')
             resources.hold_child(child)
             allocation_child.close()
             handoff = RootCheckoutHandoff(plan, resources, child, allocation_root, deadline=deadline)
             host_channel.close()
+            if git_host_channel is not None:git_host_channel.close()
             startup = canonical({'configuration': plan.config_text, 'installation': plan.installation,
                 'installation_digest': plan.installation_digest, 'resources': resources.data})
             if len(startup) > 2 * 1048576: raise QualificationError('HOST_STARTUP_TOO_LARGE')
@@ -309,9 +397,14 @@ def execute(plan):
                 raise QualificationError('NATIVE_EVIDENCE_INVALID')
             broker.wait(timeout=min(5, left()))
             if broker.returncode != 0: raise QualificationError('BROKER_EXIT_UNCERTAIN')
+            if git_broker is not None:
+                git_broker.wait(timeout=min(5,left()))
+                if git_broker.returncode!=0:raise QualificationError('GIT_BROKER_EXIT_UNCERTAIN')
         finally:
             host_channel.close(); broker_channel.close()
             allocation_root.close(); allocation_child.close()
+            for channel in (git_host_channel,git_broker_channel):
+                if channel is not None:channel.close()
             if child is not None and child.poll() is None:
                 # Exact owned trusted child only, not a PID supplied in data.
                 child.terminate()
@@ -327,6 +420,10 @@ def execute(plan):
                 try: broker.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     raise QualificationError('BROKER_CLEANUP_PENDING') from None
+            if git_broker is not None and git_broker.poll() is None:
+                try:git_broker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    raise QualificationError('GIT_BROKER_CLEANUP_PENDING') from None
     retained = resources.retained_evidence
     if (type(retained) is not dict or retained.get('status') != 'stopped-evidence-retained'
             or retained.get('instance') != result['instance']):

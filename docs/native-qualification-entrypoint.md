@@ -223,8 +223,10 @@ for nested Gate/Broker observations. The existing root-owned process deadline is
 the aggregate bound. If it expires during an effect, canonical audit/intent and
 issued-session evidence remain retained; this is not a completed scenario.
 
-The current backend still lacks the concrete controlled Git worker endpoints and
-mapped worker profile, and the Gate evaluator helper resources. Manager action
-transport also needs its existing authenticated host/audit binding. These remain
-explicit composition gaps; creating a Git journal or reading an existing Gate
-projection is not a replacement. The CLI still cannot manufacture HumanSession.
+The optional paired Git installation references now select the concrete controlled
+Git endpoints, mapped worker profile and separate credential-scoped Git Broker;
+see `native-git-qualification.md`. That primary-only profile refuses a successor
+before retirement until its new worktree has an exact admitted projection.
+Gate evaluator helper resources remain unavailable. Manager action transport
+also needs its authenticated host/audit binding. Reading an existing Gate
+projection is not evaluation, and the CLI still cannot manufacture HumanSession.

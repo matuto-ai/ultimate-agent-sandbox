@@ -67,7 +67,7 @@ class NativeRunLauncher:
     """Exact held host resources; no caller-selected recipe, process or authority."""
     def __init__(self, plan, resources, supervisor, ledger, broker, *, engine,
                  endpoint, listener, control, hub_origin, controller, control_lock,
-                 exec_seat, admission_seat, mounts, stack, admissions, budget):
+                 exec_seat, admission_seat, mounts, stack, admissions, budget, git_resources=None):
         from .native_session import SessionBudget
         from .docker_exec_api import DockerExecAPI
         if (type(plan) is not QualificationPlan or type(broker) is not NativeAdmissionBroker
@@ -82,6 +82,11 @@ class NativeRunLauncher:
                 or admission_seat.participant_id != exec_seat.participant_id
                 or admission_seat.actor_id != exec_seat.actor_id):
             raise LedgerError('ADMISSION_BINDING_MISMATCH')
+        if git_resources is not None:
+            from .native_git_resources import NativeGitResources
+            if type(git_resources) is not NativeGitResources:
+                raise LedgerError('NATIVE_GIT_RESOURCES_REQUIRED')
+        self.git_resources=git_resources
         selected = plan.seats['pi']
         profile = next(p for p in plan.room['profiles'] if p['id'] == selected['profile'])
         if (admission_seat.room_id != exec_seat.room_id
@@ -136,7 +141,8 @@ class NativeRunLauncher:
             self.plan.room['id'], participant, self.resources['pi_manifest_path'],
             self.plan.installation['pi_manifest']['sha256'], seat=self.exec_seat,
             scope=scope, checkout=slot['path'], runtime_root=self.plan.room['state_root']+'/runtime',
-            endpoint=self.resources['peer_path'], mounts=self.mounts)
+            endpoint=self.resources['peer_path'], mounts=self.mounts,
+            **({} if getattr(self,'git_resources',None) is None else {'git_profile':self.git_resources.profile}))
         if recipe.checkout != slot['path']:
             raise LedgerError('NATIVE_CHECKOUT_MISMATCH')
         launch = ExecLaunch(self.engine, self.exec_seat, self.endpoint,

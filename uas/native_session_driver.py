@@ -25,7 +25,7 @@ class NativeSessionDriver:
     an aggregate bound for nested Gates/Broker observations or lifecycle locks.
     Unknown effects stop this invocation with their original owners/journals intact.
     """
-    def __init__(self, owner, recruitment, request, budget, *, next_request=None):
+    def __init__(self, owner, recruitment, request, budget, *, next_request=None, git_operations=None):
         from .native_session import SessionBudget
         if (type(owner) is not NativeRunAdmission or type(recruitment) is not NativeReviewerRecruitment
                 or recruitment.owner is not owner or type(request) is not NativeHumanRunRequest
@@ -43,9 +43,16 @@ class NativeSessionDriver:
                 or next_request.operation_id==request.operation_id
                 or next_request.issue_number==request.issue_number):
             raise LedgerError('EXPLICIT_NATIVE_SUCCESSOR_REQUIRED')
+        if git_operations is not None:
+            from .native_git_operations import NativeGitOperations
+            if (type(git_operations) is not NativeGitOperations or git_operations.owner is not owner
+                    or git_operations.reviewer is not recruitment):
+                raise LedgerError('NATIVE_GIT_OWNER_REQUIRED')
+        self.git_operations=git_operations
         self.owner,self.recruitment,self.request,self.budget=owner,recruitment,request,budget
         self.next_request=next_request
         self.runs=[];self.counts={'packets':0,'deliveries':0,'completion_reads':0}
+        if git_operations is not None:self.counts['git_requests']=0
         self.started=False;self.completion_attempts={}
         self.next_delivery=0.;self.next_completion=0.
         self.phase='active';self.pending_successor=None;self.last_observed=None
@@ -111,6 +118,7 @@ class NativeSessionDriver:
 
     def _successor(self,row):
         previous=self.recruitment;request=self.next_request
+        if self.git_operations is not None:self.git_operations.require_successor()
         self._headroom(90)
         self.pending_successor={'run_id':self.owner.run_id(request.operation_id),
                                 'operation_id':request.operation_id}
@@ -156,13 +164,19 @@ class NativeSessionDriver:
                 if now>=self.next_completion:self._completion(row)
                 if self._row()['status']=='CLOSED':continue
                 channels=[service.helper.forge_channel for service in self._services()]
-                ready,_,exceptional=select.select(channels,[],channels,min(.1,self.budget.remaining(.1)))
+                git_listener=None if self.git_operations is None else self.git_operations.request_listener
+                watched=channels+([] if git_listener is None else [git_listener])
+                ready,_,exceptional=select.select(watched,[],watched,min(.1,self.budget.remaining(.1)))
                 if exceptional:raise OriginDenied('native ingress failed')
                 for service,channel in zip(self._services(),channels):
                     if channel in ready:
                         self._current();self._headroom(45)
                         service.receive_once()  # Original packet; canonical owner returns its exact response.
                         self.counts['packets']+=1
+                if git_listener is not None and git_listener in ready:
+                    self._current();self._headroom(45)
+                    self.git_operations.serve_next(timeout=self.budget.remaining(1))
+                    self.counts['git_requests']+=1
                 # Idle is only idle. It neither closes the Run nor ends the session.
         except TimeoutError:
             return self._result('unknown','operation-timeout-reconcile-original-owner')

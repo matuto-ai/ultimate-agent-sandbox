@@ -142,7 +142,7 @@ class NativePiRecipe:
         return json.loads(self._identity_json)
 
     def __init__(self, manifest_path, manifest_digest, *, seat, scope, checkout,
-                 runtime_root, endpoint, mounts, provider, model, provider_auth=None):
+                 runtime_root, endpoint, mounts, provider, model, provider_auth=None, git_profile=None):
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat:
             raise NativeRecipeError('canonical selected seat required')
@@ -172,24 +172,28 @@ class NativePiRecipe:
             raise NativeRecipeError('Unix endpoint path too long')
         self.home = path(runtime_root) + '/' + seat.slot
         self.sessions = path(self.home + '/contexts/' + str(scope['context_generation']) + '/sessions')
-        if (type(mounts) is not tuple or not 1 <= len(mounts) <= 16
-                or any(type(m) is not NativeMount for m in mounts)
-                or len({m.destination for m in mounts}) != len(mounts)):
-            raise NativeRecipeError('exact admitted mounts required')
-        for index, first in enumerate(mounts):
+        from .native_git_recipe import base_mounts
+        ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
+            image_id=manifest['image_id'], image_reference=manifest['image_reference'])
+        self.git_profile = git_profile
+        if (type(ordinary_mounts) is not tuple or not 1 <= len(ordinary_mounts) <= 16
+                or any(type(m) is not NativeMount for m in ordinary_mounts)
+                or len({m.destination for m in ordinary_mounts}) != len(ordinary_mounts)):
+            raise NativeRecipeError('exact admitted ordinary_mounts required')
+        for index, first in enumerate(ordinary_mounts):
             if any(below(first.destination, second.destination) or below(second.destination, first.destination)
-                   for second in mounts[index+1:]):
-                raise NativeRecipeError('overlapping mounts denied')
+                   for second in ordinary_mounts[index+1:]):
+                raise NativeRecipeError('overlapping ordinary_mounts denied')
         # Project paths are identical on host/Workstation; runtime state must not
         # alias Project data or the endpoint mount. No implicit directory setup.
-        project = [m for m in mounts if below(self.checkout,m.destination)]
-        homes = [m for m in mounts if below(self.home,m.destination)]
-        peers = [m for m in mounts if below(self.endpoint,m.destination)]
+        project = [m for m in ordinary_mounts if below(self.checkout,m.destination)]
+        homes = [m for m in ordinary_mounts if below(self.home,m.destination)]
+        peers = [m for m in ordinary_mounts if below(self.endpoint,m.destination)]
         if (len(project)!=1 or project[0].read_only or project[0].source!=project[0].destination
                 or len(homes)!=1 or homes[0].read_only or homes[0].source != runtime_root
                 or homes[0].destination != runtime_root or len(peers)!=1
                 or project[0] in homes or peers[0] in homes or project[0] in peers):
-            raise NativeRecipeError('separate admitted Project/runtime/endpoint mounts required')
+            raise NativeRecipeError('separate admitted Project/runtime/endpoint ordinary_mounts required')
         if provider_auth is not None: require_reference(provider_auth, 'pi')
         self.provider_auth = provider_auth
         self.auth_path = None if provider_auth is None else provider_auth.path(runtime_root)
@@ -201,13 +205,14 @@ class NativePiRecipe:
             'payload_manifest_digest':self.payload_manifest_digest,
             'scope':dict(scope), 'recipe_sha256':hashlib.sha256(json.dumps({
                 'checkout':self.checkout,'home':self.home,'sessions':self.sessions,'endpoint':self.endpoint,
-                'provider':provider,'model':model,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts]},sort_keys=True).encode()).hexdigest()}
+                'provider':provider,'model':model,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts],
+                **({} if git_profile is None else {'git_profile_digest':git_profile.digest})},sort_keys=True).encode()).hexdigest()}
         self._identity_json = json.dumps(identity,sort_keys=True)
         self._frozen = True
 
     @classmethod
     def from_configuration(cls, source, room_id, participant_id, manifest_path, manifest_digest,
-                           *, seat, scope, checkout, runtime_root, endpoint, mounts):
+                           *, seat, scope, checkout, runtime_root, endpoint, mounts, git_profile=None):
         """Resolve existing configuration without changing native saved settings.
 
         Only explicit Pi provider/model arguments are qualified initially. A
@@ -223,9 +228,13 @@ class NativePiRecipe:
             raise NativeRecipeError('configured native Pi seat mismatch')
         if runtime_root != room['state_root'] + '/runtime':
             raise NativeRecipeError('Room-owned runtime subtree required')
-        runtime_mounts = [m for m in mounts if m.source == runtime_root and m.destination == runtime_root and not m.read_only]
-        if (len(runtime_mounts) != 1 or len(mounts) != 6
-                or any(below(room['state_root'], m.source) for m in mounts)):
+        from .native_git_recipe import base_mounts
+        ordinary_mounts = base_mounts(mounts, git_profile, seat=seat, checkout=checkout,
+            image_id=None if git_profile is None else git_profile.image_id,
+            image_reference=None if git_profile is None else git_profile.image_reference)
+        runtime_mounts = [m for m in ordinary_mounts if m.source == runtime_root and m.destination == runtime_root and not m.read_only]
+        if (len(runtime_mounts) != 1 or len(ordinary_mounts) != 6
+                or any(below(room['state_root'], m.source) for m in ordinary_mounts)):
             raise NativeRecipeError('dedicated runtime subtree and no control-store exposure required')
         provider = next(p for p in config['deployment']['providers'] if p['id'] == configured['provider'])
         if 'endpoint' in provider:
@@ -247,13 +256,13 @@ class NativePiRecipe:
         if checkout != project['repo'] and str(Path(checkout).parent) != project['checkouts']:
             raise NativeRecipeError('owned configured checkout required')
         for key in ('repo','workspace','reference','checkouts'):
-            selected = [m for m in mounts if m.source == project[key] and m.destination == project[key]]
+            selected = [m for m in ordinary_mounts if m.source == project[key] and m.destination == project[key]]
             if len(selected) != 1 or selected[0].read_only != (key == 'reference'):
                 raise NativeRecipeError('configured Project mount contract differs')
         recipe = cls(manifest_path, manifest_digest, seat=seat, scope=scope, checkout=checkout,
             runtime_root=runtime_root, endpoint=endpoint, mounts=mounts,
             provider=choices['--provider'], model=selected_model,
-            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']))
+            provider_auth=select_reference(provider,'pi',native_provider=choices['--provider']), git_profile=git_profile)
         image = next(i for i in config['deployment']['images'] if i['id'] == room['image'])
         if image['reference'] != recipe.image_reference:
             raise NativeRecipeError('configured image differs from selected manifest')
