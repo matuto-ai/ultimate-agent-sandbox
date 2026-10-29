@@ -12,8 +12,8 @@ import tempfile
 import threading
 import unittest
 
-from library_support import (AT, ORIGIN, OTHER, binding, capture, document, operation, session,
-                             settings, value)
+from library_support import (AT, HUMAN_ORIGIN, ORIGIN, OTHER, binding, capture, document,
+                             library_origin, operation, session, settings, value)
 from uas import library
 from uas.ledger import Origin
 from uas.library import LibraryError
@@ -35,13 +35,13 @@ def durable(operation, projection_commit="b" * 40, visible=False):
                            projection={"commit_sha": projection_commit, "visible": visible})
 
 
-def human_reject(operation_id="reject-1"):
+def human_reject(operation_id="reject-1", reason="RULE_REFUSED"):
     return library.action(library.human_scope(session(("library-reject",)), binding=binding(),
                                               kind="reject"),
                           settings(), kind="reject", operation_id=operation_id,
                           request_id="human-request-1",
                           payload={"drain_id": "drain-1", "queue_id": DIGEST,
-                                   "reason": "RULE_REFUSED", "observed_version": DIGEST},
+                                   "reason": reason, "observed_version": DIGEST},
                           at=AT)
 
 
@@ -77,12 +77,14 @@ class RecordCommitTests(unittest.TestCase):
         self.assertEqual(attempt.settings_id, record["settings_id"])
         self.assertEqual(attempt.digest(), record["payload_sha256"])
         self.assertGreater(record["payload_bytes"], 0)
-        self.assertEqual(identity["project_id"], record["project_id"])
-        self.assertEqual(identity["project_identity"], record["project_identity"])
+        self.assertEqual(identity["project_id"], record["scope"]["project_id"])
+        self.assertEqual(identity["project_identity"], record["scope"]["project_identity"])
         self.assertEqual(identity["project_path"], record["project_path"])
-        self.assertEqual("participant", record["origin"]["subject"])
-        self.assertEqual(ORIGIN.actor_id, record["origin"]["actor_id"])
-        self.assertEqual(ORIGIN.authority_version, record["origin"]["authority_version"])
+        self.assertEqual("participant", record["scope"]["subject"])
+        self.assertEqual(ORIGIN.actor_id, record["scope"]["actor_id"])
+        self.assertEqual(ORIGIN.authority_version, record["scope"]["authority_version"])
+        self.assertEqual(AT, record["at"])
+        self.assertEqual(ORIGIN.actor_id, record["provenance"]["actor_id"])
         self.assertIsNone(record["receipt"])
         self.assertIsNone(record["finished_at"])
         self.assertRegex(record["started_at"], r"\+00:00\Z")
@@ -248,10 +250,82 @@ class ScopeIsolationTests(unittest.TestCase):
         self.assertEqual([original.operation_id, retry.operation_id],
                          [item["operation_id"] for item in submission["attempts"]])
         self.assertEqual([ORIGIN.actor_id, OTHER.actor_id],
-                         [item["origin"]["actor_id"] for item in submission["attempts"]])
+                         [item["scope"]["actor_id"] for item in submission["attempts"]])
+        self.assertEqual([ORIGIN.actor_id, ORIGIN.actor_id],
+                         [item["provenance"]["actor_id"] for item in submission["attempts"]])
         self.assertEqual(["DURABLY_QUEUED"] * 2, [item["receipt"]["outcome"] for item in recorded])
         self.assertEqual([ORIGIN.participant_id, OTHER.participant_id],
-                         [item["origin"]["participant_id"] for item in submission["attempts"]])
+                         [item["scope"]["participant_id"] for item in submission["attempts"]])
+
+
+class RequestIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.records = LibraryRecords(Path(self.temp.name) / "records.sqlite3", "deployment-1")
+        self.addCleanup(self.records.close)
+
+    def test_changed_human_request_is_refused_under_a_new_command_id(self):
+        first = human_reject("reject-1", reason="RULE_ONE")
+        self.records.begin(first)
+        self.records.finish(first, library.receipt(
+            first, "COMMITTED", at=AT,
+            publication={"commit_sha": "c" * 40,
+                         "path": "projects/github.com/acme/alpha/log.md"}))
+        changed = human_reject("reject-2", reason="RULE_TWO")
+        with self.assertRaises(LibraryError) as contract:
+            library.identity(first, changed)
+        self.assertEqual("ID_CONFLICT", contract.exception.code)
+        with self.assertRaises(LibraryError) as refused:
+            self.records.begin(changed)
+        self.assertEqual("ID_CONFLICT", refused.exception.code)
+        self.assertEqual("PENDING", self.records.begin(
+            human_reject("reject-3", reason="RULE_ONE"))["state"])
+        submission = self.records.submission(first.scope.project_identity,
+                                             first.request_id)
+        self.assertEqual(HUMAN_ORIGIN.actor_id, submission["origin"]["actor_id"])
+        self.assertEqual([first.operation_id, "reject-3"],
+                         [item["operation_id"] for item in submission["attempts"]])
+        self.assertEqual([first.digest(), first.digest()],
+                         [item["payload_sha256"] for item in submission["attempts"]])
+
+    def test_changed_settings_request_is_refused_under_a_new_command_id(self):
+        def change(operation_id, result_count):
+            value = document()
+            value["limits"]["result_count"] = result_count
+            return library.settings_change(library.installation_scope(library_origin()),
+                                           settings(), operation_id=operation_id,
+                                           request_id="settings-request-1",
+                                           document=io.StringIO(json.dumps(value)), at=AT)
+
+        first = change("settings-1", 4)
+        self.records.begin(first)
+        with self.assertRaises(LibraryError) as refused:
+            self.records.begin(change("settings-2", 6))
+        self.assertEqual("ID_CONFLICT", refused.exception.code)
+        self.assertEqual("PENDING", self.records.begin(change("settings-3", 4))["state"])
+        submission = self.records.submission(None, "settings-request-1")
+        self.assertEqual([first.operation_id, "settings-3"],
+                         [item["operation_id"] for item in submission["attempts"]])
+
+    def test_attempt_equality_matches_the_supplied_contract(self):
+        original = capture()
+        recorded = self.records.begin(original)["record"]
+        later = library.capture(original.scope, settings(), operation_id=original.operation_id,
+                                request_id=original.request_id, value=original.payload,
+                                at="2026-10-29T01:00:00+00:00")
+        with self.assertRaises(LibraryError) as contract:
+            library.identity(original, later)
+        self.assertEqual("ID_CONFLICT", contract.exception.code)
+        with self.assertRaises(LibraryError) as refused:
+            self.records.begin(later)
+        self.assertEqual("ID_CONFLICT", refused.exception.code)
+        renamed = capture(target=binding(repository="acme/renamed-alpha"))
+        self.assertEqual("DUPLICATE", library.identity(original, renamed))
+        self.assertEqual(recorded, self.records.begin(renamed)["record"])
+        self.assertEqual("github.com/acme/alpha", recorded["project_path"])
+        self.assertEqual(1, len(self.records.submission(
+            original.scope.project_identity, original.request_id)["attempts"]))
 
 
 class InstallationScopeTests(unittest.TestCase):
@@ -272,16 +346,19 @@ class InstallationScopeTests(unittest.TestCase):
         self.assertEqual("PENDING", self.records.begin(attempt)["state"])
         self.assertEqual([attempt.operation_id], [
             item["operation_id"] for item in self.records.pending()])
-        self.assertIsNone(self.records.submission(None, attempt.request_id))
         self.assertEqual([], self.records.pending(project_identity=binding()["project_identity"]))
+        settings_submission = self.records.submission(None, attempt.request_id)
+        self.assertEqual("operator", settings_submission["origin"]["subject"])
+        self.assertIsNone(self.records.submission(binding()["project_identity"],
+                                                  attempt.request_id))
         terminal = self.records.finish(attempt, library.receipt(
             attempt, "CONFIGURED", at=AT,
             configuration={"settings_id": attempt.payload["next_settings_id"], "version": 2}))
         self.assertEqual(terminal, self.records.record(attempt.operation_id,
                                                        project_identity=None))
-        self.assertIsNone(terminal["project_id"])
-        self.assertIsNone(terminal["project_identity"])
-        self.assertEqual("operator", terminal["origin"]["subject"])
+        self.assertIsNone(terminal["scope"]["project_id"])
+        self.assertIsNone(terminal["scope"]["project_identity"])
+        self.assertEqual("operator", terminal["scope"]["subject"])
         self.assertEqual([], self.records.pending())
         self.assertIsNone(self.records.record(attempt.operation_id,
                                               project_identity=binding()["project_identity"]))

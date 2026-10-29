@@ -14,6 +14,10 @@ read as canonical publication success or absence. Later Git reconciliation,
 scheduler recovery and report replay consume these records. Recovery and
 deduplication state is never pruned here; receipt-detail expiry belongs to a
 later slice.
+
+Attempt equality follows the supplied ``Operation.canonical()`` contract, so
+an exact retry reconciles while a reused Command ID or a changed request in the
+same Project or installation scope is refused for every operation kind.
 """
 from datetime import datetime, timezone
 import json
@@ -21,7 +25,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .library import LibraryError, Operation, admit_receipt, audit_metadata
+from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata
 
 
 RECORD_VERSION = 1
@@ -29,9 +33,12 @@ MAX_PENDING = 256
 MAX_ATTEMPTS = 256
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_IDENTITY_KEYS = ("record_version", "kind", "operation_id", "request_id", "queue_id",
-                  "drain_id", "settings_id", "project_id", "project_identity",
-                  "project_path", "payload_sha256", "payload_bytes", "origin")
+_ATTEMPT_KEYS = ("record_version", "kind", "operation_id", "request_id", "queue_id",
+                 "drain_id", "settings_id", "at", "payload_sha256", "payload_bytes",
+                 "scope", "provenance", "project_path")
+# Mutable bundle coordinates stay descriptive; the supplied Operation.canonical
+# contract excludes them so a rename does not break exact-retry reconciliation.
+_COORDINATES = ("project_path",)
 
 # An outcome a Producer cannot reach for this kind is refused, so a record
 # cannot claim a publication its operation does not make.
@@ -42,7 +49,7 @@ _KIND_OUTCOMES = {
 
 _SCHEMA = {
     "deployment": "CREATE TABLE deployment (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL, id TEXT NOT NULL)",
-    "submissions": "CREATE TABLE submissions (project_identity TEXT, request_id TEXT NOT NULL, identity TEXT NOT NULL, origin TEXT NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(project_identity, request_id))",
+    "submissions": "CREATE TABLE submissions (scope_key TEXT NOT NULL, request_id TEXT NOT NULL, identity TEXT NOT NULL, origin TEXT NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(scope_key, request_id))",
     "attempts": "CREATE TABLE attempts (operation_id TEXT PRIMARY KEY, project_identity TEXT, request_id TEXT NOT NULL, queue_id TEXT, drain_id TEXT, identity TEXT NOT NULL, started_at TEXT NOT NULL, receipt TEXT, finished_at TEXT)",
 }
 _INDEXES = {
@@ -53,6 +60,7 @@ _INDEXES = {
 }
 _SUBMISSION_ORIGIN = {"actor_id", "participant_id", "subject", "at", "request_id",
                       "payload_sha256"}
+_SUBMISSION_IDENTITY = {"record_version", "kind", "queue_id", "payload_sha256"}
 
 
 def _canonical(value):
@@ -121,7 +129,8 @@ def _submission_origin(operation):
     if set(origin) != _SUBMISSION_ORIGIN:
         raise LibraryError("INVALID_RECORD", "provenance")
     for key in ("actor_id", "participant_id", "subject", "request_id"):
-        _token(origin[key], "provenance." + key)
+        if origin[key] is not None or key != "participant_id":
+            _token(origin[key], "provenance." + key)
     _timestamp(origin["at"])
     _digest(origin["payload_sha256"], "provenance.payload_sha256")
     if origin["request_id"] != operation.request_id:
@@ -131,39 +140,55 @@ def _submission_origin(operation):
     return _safe(origin, "provenance")
 
 
+def _scope_key(scope):
+    """One Project or the installation scope; never a caller path."""
+    return scope.project_identity or ""
+
+
 def _identity(operation):
-    """Bounded immutable identity of one attempt; the payload itself is excluded."""
+    """One attempt's bounded identity; payload content stays outside it.
+
+    The equality value is the supplied ``Operation.canonical()`` contract: the
+    attempt time, payload digest, authenticated scope and immutable submission
+    provenance decide identity, while mutable bundle coordinates are recorded
+    descriptively so a repository rename does not change it.
+    """
     payload = _canonical(operation.payload)
     try:
         size = len(payload.encode("utf-8"))
     except UnicodeError as error:
         raise LibraryError("INVALID_RECORD", "payload") from error
+    scope = operation.scope.canonical()
+    project_path = scope.pop("project_path")
     identity = {
         "record_version": RECORD_VERSION, "kind": operation.kind,
         "operation_id": operation.operation_id, "request_id": operation.request_id,
         "queue_id": operation.queue_id, "drain_id": operation.drain_id,
-        "settings_id": operation.settings_id,
-        "project_id": operation.scope.project_id,
-        "project_identity": operation.scope.project_identity,
-        "project_path": operation.scope.project_path,
+        "settings_id": operation.settings_id, "at": operation.at,
         "payload_sha256": operation.digest(), "payload_bytes": size,
-        "origin": _origin(operation.scope),
+        "scope": scope, "provenance": _submission_origin(operation),
+        "project_path": project_path,
     }
     for key in ("kind", "operation_id", "request_id", "settings_id"):
         _token(identity[key], key)
-    for key in ("queue_id",):
-        if identity[key] is not None:
-            _digest(identity[key], key)
-    for key in ("project_id", "project_identity"):
-        if identity[key] is not None:
-            _token(identity[key], key)
-    for key, stored in (("project_path", operation.scope.project_path),
-                        ("drain_id", operation.drain_id)):
-        if stored is not None:
-            _token(stored, key)
+    if identity["queue_id"] is not None:
+        _digest(identity["queue_id"], "queue_id")
+    if identity["drain_id"] is not None:
+        _token(identity["drain_id"], "drain_id")
+    if project_path is not None:
+        _token(project_path, "project_path")
+    _timestamp(identity["at"])
     if (identity["kind"] == "enqueue") != (identity["queue_id"] is not None):
         raise LibraryError("INVALID_RECORD", "queue_id")
+    _origin(operation.scope)  # validate the authenticated origin fields
     return _safe(identity, "identity")
+
+
+def _submission(identity):
+    """Request-level deduplication identity: kind, queue and canonical digest."""
+    return {"record_version": RECORD_VERSION, "kind": identity["kind"],
+            "queue_id": identity["queue_id"],
+            "payload_sha256": identity["payload_sha256"]}
 
 
 class LibraryRecords:
@@ -320,23 +345,26 @@ class LibraryRecords:
         if project_identity is not None:
             _token(project_identity, "project_identity")
         value = self._read(lambda db: self._attempt(db, operation_id))
-        if value is None or value["project_identity"] != project_identity:
+        if value is None or value["scope"]["project_identity"] != project_identity:
             return None
         return value
 
     def submission(self, project_identity, request_id):
         """Immutable original submission plus its attempts, oldest first.
 
-        Bounded: history past this owner's read limit needs operator action.
+        Every operation kind is fenced by its Project or installation scope and
+        request identity. Bounded: history past this owner's read limit needs
+        operator action.
         """
         if project_identity is not None:
             _token(project_identity, "project_identity")
         _token(request_id, "request_id")
+        scope_key = project_identity or ""
 
         def read(db):
             row = db.execute("SELECT identity,origin,submitted_at FROM submissions "
-                             "WHERE project_identity IS ? AND request_id=?",
-                             (project_identity, request_id)).fetchone()
+                             "WHERE scope_key=? AND request_id=?",
+                             (scope_key, request_id)).fetchone()
             if row is None:
                 return None
             try:
@@ -346,7 +374,7 @@ class LibraryRecords:
                         or row["identity"] != _canonical(identity)
                         or set(origin) != _SUBMISSION_ORIGIN
                         or origin.get("request_id") != request_id
-                        or identity.get("request_id") != request_id
+                        or set(identity) != _SUBMISSION_IDENTITY
                         or identity.get("payload_sha256") != origin.get("payload_sha256")):
                     raise ValueError()
             except LibraryError as error:
@@ -355,7 +383,8 @@ class LibraryRecords:
                 raise LibraryError("RECORD_INVALID") from error
             attempts = db.execute("SELECT operation_id FROM attempts WHERE project_identity IS ? "
                                   "AND request_id=? ORDER BY started_at,operation_id LIMIT ?",
-                                  (project_identity, request_id, MAX_ATTEMPTS + 1)).fetchall()
+                                  (project_identity or None, request_id,
+                                   MAX_ATTEMPTS + 1)).fetchall()
             if len(attempts) > MAX_ATTEMPTS:
                 raise LibraryError("RECORD_CAPACITY")
             records = [self._attempt(db, item["operation_id"]) for item in attempts]
@@ -409,43 +438,44 @@ class LibraryRecords:
     def begin(self, operation):
         """Durably record one attempt intent; no acknowledgement before commit.
 
-        An exact repeat returns the committed record unchanged. Conflicting
-        identity or digest reuse is refused instead of overwriting a receipt.
+        An exact repeat returns the committed record unchanged. Reusing a
+        Command ID for a different attempt, or a request ID for a different
+        kind/digest, is refused for every operation kind instead of overwriting
+        a receipt or admitting a changed request.
         """
-        if type(operation) is not Operation:
+        if type(operation) is not Operation or type(operation.scope) is not LibraryScope:
             raise LibraryError("INVALID_OPERATION", "operation")
         identity = _identity(operation)
         canonical = _canonical(identity)
-        origin = _submission_origin(operation) if operation.kind == "enqueue" else None
+        equality = _canonical(_equality(identity))
+        submission = _canonical(_submission(identity))
+        origin = identity["provenance"]
+        scope = identity["scope"]
 
         def work(db):
             prior = self._attempt(db, operation.operation_id)
             if prior is not None:
-                if _canonical(_identity_like(prior)) != canonical:
+                if _canonical(_equality(_identity_like(prior))) != equality:
                     raise LibraryError("ID_CONFLICT", "operation_id")
                 return {"state": prior["state"], "record": prior}
-            if origin is not None:
-                row = db.execute("SELECT identity FROM submissions WHERE "
-                                 "project_identity IS ? AND request_id=?",
-                                 (identity["project_identity"], identity["request_id"])).fetchone()
-                if row is not None:
-                    stored = json.loads(row["identity"])
-                    if (stored.get("payload_sha256") != identity["payload_sha256"]
-                            or stored.get("queue_id") != identity["queue_id"]
-                            or stored.get("kind") != identity["kind"]):
-                        raise LibraryError("ID_CONFLICT", "request_id")
-                else:
-                    # Only a retry may carry another actor's submission origin.
-                    if any(origin[key] != identity["origin"][key] for key in
-                           ("actor_id", "participant_id", "subject")):
-                        raise LibraryError("CALLER_AUTHORITY", "provenance.actor_id")
-                    db.execute("INSERT INTO submissions VALUES(?,?,?,?,?)",
-                               (identity["project_identity"], identity["request_id"],
-                                canonical, _canonical(origin), _now()))
+            row = db.execute("SELECT identity FROM submissions WHERE scope_key=? "
+                             "AND request_id=?",
+                             (_scope_key(operation.scope), identity["request_id"])).fetchone()
+            if row is not None:
+                if row["identity"] != submission:
+                    raise LibraryError("ID_CONFLICT", "request_id")
+            else:
+                # Only a retry may carry another actor's submission origin.
+                if any(origin[key] != scope[key] for key in
+                       ("actor_id", "participant_id", "subject")):
+                    raise LibraryError("CALLER_AUTHORITY", "provenance.actor_id")
+                db.execute("INSERT INTO submissions VALUES(?,?,?,?,?)",
+                           (_scope_key(operation.scope), identity["request_id"],
+                            submission, _canonical(origin), _now()))
             self._capacity(db)
             db.execute("INSERT INTO attempts(operation_id,project_identity,request_id,"
                        "queue_id,drain_id,identity,started_at) VALUES(?,?,?,?,?,?,?)",
-                       (operation.operation_id, identity["project_identity"],
+                       (operation.operation_id, scope["project_identity"],
                         identity["request_id"], identity["queue_id"], identity["drain_id"],
                         canonical, _now()))
             return {"state": "PENDING", "record": self._attempt(db, operation.operation_id)}
@@ -463,9 +493,9 @@ class LibraryRecords:
         The receipt must describe this stored attempt. An exact repeat returns
         the committed record; a different value is a conflict, never a rewrite.
         """
-        if type(operation) is not Operation:
+        if type(operation) is not Operation or type(operation.scope) is not LibraryScope:
             raise LibraryError("INVALID_OPERATION", "operation")
-        canonical_identity = _canonical(_identity(operation))
+        canonical_identity = _canonical(_equality(_identity(operation)))
         try:
             admitted = admit_receipt(dict(receipt))
         except LibraryError as error:
@@ -490,7 +520,7 @@ class LibraryRecords:
             prior = self._attempt(db, operation.operation_id)
             if prior is None:
                 raise LibraryError("RECORD_NOT_FOUND")
-            if _canonical(_identity_like(prior)) != canonical_identity:
+            if _canonical(_equality(_identity_like(prior))) != canonical_identity:
                 raise LibraryError("ID_CONFLICT", "operation_id")
             if prior["receipt"] is not None:
                 if _canonical(prior["receipt"]) != value:
@@ -505,4 +535,9 @@ class LibraryRecords:
 
 def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
-    return {key: value[key] for key in _IDENTITY_KEYS}
+    return {key: value[key] for key in _ATTEMPT_KEYS}
+
+
+def _equality(value):
+    """The part of a stored identity that decides exact-retry equality."""
+    return {key: item for key, item in value.items() if key not in _COORDINATES}

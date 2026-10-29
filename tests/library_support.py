@@ -12,6 +12,10 @@ OTHER = Origin("actor-beta", "seat-b", "inc-2", "epoch-2", ("implement", "librar
 HUMAN_ORIGIN = Origin("human-seat", "human-seat", "inc-human", "human-epoch", ("human-control-run",))
 
 
+def library_origin():
+    return Origin("operator-a", "operator-a", "inc-op", "epoch-op", ("library-settings",))
+
+
 def document():
     return {
         "version": 1,
