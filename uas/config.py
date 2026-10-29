@@ -19,8 +19,8 @@ ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}\Z")
 IMAGE_PATH = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*\Z")
 CAPABILITIES = {
-    "implement": "hub", "review": "hub", "can-open-requested-run": "hub",
     "library:enqueue": "hub",
+    "implement": "hub", "review": "hub", "can-open-requested-run": "hub",
     "forge-read": "broker", "forge-write": "broker", "git-read": "broker", "git-push": "broker",
 }
 CONTROLS = ("non_root", "outer_confinement", "process_binding", "private_endpoints", "no_host_runtime_socket")
@@ -166,6 +166,8 @@ def _image(value, field):
     are not part of the initial input surface. This never resolves or pulls.
     """
     _text(value, field, 340)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        return  # Exact locally imported image config ID; never a tag.
     name, separator, digest = value.partition("@")
     if not separator or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or len(name) > 255:
         raise ConfigError(field, "expected image pinned by SHA-256 digest")

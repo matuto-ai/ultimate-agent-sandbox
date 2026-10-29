@@ -1,3 +1,4 @@
+from .native_image_package import valid_image_reference
 from .runtime_provider import ProviderAuthReference, select_reference, require_reference
 """Immutable installation-selected Claude SDK/native payload; not Actor admission.
 
@@ -47,9 +48,7 @@ class NativeClaudeRecipe:
                 or type(manifest['version']) is not int or manifest['version'] != 1
                 or manifest['runtime'] != 'claude' or manifest['runtime_version'] != '2.1.310'
                 or manifest['sdk_version'] != '0.3.310'
-                or type(manifest['image_reference']) is not str
-                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}',manifest['image_reference'])
-                or type(manifest['image_id']) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}',manifest['image_id'])
+                or not valid_image_reference(manifest['image_reference'],manifest['image_id'])
                 or type(manifest['artifacts']) is not dict or set(manifest['artifacts']) != ARTIFACTS
                 or any(type(x) is not str or not SHA.fullmatch(x) for x in manifest['artifacts'].values())):
             raise NativeRecipeError('invalid selected Claude manifest')

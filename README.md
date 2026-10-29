@@ -126,3 +126,10 @@ launcher, fixed credential-free worker, external SSH-compatible byte Broker,
 canonical commit/source receipts and Run-scoped contribution history. Short
 account-free hosted seams are separate from the deferred real GitHub SSH and
 exact-image qualification; #67 is not closed by source tests alone.
+
+## Local test installation
+
+See [the persistent local entrypoint](docs/local/entrypoint.md) for explicit setup,
+start/status/stop and authenticated Manager inspection. This is separate from
+disposable native qualification; required host preparation and currently absent
+provider/runtime bindings are reported rather than simulated.

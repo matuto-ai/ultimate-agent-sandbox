@@ -1,3 +1,4 @@
+from .native_image_package import valid_image_reference
 from .runtime_provider import ProviderAuthReference, select_reference, require_reference
 """Opt-in trusted installation recipe consumed by the canonical exact exec owner.
 
@@ -165,9 +166,7 @@ class NativePiRecipe:
                 'image_reference','image_id','artifacts','payload_manifest_digest'} or type(manifest['version']) is not int
                 or manifest['version'] != 1 or manifest['runtime'] != 'pi'
                 or manifest['runtime_version'] != '1.4.0'
-                or type(manifest['image_reference']) is not str
-                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}', manifest['image_reference'])
-                or type(manifest['image_id']) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}',manifest['image_id'])
+                or not valid_image_reference(manifest['image_reference'],manifest['image_id'])
                 or type(manifest['artifacts']) is not dict or set(manifest['artifacts']) != ARTIFACTS
                 or any(type(v) is not str or not SHA.fullmatch(v) for v in manifest['artifacts'].values())):
             raise NativeRecipeError('invalid selected native image manifest')

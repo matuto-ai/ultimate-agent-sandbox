@@ -73,9 +73,15 @@ class LocalHostPlanTests(unittest.TestCase):
 
     def test_stale_plan_rejects_any_changed_identity(self):
         value = selected()
-        for key in ('free_bytes', 'identity'):
-            o = observation(); o['storage'][key] = 1 if key == 'free_bytes' else [2, 31]
-            with self.assertRaisesRegex(HostProfileError, 'HOST_PLAN_STALE'): verify_plan(value, o)
+        o = observation(); o['storage']['identity'] = [2, 31]
+        with self.assertRaisesRegex(HostProfileError, 'HOST_PLAN_STALE'): verify_plan(value, o)
+        o = observation(); o['storage']['free_bytes'] -= 4096
+        self.assertEqual(verify_plan(value, o), value)
+
+    def test_storage_observation_must_name_immediate_parent(self):
+        with self.assertRaisesRegex(HostProfileError, 'HOST_STORAGE_PARENT'):
+            plan(profile(), observation(), storage_root='/srv/nested/uas-local',
+                 endpoints_root='/run/uas-local')
 
     def test_forged_rehashed_plan_rejected(self):
         value = selected(); value['operations'] = []
@@ -137,7 +143,7 @@ class LocalHostPlanTests(unittest.TestCase):
         for engine in ('/var/lib/docker', '/run/docker', '/run/docker.sock'):
             for root in (engine, engine + '/uas-new', str(__import__('pathlib').PurePosixPath(engine).parent)):
                 o = observation(); o['storage']['path'] = '/srv'
-                with self.assertRaisesRegex(HostProfileError, 'HOST_ENGINE_ROOT_OVERLAP'):
+                with self.assertRaisesRegex(HostProfileError, 'HOST_(ENGINE_)?ROOT_OVERLAP'):
                     plan(profile(), o, storage_root='/srv/uas-local', endpoints_root=root)
 
 

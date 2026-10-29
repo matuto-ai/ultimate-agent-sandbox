@@ -60,7 +60,16 @@ def observe_value(value):
     return deepcopy(value)
 
 
-def plan(profile_document, observed, *, storage_root, endpoints_root, allocation_bytes=None):
+def observation_digest(value):
+    # Available bytes are rechecked against any allocation at apply time, not an
+    # identity: ordinary background writes must not invalidate every plan.
+    value = observe_value(value)
+    value['storage'].pop('free_bytes')
+    return digest(value)
+
+
+def plan(profile_document, observed, *, storage_root, endpoints_root, allocation_bytes=None,
+         receipt_root=None):
     """Return proposals and blockers, never silently substitute host choices.
 
     A non-XFS host produces a bounded file-allocation proposal only when the
@@ -69,16 +78,17 @@ def plan(profile_document, observed, *, storage_root, endpoints_root, allocation
     profile = LocalHostProfile.parse(profile_document)
     observed = observe_value(observed)
     storage_root, endpoints_root = absolute_path(storage_root), absolute_path(endpoints_root)
-    roots = [PurePosixPath(x) for x in (storage_root, endpoints_root)]
-    require(roots[0] != roots[1] and roots[0] not in roots[1].parents
-            and roots[1] not in roots[0].parents, 'HOST_ROOT_OVERLAP')
+    receipt_root = absolute_path(receipt_root or '/var/lib/uas-prepare-' + profile.installation_id)
+    roots = [PurePosixPath(x) for x in (storage_root, endpoints_root, receipt_root)]
+    require(all(a != b and a not in b.parents and b not in a.parents
+                for i,a in enumerate(roots) for b in roots[i+1:]), 'HOST_ROOT_OVERLAP')
     engine_paths = [PurePosixPath(value) for value in
                     (profile.socket, profile.data_root, profile.exec_root)]
     require(all(root != engine and root not in engine.parents and engine not in root.parents
                 for root in roots for engine in engine_paths), 'HOST_ENGINE_ROOT_OVERLAP')
     require(len(endpoints_root.encode()) + len('/'+'0'*32+'/control/hub.sock') < 108, 'HOST_SOCKET_PATH')
     parent = PurePosixPath(observed['storage']['path'])
-    require(parent in roots[0].parents, 'HOST_STORAGE_PARENT')
+    require(parent == roots[0].parent, 'HOST_STORAGE_PARENT')
     if allocation_bytes is not None:
         require(type(allocation_bytes) is int and 512*1024**2 <= allocation_bytes <= 1024**4
                 and allocation_bytes % (1024**2) == 0, 'HOST_ALLOCATION_BOUND')
@@ -86,7 +96,7 @@ def plan(profile_document, observed, *, storage_root, endpoints_root, allocation
     if observed['selinux'] != 'Enforcing':
         blockers.append('SELINUX_ENFORCING_REQUIRED')
     if any(root == occupied or PurePosixPath(occupied) in PurePosixPath(root).parents
-           for root in (storage_root, endpoints_root) for occupied in observed['occupied_paths']):
+           for root in (storage_root, endpoints_root, receipt_root) for occupied in observed['occupied_paths']):
         blockers.append('OWNERSHIP_RECONCILIATION_REQUIRED')
     for key in ('subuid', 'subgid'):
         rows = observed[key]
@@ -126,9 +136,10 @@ def plan(profile_document, observed, *, storage_root, endpoints_root, allocation
         operations.append({'kind': 'prepare-owned-xfs-file', 'path': storage_root,
                            'bytes': allocation_bytes, 'format_existing_device': False})
     operations.append({'kind': 'prepare-owned-endpoints', 'path': endpoints_root})
-    body = {'version': 1, 'profile': profile.document(), 'observations': digest(observed),
+    body = {'version': 2, 'profile': profile.document(), 'observations': observation_digest(observed),
             'storage_identity': storage['identity'], 'storage_root': storage_root,
-            'endpoints_root': endpoints_root, 'operations': operations,
+            'storage_parent': storage['path'],
+            'endpoints_root': endpoints_root, 'receipt_root': receipt_root, 'operations': operations,
             'blockers': sorted(set(blockers)), 'status': 'blocked' if blockers else 'planned'}
     return dict(body, plan_id=digest(body))
 
@@ -136,17 +147,18 @@ def plan(profile_document, observed, *, storage_root, endpoints_root, allocation
 def verify_plan(value, observed):
     """Require fresh observation and unchanged plan before privileged effects."""
     require(type(value) is dict and set(value) == {'version', 'profile', 'observations',
-            'storage_identity', 'storage_root', 'endpoints_root', 'operations', 'blockers',
+            'storage_identity', 'storage_root', 'storage_parent', 'endpoints_root', 'receipt_root', 'operations', 'blockers',
             'status', 'plan_id'}, 'HOST_PLAN')
     profile = LocalHostProfile.parse(value['profile'])
     body = {k: v for k, v in value.items() if k != 'plan_id'}
     require(digest(body) == value['plan_id'], 'HOST_PLAN_CHANGED')
-    require(digest(observe_value(observed)) == value['observations'], 'HOST_PLAN_STALE')
+    require(observation_digest(observed) == value['observations'], 'HOST_PLAN_STALE')
     require(value['status'] == 'planned' and value['blockers'] == [], 'HOST_PLAN_BLOCKED')
     # Recompute semantics; a caller cannot hash arbitrary operations into a plan.
     sizes = [op['bytes'] for op in value['operations'] if op.get('kind') == 'prepare-owned-xfs-file']
     require(len(sizes) <= 1, 'HOST_PLAN')
     expected = plan(profile.document(), observed, storage_root=value['storage_root'],
-                    endpoints_root=value['endpoints_root'], allocation_bytes=sizes[0] if sizes else None)
+                    endpoints_root=value['endpoints_root'], allocation_bytes=sizes[0] if sizes else None,
+                    receipt_root=value['receipt_root'])
     require(expected == value, 'HOST_PLAN_SEMANTICS')
     return deepcopy(value)
