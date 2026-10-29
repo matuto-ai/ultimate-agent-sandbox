@@ -128,10 +128,16 @@ CONTENT_KEYS = frozenset({
 
 
 class LibraryError(ValueError):
-    """Stable code plus safe field path; never echoes input values or secrets."""
+    """Stable code plus safe field path; never echoes input values or secrets.
 
-    def __init__(self, code: str, field: str = "$"):
+    ``evidence`` carries optional rule/location/hash facts about the refusal
+    (for example a credential rule name, its document line and a digest of the
+    matched bytes) so a record can correlate refusals without the secret.
+    """
+
+    def __init__(self, code: str, field: str = "$", evidence=None):
         self.code, self.field = code, field
+        self.evidence = evidence
         super().__init__(f"{code}: {field}")
 
 
