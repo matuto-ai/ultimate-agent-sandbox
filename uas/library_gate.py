@@ -118,6 +118,13 @@ def notice_missing(body):
 
 # --- Markdown and links ---------------------------------------------------
 
+# A tag or autolink is short; a candidate that does not close inside this window
+# is literal prose. Total lookahead is budgeted so the scan stays linear, and an
+# exhausted budget refuses the document rather than scanning ahead unbounded.
+TAG_LOOKAHEAD = 1024
+MARKUP_BUDGET = 2
+
+
 def _tag(inner):
     """True for an HTML tag, comment, declaration or processing instruction."""
     if not inner:
@@ -131,14 +138,32 @@ def _tag(inner):
     return rest == "" or rest == "/" or rest.isspace()
 
 
+def _tag_end(text, index):
+    """Offset of the ``>`` that ends a tag, honoring quoted attribute values."""
+    quote, position = None, index + 1
+    limit = min(len(text), index + TAG_LOOKAHEAD)
+    while position < limit:
+        character = text[position]
+        if quote is not None:
+            quote = None if character == quote else quote
+        elif character in "\"'":
+            quote = character
+        elif character == ">":
+            return position
+        position += 1
+    return None
+
+
 def scan(body):
-    """Yield ("link", destination) and ("image"|"html", "") outside code.
+    """Yield ("link", destination), ("image"|"html", "") or ("budget", "").
 
     This is a structural scan, not a renderer: fenced code blocks and code spans
     are literal text, while inline links, images, reference definitions, raw
     HTML and autolinks are reported so policy can judge them. A Markdown link
     destination, an HTML tag and a comment may continue after a line ending, so
-    the scan runs over the whole body instead of one line at a time.
+    the scan runs over the whole body instead of one line at a time. Text that
+    only looks like the start of markup is prose, and is scanned through rather
+    than skipped, so a link inside it is still checked.
 
     Indented (four-space) code is not distinguished from prose: telling it apart
     from a list item's indented continuation paragraph needs a full block parser,
@@ -167,6 +192,7 @@ def scan(body):
             yield "link", reference.group(2) or following[number]
     text = "\n".join(lines)
     index, length = 0, len(text)
+    budget = length * MARKUP_BUDGET + TAG_LOOKAHEAD
     while index < length:
         character = text[index]
         if character == "`":
@@ -187,17 +213,26 @@ def scan(body):
                 index = closing
                 continue
         if character == "<":
-            closing = text.find(">", index + 1)
-            inner = text[index + 1:closing] if closing >= 0 else ""
-            if _tag(inner):
-                yield "html", ""
-            elif closing >= 0 and (SCHEME.match(inner)
-                                   or ("@" in inner and not any(
-                                       c.isspace() for c in inner))):
-                yield "link", "<" + inner + ">"
-            if closing >= 0:
-                index = closing + 1
-                continue
+            opening = text[index + 1:index + 2]
+            if opening and (opening.isalpha() or opening in "!/?"):
+                end = _tag_end(text, index)
+                budget -= TAG_LOOKAHEAD if end is None else end - index
+                if budget < 0:
+                    yield "budget", ""
+                    return
+                if end is not None:
+                    inner = text[index + 1:end]
+                    if _tag(inner):
+                        yield "html", ""
+                        index = end + 1
+                        continue
+                    if SCHEME.match(inner) or ("@" in inner and not any(
+                            item.isspace() for item in inner)):
+                        yield "link", "<" + inner + ">"
+                        index = end + 1
+                        continue
+            index += 1
+            continue
         index += 1
 
 
@@ -385,6 +420,8 @@ def _policy(relative, text, filters, observations):
             _fail("IMAGE_NOT_ALLOWED", relative)
         if event == "html":
             _fail("RAW_HTML", relative)
+        if event == "budget":
+            _fail("TOO_MANY_MARKUP", relative)
         destination(relative, target)
     if kind in ("root", "index", "concept") and notice_missing(body):
         _fail("MISSING_REFERENCE_NOTICE", relative)

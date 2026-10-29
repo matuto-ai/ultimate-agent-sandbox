@@ -1687,6 +1687,23 @@ class CommitGateTests(unittest.TestCase):
         self.assertIn("context/pick-sqlite.md", self.validate(
             scope, settings, continued, current=current).bundle.added)
 
+    def test_markup_lookalikes_are_scan_through_and_attribute_quotes_respected(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("RAW_HTML", '<a title="x>y">tail</a>'),
+            ("EXTERNAL_LINK", "range < here [x](https://example.com/a) rer > end"),
+            ("TOO_MANY_MARKUP", '<a" ' * 400),
+        )
+        for code, snippet in cases:
+            with self.subTest(code=code):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+        _prefix, prose = self.update(scope, body=gate_page(
+            "Pick", ("a < b and c > d, plus [other](context/other.md).",)))
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, prose, current=current).bundle.added)
+
     def test_source_references_and_excerpt_declarations(self):
         scope, settings = self.scope(), self.settings()
         prefix, current = self.initial(scope)
