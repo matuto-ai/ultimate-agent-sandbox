@@ -781,7 +781,7 @@ NEW_LOG = ("# Update log\n\n## 2026-10-20\n"
 
 def root_index(path, identity):
     return ("---\nokf_version: \"0.2\"\n---\n\n# Project Library\n\n"
-            "Canonical source coordinates: %s.\nImmutable source identity: %s.\n\n"
+            "Source coordinates: %s\nSource identity: %s\n\n"
             "* [Context](context/index.md)\n* [Decisions](decisions/index.md)\n"
             "* [Research](research/index.md)\n* [Pending](pending/index.md)\n"
             % (path, identity))
@@ -1447,6 +1447,44 @@ class BundleValidationTests(unittest.TestCase):
             index_text="# Context\n\n* [1.](/context/pick-sqlite.md)\n")[1]
         self.refused(scope, settings, trailing_dot, current=initial,
                      code="UNSAFE_SCALAR")
+
+    def test_registration_identity_and_source_edits_use_complete_values(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, initial = self.initial(scope)
+        for identity in (scope.project_identity + "0", "x" + scope.project_identity):
+            with self.subTest(identity=identity):
+                conflicting = dict(initial)
+                conflicting[prefix + "/index.md"] = root_index(
+                    scope.project_path, identity).encode("utf-8")
+                self.refused(scope, settings, initial, current=conflicting,
+                             code="MISSING_SOURCE_IDENTITY")
+        moved = dict(initial)
+        moved[prefix + "/index.md"] = root_index(
+            scope.project_path + "2", scope.project_identity).encode("utf-8")
+        self.refused(scope, settings, initial, current=moved,
+                     code="MISSING_SOURCE_IDENTITY")
+
+        path = prefix + "/context/pick-sqlite.md"
+        _, current = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable", fields=(
+                "sources:", "  - resource: https://example.com/a",
+                "    title: Typo", "    author: LegacyAuthor")))
+        corrected = dict(current)
+        corrected[path] = current[path].replace(b"title: Typo", b"title: Corrected")
+        self.assertIn("context/pick-sqlite.md",
+                      self.validate(scope, settings, corrected, current=current).updated)
+        deflowered = dict(current)
+        deflowered[path] = current[path].replace(
+            b"sources:\n  - resource: https://example.com/a\n    title: Typo\n"
+            b"    author: LegacyAuthor\n", b"")
+        self.refused(scope, settings, deflowered, current=current,
+                     code="EXISTING_FIELD_CHANGED")
+        unsourced = dict(current)
+        unsourced[path] = current[path].replace(
+            b"sources:\n  - resource: https://example.com/a\n    title: Typo\n"
+            b"    author: LegacyAuthor\n", b"sources:\n  - resource: https://example.com/b\n")
+        self.refused(scope, settings, unsourced, current=current,
+                     code="EXISTING_FIELD_CHANGED")
 
 if __name__ == "__main__":
     unittest.main()

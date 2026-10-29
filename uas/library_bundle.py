@@ -626,6 +626,8 @@ def _concept(relative, directory, name, text, previous, selected, limits):
 def _sources(relative, sources, limits, previous_meta, writer):
     """Structural provenance: a bounded list of entries, each naming its resource."""
     if sources is None:
+        if writer and _unknown_sources(previous_meta.get("sources")):
+            _fail("EXISTING_FIELD_CHANGED", relative + ".sources")
         return
     if type(sources) is not list or not sources:
         _fail("INVALID_SOURCES", relative + ".sources")
@@ -659,17 +661,27 @@ def _sources(relative, sources, limits, previous_meta, writer):
         _preserved_sources(relative, previous, sources)
 
 
+def _unknown_sources(sources):
+    return [(entry, {key: value for key, value in entry.items()
+                     if key not in ("resource", "title")})
+            for entry in (sources or []) if type(entry) is dict]
+
+
 def _preserved_sources(relative, previous, sources):
-    """Existing source metadata stays with its resource, value and YAML kind."""
-    for entry in previous:
+    """Unknown source metadata stays with its resource, value and YAML kind.
+
+    Supported v1 source fields (resource, title) remain editable, so an ordinary
+    correction is not frozen; only reader data this writer does not own is.
+    """
+    for entry, unknown in _unknown_sources(previous):
+        if not unknown:
+            continue
         match = next((source for source in sources
                       if type(source) is dict
                       and _same(entry.get("resource"), source.get("resource"))), None)
         if match is None:
             _fail("EXISTING_FIELD_CHANGED", relative + ".sources")
-        for key, value in entry.items():
-            if key == "resource":
-                continue
+        for key, value in unknown.items():
             if key not in match or not _same(value, match[key]):
                 _fail("EXISTING_FIELD_CHANGED", relative + ".sources." + key)
 
@@ -695,9 +707,16 @@ def _root_index(text, scope):
                      "pending/index.md"):
         if required not in links:
             _fail("MISSING_INDEX_LINK", ROOT_INDEX + "." + required)
-    for value, field in ((scope.project_path, "project_path"),
-                         (scope.project_identity, "project_identity")):
-        if value not in body:
+    recorded = {}
+    for line in body.split("\n"):
+        content = line.strip()
+        for label, name in (("Source coordinates:", "project_path"),
+                            ("Source identity:", "project_identity")):
+            if content.startswith(label):
+                recorded.setdefault(name, content[len(label):].strip())
+    for field, expected in (("project_path", scope.project_path),
+                            ("project_identity", scope.project_identity)):
+        if recorded.get(field) != expected:
             _fail("MISSING_SOURCE_IDENTITY", ROOT_INDEX + "." + field)
 
 
