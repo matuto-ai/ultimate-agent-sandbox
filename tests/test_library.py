@@ -1333,5 +1333,66 @@ class BundleValidationTests(unittest.TestCase):
             self.validate(scope, self.settings(document_bytes=1024), long_text, current=files)
         self.assertLessEqual(len(raised.exception.field), 200)
 
+    def test_implicit_yaml_types_are_refused_only_where_the_writer_owns_them(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        legacy = ("---\ntype: BigQuery Table\ntitle: Legacy\narchived: false\n"
+                  "note: null\nusage_count: 5000\n---\n\n# Legacy\n")
+        current[prefix + "/context/legacy.md"] = legacy.encode("utf-8")
+        current[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Legacy](/context/legacy.md) - tolerated.\n").encode("utf-8")
+        proposed = dict(current)
+        proposed[prefix + "/context/pick-sqlite.md"] = concept(
+            "context", "Pick SQLite", "stable").encode("utf-8")
+        proposed[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Legacy](/context/legacy.md) - tolerated.\n"
+            "* [Pick SQLite](/context/pick-sqlite.md) - short.\n").encode("utf-8")
+        proposed[prefix + "/log.md"] = NEW_LOG.encode("utf-8")
+        result = self.validate(scope, settings, proposed, current=current)
+        self.assertIn("context/pick-sqlite.md", result.added)
+        self.assertEqual(legacy.encode("utf-8"), result.files[prefix + "/context/legacy.md"])
+        retyped = dict(proposed)
+        retyped[prefix + "/context/legacy.md"] = legacy.replace(
+            "usage_count: 5000", 'usage_count: "5000"').encode("utf-8")
+        self.refused(scope, settings, retyped, current=current,
+                     code="EXISTING_FIELD_CHANGED")
+
+        cases = {
+            "UNSAFE_SCALAR": b"---\ntype: context\ntitle: 2024-01-01\nstatus: stable\n---\n\n# x\n",
+            "UNSAFE_YAML": b"---\ntype: context\ntitle: Note: important\n---\n\n# x\n",
+        }
+        for code, text in cases.items():
+            with self.subTest(code=code):
+                files = dict(proposed)
+                files[prefix + "/context/pick-sqlite.md"] = text
+                self.refused(scope, settings, files, current=current, code=code)
+        unquoted_version = dict(current)
+        unquoted_version[prefix + "/index.md"] = root_index(
+            scope.project_path, scope.project_identity).replace('"0.2"', "0.2").encode("utf-8")
+        self.refused(scope, settings, unquoted_version, current=current,
+                     code="INVALID_OKF_VERSION")
+        bogus_status = dict(current)
+        bogus_status[prefix + "/context/legacy.md"] = legacy.replace(
+            "title: Legacy", "title: Legacy\nstatus: bogus").encode("utf-8")
+        self.refused(scope, settings, bogus_status, current=current,
+                     code="UNSUPPORTED_STATUS")
+        unsourced_pending = dict(current)
+        queue_id = capture(settings).queue_id
+        unsourced_pending[prefix + "/pending/" + queue_id + ".md"] = concept(
+            "research", "Unsourced", "draft").encode("utf-8")
+        unsourced_pending[prefix + "/pending/index.md"] = (
+            "# Pending\n\n* [Unsourced](/pending/%s.md) - DRAFT.\n" % queue_id).encode("utf-8")
+        self.refused(scope, settings, unsourced_pending, current=current,
+                     code="SOURCE_REQUIRED")
+        researched = dict(current)
+        researched[prefix + "/research/sourced.md"] = concept(
+            "research", "Sourced", "stable",
+            fields=("sources:", "  - resource: https://example.com/a",
+                    "    secret_note: xyz")).encode("utf-8")
+        researched[prefix + "/research/index.md"] = (
+            "# Research\n\n* [Sourced](/research/sourced.md) - short.\n").encode("utf-8")
+        self.refused(scope, settings, researched, current=current,
+                     code="UNSUPPORTED_FIELD")
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,11 +41,16 @@ STATUSES = ("draft", "stable", "deprecated")
 # Supported v1 writer vocabulary. A document may also keep keys and a type it
 # already carried, so tolerated existing reader data survives an update.
 FIELDS = ("type", "title", "description", "status", "sources")
-# YAML literals whose meaning depends on implicit type resolution; canonical
-# Library text writes them as explicit strings or not at all. Numeric and
-# timestamp-looking text stays a string, so OKF dates and counts round-trip.
+# Plain YAML scalars a conforming reader may resolve to a non-string type. The
+# gate keeps them as text, so tolerated existing reader data still round-trips,
+# and refuses them where the v1 writer owns the value.
 UNSAFE_SCALARS = frozenset({"~", "null", "true", "false", "yes", "no", "on", "off", "y", "n",
                             ".nan", ".inf", "-.inf", "+.inf"})
+INTEGER = re.compile(r"[-+]?(?:0[box][0-9a-fA-F_]+|[0-9][0-9_]*)\Z")
+SEXAGESIMAL = re.compile(r"[-+]?[0-9]+(?::[0-5]?[0-9])+\Z")
+FLOAT = re.compile(r"[-+]?(?:[0-9][0-9_]*)?\.[0-9][0-9_]*(?:[eE][-+]?[0-9]+)?\Z"
+                   r"|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+\Z")
+DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt ].*)?\Z")
 # Service-stamped fidelity fields: the deterministic service owns them, so a
 # structural gate neither invents their semantics (T05) nor freezes them. A
 # caller- or model-supplied value is refused by proposal/content admission,
@@ -84,6 +89,10 @@ class Bundle:
     added: tuple
     updated: tuple
     removed: tuple
+
+
+class Implicit(str):
+    """A plain scalar a conforming YAML reader may resolve to a non-string type."""
 
 
 def _fail(code, field="$"):
@@ -280,11 +289,28 @@ def _scalar(raw, field, depth=0):
         return _flow(value, field, depth)
     if value[0] in "\"'":
         return _quoted(value, field)
-    if value[0] in "%?@`":
+    if value[0] in "%?@`=":
+        _fail("UNSAFE_YAML", field)
+    if ": " in value:
         _fail("UNSAFE_YAML", field)
     if value.lower() in UNSAFE_SCALARS:
-        _fail("UNSAFE_SCALAR", field)
+        return Implicit(value)
+    if INTEGER.fullmatch(value) or FLOAT.fullmatch(value) or SEXAGESIMAL.fullmatch(value):
+        return Implicit(value)
+    if DATE.fullmatch(value):
+        return Implicit(value)
     return value
+
+
+def _implicit(value):
+    """True when this parsed value carries an implicit non-string YAML type."""
+    if isinstance(value, Implicit):
+        return True
+    if type(value) is list:
+        return any(_implicit(item) for item in value)
+    if type(value) is dict:
+        return any(_implicit(item) for item in value.values())
+    return False
 
 
 def _split_key(content):
@@ -394,12 +420,6 @@ def _frontmatter(text, field):
                 _fail("INVALID_YAML", field)
             return value, "\n".join(lines[index + 1:])
     _fail("MISSING_FRONTMATTER", field)
-
-
-def _optional_frontmatter(text, field):
-    if text.startswith("---\n"):
-        return _frontmatter(text, field)
-    return {}, text
 
 
 # --- Markdown structure ---------------------------------------------------
@@ -514,9 +534,11 @@ def _concept(relative, directory, name, text, previous, selected, limits):
     meta, _body = _frontmatter(text, relative)
     previous_meta = _frontmatter(previous, relative)[0] if previous is not None else {}
     declared = meta.get("type")
-    if type(declared) is not str or not declared.strip():
+    if not isinstance(declared, str) or not declared.strip():
         _fail("MISSING_TYPE", relative + ".type")
     status = meta.get("status")
+    if status is not None and status not in STATUSES:
+        _fail("UNSUPPORTED_STATUS", relative + ".status")
     if directory == PENDING:
         if status != "draft":
             _fail("INCOHERENT_STATUS", relative + ".status")
@@ -527,8 +549,11 @@ def _concept(relative, directory, name, text, previous, selected, limits):
         # never sits in another directory.
         if declared in contracts.CAPTURE_TYPES and declared != DIRECTORY_TYPE[directory]:
             _fail("TYPE_MISMATCH", relative + ".type")
-    _sources(relative, meta.get("sources"), limits)
-    if previous is not None and previous == text:
+    if declared == "research" and not meta.get("sources"):
+        _fail("SOURCE_REQUIRED", relative + ".sources")
+    writer = previous is None or previous != text
+    _sources(relative, meta.get("sources"), limits, previous_meta, writer)
+    if not writer:
         return meta.get("title")
     for key in meta:
         if key not in FIELDS and key not in SERVICE_FIELDS and key not in previous_meta:
@@ -537,15 +562,20 @@ def _concept(relative, directory, name, text, previous, selected, limits):
         if key not in meta:
             _fail("MISSING_FIELD", relative + "." + key)
     title = meta["title"]
-    if type(title) is not str or not title.strip() or "\n" in title:
+    if not isinstance(title, str) or not title.strip() or "\n" in title:
         _fail("INVALID_TEXT", relative + ".title")
     if len(title) > limits["title_chars"]:
         _fail("TITLE_TOO_LONG", relative + ".title")
     description = meta.get("description")
     if description is not None and (not isinstance(description, str) or "\n" in description):
         _fail("INVALID_TEXT", relative + ".description")
-    if status is not None and status not in STATUSES:
-        _fail("UNSUPPORTED_STATUS", relative + ".status")
+    for key, value in meta.items():
+        # Service-stamped fidelity values are the trusted writer's own; every
+        # other writer value must be an explicit string.
+        if key in SERVICE_FIELDS or (key in previous_meta and key not in FIELDS):
+            continue
+        if _implicit(value):
+            _fail("UNSAFE_SCALAR", relative + "." + key)
     previous_type = previous_meta.get("type")
     if previous_type is not None and previous_type not in contracts.CAPTURE_TYPES:
         if declared != previous_type:
@@ -560,21 +590,20 @@ def _concept(relative, directory, name, text, previous, selected, limits):
             _fail("TYPE_MISMATCH", relative + ".type")
         if not contracts.SLUG.fullmatch(name):
             _fail("UNSAFE_PATH", relative)
-    if directory == "research" and not meta.get("sources"):
-        _fail("SOURCE_REQUIRED", relative + ".sources")
-    # Document size is bounded by document_bytes for the stored file; body_bytes
-    # bounds one capture or proposal input, which a merged concept may exceed.
     # Tolerated existing keys stay with their document: an update may not drop,
-    # rewrite or invent over reader data it did not author here.
+    # rewrite or retype reader data it did not author here. Document size is
+    # bounded by document_bytes; body_bytes bounds one capture/proposal input,
+    # which a merged concept may exceed.
     for key, value in previous_meta.items():
         if key in FIELDS or key in SERVICE_FIELDS:
             continue
-        if key not in meta or meta[key] != value:
+        if (key not in meta or meta[key] != value
+                or isinstance(meta[key], Implicit) != isinstance(value, Implicit)):
             _fail("EXISTING_FIELD_CHANGED", relative + "." + key)
     return title
 
 
-def _sources(relative, sources, limits):
+def _sources(relative, sources, limits, previous_meta, writer):
     """Structural provenance: a bounded list of entries, each naming its resource."""
     if sources is None:
         return
@@ -582,12 +611,23 @@ def _sources(relative, sources, limits):
         _fail("INVALID_SOURCES", relative + ".sources")
     if len(sources) > limits["sources"]:
         _fail("TOO_MANY_SOURCES", relative + ".sources")
+    allowed = {"resource", "title"}
+    for entry in previous_meta.get("sources") or []:
+        if type(entry) is dict:
+            allowed.update(entry)
     for index, source in enumerate(sources):
         field = "%s.sources[%d]" % (relative, index)
-        if type(source) is not dict or type(source.get("resource")) is not str:
+        if type(source) is not dict or not isinstance(source.get("resource"), str):
             _fail("INVALID_SOURCES", field + ".resource")
         if not source["resource"].strip() or "\n" in source["resource"]:
             _fail("INVALID_SOURCES", field + ".resource")
+        if not writer:
+            continue
+        for key in source:
+            if key not in allowed:
+                _fail("UNSUPPORTED_FIELD", field + "." + key)
+        if _implicit(source):
+            _fail("UNSAFE_SCALAR", field)
 
 
 def _index(relative, text, empty):
@@ -602,7 +642,9 @@ def _index(relative, text, empty):
 
 def _root_index(text, scope):
     meta, body = _frontmatter(text, ROOT_INDEX)
-    if set(meta) != {"okf_version"} or meta["okf_version"] != OKF_VERSION:
+    if (set(meta) != {"okf_version"} or type(meta["okf_version"]) is not str
+            or isinstance(meta["okf_version"], Implicit)
+            or meta["okf_version"] != OKF_VERSION):
         _fail("INVALID_OKF_VERSION", ROOT_INDEX + ".okf_version")
     links = _links(body, ROOT_INDEX)
     for required in ("context/index.md", "decisions/index.md", "research/index.md",
