@@ -131,6 +131,7 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
         document=validate_document(document)
         self.native_document=deepcopy(document)
         self.host_profile=selected_host(document)
+        self._host_binding=canonical({'document':self.native_document,'host':self.host_profile.document()})
         require(type(config) is dict and type(config.get('rooms')) is list,'LOCAL_NATIVE_CONFIG')
         selected=[r for r in config['rooms'] if r['id']==room_id]
         require(len(selected)==1 and room_id in document['rooms'],'LOCAL_NATIVE_ROOM')
@@ -161,6 +162,10 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
         # No credential bindings or optional Gate/Git resources are fabricated.
         self.git_manifest=self.git_plan=self.gate_manifest=self.gate_plan=None
         self.runtime_plan=None
+
+    def require_host_unchanged(self):
+        require(canonical({'document':self.native_document,'host':self.host_profile.document()})==self._host_binding,
+                'LOCAL_NATIVE_HOST_SELECTION_CHANGED')
 
     def bind_runtime(self,plan):
         from .local_runtime_plan import LocalRuntimePlan
@@ -198,6 +203,7 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     def storage_ancestors(self): return (self.storage,self.state_root.parent)
 
     def guard(self, *, require_selinux=True):
+        self.require_host_unchanged()
         require(os.geteuid()==0,'LOCAL_NATIVE_OPERATOR_ROOT_REQUIRED')
         if require_selinux:
             require(native.command('getenforce').strip()=='Enforcing'
@@ -216,6 +222,7 @@ class LocalNativeBackend(native.NativeQualificationBackend):
         self.profile.guard(require_selinux=require_selinux)
 
     def _run(self,arguments,*,missing_ok=False):
+        self.profile.require_host_unchanged()
         return native.fixed_docker(arguments,timeout=self.timeout,missing_ok=missing_ok,
                                    socket_path=self.profile.host_profile.socket)
 
@@ -385,13 +392,26 @@ class LocalNativeObserver(native.NativeQualificationObserver):
     LABEL = LocalNativeBackend.LABEL
     name = LocalNativeBackend.name
 
+    def __init__(self,room_id,instance,config_digest,*,host_profile):
+        from .local_host_profile import LocalHostProfile
+        require(type(host_profile) is LocalHostProfile,'LOCAL_NATIVE_HOST_PROFILE_REQUIRED')
+        super().__init__(room_id,instance,config_digest)
+        self.host_profile=host_profile
+        self._host_binding=canonical(host_profile.document())
+
+    def _run(self,arguments,*,missing_ok=False):
+        require(canonical(self.host_profile.document())==self._host_binding,'LOCAL_NATIVE_HOST_SELECTION_CHANGED')
+        return native.fixed_docker(arguments,timeout=self.timeout,missing_ok=missing_ok,
+                                   socket_path=self.host_profile.socket)
+
 
 def readonly_local_supervisor(plan, resources):
     from .local_runtime_plan import LocalRuntimePlan
     require(type(plan) is LocalRuntimePlan, 'LOCAL_RUNTIME_PLAN_REQUIRED')
     plan.require_unchanged()
     require(resources['room_id']==plan.room['id'], 'OBSERVER_BINDING')
-    backend=LocalNativeObserver(plan.room['id'],resources['instance'],plan.config_digest)
+    backend=LocalNativeObserver(plan.room['id'],resources['instance'],plan.config_digest,
+                                host_profile=plan.native_profile.host_profile)
     owner=Supervisor(Path(plan.config['deployment']['state_root']),plan.room['id'],backend,
                      authorize=lambda *_:False,revoke=lambda *_:False)
     with owner._locked():

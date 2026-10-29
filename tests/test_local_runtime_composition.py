@@ -12,6 +12,9 @@ from uas.workstation_control import SupervisorAdmission
 from uas.docker_exec_api import DockerExecAPI
 from uas.workstation_exec import EndpointLease
 from test_native_run_admission import fixture
+from types import SimpleNamespace
+from tests.test_local_host_plan import profile as host_profile_document
+from uas.local_host_profile import LocalHostProfile
 
 class LocalRuntimeCompositionTests(unittest.TestCase):
     def test_actual_session_constructs_native_admission_same_ledger_session_and_retained_clients(self):
@@ -27,6 +30,9 @@ class LocalRuntimeCompositionTests(unittest.TestCase):
             setattr(plan,key,getattr(source,key))
         plan.installation={k:v for k,v in source.installation.items() if k not in {'git_manifest','gate_manifest'}}
         plan.operation_timeout_seconds=60;plan.require_unchanged=Mock()
+        # This session fixture doubles storage; Engine selection uses the real
+        # validated host profile rather than an absent/default daemon fallback.
+        plan.native_profile=SimpleNamespace(host_profile=LocalHostProfile.parse(host_profile_document()))
         owner=object.__new__(LocalNativeRunSession);owner.plan=plan;owner.supervisor=f.supervisor
         owner._thread=threading.get_ident();owner.current=Mock();owner.operation_current=Mock()
         owner.clients=Mock(return_value=(f.launcher.forge_broker.client,None))

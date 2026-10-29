@@ -125,3 +125,13 @@ class LocalRuntimePlanTests(unittest.TestCase):
         with patch('uas.native_git_resources.selection',return_value={'image_id':'sha256:'+'0'*64}):
             with self.assertRaises(LifecycleError):self.native.bind_runtime(plan)
         self.assertIsNone(self.native.runtime_plan);self.assertIsNone(self.native.git_plan)
+
+    def test_replaced_engine_profile_or_native_document_invalidates_plan(self):
+        from dataclasses import replace
+        plan=self.plan()
+        original=self.native.host_profile
+        self.native.host_profile=replace(original,socket='/run/foreign.sock')
+        with self.assertRaisesRegex(QualificationError,'SELECTION_CHANGED'):plan.require_unchanged()
+        self.native.host_profile=original
+        self.native.native_document['installation_id']='b'*32
+        with self.assertRaisesRegex(QualificationError,'SELECTION_CHANGED'):plan.require_unchanged()
