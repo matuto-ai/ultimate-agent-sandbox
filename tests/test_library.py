@@ -1772,6 +1772,22 @@ class CommitGateTests(unittest.TestCase):
                 self.assertIn("context/pick-sqlite.md", self.validate(
                     scope, settings, proposed, current=current).bundle.added)
 
+    def test_url_edge_whitespace_cannot_hide_unsafe_destinations(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        for snippet in (
+                "[x](javascript:alert(1))",
+                "[x](&#32;javascript:alert(1))",
+                "[x](< javascript:alert(1)>)",
+                "[x](<  javascript:alert(1) >)",
+                "[x](&#32;https://example.com/a)",
+                "[x](&#32;//example.com/a)",
+                "[x][ref]\n\n[ref]: < javascript:alert(1)>",
+                "[x](context/other.md&#32;)"):
+            with self.subTest(snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code="UNSAFE_LINK")
+
     def test_markdown_nesting_cannot_silently_hide_policy_tokens(self):
         scope, settings = self.scope(), self.settings()
         _prefix, current = self.initial(scope)

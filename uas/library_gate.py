@@ -173,6 +173,9 @@ def destination(relative, target):
     value = target
     if not value:
         _fail("INVALID_LINK", relative + ".link")
+    # URL consumers trim edge whitespace; refuse rather than change its meaning.
+    if value != value.strip():
+        _fail("UNSAFE_LINK", relative + ".link")
     if value.startswith("#"):
         return None
     if "@" in value and "/" not in value:
