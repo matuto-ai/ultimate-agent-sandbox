@@ -17,11 +17,18 @@ in this proposal are left alone: tolerated reader data keeps its unknown types,
 keys and historical text, because unchanged bytes are already published and
 this gate cannot repair them. Refusals carry safe code/field evidence plus
 optional rule/location/digest facts, never a matched secret.
+
+Markdown is parsed for the constructs the policy depends on - fenced code, code
+spans, inline links, images, autolinks and link reference definitions - rather
+than matched as text, and a link destination is character-reference decoded
+before it is judged. Credential policy covers both the published text and the
+values the strict YAML parser decodes from it, so an escape cannot hide a secret.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import html
 import posixpath
 import re
 
@@ -118,11 +125,17 @@ def notice_missing(body):
 
 # --- Markdown and links ---------------------------------------------------
 
-# A tag or autolink is short; a candidate that does not close inside this window
-# is literal prose. Total lookahead is budgeted so the scan stays linear, and an
-# exhausted budget refuses the document rather than scanning ahead unbounded.
-TAG_LOOKAHEAD = 1024
-MARKUP_BUDGET = 2
+# A tag or autolink is short. A tag-like ``<`` whose ``>`` is not inside this
+# window is refused instead of admitted as prose, so a long attribute value
+# cannot hide a tag.
+TAG_LOOKAHEAD = 4096
+FENCE = ("```", "~~~")
+# A link reference definition, after any blockquote or list-item prefix.
+DEFINITION = re.compile(r"\[([^\]\n]{1,200})\]:[ \t]*(\S.*)?\Z")
+BLOCK_PREFIX = re.compile(r"[ \t]*(?:>[ \t]*)*"
+                          r"(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?[ \t]*")
+PIN_KEYWORDS = ("blob", "raw", "commit", "commits", "tree", "src",
+                "object", "objects", "revision", "revisions")
 
 
 def _tag(inner):
@@ -154,31 +167,36 @@ def _tag_end(text, index):
     return None
 
 
-def scan(body):
-    """Yield ("link", destination), ("image"|"html", "") or ("budget", "").
-
-    This is a structural scan, not a renderer: fenced code blocks and code spans
-    are literal text, while inline links, images, reference definitions, raw
-    HTML and autolinks are reported so policy can judge them. A Markdown link
-    destination, an HTML tag and a comment may continue after a line ending, so
-    the scan runs over the whole body instead of one line at a time. Text that
-    only looks like the start of markup is prose, and is scanned through rather
-    than skipped, so a link inside it is still checked.
-
-    Indented (four-space) code is not distinguished from prose: telling it apart
-    from a list item's indented continuation paragraph needs a full block parser,
-    and refusing its content fails closed rather than admitting an unchecked
-    link in prose. Writer output therefore uses fenced code for literal text.
-    """
+def _unfenced(body):
+    """Body lines with fenced code blanked out; a malformed fence is text."""
     fence, lines = None, []
     for line in body.split("\n"):
         stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            marker = stripped[:3]
-            fence = None if fence == marker else (fence or marker)
+        if not stripped.startswith(FENCE):
+            lines.append("" if fence else line)
+            continue
+        character = stripped[0]
+        run = len(stripped) - len(stripped.lstrip(character))
+        info = stripped[run:]
+        if fence is None:
+            # A backtick fence's info string may not contain a backtick, so that
+            # line is ordinary Markdown text and what follows is still scanned.
+            if character == "`" and "`" in info:
+                lines.append(line)
+                continue
+            fence = character * run
             lines.append("")
             continue
-        lines.append("" if fence else line)
+        if character == fence[0] and run >= len(fence) and not info.strip():
+            fence = None
+            lines.append("")
+            continue
+        lines.append("")
+    return lines
+
+
+def _definitions(lines):
+    """Reference-definition destinations, including one on the following line."""
     following, upcoming = [], ""
     for line in reversed(lines):
         following.append(upcoming)
@@ -186,18 +204,58 @@ def scan(body):
             upcoming = line
     following.reverse()
     for number, line in enumerate(lines):
-        reference = REFERENCE.match(line)
-        if reference is not None:
-            # A definition's destination may sit on the following line.
-            yield "link", reference.group(2) or following[number]
-    text = "\n".join(lines)
+        match = DEFINITION.match(BLOCK_PREFIX.sub("", line))
+        if match is not None:
+            yield match.group(2) or following[number]
+
+
+def _paragraph_end(text, start):
+    """Offset of the line ending that closes the paragraph containing ``start``."""
+    position = start
+    while True:
+        line_end = text.find("\n", position)
+        if line_end < 0:
+            return len(text)
+        next_start = line_end + 1
+        next_end = text.find("\n", next_start)
+        if not text[next_start:next_end if next_end >= 0 else len(text)].strip():
+            return line_end
+        position = next_start
+
+
+def _code_end(text, start, run):
+    """Offset of the backtick run that closes a code span, or None.
+
+    A code span closes inside its own paragraph with a run of exactly the same
+    length; an unmatched opening run is literal text, never a skip to the end.
+    """
+    limit, marker = _paragraph_end(text, start), "`" * run
+    position = start
+    while position < limit:
+        found = text.find(marker, position, limit)
+        if found < 0:
+            return None
+        after = text[found + run:found + run + 1]
+        if after != "`":
+            return found
+        position = found + run
+        while position < limit and text[position] == "`":
+            position += 1
+    return None
+
+
+def _inline(text):
+    """Yield ("link", destination), ("image", "") and ("html", "") events."""
     index, length = 0, len(text)
-    budget = length * MARKUP_BUDGET + TAG_LOOKAHEAD
     while index < length:
         character = text[index]
         if character == "`":
-            closing = text.find("`", index + 1)
-            index = length if closing < 0 else closing + 1
+            run = 1
+            while index + run < length and text[index + run] == "`":
+                run += 1
+            closing = _code_end(text, index + run, run)
+            # An unmatched opening run is literal text, never a skip ahead.
+            index = index + run if closing is None else closing + run
             continue
         if character == "!" and text[index + 1:index + 2] == "[":
             yield "image", ""
@@ -216,24 +274,45 @@ def scan(body):
             opening = text[index + 1:index + 2]
             if opening and (opening.isalpha() or opening in "!/?"):
                 end = _tag_end(text, index)
-                budget -= TAG_LOOKAHEAD if end is None else end - index
-                if budget < 0:
-                    yield "budget", ""
+                if end is None:
+                    yield "html", ""
                     return
-                if end is not None:
-                    inner = text[index + 1:end]
-                    if _tag(inner):
-                        yield "html", ""
-                        index = end + 1
-                        continue
-                    if SCHEME.match(inner) or ("@" in inner and not any(
-                            item.isspace() for item in inner)):
-                        yield "link", "<" + inner + ">"
-                        index = end + 1
-                        continue
+                inner = text[index + 1:end]
+                if _tag(inner):
+                    yield "html", ""
+                    index = end + 1
+                    continue
+                if SCHEME.match(inner) or ("@" in inner and not any(
+                        item.isspace() for item in inner)):
+                    yield "link", "<" + inner + ">"
+                    index = end + 1
+                    continue
             index += 1
             continue
         index += 1
+
+
+def scan(body):
+    """Yield ("link", destination), ("image", "") and ("html", "") outside code.
+
+    This is a structural parse of the Markdown that matters to policy, not a
+    renderer: fenced code blocks and code spans are literal text, while inline
+    links, images, raw HTML, autolinks and link reference definitions are
+    reported so policy can judge them. A link destination, an HTML tag and a
+    comment may continue after a line ending, so the scan runs over the whole
+    body instead of one line at a time, and text that only looks like the start
+    of markup is scanned through rather than skipped.
+
+    Indented (four-space) code is not distinguished from prose: telling it apart
+    from a list item's indented continuation paragraph needs a full block parser,
+    and refusing its content fails closed rather than admitting an unchecked
+    link in prose. Writer output therefore uses fenced code for literal text.
+    """
+    lines = _unfenced(body)
+    for target in _definitions(lines):
+        yield "link", target
+    for event in _inline("\n".join(lines)):
+        yield event
 
 
 def destination(relative, target):
@@ -253,6 +332,11 @@ def destination(relative, target):
         value = value[1:end] if end > 0 else value[1:]
     elif " " in value or "\t" in value:
         value = value.split(None, 1)[0]
+    if not value:
+        _fail("INVALID_LINK", relative + ".link")
+    # A link destination's character references are decoded before rendering, so
+    # the policy judges the decoded value rather than its spelling.
+    value = html.unescape(value)
     if not value:
         _fail("INVALID_LINK", relative + ".link")
     if value.startswith("#"):
@@ -312,8 +396,15 @@ def source(resource):
             _fail("UNSAFE_SOURCE", "source.resource")
         if any(ord(c) < 33 or ord(c) == 127 for c in path):
             _fail("UNSAFE_SOURCE", "source.resource")
-        body = path.split("#", 1)[0].split("?", 1)[0]
-        pinned = any(COMMIT_SEGMENT.match(part) for part in body.split("/"))
+        parts = [part for part in path.split("#", 1)[0].split("?", 1)[0].split("/") if part]
+        # A revision segment only identifies an immutable artifact when the path
+        # names it as one (`/blob/<commit>/<file>`); a hash-shaped directory in
+        # an otherwise mutable path such as `/blob/main/<dir>/doc.md` does not
+        # make the reference pinned.
+        pinned = any(COMMIT_SEGMENT.match(part) and number > 0
+                     and parts[number - 1].lower() in PIN_KEYWORDS
+                     and number + 1 < len(parts)
+                     for number, part in enumerate(parts))
         return {"resource": resource,
                 "kind": "artifact" if pinned else "resource", "pinned": pinned}
     if SCHEME.match(resource) or resource.startswith("//") or "\\" in resource:
@@ -381,18 +472,45 @@ def heuristic_qualified():
     return False
 
 
-def _credentials(relative, text, filters, observations):
+def _record(observations, found):
+    """Keep one safe fact per detected value, at the first location seen."""
+    seen = {(item["rule"], item["sha256"]) for item in observations}
+    for item in found:
+        key = (item["rule"], item["sha256"])
+        if key not in seen:
+            seen.add(key)
+            observations.append(item)
+
+
+def _credentials(location, text, filters, observations):
     """Refuse a blocking match, or record the same safe facts when observing."""
     for rules, mode in ((HIGH_CONFIDENCE, filters["high_confidence"]),
                         (HEURISTIC, filters["heuristic"])):
-        found = findings(rules, relative, text, placeholders=rules is HEURISTIC)
+        found = findings(rules, location, text, placeholders=rules is HEURISTIC)
         if not found:
             continue
         if mode == "block" and (rules is not HEURISTIC or heuristic_qualified()):
             evidence = found[0]
             _fail("SECRET_DETECTED",
-                  "%s:%d.%s" % (relative, evidence["line"], evidence["rule"]), evidence)
-        observations.extend(found)
+                  "%s:%d.%s" % (location, evidence["line"], evidence["rule"]), evidence)
+        _record(observations, found)
+
+
+def _decoded(value, location, filters, observations):
+    """Apply the same credential policy to parsed metadata values.
+
+    The strict YAML parser decodes escapes, so the same semantic value can be
+    spelled with a character reference; scanning only the serialized document
+    would admit it.
+    """
+    if isinstance(value, str):
+        _credentials(location, value, filters, observations)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _decoded(item, "%s.%s" % (location, key), filters, observations)
+    elif isinstance(value, list):
+        for number, item in enumerate(value):
+            _decoded(item, "%s[%d]" % (location, number), filters, observations)
 
 
 # --- Public seam ----------------------------------------------------------
@@ -420,8 +538,6 @@ def _policy(relative, text, filters, observations):
             _fail("IMAGE_NOT_ALLOWED", relative)
         if event == "html":
             _fail("RAW_HTML", relative)
-        if event == "budget":
-            _fail("TOO_MANY_MARKUP", relative)
         destination(relative, target)
     if kind in ("root", "index", "concept") and notice_missing(body):
         _fail("MISSING_REFERENCE_NOTICE", relative)
@@ -429,6 +545,8 @@ def _policy(relative, text, filters, observations):
         for index, entry in enumerate(meta.get("sources") or []):
             _declaration(relative, entry, index)
     _credentials(relative, text, filters, observations)
+    if meta:
+        _decoded(meta, relative + ".metadata", filters, observations)
 
 
 @dataclass(frozen=True)

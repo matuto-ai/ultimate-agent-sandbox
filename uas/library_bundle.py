@@ -626,9 +626,10 @@ def _concept(relative, directory, name, text, previous, selected, limits,
 
 def _sources(relative, sources, limits, previous_meta, writer, source_fields=()):
     """Structural provenance: a bounded list of entries, each naming its resource."""
+    owned = ("resource", "title") + tuple(source_fields)
     if sources is None:
         if writer and any(unknown for _entry, unknown
-                          in _unknown_sources(previous_meta.get("sources"))):
+                          in _unknown_sources(previous_meta.get("sources"), owned)):
             _fail("EXISTING_FIELD_CHANGED", relative + ".sources")
         return
     if type(sources) is not list or not sources:
@@ -660,22 +661,21 @@ def _sources(relative, sources, limits, previous_meta, writer, source_fields=())
         if _implicit(source):
             _fail("UNSAFE_SCALAR", field)
     if writer:
-        _preserved_sources(relative, previous, sources)
+        _preserved_sources(relative, previous, sources, owned)
 
 
-def _unknown_sources(sources):
-    return [(entry, {key: value for key, value in entry.items()
-                     if key not in ("resource", "title")})
+def _unknown_sources(sources, owned=("resource", "title")):
+    return [(entry, {key: value for key, value in entry.items() if key not in owned})
             for entry in (sources or []) if type(entry) is dict]
 
 
-def _preserved_sources(relative, previous, sources):
+def _preserved_sources(relative, previous, sources, owned=("resource", "title")):
     """Unknown source metadata stays with its resource, value and YAML kind.
 
-    Supported v1 source fields (resource, title) remain editable, so an ordinary
-    correction is not frozen; only reader data this writer does not own is.
+    Writer-owned source fields remain editable, so an ordinary correction is not
+    frozen; only reader data this writer does not own is.
     """
-    for entry, unknown in _unknown_sources(previous):
+    for entry, unknown in _unknown_sources(previous, owned):
         if not unknown:
             continue
         match = next((source for source in sources

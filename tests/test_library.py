@@ -1693,7 +1693,7 @@ class CommitGateTests(unittest.TestCase):
         cases = (
             ("RAW_HTML", '<a title="x>y">tail</a>'),
             ("EXTERNAL_LINK", "range < here [x](https://example.com/a) rer > end"),
-            ("TOO_MANY_MARKUP", '<a" ' * 400),
+            ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
         )
         for code, snippet in cases:
             with self.subTest(code=code):
@@ -1703,6 +1703,47 @@ class CommitGateTests(unittest.TestCase):
             "Pick", ("a < b and c > d, plus [other](context/other.md).",)))
         self.assertIn("context/pick-sqlite.md", self.validate(
             scope, settings, prose, current=current).bundle.added)
+
+    def test_markdown_policy_follows_parsed_tokens_not_spellings(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("EXTERNAL_LINK", "`unmatched\n\n[x](https://example.com/a)"),
+            ("EXTERNAL_LINK", "[x](https&#58;//example.com/a)"),
+            ("UNSAFE_LINK", "[x](javascript&#58;alert(1))"),
+            ("EXTERNAL_LINK", "> [ref]: https://example.com/a\n>\n> [ref]"),
+            ("EXTERNAL_LINK", "```info`invalid\n[x](https://example.com/a)"),
+            ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
+        )
+        for code, snippet in cases:
+            with self.subTest(code=code, snippet=snippet[:40]):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+        _prefix, prose = self.update(scope, body=gate_page(
+            "Pick", ("An unmatched ` stays literal and [other](context/other.md) is fine.",
+                     "", "```", "<div>and [x](https://example.com/a)</div>", "```")))
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, prose, current=current).bundle.added)
+
+    def test_escaped_metadata_cannot_smuggle_a_credential(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        secret = "ghp_" + "A1b2" * 10
+        for name, title in (("literal", '"' + secret + '"'),
+                            ("escaped", '"\\u0067' + secret[1:] + '"'),
+                            ("plain", '"safe text"')):
+            with self.subTest(name=name):
+                _prefix, proposed = self.update(
+                    scope, sources=[source_entry(PINNED, title=title)])
+                if name == "plain":
+                    self.assertIn("context/pick-sqlite.md", self.validate(
+                        scope, settings, proposed, current=current).bundle.added)
+                    continue
+                error = self.refused(scope, settings, proposed, current=current,
+                                     code="SECRET_DETECTED")
+                self.assertNotIn(secret, str(error))
+                if name == "escaped":
+                    self.assertIn(".metadata", error.evidence["path"])
 
     def test_source_references_and_excerpt_declarations(self):
         scope, settings = self.scope(), self.settings()
@@ -1722,6 +1763,8 @@ class CommitGateTests(unittest.TestCase):
         self.assertTrue(library_gate.source(PINNED)["pinned"])
         self.assertTrue(library_gate.source("decisions/pick-sqlite.md")["pinned"])
 
+        self.assertFalse(library_gate.source(
+            "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md")["pinned"])
         cases = (
             ("UNSAFE_SOURCE", source_entry("ftp://example.com/a")),
             ("UNSAFE_SOURCE", source_entry("../escape.md")),
@@ -1730,6 +1773,9 @@ class CommitGateTests(unittest.TestCase):
             ("UNSAFE_SOURCE", source_entry("https://user:pass@example.com/a")),
             ("EXCERPT_UNPINNED_SOURCE",
              source_entry("https://example.com/spec", range_="1-2", sha256=DIGEST)),
+            ("EXCERPT_UNPINNED_SOURCE", source_entry(
+                "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md",
+                range_="1-2", sha256=DIGEST)),
             ("INCOMPLETE_EXCERPT", source_entry(PINNED, range_="1-2")),
             ("INCOMPLETE_EXCERPT", source_entry(PINNED, sha256=DIGEST)),
             ("INVALID_EXCERPT_RANGE", source_entry(PINNED, range_="0-2", sha256=DIGEST)),
@@ -1741,6 +1787,47 @@ class CommitGateTests(unittest.TestCase):
             with self.subTest(code=code, declaration=declaration):
                 _prefix, proposed = self.update(scope, sources=[declaration])
                 self.refused(scope, settings, proposed, current=current, code=code)
+
+    def test_writer_owned_excerpt_fields_remain_correctable(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        _prefix, first = self.update(
+            scope, sources=[source_entry(PINNED, range_="1-2", sha256=DIGEST)])
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, first, current=current).bundle.added)
+        _prefix, corrected = self.update(
+            scope, sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)])
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, corrected, current=first).bundle.updated)
+        _prefix, removed = self.update(scope, sources=())
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, removed, current=first).bundle.updated)
+        # A genuinely unknown source field stays as tolerated reader data, while
+        # the writer-owned excerpt fields next to it remain correctable.
+        prefix, tolerated = self.initial(scope)
+        concept_path = prefix + "/context/pick-sqlite.md"
+        tolerated[concept_path] = gate_concept(
+            "context", "Pick SQLite", "stable",
+            sources=[source_entry(PINNED, range_="1-2", sha256=DIGEST)
+                     + ["    author: LegacyAuthor"]],
+        ).encode("utf-8")
+        tolerated[prefix + "/context/index.md"] = gate_page(
+            "Context", ("* [Pick SQLite](/context/pick-sqlite.md) - short.",)
+        ).encode("utf-8")
+        tolerated[prefix + "/log.md"] = NEW_LOG.encode("utf-8")
+        _prefix, updated = self.update(
+            scope, sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)])
+        updated[concept_path] = gate_concept(
+            "context", "Pick SQLite", "stable",
+            sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)
+                     + ["    author: LegacyAuthor"]],
+        ).encode("utf-8")
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, updated, current=tolerated).bundle.updated)
+        _prefix, dropped = self.update(
+            scope, sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)])
+        self.refused(scope, settings, dropped, current=tolerated,
+                     code="EXISTING_FIELD_CHANGED")
 
     def test_credentials_refuse_with_safe_evidence_and_no_echoed_value(self):
         scope, settings = self.scope(), self.settings()
