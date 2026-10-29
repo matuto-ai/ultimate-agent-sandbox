@@ -22,7 +22,8 @@ The in-process write lock covers reconciliation, commit and push only. No model
 work happens under it, so the Git write lock is never held across model latency.
 
 Credentials are not read or stored here: a deployment supplies transport and
-credential variables through ``environment``. A target or branch change is
+credential variables through ``environment``. The canonical target and branch
+are pinned in the service root, not in the disposable clone, and a change is
 refused rather than followed, so an operator provisions a fresh service root
 instead of silently repointing a clone.
 """
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
@@ -46,6 +48,8 @@ from .library_records import LibraryRecords
 
 LEASE_FILE = "lease"
 CLONE_DIR = "clone.git"
+PIN_FILE = "canonical.json"
+MAX_PIN_BYTES = 4096
 TRAILER_KEYS = ("Library-Publication", "Library-Operation", "Library-Request",
                 "Library-Queue", "Library-Input", "Library-Parent")
 # Transport/credential variables a deployment may supply explicitly. Everything
@@ -129,6 +133,21 @@ def _environment(value):
     return dict(value)
 
 
+def _pin_value(value, expected):
+    """One bounded canonical target/branch pin; nothing else is tolerated."""
+    try:
+        stored = json.loads(value.decode("utf-8"))
+    except (ValueError, UnicodeError):
+        raise LibraryError("PIN_UNAVAILABLE", "canonical") from None
+    if (type(stored) is not dict or set(stored) != set(expected)
+            or stored["version"] != expected["version"]
+            or type(stored["target"]) is not str
+            or type(stored["branch"]) is not str):
+        raise LibraryError("PIN_UNAVAILABLE", "canonical")
+    if stored != expected:
+        raise LibraryError("TARGET_MISMATCH", "canonical")
+
+
 def _trailers(message):
     """The exact metadata-only trailer block this seam writes, or nothing."""
     lines = [line for line in message.splitlines() if line.strip()]
@@ -206,6 +225,7 @@ class LibraryGit:
             raise LibraryError("ALREADY_STARTED", "lease")
         self._acquire()
         try:
+            self._pin()
             state = self._clone_state()
             if state == "mismatch":
                 raise LibraryError("TARGET_MISMATCH", "target")
@@ -251,13 +271,17 @@ class LibraryGit:
 
     # --- publication ------------------------------------------------------
 
-    def publish(self, operation, bundle, *, input_sha=None):
+    def publish(self, operation, bundle, *, input_sha):
         """Publish one validated complete Project bundle as one fast-forward commit.
 
         ``bundle`` is the T04/T05 complete result; this seam replaces exactly
-        that Project prefix and preserves every other path. An operation already
-        present in canonical history returns its committed result without a new
-        commit, which is what makes a lost acknowledgement safe to retry.
+        that Project prefix and preserves every other path. ``input_sha`` is the
+        canonical head the complete result was prepared against, or ``None``
+        when the caller is creating a Project that has no bundle yet: a complete
+        result may never silently revert Project content it did not prepare
+        against. An operation already present in canonical history returns its
+        committed result without a new commit, which is what makes a lost
+        acknowledgement safe to retry.
         """
         if not self._started:
             raise LibraryError("NOT_READY", "lease")
@@ -294,9 +318,7 @@ class LibraryGit:
 
     def _publish(self, operation, prefix, files, input_sha):
         previous = self._head
-        if input_sha is not None and (previous is None
-                                      or not self._ancestor(input_sha, previous)):
-            raise LibraryError("INCOMPATIBLE_HEAD", "input_sha")
+        self._compatible(input_sha, previous, prefix)
         input_identity = input_sha or previous
         current = self._tree_paths(previous, prefix)
         tree = self._tree(previous, files, current - set(files))
@@ -310,6 +332,25 @@ class LibraryGit:
             return rejected
         return Publication(operation.operation_id, input_identity, previous, commit, True)
 
+    def _compatible(self, input_sha, previous, prefix):
+        """The caller's basis must still describe this Project's canonical input.
+
+        Ancestry alone is not compatibility: a complete result prepared before
+        another publication would otherwise overwrite that newer content. A
+        missing basis is only acceptable while the Project has no bundle.
+        """
+        if input_sha is None:
+            if previous is not None and self._subtree(previous, prefix) is not None:
+                raise LibraryError("INCOMPATIBLE_HEAD", "input_sha")
+            return
+        if previous is None or not self._ancestor(input_sha, previous):
+            raise LibraryError("INCOMPATIBLE_HEAD", "input_sha")
+        if self._subtree(input_sha, prefix) != self._subtree(previous, prefix):
+            raise LibraryError("INCOMPATIBLE_HEAD", "input_sha")
+
+    def _subtree(self, commit, prefix):
+        return self._rev("%s:%s" % (commit, prefix))
+
     def _tree(self, previous, files, removals):
         index = self.root / ("index-" + uuid.uuid4().hex)
         env = {"GIT_INDEX_FILE": str(index)}
@@ -320,11 +361,12 @@ class LibraryGit:
             for path in sorted(files):
                 blob = self._run("hash-object", "-w", "--stdin", data=files[path], env=env)
                 entries.append(b"100644 %s\t%s\x00" % (blob.encode(), path.encode("utf-8")))
+            # Mode 0 removes an index entry without needing a work tree.
+            for path in sorted(removals):
+                entries.append(b"0 %s\t%s\x00" % (b"0" * 40, path.encode("utf-8")))
             if entries:
                 self._run("update-index", "-z", "--index-info",
                           data=b"".join(entries), env=env)
-            for path in sorted(removals):
-                self._run("update-index", "--force-remove", path, env=env)
             return self._run("write-tree", env=env)
         finally:
             try:
@@ -496,6 +538,54 @@ class LibraryGit:
         if code != 0:
             return None
         return out.decode("utf-8", "strict").strip()
+
+    # --- canonical pin ----------------------------------------------------
+
+    def _pin(self):
+        """Canonical target/branch identity, durable outside the clone cache.
+
+        The clone is disposable, so the pin lives in the service root: losing
+        the clone must not let a different target or branch take its place.
+        """
+        expected = {"version": 1, "target": self.target, "branch": self.branch}
+        path = self.root / PIN_FILE
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            self._write_pin(path, expected)
+            return
+        except OSError as error:
+            raise LibraryError("PIN_UNAVAILABLE", "canonical") from error
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise LibraryError("PIN_UNAVAILABLE", "canonical")
+            raw = os.read(descriptor, MAX_PIN_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        if len(raw) > MAX_PIN_BYTES:
+            raise LibraryError("PIN_UNAVAILABLE", "canonical")
+        _pin_value(raw, expected)
+
+    def _write_pin(self, path, expected):
+        temporary = self.root / (PIN_FILE + "." + uuid.uuid4().hex)
+        data = json.dumps(expected, sort_keys=True).encode("utf-8")
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                 | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(descriptor, data)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, path)
+            directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError as error:
+            raise LibraryError("PIN_UNAVAILABLE", "canonical") from error
 
     # --- clone state ------------------------------------------------------
 
