@@ -11,6 +11,8 @@ All mounts are private; the participant sees only a staged chroot. No accounts,
 credentials, host-policy edits, VM, target prove_service or native Git workers.
 Importing is effect-free. Run only in reviewed disposable hosted CI.
 """
+from contextlib import ExitStack
+import hashlib
 import importlib.util
 import json
 import os
@@ -31,6 +33,9 @@ DEADLINE = 'UAS_ROOM_PROTOCOL_DEADLINE'
 LIMIT_SECONDS = 25
 CONTAINER = 'a' * 64
 UID = 65532
+CASES = ('current', 'legacy-96f6')
+ADMISSION_DELAY_SECONDS = 8
+LEGACY_SHA256 = '3081a6f2b850f2521cb05743267d09022d87c5efb4bedfd39cf06d027bb48b7b'
 
 
 def require(value, message):
@@ -48,10 +53,12 @@ def helpers():
     return load_source('room_protocol_helpers', Path(__file__).with_name('git_composition_smoke.py'))
 
 
-def recipe():
+def recipe(case='current'):
+    require(case in CASES, 'unknown fixed Room case')
+    probe = '/opt/uas/uas/room_probe.py' if case == 'current' else '/opt/uas/room_probe_96f6.py'
     return {'AttachStdin': True, 'AttachStdout': True, 'AttachStderr': True,
             'Tty': False, 'Privileged': False, 'User': '65532:65532', 'WorkingDir': '/',
-            'Cmd': ['/usr/bin/python3', '-I', '/opt/uas/uas/room_probe.py', 'bootstrap'], 'Env': []}
+            'Cmd': ['/usr/bin/python3', '-I', probe, 'bootstrap'], 'Env': []}
 
 
 def stage(root, smoke):
@@ -64,6 +71,11 @@ def stage(root, smoke):
     require(not source.is_symlink() and all(not path.is_symlink() for path in source.rglob('*')),
             'ordinary reviewed package sources required')
     shutil.copytree(source, package / 'uas', ignore=shutil.ignore_patterns('__pycache__'))
+    legacy = Path(__file__).with_name('fixtures') / 'room_probe_96f6.py'
+    require(not legacy.is_symlink() and hashlib.sha256(legacy.read_bytes()).hexdigest() == LEGACY_SHA256,
+            'exact historical bootstrap source required')
+    shutil.copyfile(legacy, package / 'room_probe_96f6.py')
+    (package / 'room_probe_96f6.py').chmod(0o444)
     for path in (package / 'uas').rglob('*'):
         path.chmod(0o555 if path.is_dir() else 0o444)
     shutil.copyfile(ROOT / 'tests/vm/room_service.py', package / 'room_service.py')
@@ -94,12 +106,15 @@ def stage(root, smoke):
 
 class BootstrapEngine:
     """One owned real process; Engine API shape only, never Docker evidence."""
-    def __init__(self, jail, helper):
-        self.jail, self.helper = jail, helper
+    def __init__(self, jail, helper, case='current'):
+        self.jail, self.helper, self.case = jail, helper, case
+        self.stderr_fd = -1
+        self.stderr = bytearray()
+        self.stderr_bytes = 0
         self.created, self.child, self.transport = False, None, None
 
     def create(self, container, spec):
-        require(not self.created and container == CONTAINER and spec == recipe(),
+        require(not self.created and container == CONTAINER and spec == recipe(self.case),
                 'single fixed Room bootstrap recipe required')
         self.created = True
         return 'b' * 64
@@ -108,21 +123,27 @@ class BootstrapEngine:
         require(self.created and self.child is None and identifier == 'b' * 64,
                 'single owned bootstrap start required')
         read, write = os.pipe2(os.O_CLOEXEC)
-        try: pid = os.fork()
+        try: err_read, err_write = os.pipe2(os.O_CLOEXEC)
         except BaseException:
             os.close(read); os.close(write); raise
+        try: pid = os.fork()
+        except BaseException:
+            for fd in (read, write, err_read, err_write): os.close(fd)
+            raise
         if pid == 0:
             try:
                 os.close(write); os.dup2(read, 0, inheritable=True)
+                os.dup2(err_write, 2, inheritable=True)
                 os.chroot(self.jail); os.chdir('/')
                 self.helper.close_fds_except(set()); self.helper.isolate(UID)
-                os.execve('/usr/bin/python3', recipe()['Cmd'],
+                os.execve('/usr/bin/python3', recipe(self.case)['Cmd'],
                           {'PATH': '/usr/bin:/bin', 'PYTHONDONTWRITEBYTECODE': '1'})
             except BaseException:
                 import traceback
                 traceback.print_exc(); os._exit(125)
         self.child = self.helper.OwnedChild(pid)
-        os.close(read)
+        os.close(read); os.close(err_write)
+        self.stderr_fd = err_read; os.set_blocking(err_read, False)
         self.transport = self.helper.FixtureTransport(write)
         return self.transport
 
@@ -131,12 +152,32 @@ class BootstrapEngine:
         return {'ID': identifier, 'ContainerID': CONTAINER, 'Pid': self.child.pid,
                 'Running': self.child.observation() is None}
 
+    def observe_exit(self):
+        """Bounded owned-pipe evidence before reaping; no exit inference from EOF."""
+        if self.stderr_fd >= 0:
+            while True:
+                try: raw = os.read(self.stderr_fd, 4096)
+                except BlockingIOError: break
+                if not raw: break
+                self.stderr_bytes += len(raw)
+                self.stderr.extend(raw[:max(0, 4096 - len(self.stderr))])
+                if self.stderr_bytes > 4096: break
+        result = self.child.observation() if self.child is not None and self.child.owned else None
+        return {'exit_code': result.si_status if result is not None and result.si_code == os.CLD_EXITED else None,
+                'exit_observed': result is not None,
+                'stderr': bytes(self.stderr).decode('utf-8', 'replace'),
+                'stderr_bytes': self.stderr_bytes, 'stderr_truncated': self.stderr_bytes > 4096}
+
     def close(self):
         failures = []
         for owner, method in ((self.transport, 'close'), (self.child, 'finish')):
             if owner is not None:
                 try: getattr(owner, method)()
                 except BaseException as error: failures.append(error)
+        if self.stderr_fd >= 0:
+            fd, self.stderr_fd = self.stderr_fd, -1
+            try: os.close(fd)
+            except BaseException as error: failures.append(error)
         if failures: raise AssertionError('owned bootstrap cleanup incomplete') from failures[0]
 
 
@@ -183,7 +224,7 @@ def collect_probe_output(stdout, stderr, deadline):
     return bytes(buffers[stdout]), bytes(buffers[stderr])
 
 
-def protocol(root, jail, endpoint):
+def protocol(root, jail, endpoint, case='current'):
     sys.path.insert(0, '/opt/uas')
     for name in tuple(sys.modules):
         if name == 'uas' or name.startswith('uas.'): del sys.modules[name]
@@ -204,16 +245,17 @@ def protocol(root, jail, endpoint):
     room.BROKER_ROOT = root / 'brokers'
     helper = helpers()
     class Bootstrap(ExecLaunch):
-        def _create_spec(self): return recipe()
+        def _create_spec(self): return recipe(case)
     private = root / 'supervisor'; private.mkdir(mode=0o700)
-    engine = BootstrapEngine(jail, helper)
+    engine = BootstrapEngine(jail, helper, case)
     broker = launch = authority = held = provenance = listener = None
     sibling = None
     pipe_fds = set()
     backend_fd = -1
     active = True
     lock = threading.RLock()
-    checks = {'native_qualification': False, 'stage': 'start', 'worker_starts': 0}
+    checks = {'native_qualification': False, 'case': case, 'stage': 'start', 'worker_starts': 0,
+              'admission_boundary_seconds': {}, 'workload_release_sent': False}
     failure = None
     def current():
         if not active or launch.origin.revoked or not alive(launch.origin.pidfd):
@@ -306,7 +348,27 @@ def protocol(root, jail, endpoint):
                 reply = serve_one(channel, service, authority, lifecycle_lock=lambda: lock)
                 room.require_help_reply(reply, checks, index)
         control({'kind': 'HELP_ONLY_PROVED'}, bind=True)
+        post_help_started = time.monotonic()
         checks['stage'] = 'same_uid_unrelated'
+        # Explicit latency substitution, not a successful full admission receipt.
+        # Both cases keep the actual waiting peer and all cheap live checks.
+        def admission_boundary(name):
+            started = time.monotonic()
+            deadline = started + ADMISSION_DELAY_SECONDS
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: break
+                if 'bootstrap_exit' in checks:
+                    time.sleep(remaining)
+                else:
+                    exited, _, _ = select.select([launch.origin.pidfd], [], [], remaining)
+                    if exited:
+                        checks['bootstrap_exit'] = engine.observe_exit()
+                        checks['bootstrap_exit_after_help_seconds'] = time.monotonic() - post_help_started
+            elapsed = time.monotonic() - started
+            checks['admission_boundary_seconds'][name] = elapsed
+            require(elapsed >= ADMISSION_DELAY_SECONDS, 'admission delay returned early')
+        admission_boundary('before_unrelated_helper')
         # A fresh interpreter imports the actual probe and launcher before its
         # diagnostic-only barrier. Readiness never substitutes for SCM_PIDFD.
         def pipe():
@@ -364,37 +426,67 @@ def protocol(root, jail, endpoint):
         checks['unrelated_fresh_exec'] = True
         checks['unrelated_refusal'] = checks.pop('authority_failure')
         require(checks['unrelated_refusal']['phase'] == 'lineage', 'unrelated refused outside ancestry check')
-        with lock:
-            bootstrap_control_remaining(control_deadline)
-            current(); resources(); held.current(); current(); resources(); broker.require()
-            launch.channel.settimeout(bootstrap_control_remaining(control_deadline))
-            send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})
-        control({'kind': 'WORKLOAD_STARTED'})
-        control_deadline = None
-        launch.channel.settimeout(original_control_timeout)
-        checks['stage'] = 'held_exit'
-        send(launch.channel, {'kind': 'EXIT'})
-        poll = select.poll(); poll.register(launch.origin.pidfd, select.POLLIN)
-        require(poll.poll(2000) and not alive(launch.origin.pidfd), 'held bootstrap exit missing')
-        with lock:
-            try: held.current()
-            except OriginDenied: pass
-            else: raise AssertionError('exited held bootstrap remained current')
-        checks['exited_refusal'] = checks.pop('authority_failure')
-        engine.child.finish(success=True)
-        require(checks['worker_starts'] == 0, 'Room help unexpectedly started native worker')
-        checks.update(status='passed', stage='complete', mounted_real_help=True, non_help_refused=True,
-            same_uid_unrelated_task_refused=True, held_bootstrap_exit_observed=True,
-            exited_authority_refused=True, same_live_private_broker_rechecked=True,
-            engine='OWNED_PROCESS_ADAPTER_NOT_DOCKER', namespaces='SAME_PRIVATE_PID_AND_HOST_USER_NAMESPACE',
-            selinux='NOT_TESTED', quota='NOT_TESTED', network_policy='NOT_TESTED',
-            room_manifest_and_full_endpoint='NOT_TESTED', docker_tcg_startup='NOT_TESTED',
-            remapped_container='NOT_TESTED', native_git_worker_enabled=False, credentials_created=False)
+        checks['stage'] = 'final_admission'
+        admission_boundary('before_workload_release')
+        checks['post_help_seconds'] = time.monotonic() - post_help_started
+        require(checks['post_help_seconds'] >= 2 * ADMISSION_DELAY_SECONDS,
+                'composed latency path was not exercised')
+        if case == 'legacy-96f6':
+            checks['bootstrap_exit'] = engine.observe_exit()
+            observed = checks['bootstrap_exit']
+            require(observed['exit_observed'] and observed['exit_code'] == 1
+                    and not observed['stderr_truncated'] and 'TimeoutError: timed out' in observed['stderr'],
+                    'historical bootstrap did not reproduce the real waiting-child timeout')
+            with lock:
+                try: held.current()
+                except OriginDenied: pass
+                else: raise AssertionError('timed-out bootstrap remained current')
+            require(not checks['workload_release_sent'] and checks['worker_starts'] == 0,
+                    'historical timeout released work')
+            checks.update(status='passed', stage='expected_legacy_timeout',
+                negative_control=True, same_uid_unrelated_task_refused=True,
+                late_release_refused=True, native_git_worker_enabled=False, credentials_created=False)
+        else:
+            with lock:
+                bootstrap_control_remaining(control_deadline)
+                current(); resources(); held.current(); current(); resources(); broker.require()
+                launch.channel.settimeout(bootstrap_control_remaining(control_deadline))
+                send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})
+                checks['workload_release_sent'] = True
+            control({'kind': 'WORKLOAD_STARTED'})
+            control_deadline = None
+            launch.channel.settimeout(original_control_timeout)
+            checks['stage'] = 'held_exit'
+            send(launch.channel, {'kind': 'EXIT'})
+            poll = select.poll(); poll.register(launch.origin.pidfd, select.POLLIN)
+            require(poll.poll(2000) and not alive(launch.origin.pidfd), 'held bootstrap exit missing')
+            with lock:
+                try: held.current()
+                except OriginDenied: pass
+                else: raise AssertionError('exited held bootstrap remained current')
+            checks['exited_refusal'] = checks.pop('authority_failure')
+            checks['bootstrap_exit'] = engine.observe_exit()
+            require(checks['bootstrap_exit']['exit_code'] == 0 and not checks['bootstrap_exit']['stderr_truncated'],
+                    'current bootstrap did not exit cleanly')
+            engine.child.finish(success=True)
+            require(checks['worker_starts'] == 0, 'Room help unexpectedly started native worker')
+            checks.update(status='passed', stage='complete', mounted_real_help=True, non_help_refused=True,
+                same_uid_unrelated_task_refused=True, held_bootstrap_exit_observed=True,
+                exited_authority_refused=True, same_live_private_broker_rechecked=True,
+                engine='OWNED_PROCESS_ADAPTER_NOT_DOCKER', namespaces='SAME_PRIVATE_PID_AND_HOST_USER_NAMESPACE',
+                selinux='NOT_TESTED', quota='NOT_TESTED', network_policy='NOT_TESTED',
+                room_manifest_and_full_endpoint='NOT_TESTED', docker_tcg_startup='NOT_TESTED',
+                remapped_container='NOT_TESTED', native_git_worker_enabled=False, credentials_created=False)
     except BaseException as error:
         failure = error
         checks.update(status='failed', error_type=type(error).__name__)
         raise
     finally:
+        # Capture before cleanup can kill/reap the child or close its pipe.
+        try:
+            if 'bootstrap_exit' not in checks: checks['bootstrap_exit'] = engine.observe_exit()
+        except BaseException as error:
+            checks['bootstrap_exit_capture_error'] = type(error).__name__
         active = False
         errors = []
         def dispose(name, action):
@@ -415,7 +507,8 @@ def protocol(root, jail, endpoint):
     print(json.dumps(checks, sort_keys=True), flush=True)
 
 
-def namespace(root):
+def namespace(root, case):
+    require(case in CASES, 'unknown fixed Room case')
     helper = helpers(); smoke = helper.helpers(); smoke.gate()
     require(os.getpid() == 1 and root.parent == Path('/tmp') and root.name.startswith('uas-room-protocol-')
             and root.resolve() == root and root.is_dir() and root.stat().st_uid == 0
@@ -430,7 +523,7 @@ def namespace(root):
     if pid == 0:
         try:
             require(os.getpid() != 1 and os.getppid() == 1, 'live namespace parent required')
-            protocol(root, jail, endpoint)
+            protocol(root, jail, endpoint, case)
             sys.stdout.flush(); sys.stderr.flush()
         except BaseException:
             import traceback
@@ -445,16 +538,38 @@ def namespace(root):
 
 def main():
     helper = helpers(); helper.helpers().gate()
-    if len(sys.argv) == 3 and sys.argv[1] == '--namespace':
-        namespace(Path(sys.argv[2])); return
+    if len(sys.argv) == 4 and sys.argv[1] == '--namespace':
+        namespace(Path(sys.argv[2]), sys.argv[3]); return
     require(len(sys.argv) == 1, 'no caller-selected Room fixture execution')
-    with tempfile.TemporaryDirectory(prefix='uas-room-protocol-', dir='/tmp') as temporary:
-        env = {'PATH': '/usr/bin:/bin', 'GITHUB_ACTIONS': 'true', 'RUNNER_OS': 'Linux',
-               'PYTHONDONTWRITEBYTECODE': '1', DEADLINE: str(time.monotonic() + LIMIT_SECONDS)}
-        result = subprocess.run(['/usr/bin/unshare', '--mount', '--net', '--pid', '--fork',
-            '--kill-child=KILL', '--mount-proc', sys.executable, str(Path(__file__).resolve()),
-            '--namespace', temporary], env=env, timeout=27, check=False)
-        require(result.returncode == 0, 'hosted Room protocol seam failed')
+    # Two distinct owned namespaces, one shared outer bound. Never serial 2x25s.
+    with ExitStack() as stack:
+        children = []
+        deadline = time.monotonic() + 27
+        try:
+            for case in CASES:
+                temporary = stack.enter_context(tempfile.TemporaryDirectory(prefix='uas-room-protocol-', dir='/tmp'))
+                env = {'PATH': '/usr/bin:/bin', 'GITHUB_ACTIONS': 'true', 'RUNNER_OS': 'Linux',
+                       'PYTHONDONTWRITEBYTECODE': '1', DEADLINE: str(time.monotonic() + LIMIT_SECONDS)}
+                children.append(subprocess.Popen(['/usr/bin/unshare', '--mount', '--net', '--pid', '--fork',
+                    '--kill-child=KILL', '--mount-proc', sys.executable, str(Path(__file__).resolve()),
+                    '--namespace', temporary, case], env=env))
+            for child in children:
+                require(child.wait(timeout=max(.001, deadline - time.monotonic())) == 0,
+                        'hosted Room protocol composition case failed')
+        finally:
+            # Killing an owned unshare wrapper also kills its private PID namespace.
+            primary = sys.exc_info()[1]
+            cleanup = []
+            for child in children:
+                try:
+                    if child.poll() is None: child.kill()
+                except BaseException as error: cleanup.append(type(error).__name__)
+            for child in children:
+                try: child.wait(timeout=1)
+                except BaseException as error: cleanup.append(type(error).__name__)
+            if cleanup:
+                print(json.dumps({'outer_cleanup_errors': cleanup}), flush=True)
+                if primary is None: raise AssertionError('owned namespace cleanup incomplete')
 
 
 if __name__ == '__main__': main()

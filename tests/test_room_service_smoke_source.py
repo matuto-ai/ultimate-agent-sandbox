@@ -2,6 +2,7 @@
 import ast
 from contextlib import ExitStack, contextmanager
 import ctypes
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -269,7 +270,64 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         self.assertIn("if failure is not None or errors:", self.source)
         self.assertEqual(smoke.LIMIT_SECONDS, 25)
         self.assertIn('signal.alarm(max(1, int(remaining)))', self.source)
-        self.assertIn('timeout=27, check=False', self.source)
+        self.assertIn('deadline = time.monotonic() + 27', self.source)
+        self.assertIn('child.wait(timeout=max(.001, deadline - time.monotonic()))', self.source)
+
+    def test_composed_case_uses_exact_old_source_not_shortened_current_timeout(self):
+        old = ROOT / 'tests/linux/fixtures/room_probe_96f6.py'
+        self.assertEqual(hashlib.sha256(old.read_bytes()).hexdigest(), smoke.LEGACY_SHA256)
+        self.assertNotIn('BOOTSTRAP_CONTROL_SECONDS', old.read_text())
+        self.assertIn('channel.settimeout(12)', old.read_text())
+        self.assertEqual(smoke.recipe('legacy-96f6')['Cmd'][2], '/opt/uas/room_probe_96f6.py')
+        self.assertNotIn('BOOTSTRAP_CONTROL_SECONDS =', self.source)
+        with self.assertRaisesRegex(AssertionError, 'unknown fixed Room case'): smoke.recipe('other')
+
+    def test_two_latency_boundaries_enclose_actual_helper_and_final_live_checks(self):
+        self.assertEqual(smoke.ADMISSION_DELAY_SECONDS, 8)
+        start = self.source.index("admission_boundary('before_unrelated_helper')")
+        helper = self.source.index('pid = os.fork()', start)
+        refusal = self.source.index("checks['unrelated_refusal'] =", helper)
+        end = self.source.index("admission_boundary('before_workload_release')", refusal)
+        release = self.source.index("send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})", end)
+        self.assertLess(start, helper); self.assertLess(helper, refusal)
+        self.assertLess(refusal, end); self.assertLess(end, release)
+        self.assertIn('current(); resources(); held.current(); current(); resources(); broker.require()',
+                      self.source[end:release])
+        self.assertIn("observed['exit_code'] == 1", self.source[end:release])
+        self.assertIn("'TimeoutError: timed out' in observed['stderr']", self.source[end:release])
+        self.assertIn('timed-out bootstrap remained current', self.source[end:release])
+        self.assertIn("not checks['workload_release_sent']", self.source[end:release])
+
+    def test_capture_is_bounded_and_uses_waitid_observation_not_pipe_eof(self):
+        engine = smoke.BootstrapEngine(Path('/tmp/owned/jail'), Mock())
+        engine.stderr_fd = 42
+        engine.child = Mock(owned=True)
+        engine.child.observation.return_value = None
+        with patch.object(smoke.os, 'read', side_effect=[b'TimeoutError: timed out\n', b'']):
+            result = engine.observe_exit()
+        self.assertFalse(result['exit_observed'])
+        self.assertIsNone(result['exit_code'])
+        engine.child.observation.return_value = type('Exit', (), {'si_status': 1, 'si_code': os.CLD_EXITED})()
+        with patch.object(smoke.os, 'read', side_effect=BlockingIOError):
+            result = engine.observe_exit()
+        self.assertTrue(result['exit_observed']); self.assertEqual(result['exit_code'], 1)
+        self.assertIn('TimeoutError', result['stderr'])
+        with patch.object(smoke.os, 'read', side_effect=[b'x' * 4096]):
+            result = engine.observe_exit()
+        self.assertTrue(result['stderr_truncated']); self.assertLessEqual(len(result['stderr']), 4096)
+        engine.child.finish.assert_not_called()
+
+    def test_main_cases_have_distinct_roots_and_are_started_before_any_wait(self):
+        self.assertEqual(smoke.CASES, ('current', 'legacy-96f6'))
+        main = next(n for n in ast.walk(self.tree) if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        loops = [n for n in ast.walk(main) if isinstance(n, ast.For)]
+        launch = next(n for n in loops if 'subprocess.Popen' in ast.unparse(n))
+        self.assertIn('tempfile.TemporaryDirectory', ast.unparse(launch))
+        self.assertNotIn('.wait(', ast.unparse(launch))
+        self.assertIn("'--namespace', temporary, case", ast.unparse(launch))
+        self.assertIn('if child.poll() is None: child.kill()', self.source)
+        self.assertIn('try: child.wait(timeout=1)', self.source)
+        self.assertIn('if primary is None: raise AssertionError', self.source)
 
     def test_workflow_adds_one_parallel_child_without_new_job_or_budget(self):
         workflow = (ROOT / '.github/workflows/validate.yml').read_text()

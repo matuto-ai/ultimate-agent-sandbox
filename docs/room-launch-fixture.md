@@ -372,3 +372,32 @@ no new process, exec, thread or transport drain is introduced. The existing
 `NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY`. That observation is not an exit status or
 an exit-cause diagnosis; the previous BrokenPipe cause remains unproven. Source
 and fake-clock tests do not qualify native Linux/Docker or the hosted target VM.
+
+
+## Cheap composed bootstrap waiting regression
+
+The hosted Room seam now runs two isolated cases concurrently within its existing
+25-second case / 27-second parent / 29-second shell limits. Each performs real
+help and non-help requests, holds the actual bootstrap socket/task, waits eight
+measured seconds at the external pre-helper admission boundary, runs the real
+unrelated helper and verifies its ancestry refusal, then waits eight measured
+seconds at the final admission boundary before freshly checking authority and
+releasing workload. These waits are explicit latency substitutions, not full
+Room admission evidence. The target's SELinux, quota and network checks remain
+separate. The complete automatic CI still has its existing three-minute ceiling.
+
+One case executes the current bootstrap unchanged. The negative control executes
+the byte-identical `uas/room_probe.py` from commit
+`96f6a132c51ba70a137f645a1dfd430de7d46d74`, retained at
+`tests/linux/fixtures/room_probe_96f6.py` and SHA256-checked before staging. Other
+modules and the parent are current in both cases, isolating the bootstrap fix;
+this is not a claim to rerun the complete historical tree. The control must
+record an actual exit 1 with bounded `TimeoutError: timed out` stderr, and fresh
+authority must refuse release. The current case must acknowledge workload start
+and exit normally. Every case owns a separate PID/mount/network namespace,
+endpoint, Broker and temporary root, and must clean up all owned resources.
+
+Child stderr and waitid exit evidence are captured before cleanup can erase the
+original failure. This regression demonstrates the composed waiting defect and
+its correction under measured injected latency. It does not retrospectively
+prove the unrecorded child-exit cause of VM run 40802696439.
