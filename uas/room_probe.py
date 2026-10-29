@@ -23,6 +23,7 @@ import time
 ENDPOINT = '/uas/git/request.sock'
 PUBLIC_ADDRESS = '1.1.1.1'
 PUBLIC_HOST = 'one.one.one.one'
+PUBLIC_CA_FILE = '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem'
 PUBLIC_REQUEST = b'HEAD / HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n'
 
 
@@ -63,7 +64,9 @@ def public_head():
         value = 5 - (time.monotonic() - started)
         require(value > 0, 'public HTTPS deadline exceeded')
         return value
-    context = ssl.create_default_context()
+    # The signed offline image materializes this server-auth bundle, not
+    # Fedora 44's scriptlet-generated default hashed certificate directory.
+    context = ssl.create_default_context(cafile=PUBLIC_CA_FILE)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as raw:
         raw.settimeout(remaining())
         raw.connect((PUBLIC_ADDRESS, 443))

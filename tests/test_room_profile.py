@@ -189,7 +189,7 @@ class RoomProfileTests(unittest.TestCase):
              patch.object(room_probe.time,'monotonic',return_value=10):
             result=room_probe.public_head()
         create.assert_called_once_with(socket.AF_INET,socket.SOCK_STREAM)
-        verified.assert_called_once_with()
+        verified.assert_called_once_with(cafile='/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem')
         raw.connect.assert_called_once_with(('1.1.1.1',443))
         context.wrap_socket.assert_called_once_with(raw,server_hostname='one.one.one.one')
         channel.sendall.assert_called_once_with(b'HEAD / HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n')
@@ -197,6 +197,42 @@ class RoomProfileTests(unittest.TestCase):
         self.assertEqual(len(b'HTTP/1.1 200 OK\r\nServer: fixture\r\n\r\n'),result['response_header_bytes'])
         self.assertNotIn('DO_NOT_RETAIN',json.dumps(result))
         self.assertIs(result['certificate_hostname_verified'],True)
+
+    def test_public_probe_fixed_trust_failure_never_falls_back_or_opens_socket(self):
+        for error in (FileNotFoundError('absent fixed CA bundle'),
+                      ssl.SSLError('malformed fixed CA bundle')):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(ssl, 'create_default_context', side_effect=error) as verified, \
+                    patch.object(ssl, '_create_unverified_context') as unverified, \
+                    patch.object(room_probe.socket, 'socket') as create:
+                with self.assertRaises(type(error)) as caught:
+                    room_probe.public_head()
+                self.assertIs(caught.exception, error)
+                verified.assert_called_once_with(
+                    cafile='/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem')
+                unverified.assert_not_called(); create.assert_not_called()
+
+    def test_public_probe_keeps_default_tls_verification_and_signed_bundle_contract(self):
+        # Source/mock contract, not native TLS or public-network qualification.
+        source = ast.parse((Path(__file__).parents[1]/'uas/room_probe.py').read_text())
+        public = next(n for n in source.body if isinstance(n, ast.FunctionDef) and n.name == 'public_head')
+        assignments = [n for n in ast.walk(public) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))]
+        self.assertFalse(any(isinstance(n, ast.Attribute) and n.attr in
+            ('verify_mode', 'check_hostname', 'verify_flags') for statement in assignments for n in ast.walk(statement)))
+        calls = [n for n in ast.walk(public) if isinstance(n, ast.Call)]
+        context_calls = [n for n in calls if isinstance(n.func, ast.Attribute) and n.func.attr == 'create_default_context']
+        self.assertEqual(len(context_calls), 1)
+        self.assertEqual(ast.unparse(context_calls[0]), 'ssl.create_default_context(cafile=PUBLIC_CA_FILE)')
+        self.assertNotIn('_create_unverified_context', ast.unparse(public))
+        import native_trust
+        self.assertEqual(room_probe.PUBLIC_CA_FILE, '/' + native_trust.CA_OUTPUTS[1])
+        command = native_trust.fixed_commands(Path('/fixed'))[1]
+        self.assertEqual(command[-1], room_probe.PUBLIC_CA_FILE)
+        self.assertIn('--format=pem-bundle', command)
+        self.assertIn('--filter=ca-anchors', command)
+        self.assertEqual(command[command.index('--purpose') + 1], 'server-auth')
+        self.assertEqual(native_trust.VERIFIED_INPUTS[
+            'usr/share/pki/ca-trust-source/ca-bundle.trust.p11-kit'], 'ca-certificates')
 
     def test_public_probe_rechecks_deadline_before_connect_and_every_receive(self):
         raw=Mock();raw.__enter__=Mock(return_value=raw);raw.__exit__=Mock(return_value=False)

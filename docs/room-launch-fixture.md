@@ -221,6 +221,17 @@ probe is one HTTPS `HEAD /` to `1.1.1.1:443` with SNI and Host
 credential, redirect following or retry. The exact request is in
 `uas/room_probe.py`; response bodies are neither needed nor logged. The selected
 address/hostname is documented by [Cloudflare](https://developers.cloudflare.com/1.1.1.1/infrastructure/network-operators/).
+The probe explicitly loads the image's existing
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`: `native_trust.py` generates
+this server-auth CA-anchor bundle from signed, installed-header-verified Fedora
+CA input before rootfs fingerprinting. No host trust, downloaded CA, fallback or
+unverified context is added. Python's default required certificate and hostname
+verification remain enabled. [Fedora 44's default trust layout](https://fedoraproject.org/wiki/Changes/droppingOfCertPemFile)
+uses a hashed directory that this no-scriptlet image does not materialize;
+nonempty generated bundles alone do not establish default-path availability.
+This explains a source-level trust-path mismatch, not proof of the failed
+remote certificate chain. Missing or malformed fixed trust fails before connect.
+This fixture-specific choice does not claim general default-store repair.
 The fixed no-forwarding user-mode NIC follows [QEMU
 networking](https://www.qemu.org/docs/master/system/devices/net.html). Root must
 review this concrete network destination and cleanup before authorizing a run.
