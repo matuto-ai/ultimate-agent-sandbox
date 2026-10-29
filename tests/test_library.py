@@ -1713,6 +1713,10 @@ class CommitGateTests(unittest.TestCase):
             ("UNSAFE_LINK", "[x](javascript&#58;alert(1))"),
             ("EXTERNAL_LINK", "> [ref]: https://example.com/a\n>\n> [ref]"),
             ("EXTERNAL_LINK", "```info`invalid\n[x](https://example.com/a)"),
+            ("EXTERNAL_LINK", r"\`literal [x](https://example.com/a) `"),
+            ("EXTERNAL_LINK", "`unmatched\n# [x](https://example.com/a)\n`"),
+            ("EXTERNAL_LINK", "`unmatched\n* [x](https://example.com/a)\n`"),
+            ("EXTERNAL_LINK", "`unmatched\n> [x](https://example.com/a)\n`"),
             ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
         )
         for code, snippet in cases:
@@ -1720,7 +1724,8 @@ class CommitGateTests(unittest.TestCase):
                 _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
                 self.refused(scope, settings, proposed, current=current, code=code)
         _prefix, prose = self.update(scope, body=gate_page(
-            "Pick", ("An unmatched ` stays literal and [other](context/other.md) is fine.",
+            "Pick", ("An unmatched ` stays literal, \\`escaped\\` text is not code,",
+                     "a `span", "over two lines` is code, and [other](context/other.md) is fine.",
                      "", "```", "<div>and [x](https://example.com/a)</div>", "```")))
         self.assertIn("context/pick-sqlite.md", self.validate(
             scope, settings, prose, current=current).bundle.added)
@@ -1765,6 +1770,9 @@ class CommitGateTests(unittest.TestCase):
 
         self.assertFalse(library_gate.source(
             "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md")["pinned"])
+        # A pin keyword inside the file path cannot upgrade a mutable revision.
+        self.assertFalse(library_gate.source(
+            "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md")["pinned"])
         cases = (
             ("UNSAFE_SOURCE", source_entry("ftp://example.com/a")),
             ("UNSAFE_SOURCE", source_entry("../escape.md")),
@@ -1775,6 +1783,9 @@ class CommitGateTests(unittest.TestCase):
              source_entry("https://example.com/spec", range_="1-2", sha256=DIGEST)),
             ("EXCERPT_UNPINNED_SOURCE", source_entry(
                 "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md",
+                range_="1-2", sha256=DIGEST)),
+            ("EXCERPT_UNPINNED_SOURCE", source_entry(
+                "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md",
                 range_="1-2", sha256=DIGEST)),
             ("INCOMPLETE_EXCERPT", source_entry(PINNED, range_="1-2")),
             ("INCOMPLETE_EXCERPT", source_entry(PINNED, sha256=DIGEST)),

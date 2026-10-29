@@ -31,6 +31,7 @@ import hashlib
 import html
 import posixpath
 import re
+import string
 
 from . import library as contracts
 from . import library_bundle
@@ -209,18 +210,33 @@ def _definitions(lines):
             yield match.group(2) or following[number]
 
 
+BLOCK_START = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+
+
+def _starts_block(line):
+    """True for a line that cannot continue a paragraph's inline content."""
+    stripped = line.strip()
+    return (not stripped or stripped.startswith(("```", "~~~", ">"))
+            or library_bundle.HEADING.match(stripped) is not None
+            or BLOCK_START.match(stripped) is not None
+            or re.fullmatch(r"(?:[-*_][ \t]*){3,}", stripped) is not None)
+
+
 def _paragraph_end(text, start):
-    """Offset of the line ending that closes the paragraph containing ``start``."""
-    position = start
-    while True:
-        line_end = text.find("\n", position)
-        if line_end < 0:
-            return len(text)
-        next_start = line_end + 1
-        next_end = text.find("\n", next_start)
-        if not text[next_start:next_end if next_end >= 0 else len(text)].strip():
-            return line_end
-        position = next_start
+    """Offset of the line ending that closes the paragraph containing ``start``.
+
+    A blank line, a heading, a list item, a blockquote, a thematic break or a
+    fence starts a new block, so inline content - including a code span - cannot
+    continue past it.
+    """
+    position = text.find("\n", start)
+    while position >= 0:
+        next_start = position + 1
+        line_end = text.find("\n", next_start)
+        if _starts_block(text[next_start:line_end if line_end >= 0 else len(text)]):
+            return position
+        position = line_end
+    return len(text)
 
 
 def _code_end(text, start, run):
@@ -249,6 +265,12 @@ def _inline(text):
     index, length = 0, len(text)
     while index < length:
         character = text[index]
+        if character == "\\" and index + 1 < length:
+            # A backslash escape makes the next punctuation character literal,
+            # so an escaped backtick never opens a code span.
+            if text[index + 1] in string.punctuation:
+                index += 2
+                continue
         if character == "`":
             run = 1
             while index + run < length and text[index + run] == "`":
@@ -398,13 +420,14 @@ def source(resource):
             _fail("UNSAFE_SOURCE", "source.resource")
         parts = [part for part in path.split("#", 1)[0].split("?", 1)[0].split("/") if part]
         # A revision segment only identifies an immutable artifact when the path
-        # names it as one (`/blob/<commit>/<file>`); a hash-shaped directory in
-        # an otherwise mutable path such as `/blob/main/<dir>/doc.md` does not
-        # make the reference pinned.
-        pinned = any(COMMIT_SEGMENT.match(part) and number > 0
-                     and parts[number - 1].lower() in PIN_KEYWORDS
-                     and number + 1 < len(parts)
-                     for number, part in enumerate(parts))
+        # names it as one (`/blob/<commit>/<file>`). The first pin keyword fixes
+        # that position, so `/blob/main/<dir>/<hash>/doc.md` stays mutable: its
+        # revision is `main`, and the later keyword is only part of the file path.
+        revision = next((number + 1 for number, part in enumerate(parts)
+                         if part.lower() in PIN_KEYWORDS and number + 1 < len(parts)),
+                        None)
+        pinned = bool(revision is not None and COMMIT_SEGMENT.match(parts[revision])
+                      and revision + 1 < len(parts))
         return {"resource": resource,
                 "kind": "artifact" if pinned else "resource", "pinned": pinned}
     if SCHEME.match(resource) or resource.startswith("//") or "\\" in resource:
