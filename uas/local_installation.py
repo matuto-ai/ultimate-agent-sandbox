@@ -4,6 +4,7 @@ Setup is explicit and non-destructive. All selected bytes are digest-pinned;
 opening an existing installation never silently adopts changed input files.
 """
 from contextlib import contextmanager
+from copy import deepcopy
 import fcntl
 import hashlib
 from io import StringIO
@@ -92,11 +93,14 @@ def read_reference(value):
 
 def selection(raw):
     value = document(raw)
-    require(set(value) == {'version', 'project', 'native', 'manager'}
+    require(set(value) in ({'version', 'project', 'native', 'manager'}, {'version', 'project', 'native', 'manager','runtime'})
             and type(value['version']) is int and value['version'] == 1, 'INSTALLATION_SCHEMA')
     result = {'version': 1, 'project': reference(value['project'])}
     for name in ('native', 'manager'):
         result[name] = None if value[name] is None else reference(value[name])
+    if 'runtime' in value:
+        require(type(value['runtime']) is dict and len(value['runtime'])<=64,'LOCAL_RUNTIME_SELECTION')
+        result['runtime']={room:reference(ref) for room,ref in value['runtime'].items()}
     return result
 
 
@@ -137,7 +141,8 @@ class Installation:
 
     @staticmethod
     def inspect(value):
-        config = load(StringIO(read_reference(value['project']).decode('utf-8')))
+        config_text=read_reference(value['project']).decode('utf-8')
+        config = load(StringIO(config_text))
         selected = {}
         for name in ('native', 'manager'):
             selected[name] = None if value[name] is None else document(read_reference(value[name]))
@@ -169,6 +174,16 @@ class Installation:
                     configuration_sha256=hashlib.sha256(canonical(config)).hexdigest())
             except (LedgerError, NativeRecipeError) as error:
                 raise LocalInstallationError('LOCAL_MANAGER_SELECTION_INVALID') from error
+        runtime=value.get('runtime',{})
+        require(not runtime or selected['native'] is not None,'LOCAL_RUNTIME_NATIVE_REQUIRED')
+        require(set(runtime)<={room['id'] for room in config['rooms']},'LOCAL_RUNTIME_ROOM_SELECTION')
+        for room_id,ref in runtime.items():
+            from .local_runtime_plan import LocalRuntimePlan
+            profile=LocalNativeProfile(config,selected['native'],room_id,config['deployment']['state_root'])
+            plan=LocalRuntimePlan.read(config_text,ref['path'],ref['sha256'],native_profile=profile)
+            require(plan.room['id']==room_id,'LOCAL_RUNTIME_ROOM_SELECTION')
+            profile.bind_runtime(plan)
+        if 'runtime' in value:selected['runtime']=deepcopy(runtime)
         return config, selected
 
     def setup(self, raw):
@@ -194,25 +209,53 @@ class Installation:
                 os.close(directory)
             return {'status': 'installed', 'installation': str(self.root)}
 
-    def select_manager(self, reference_or_none):
-        """Explicit offline grant selection; never replace Project/native state.
+    def runtime_plan_for(self,profile):
+        from .local_native import LocalNativeProfile
+        from .local_runtime_plan import LocalRuntimePlan
+        require(type(profile) is LocalNativeProfile,'LOCAL_NATIVE_PROFILE_REQUIRED')
+        value,config,selected=self.open()
+        ref=value.get('runtime',{}).get(profile.room['id'])
+        if ref is None:return None
+        require(selected['native']==profile.native_document,'LOCAL_RUNTIME_PROFILE_BINDING')
+        if profile.runtime_plan is not None:
+            plan=profile.runtime_plan;plan.require_unchanged()
+            require(plan.installation_digest==ref['sha256'],'LOCAL_RUNTIME_SELECTION_CHANGED')
+            return plan
+        return LocalRuntimePlan.read(read_reference(value['project']).decode('utf-8'),ref['path'],ref['sha256'],native_profile=profile)
 
-        Host/helper ownership must be absent. Atomic visibility and directory
-        durability are distinct: after any ambiguous replace/fsync error read
-        current state to reconcile, but never silently repeat the write.
-        """
+    def select_manager(self, reference_or_none):
+        selected=None if reference_or_none is None else reference(reference_or_none)
+        return self._select_optional('manager',selected)
+
+    def select_runtime(self,room_id,reference_or_none):
+        require(type(room_id) is str,'LOCAL_RUNTIME_ROOM_SELECTION')
+        selected=None if reference_or_none is None else reference(reference_or_none)
+        return self._select_optional('runtime',selected,room_id=room_id)
+
+    def _select_optional(self,kind,selected,*,room_id=None):
         from .local_host import host_lock
-        selected = None if reference_or_none is None else reference(reference_or_none)
         with host_lock(self), self._locked():
             before = self._read()
             after = {**before, 'manager': selected}
+            if kind=='runtime':
+                refs=dict(before.get('runtime',{}))
+                if selected is None:refs.pop(room_id,None)
+                else:refs[room_id]=selected
+                after={**before,'runtime':refs}
+            if kind=='runtime':
+                config,unused=self.inspect(before)
+                rooms={room['id']:room for room in config['rooms']}
+                require(room_id in rooms,'LOCAL_RUNTIME_ROOM_SELECTION')
+                if before.get('runtime',{}).get(room_id)!=selected:
+                    require(not os.path.lexists(Path(rooms[room_id]['state_root'])/'lifecycle.json'),
+                            'LOCAL_RUNTIME_RECONFIGURATION_REQUIRES_UNCREATED_ROOM')
             self.inspect(after)
-            receipt = {'installation': str(self.root), 'manager': selected,
+            receipt = {'installation': str(self.root), kind: selected,
                        'previous_sha256': hashlib.sha256(canonical(before)).hexdigest(),
                        'selected_sha256': hashlib.sha256(canonical(after)).hexdigest()}
             if before == after:
                 return {**receipt, 'status': 'already-selected'}
-            pending = self.root / ('.manager-selection-' + uuid.uuid4().hex + '.json')
+            pending = self.root / (('.'+kind+'-selection-') + uuid.uuid4().hex + '.json')
             fd = os.open(pending, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
             identity = os.fstat(fd)
             try:
@@ -228,12 +271,12 @@ class Installation:
                 except OSError as error:
                     try: observed = self._read()
                     except (OSError, ValueError):
-                        raise LocalInstallationError('MANAGER_SELECTION_RESULT_UNKNOWN') from error
-                    code = ('MANAGER_SELECTION_DURABILITY_UNCONFIRMED' if observed == after else
-                            'MANAGER_SELECTION_NOT_REPLACED' if observed == before else
-                            'MANAGER_SELECTION_RESULT_UNKNOWN')
+                        raise LocalInstallationError(kind.upper()+'_SELECTION_RESULT_UNKNOWN') from error
+                    code = (kind.upper()+'_SELECTION_DURABILITY_UNCONFIRMED' if observed == after else
+                            kind.upper()+'_SELECTION_NOT_REPLACED' if observed == before else
+                            kind.upper()+'_SELECTION_RESULT_UNKNOWN')
                     raise LocalInstallationError(code) from error
-                require(self._read() == after, 'MANAGER_SELECTION_READBACK_MISMATCH')
+                require(self._read() == after, kind.upper()+'_SELECTION_READBACK_MISMATCH')
                 return {**receipt, 'status': 'selected'}
             finally:
                 # Only the temporary inode created by this invocation is ours.
@@ -246,8 +289,8 @@ class Installation:
                             pending.unlink()
                 except OSError:
                     if primary is None:
-                        raise LocalInstallationError('MANAGER_SELECTION_TEMP_CLEANUP_UNCONFIRMED') from None
-                    primary.add_note('MANAGER_SELECTION_TEMP_CLEANUP_UNCONFIRMED')
+                        raise LocalInstallationError(kind.upper()+'_SELECTION_TEMP_CLEANUP_UNCONFIRMED') from None
+                    primary.add_note(kind.upper()+'_SELECTION_TEMP_CLEANUP_UNCONFIRMED')
 
     def open(self):
         with self._locked():

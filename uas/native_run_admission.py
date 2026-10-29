@@ -69,8 +69,9 @@ class NativeRunLauncher:
                  endpoint, listener, control, hub_origin, controller, control_lock,
                  exec_seat, admission_seat, mounts, stack, admissions, budget, git_resources=None, gate_profile=None):
         from .native_session import SessionBudget
+        from .local_runtime_plan import LocalRuntimePlan
         from .docker_exec_api import DockerExecAPI
-        if (type(plan) is not QualificationPlan or type(broker) is not NativeAdmissionBroker
+        if (type(plan) not in (QualificationPlan,LocalRuntimePlan) or type(broker) is not NativeAdmissionBroker
                 or broker.ledger is not ledger or broker.client.supervisor is not supervisor
                 or type(engine) is not DockerExecAPI or type(endpoint) is not EndpointLease
                 or type(exec_seat) is not ExecSeat or type(admission_seat) is not AdmissionSeat

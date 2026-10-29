@@ -79,3 +79,63 @@ class LocalServicesTests(unittest.TestCase):
             self.assertEqual(owner.status('alpha')['hub'],'unknown')
             self.assertIs(owner.close(),True);process.stdin.close.assert_called_once()
             self.assertEqual(owner.ensure('alpha',Mock(),backend,{'instance_id':'instance'})['hub'],'stopped');spawn.assert_called_once()
+    def test_runtime_resources_are_adopted_before_startup_and_not_idle_authority(self):
+        from uas import local_runtime_resources
+        owner=self.owner();backend=self.backend();process=Mock();process.poll.return_value=None
+        plan=SimpleNamespace(config_text='public config',installation={},installation_digest='a'*64)
+        backend.profile.native_document={'public':'native'}
+        owner.runtime_plan_for=lambda profile:plan;owner.manager_reference_for=lambda profile:{'path':'/public/manager','sha256':'b'*64}
+        runtime=Mock();runtime.prepare.return_value=({'broker_fd':11,'checkout_fd':12,'instance':'instance'},(11,12))
+        with patch.object(services.os,'geteuid',return_value=0),patch.object(services,'mapping_digest',return_value='a'*64),patch.object(services.os,'stat',return_value=SimpleNamespace(st_gid=55)),patch.object(services.subprocess,'Popen',return_value=process) as spawn,patch.object(services,'read_ready',return_value={'status':'ready'}),patch.object(services,'send_startup') as send,patch.object(local_runtime_resources,'missing_bindings',return_value=[]),patch.object(local_runtime_resources,'LocalRuntimeResources',return_value=runtime):
+            owner.ensure('alpha',Mock(),backend,{'instance_id':'instance'})
+        runtime.adopt.assert_called_once_with(process)
+        self.assertEqual(spawn.call_args.kwargs['pass_fds'],(9,10,11,12,8))
+        raw=json.loads(send.call_args.args[1]);self.assertEqual(raw['runtime']['broker_fd'],11)
+        self.assertEqual(raw['runtime']['manager_reference']['path'],'/public/manager')
+        self.assertNotIn('broker_fd',raw['runtime']['resources'])
+        with patch.object(services,'send_startup',side_effect=TimeoutError):
+            self.assertIs(owner.revoke('instance','participants'),False)
+    def test_runtime_pause_requires_receipt_and_never_retries_uncertainty(self):
+        owner=self.owner();process=Mock();process.poll.return_value=None
+        row={'instance':'instance','state':'ready','process':process,'runtime_owner':Mock(),'runtime_phase':'active'}
+        owner._rooms['alpha']=row
+        with patch.object(services,'send_startup') as send,patch.object(services,'read_control_receipt',side_effect=TimeoutError):
+            self.assertIs(owner.revoke('instance','participants'),False)
+            self.assertIs(owner.revoke('instance','participants'),False)
+            send.assert_called_once_with(process,b'P')
+        self.assertEqual(row['runtime_phase'],'pause-unconfirmed')
+    def test_runtime_pause_receipt_preserves_hub(self):
+        owner=self.owner();process=Mock();process.poll.return_value=None
+        row={'instance':'instance','state':'ready','process':process,'runtime_owner':Mock(),'runtime_phase':'active'}
+        owner._rooms['alpha']=row
+        with patch.object(services,'send_startup') as send,patch.object(services,'read_control_receipt') as receipt:
+            self.assertIs(owner.revoke('instance','participants'),True)
+            self.assertIs(owner.revoke('instance','participants'),True)
+            send.assert_called_once_with(process,b'P')
+        receipt.assert_called_once_with(process,'alpha','instance',status='participants-revoked')
+        process.stdin.close.assert_not_called();self.assertEqual(row['runtime_phase'],'paused')
+    def test_unbound_manager_starts_idle_without_broker_effects(self):
+        from uas import local_runtime_resources
+        owner=self.owner();backend=self.backend();process=Mock();process.poll.return_value=None
+        owner.runtime_plan_for=lambda profile:object();owner.manager_reference_for=lambda profile:None
+        with patch.object(services.os,'geteuid',return_value=0),patch.object(services,'mapping_digest',return_value='a'*64),patch.object(services.os,'stat',return_value=SimpleNamespace(st_gid=55)),patch.object(services.subprocess,'Popen',return_value=process),patch.object(services,'read_ready',return_value={'status':'ready'}),patch.object(services,'send_startup') as send,patch.object(local_runtime_resources,'LocalRuntimeResources') as resources:
+            result=owner.ensure('alpha',Mock(),backend,{'instance_id':'instance'})
+        self.assertEqual(result['runtime'],'waiting-for-manager');resources.assert_not_called()
+        self.assertNotIn('runtime',json.loads(send.call_args.args[1]))
+        self.assertIs(owner.revoke('instance','participants'),True)
+    def test_missing_credentials_preserve_idle_hub_without_broker_effects(self):
+        from uas import local_runtime_resources
+        owner=self.owner();backend=self.backend();process=Mock();process.poll.return_value=None
+        owner.runtime_plan_for=lambda profile:object();owner.manager_reference_for=lambda profile:{"path":"/private/manager","sha256":"a"*64}
+        with patch.object(services.os,'geteuid',return_value=0),patch.object(services,'mapping_digest',return_value='a'*64),patch.object(services.os,'stat',return_value=SimpleNamespace(st_gid=55)),patch.object(services.subprocess,'Popen',return_value=process),patch.object(services,'read_ready',return_value={'status':'ready'}),patch.object(services,'send_startup') as send,patch.object(local_runtime_resources,'missing_bindings',return_value=['forge-credential']),patch.object(local_runtime_resources,'LocalRuntimeResources') as resources:
+            result=owner.ensure('alpha',Mock(),backend,{'instance_id':'instance'})
+        self.assertEqual(result['runtime'],'missing-credentials');resources.assert_not_called()
+        self.assertNotIn('runtime',json.loads(send.call_args.args[1]))
+        self.assertIs(owner.revoke('instance','participants'),True)
+    def test_late_pause_receipt_reconciles_without_another_command(self):
+        owner=self.owner();process=Mock();process.poll.return_value=None
+        row={'instance':'instance','state':'ready','process':process,'runtime_owner':Mock(),'runtime_phase':'pause-unconfirmed'}
+        owner._rooms['alpha']=row
+        with patch.object(services.select,'select',return_value=([process.stdout],[],[])),patch.object(services,'read_control_receipt') as receipt,patch.object(services,'send_startup') as send:
+            self.assertIs(owner.revoke('instance','participants'),True)
+        send.assert_not_called();receipt.assert_called_once_with(process,'alpha','instance',status='participants-revoked',seconds=1)

@@ -5,6 +5,7 @@ Only an explicit privileged operator invocation may mutate selected resources;
 Project storage, quota, labels and Engine userns must already be prepared.
 """
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal
 import hashlib
 import fcntl
@@ -102,6 +103,7 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     """Prepared local selections, not a disposable QualificationPlan."""
     def __init__(self, config, document, room_id, control_root):
         document=validate_document(document)
+        self.native_document=deepcopy(document)
         require(type(config) is dict and type(config.get('rooms')) is list,'LOCAL_NATIVE_CONFIG')
         selected=[r for r in config['rooms'] if r['id']==room_id]
         require(len(selected)==1 and room_id in document['rooms'],'LOCAL_NATIVE_ROOM')
@@ -131,6 +133,34 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
         self.digest=hashlib.sha256(canonical({'installation':document,'room':self.room})).hexdigest()
         # No credential bindings or optional Gate/Git resources are fabricated.
         self.git_manifest=self.git_plan=self.gate_manifest=self.gate_plan=None
+        self.runtime_plan=None
+
+    def bind_runtime(self,plan):
+        from .local_runtime_plan import LocalRuntimePlan
+        require(type(plan) is LocalRuntimePlan and plan.native_profile is self,'LOCAL_RUNTIME_PROFILE_BINDING')
+        plan.require_unchanged()
+        require(self.runtime_plan is None or self.runtime_plan is plan,'LOCAL_RUNTIME_ALREADY_BOUND')
+        git=gate=None
+        if 'git_manifest' in plan.installation:
+            from .native_git_resources import selection
+            git=selection(plan)
+            require(git['image_id']==self.image_id,'GIT_IMAGE_PAIRING')
+        if 'gate_manifest' in plan.installation:
+            from .native_gate_resources import selection
+            gate=selection(plan)
+            require(git is not None and gate['image_id']==self.image_id,'GATE_GIT_PROFILE_REQUIRED')
+        self.git_manifest=git;self.git_plan=plan if git is not None else None
+        self.gate_manifest=gate;self.gate_plan=plan if gate is not None else None
+        self.runtime_plan=plan
+
+    def spec(self):
+        result=super().spec()
+        if self.runtime_plan is not None:
+            self.runtime_plan.require_unchanged()
+            digest=hashlib.sha256(canonical({'native':self.digest,
+                'runtime':self.runtime_plan.installation_digest,'selection':self.runtime_plan.installation})).hexdigest()
+            return replace(result,profile_digest='sha256:'+digest)
+        return result
 
     @property
     def storage(self): return self._storage
@@ -248,16 +278,25 @@ class LocalNativeBackend(native.NativeQualificationBackend):
 
 class LocalNativeHost:
     """Canonical infrastructure lifecycle; never claims provider/Hub readiness."""
-    def __init__(self, config, native_document, state_root, *, authorize, revoke):
+    def __init__(self, config, native_document, state_root, *, authorize, revoke, runtimeplans=None):
         require(callable(authorize) and callable(revoke),'LOCAL_NATIVE_AUTHORITY_REQUIRED')
         self._config=deepcopy(config);self._document=validate_document(native_document)
         self._root=path(str(state_root));self._authorize=authorize;self._revoke=revoke;self._owners={}
+        require(runtimeplans is None or type(runtimeplans) is dict,'LOCAL_RUNTIME_PLANS_REQUIRED')
+        self._runtimeplans={} if runtimeplans is None else dict(runtimeplans)
 
     def _owner(self,room_id):
         if room_id not in self._owners:
             profile=LocalNativeProfile(self._config,self._document,room_id,self._root)
+            if room_id in self._runtimeplans:
+                selected=self._runtimeplans[room_id]
+                plan=selected(profile) if callable(selected) else selected
+                if plan is not None:
+                    require(plan.native_profile is profile,'LOCAL_RUNTIME_PROFILE_BINDING')
+                    profile.bind_runtime(plan)
             backend=LocalNativeBackend(profile)
-            owner=Supervisor(self._root,room_id,backend,authorize=self._authorize,revoke=self._revoke)
+            owner=Supervisor(self._root,room_id,backend,authorize=self._authorize,revoke=self._revoke,
+                             **({'state_reader_gid':native.HOST_UID} if profile.runtime_plan is not None else {}))
             self._owners[room_id]=(owner,backend)
         return self._owners[room_id]
 
@@ -303,3 +342,25 @@ class LocalNativeHost:
         with owner._locked():state=owner._read()
         require(state is not None,'LOCAL_NATIVE_NOT_STARTED');backend._binding(state)
         return owner,backend,deepcopy(state)
+
+
+class LocalNativeObserver(native.NativeQualificationObserver):
+    """Read-only canonical local ownership; never lifecycle authority."""
+    LABEL = LocalNativeBackend.LABEL
+    name = LocalNativeBackend.name
+
+
+def readonly_local_supervisor(plan, resources):
+    from .local_runtime_plan import LocalRuntimePlan
+    require(type(plan) is LocalRuntimePlan, 'LOCAL_RUNTIME_PLAN_REQUIRED')
+    plan.require_unchanged()
+    require(resources['room_id']==plan.room['id'], 'OBSERVER_BINDING')
+    backend=LocalNativeObserver(plan.room['id'],resources['instance'],plan.config_digest)
+    owner=Supervisor(Path(plan.config['deployment']['state_root']),plan.room['id'],backend,
+                     authorize=lambda *_:False,revoke=lambda *_:False)
+    with owner._locked():
+        state=owner._read()
+        require(state is not None and state['instance_id']==resources['instance']
+                and state['phase']=='running' and state['spec']['config_digest']=='sha256:'+plan.config_digest,
+                'OBSERVER_BINDING')
+    return owner

@@ -21,10 +21,10 @@ from .native_qualification import QualificationError
 
 
 def startup_document(raw):
-    if type(raw) is not bytes or not 0 < len(raw) <= 65536:
+    if type(raw) is not bytes or not 0 < len(raw) <= 2*1048576:
         raise QualificationError('LOCAL_HUB_STARTUP_DOCUMENT')
     value=json.loads(raw,object_pairs_hook=_unique)
-    if (type(value) is not dict or set(value)!={'version','room','resources'}
+    if (type(value) is not dict or set(value) not in ({'version','room','resources'},{'version','room','resources','runtime'})
             or type(value['version']) is not int or value['version']!=1
             or type(value['room']) is not dict or type(value['resources']) is not dict):
         raise QualificationError('LOCAL_HUB_STARTUP_DOCUMENT')
@@ -79,15 +79,49 @@ def run(raw,parent_fd):
                                                startup,listener,stack,SessionBudget(30))
         receipt={'version':1,'status':'ready','room_id':startup['room_id'],
                  'room_instance':startup['room_instance'],'controller':ready['controller']}
-        sys.stdout.buffer.write(_canonical(receipt)+b'\n');sys.stdout.buffer.flush()
-        retain(control,origin,parent_fd)
+        def announce(_=None):
+            sys.stdout.buffer.write(_canonical(receipt)+b'\n');sys.stdout.buffer.flush()
+        if 'runtime' not in document:
+            announce();retain(control,origin,parent_fd)
+        else:
+            from io import StringIO
+            from .config import load
+            from .local_native import LocalNativeProfile
+            from .local_runtime_plan import LocalRuntimePlan
+            from .local_native_run_session import LocalNativeRunSession
+            from .local_runtime_manager import serve_runtime_manager
+            runtime=document['runtime']
+            require_fields={'configuration','installation','installation_digest','resources',
+                            'native_document','manager_reference','broker_fd','checkout_fd','git_fd'}
+            if type(runtime) is not dict or set(runtime)!=require_fields:
+                raise QualificationError('LOCAL_RUNTIME_STARTUP_SCHEMA')
+            config=load(StringIO(runtime['configuration']))
+            profile=LocalNativeProfile(config,runtime['native_document'],document['room']['id'],
+                                       config['deployment']['state_root'])
+            plan=LocalRuntimePlan(runtime['configuration'],runtime['installation'],
+                                  installation_digest=runtime['installation_digest'],native_profile=profile)
+            profile.bind_runtime(plan)
+            native_resources=runtime['resources']
+            if (native_resources['instance']!=resources['instance']
+                    or native_resources['hub_id']!=resources['hub_id']):
+                raise QualificationError('LOCAL_RUNTIME_STARTUP_SCOPE')
+            owner=LocalNativeRunSession(plan,native_resources,control=control,origin=origin,
+                ready=ready,metadata=startup,broker_fd=runtime['broker_fd'],
+                checkout_fd=runtime['checkout_fd'],git_fd=runtime['git_fd'],parent_fd=parent_fd)
+            stack.callback(owner.close)
+            owner.clients()  # Authenticate retained brokers before declaring host readiness.
+            def stopped():
+                try:owner.current();return False
+                except Exception:return True
+            serve_runtime_manager(plan,native_resources,owner,runtime['manager_reference'],
+                                  stopped=stopped,on_ready=announce)
 
 
 def main():
     if len(sys.argv)!=1:raise QualificationError('LOCAL_HUB_FIXED_ENTRYPOINT')
     # Unbuffered reads prevent consuming parent lifetime bytes beyond newline.
     raw=bytearray()
-    while len(raw)<=65536:
+    while len(raw)<=2*1048576:
         byte=os.read(0,1)
         if byte==b'\n':break
         if not byte:raise QualificationError('LOCAL_HUB_STARTUP_EOF')

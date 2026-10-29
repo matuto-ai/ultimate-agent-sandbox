@@ -19,7 +19,7 @@ import re
 import socket
 import stat
 
-from .native_image_package import canonical, REFERENCE
+from .native_image_package import canonical, REFERENCE, valid_image_reference
 from .native_pi_recipe import read_manifest, path, SHA
 from .kernel_origin import OriginDenied, alive, _identity
 
@@ -43,6 +43,33 @@ def require(value, message):
 
 def identifier(value):
     return type(value) is str and re.fullmatch(r'[0-9a-f]{32}', value) is not None
+
+
+def local_profile(plan):
+    """Only the concrete local declaration selects non-qualification roots."""
+    from .local_runtime_plan import LocalRuntimePlan
+    if type(plan) is LocalRuntimePlan:
+        plan.require_unchanged()
+        return plan.native_profile
+    return None
+
+
+def endpoint_root(plan):
+    profile=local_profile(plan)
+    return ENDPOINT_ROOT if profile is None else profile.endpoints
+
+
+def backend_path(plan):
+    profile=local_profile(plan)
+    if profile is not None:return profile.state_root/'git-backend'
+    require(identifier(plan.installation.get('nonce')), 'qualification nonce required')
+    return STORAGE_ROOT/plan.installation['nonce']/'git-backend'
+
+
+def selected_image(plan):
+    profile=local_profile(plan)
+    if profile is not None:return profile.image_reference
+    return next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
 
 
 def selection(plan, *, filename=None):
@@ -78,19 +105,21 @@ def validate_selection(value, plan):
     fields=PAYLOAD_FIELDS|{'image_reference','image_id','backend_path'}
     require(type(value) is dict and set(value)==fields, 'invalid prepared selection')
     validate_payload({key:value[key] for key in PAYLOAD_FIELDS})
-    require(type(value['image_reference']) is str and REFERENCE.fullmatch(value['image_reference'])
-        and type(value['image_id']) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',value['image_id']), 'image identity required')
-    image=next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
+    require(valid_image_reference(value['image_reference'],value['image_id']), 'image identity required')
+    image=selected_image(plan)
     require(value['image_reference']==image, 'prepared image differs')
-    require(identifier(plan.installation['nonce']) and value['backend_path']==str(STORAGE_ROOT/plan.installation['nonce']/'git-backend'), 'fixed backend path required')
+    require(value['backend_path']==str(backend_path(plan)), 'fixed backend path required')
+    profile=local_profile(plan)
+    if profile is not None:require(value['image_id']==profile.image_id,'local image identity differs')
     return value
 
 
 def git_mounts(plan, state):
     """Parent-before-child mount order is part of this exact finite contract."""
-    require(identifier(state['instance_id']) and identifier(plan.installation['nonce']), 'instance required')
+    require(identifier(state['instance_id']), 'instance required')
+    backend_path(plan)  # Validate fixed local profile or legacy nonce.
     repo=path(plan.room['project']['roots']['repo'])
-    root=ENDPOINT_ROOT/state['instance_id']; views=root/'git-views'; fixed=root/'git-fixed'
+    root=endpoint_root(plan)/state['instance_id']; views=root/'git-views'; fixed=root/'git-fixed'
     return (
         NativeGitMount(str(views),'/opt/uas/git-views',True),
         NativeGitMount(repo+'/.git','/opt/uas/git-views/primary/gitdir',False),
@@ -226,7 +255,7 @@ def prepare_views(plan,state):
             info=os.fstat(fd);require(stat.S_ISREG(info.st_mode),'existing Git metadata required')
             if filename=='commondir':require(info.st_size==2 and os.read(fd,3)==b'.\n','explicit neutral primary setup required')
         finally:os.close(fd)
-    root=ENDPOINT_ROOT/state['instance_id']
+    root=endpoint_root(plan)/state['instance_id']
     for relative in ('git-views','git-views/primary','git-views/primary/gitdir','git-views/primary/common','git-fixed','git-workspace'):
         target=root/relative;target.mkdir(mode=0o755);os.chown(target,100000,100000);os.chmod(target,0o755)
     binding=ForgeBinding(plan.room['id'],plan.room['project']['id'],plan.room['project']['repository'])
@@ -251,7 +280,9 @@ class NativeGitResources:
         from .lifecycle import Supervisor
         from .native_qualification_backend import NativeQualificationObserver
         from .workstation_exec import EndpointLease
-        require(type(supervisor) is Supervisor and type(supervisor.backend) is NativeQualificationObserver
+        from .local_native import LocalNativeObserver
+        expected=LocalNativeObserver if local_profile(plan) is not None else NativeQualificationObserver
+        require(type(supervisor) is Supervisor and type(supervisor.backend) is expected
             and type(engine) is DockerExecAPI,'canonical readonly owners required')
         self=cls();self._closed=False;self._pidfd=-1;self._listeners=[]
         self.supervisor=supervisor;self.plan=plan;self.config_digest=plan.config_digest
@@ -294,14 +325,14 @@ class NativeGitResources:
                 and process_binding(pid,self.container_id)==before,'container task replaced during observation')
             self.backend_fd=resource_dict['git_backend_fd'];self.backend_sha256=manifest['backend_sha256']
             self._backend_identity=require_sealed(self.backend_fd,self.backend_sha256)
-            root=ENDPOINT_ROOT/self.profile.instance_id/'git'
+            root=endpoint_root(plan)/self.profile.instance_id/'git'
             self._socket_identities={}
             for kind in ('request','worker'):
                 endpoint=root/(kind+'.sock')
                 require(resource_dict['git_'+kind+'_path']==str(endpoint),'fixed endpoint differs')
                 lease=EndpointLease(endpoint,owner=HOST_UID,group=RUNTIME_UID)
                 fd=resource_dict['git_'+kind+'_fd'];require(type(fd) is int and fd>=3,'inherited listener required')
-                listener=socket.socket(fileno=fd);self._listeners.append(listener)
+                listener=socket.socket(fileno=os.dup(fd) if local_profile(plan) is not None else fd);self._listeners.append(listener)
                 require(listener.family==socket.AF_UNIX and listener.type==socket.SOCK_SEQPACKET
                     and listener.getsockname()==str(endpoint)
                     and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)==(0 if kind=='request' else 1),'prebound listener differs')
@@ -315,7 +346,7 @@ class NativeGitResources:
     def _verify_container(self,value,resources):
         base=[(p,p,k!='reference') for k,p in self.plan.room['project']['roots'].items() if k in ('repo','workspace','reference','checkouts')]
         runtime=self.plan.room['state_root']+'/runtime';peer=str(Path(resources['peer_path']).parent)
-        require(peer==str(ENDPOINT_ROOT/self.profile.instance_id/'peer'),'peer mount differs')
+        require(peer==str(endpoint_root(self.plan)/self.profile.instance_id/'peer'),'peer mount differs')
         expected=set(base+[(runtime,runtime,True),(peer,peer,False)]+list(self.profile.mount_tuples()))
         if 'gate_manifest' in self.plan.installation:
             from .native_gate_resources import gate_mounts

@@ -32,7 +32,8 @@ class LocalController:
         if selected['native'] is not None:
             self.native = native_factory(self.config, selected['native'],
                 Path(self.config['deployment']['state_root']),
-                authorize=self.authorize, revoke=self.revoke)
+                authorize=self.authorize, revoke=self.revoke,
+                runtimeplans={room:installation.runtime_plan_for for room in self.value.get('runtime',{})})
 
     def authorize(self, action, room_id, instance):
         return os.geteuid() == 0 and room_id in self.rooms and action in {'start', 'stop'}
@@ -60,7 +61,8 @@ class LocalController:
             result = self.native.start(room)
             owner, backend, state = self.native.resources(room)
             service = self.services.ensure(room, owner, backend, state)
-            manager = self.manager.ensure(room, owner, backend, state) if self.manager else {'status':'not-configured'}
+            manager = ({'status':'owned-by-runtime-child'} if service.get('manager_owner') in {'runtime','unknown'} else
+                       self.manager.ensure(room, owner, backend, state) if self.manager else {'status':'not-configured'})
             return {**result, 'services': service, 'manager':manager}
         if action == 'stop':
             return self.native.stop(room)

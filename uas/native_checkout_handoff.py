@@ -251,6 +251,10 @@ class RootCheckoutHandoff:
                 and type(resources._supervisor) is Supervisor
                 and type(child) is subprocess.Popen and resources._child is child,
                 'CHECKOUT_ROOT_OWNER_REQUIRED')
+        self._initialize(plan, resources, child, channel, deadline=deadline)
+
+    def _initialize(self, plan, resources, child, channel, *, deadline):
+        # Called only after the qualification or explicit local owner proof.
         remaining(deadline)
         self.plan, self.resources, self.child, self.channel = plan, resources, child, channel
         self.owner, self.deadline = resources._supervisor, deadline
@@ -338,7 +342,12 @@ class RootCheckoutHandoff:
     def _gate_quota(self, evaluation):
         from .native_qualification_backend import NativeQualificationBackend
         backend = self.owner.backend
-        require(type(backend) is NativeQualificationBackend, 'GATE_QUOTA_BACKEND_REQUIRED')
+        local = False
+        if type(backend) is not NativeQualificationBackend:
+            from .local_native import LocalNativeBackend
+            from .local_runtime_resources import LocalRootCheckoutHandoff
+            local = type(self) is LocalRootCheckoutHandoff and type(backend) is LocalNativeBackend
+        require(type(backend) is NativeQualificationBackend or local, 'GATE_QUOTA_BACKEND_REQUIRED')
         with self.owner._locked(deadline=self.deadline):
             lifecycle, before = self._quota_snapshot(evaluation)
             pins = getattr(self, '_gate_evaluation_pins', {})

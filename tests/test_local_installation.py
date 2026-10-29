@@ -172,3 +172,48 @@ class LocalInstallationTests(unittest.TestCase):
             replace.assert_called_once()
         self.assertEqual((self.install.root/'installation.json').read_bytes(),before)
         self.assertEqual(list(self.install.root.glob('.manager-selection-*')),[])
+
+    def runtime_reference(self):
+        from test_native_qualification import NativeQualificationTests
+        source=NativeQualificationTests();source.setUp()
+        self.project.write_text(json.dumps(source.config));self.value['project']=self.ref(self.project)
+        native=self.root/'native.json';native.write_text(json.dumps(native_selection(source.config)))
+        self.value['native']=self.ref(native)
+        value={'version':1,'profile':'local-runtime-v1','room_id':'alpha','installation_id':'a'*32,
+               'human_mergers':[7],**{k+'_manifest':{'path':'/installation/'+k+'.json','sha256':'b'*64}
+                                   for k in ('pi','claude','broker')}}
+        target=self.root/'runtime-choice.json';fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as out:json.dump(value,out)
+        return self.ref(target)
+    def test_optional_runtime_selection_is_backward_compatible_and_bound_before_create(self):
+        from uas.local_native import LocalNativeHost
+        ref=self.runtime_reference();self.install.setup(self.raw());before=self.install.open()[0]
+        self.assertNotIn('runtime',before)
+        self.assertEqual(self.install.select_runtime('alpha',ref)['status'],'selected')
+        value,config,selected=self.install.open()
+        self.assertEqual(value['project'],before['project']);self.assertEqual(value['native'],before['native'])
+        self.assertEqual(value['manager'],before['manager']);self.assertEqual(value['runtime'],{'alpha':ref})
+        native=LocalNativeHost(config,selected['native'],config['deployment']['state_root'],
+            authorize=lambda *_:True,revoke=lambda *_:False,runtimeplans={'alpha':self.install.runtime_plan_for})
+        from uas.lifecycle import Supervisor
+        def root_constructor(*args,**kwargs):
+            with patch('uas.lifecycle.os.geteuid',return_value=0):return Supervisor(*args,**kwargs)
+        with patch('uas.local_native.Supervisor',side_effect=root_constructor):
+            owner,backend=native._owner('alpha')
+        plan=backend.profile.runtime_plan
+        self.assertIs(plan.native_profile,backend.profile)
+        self.assertEqual(plan.installation_digest,ref['sha256'])
+        self.assertNotEqual(backend.profile.spec().profile_digest,'sha256:'+backend.profile.digest)
+        self.assertIs(self.install.runtime_plan_for(backend.profile),plan)
+        self.assertEqual(self.install.select_runtime('alpha',ref)['status'],'already-selected')
+    def test_runtime_reconfiguration_after_instance_creation_is_refused_before_write(self):
+        ref=self.runtime_reference();self.install.setup(self.raw());before=(self.install.root/'installation.json').read_bytes()
+        original=os.path.lexists
+        with patch('uas.local_installation.os.path.lexists',side_effect=lambda p: True if str(p).endswith('/lifecycle.json') else original(p)):
+            with self.assertRaisesRegex(LocalInstallationError,'UNCREATED_ROOM'):
+                self.install.select_runtime('alpha',ref)
+        self.assertEqual((self.install.root/'installation.json').read_bytes(),before)
+    def test_runtime_selection_unknown_room_or_missing_native_rejected(self):
+        ref=self.runtime_reference();self.value['native']=None;self.value['runtime']={'alpha':ref}
+        with self.assertRaisesRegex(LocalInstallationError,'LOCAL_RUNTIME_NATIVE_REQUIRED'):self.install.setup(self.raw())
+        self.assertFalse(self.install.root.exists())

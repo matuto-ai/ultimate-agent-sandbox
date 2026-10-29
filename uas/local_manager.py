@@ -47,6 +47,30 @@ execute:request=>packet('execute',request), inspect:request=>packet('inspect',re
 })();</script>'''
 
 
+# A manual submission, never an automatic admission retry. The correlation stays
+# fixed after any error; the user explicitly clears it for a different request.
+OPEN_CLIENT = """<script>
+(function(){
+const form=document.createElement('form');form.id='native-open-run';
+form.innerHTML='<h2>Open native Run</h2><p>One bounded request: initial Run and optional preselected successor. Later separate Runs are not supported by this host epoch.</p><label>Issue number <input name="issue" type="number" min="1" max="9999999999" required></label> <label>Optional next issue <input name="nextissue" type="number" min="1" max="9999999999"></label> <button type="submit">Open Run</button> <button type="button" name="clear">New request</button><p role="status"></p>';
+const issue=form.elements.issue,send=form.querySelector('[type=submit]'),clear=form.elements.clear,status=form.querySelector('[role=status]');
+let operation=null,selected=null,nextOperation=null,nextSelected=null,busy=false;
+clear.onclick=()=>{if(busy)return;operation=null;selected=null;nextOperation=null;nextSelected=null;issue.disabled=false;form.elements.nextissue.disabled=false;status.textContent='New request. No action sent.';};
+form.onsubmit=async(event)=>{event.preventDefault();if(busy)return;
+const number=Number(issue.value);if(!Number.isSafeInteger(number)||number<1||number>9999999999)return;
+if(operation===null){operation=crypto.randomUUID();selected=number;const next=Number(form.elements.nextissue.value);if(form.elements.nextissue.value){if(!Number.isSafeInteger(next)||next<1||next>9999999999||next===number){operation=null;return;}nextSelected=next;nextOperation=crypto.randomUUID();}}
+if(selected!==number){status.textContent='Use New request to change the issue.';return;}
+busy=true;form.elements.nextissue.disabled=true;send.disabled=true;clear.disabled=true;issue.disabled=true;
+status.textContent='Running bounded native operation. Keep this page open. Operation '+operation;
+try{const response=await fetch('/uas/human-action/v1',{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({version:1,action:'open-run',payload:{operation_id:operation,issue_number:selected,...(nextOperation?{next_operation_id:nextOperation,next_issue_number:nextSelected}:{})}})});
+const result=await response.json();if(!response.ok)throw Error('unconfirmed');
+status.textContent='Operation '+operation+': '+result.status+'; Run '+result.run_id+'; generation '+result.generation+(result.outcome?'; outcome '+result.outcome:'');
+}catch(_){status.textContent='Outcome unconfirmed. Operation '+operation+'. No automatic retry. Inspect the Run before explicitly retrying this same request.';}
+finally{busy=false;send.disabled=false;clear.disabled=false;}};
+document.body.appendChild(form);
+})();</script>"""
+
+
 class LocalManager:
     """Use `serve(listener, tls_context, stopped)` on the trusted owner thread.
 
@@ -55,7 +79,7 @@ class LocalManager:
     whose authenticate callback consumes the provided HumanSession context.
     There is no default grant and no browser-selected owner or filesystem path.
     """
-    def __init__(self, bindings, document_for, *, authority, action_host_for=None):
+    def __init__(self, bindings, document_for, *, authority, action_host_for=None, run_actions=None, current=None):
         if type(bindings) is not HumanActionBindings or not callable(document_for):
             raise LedgerError('LOCAL_MANAGER_BINDINGS_REQUIRED')
         if action_host_for is not None and not callable(action_host_for):
@@ -64,6 +88,14 @@ class LocalManager:
                 not re.fullmatch(r'(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}', authority) or
                 not 1 <= int(authority.rsplit(':',1)[1]) <= 65535):
             raise LedgerError('LOCAL_MANAGER_AUTHORITY_REQUIRED')
+        if run_actions is not None:
+            from .local_manager_actions import LocalNativeRunActions
+            if type(run_actions) is not LocalNativeRunActions:
+                raise LedgerError('LOCAL_NATIVE_RUN_ACTIONS_REQUIRED')
+        if current is not None and not callable(current):
+            raise LedgerError('LOCAL_MANAGER_CURRENT_REQUIRED')
+        self.current = current
+        self.run_actions = run_actions
         self.bindings, self.document_for = bindings, document_for
         self.authority, self.action_host_for = authority, action_host_for
         self._thread = threading.get_ident()
@@ -119,10 +151,11 @@ class LocalManager:
 
     def handle(self, channel):
         """Handle one request on an established TLS socket; caller closes it."""
-        self._owner(); connection = None
+        self._owner(); connection = None; action_attempted = False
         try:
             # Even the public loader requires a registered client certificate;
             # its actual data request separately receives request-scoped authority.
+            if self.current is not None: self.current()
             connection = self.bindings.accept(channel)
             value = self._read(channel)
             if value is None:
@@ -140,7 +173,17 @@ class LocalManager:
                     html=document.render()
                     if self.action_host_for is not None:
                         html=html.replace('</body>',ACTION_CLIENT+'</body>')
+                    # Rendering availability is not action authority: an observe
+                    # session cannot authorize open-run. The later POST must
+                    # obtain its own exact request scope from the same binding.
+                    connection._current()
+                    if (self.run_actions is not None and
+                            {'open-run','authorize-run-request'}.issubset(connection._grant.actions)):
+                        html=html.replace('</body>',OPEN_CLIENT+'</body>')
                     result={'status':'available','html':html}
+                elif frame['action']=='open-run' and self.run_actions is not None:
+                    action_attempted = True
+                    result=self.run_actions.open(payload,session)
                 elif self.action_host_for is not None:
                     host=self.action_host_for(session)
                     if type(host) is not FieldNotesActionHost:
@@ -152,10 +195,14 @@ class LocalManager:
                     result=host.handle(_json(payload).encode(),context=session)
                 else:
                     raise LedgerError('LOCAL_MANAGER_ACTIONS_UNAVAILABLE')
-                if not session.allowed('observe'): raise LedgerError('LOCAL_MANAGER_AUTHENTICATION_REVOKED')
+                if self.current is not None: self.current()
+                if not session.allowed(frame['action']): raise LedgerError('LOCAL_MANAGER_AUTHENTICATION_REVOKED')
                 self._send(channel,'200 OK',_json(result).encode())
         except (LedgerError,ValueError,UnicodeError,OSError):
-            self._send(channel,'403 Forbidden',b'{"status":"unavailable"}')
+            if action_attempted:
+                self._send(channel,'503 Service Unavailable',b'{"status":"unavailable","outcome":"unknown"}')
+            else:
+                self._send(channel,'403 Forbidden',b'{"status":"unavailable"}')
         except Exception:
             # No owner details or blind retry after an uncertain action outcome.
             self._send(channel,'503 Service Unavailable',b'{"status":"unavailable","outcome":"unknown"}')
@@ -284,9 +331,16 @@ class ManagerSelection:
         for filename in tls.values(): path(filename)
         return cls(authority,value['client_certificate_sha256'],grant,tuple(sorted(tls.items())),configuration_sha256)
 
-    def manager(self, document_for, *, action_host_for=None):
+    def manager(self, document_for, *, action_host_for=None, run_actions=None, current=None):
         return LocalManager(HumanActionBindings({self.fingerprint:self.grant}),document_for,
-                            authority=self.authority,action_host_for=action_host_for)
+                            authority=self.authority,action_host_for=action_host_for,run_actions=run_actions,current=current)
+
+    def require_unchanged(self, reference):
+        """Revalidate only this existing selected descriptor, not root installation."""
+        observed=type(self).read(reference,deployment_id=self.grant.deployment_id,
+            room_id=self.grant.room_id,instance_id=self.grant.instance_id,
+            configuration_sha256=self.configuration_sha256)
+        _require(observed==self,'LOCAL_MANAGER_SELECTION_CHANGED')
 
     def tls_context(self):
         """Load existing credentials by held nofollow FD, never return their bytes."""

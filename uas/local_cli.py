@@ -25,7 +25,8 @@ def run_host(installation):
     previous = {}
     def stop(*_): stopped.set()
     with host_lock(installation) as lock_fd:
-        services = LocalServices(lock_fd)
+        services = LocalServices(lock_fd, runtime_plan_for=installation.runtime_plan_for,
+            manager_reference_for=lambda profile:installation.open()[0]['manager'])
         manager = ManagerOwner(installation)
         controller = LocalController(installation, LocalNativeHost, services=services, host_lock_fd=lock_fd, manager=manager)
         try:
@@ -54,6 +55,9 @@ def main(argv=None):
     commands = parser.add_subparsers(dest='operation', required=True)
     setup = commands.add_parser('setup', help='persist explicit digest-pinned references once')
     setup.add_argument('selection', help='installation selection JSON, no secrets')
+    runtime = commands.add_parser('select-runtime', help='select pinned runtime bindings before first Room start')
+    runtime.add_argument('--room', required=True)
+    runtime.add_argument('reference', help='JSON path/sha256 reference, no secrets')
     manager = commands.add_parser('select-manager', help='select an existing Manager grant while host is stopped')
     manager.add_argument('reference', help='JSON object containing path and sha256, not credentials')
     commands.add_parser('inspect', help='offline inspection without native effects')
@@ -67,6 +71,9 @@ def main(argv=None):
         if args.operation == 'setup':
             with open(args.selection, 'rb') as source: raw = source.read(1048577)
             result = installation.setup(raw)
+        elif args.operation == 'select-runtime':
+            with open(args.reference, 'rb') as source: reference = document(source.read(1048577))
+            result = installation.select_runtime(args.room, reference)
         elif args.operation == 'select-manager':
             with open(args.reference, 'rb') as source: reference = document(source.read(1048577))
             result = installation.select_manager(reference)

@@ -10,7 +10,8 @@ An offline installation can validate and persist a Project configuration and
 show what is missing. With the native host profile prepared, it can start the
 Workstation and an authenticated **idle** Hub, stop the Workstation without
 removing the Room's data, and restart it. Participant/provider execution is not
-claimed by idle infrastructure readiness. The optional local Manager displays
+claimed by idle infrastructure readiness. Selecting runtime bindings enables a
+bounded authenticated native Run operation through the Manager Issue form. The optional local Manager displays
 real Room projections through the existing mutually authenticated TLS grant;
 without that grant it stays unavailable, not anonymously authenticated.
 
@@ -60,7 +61,9 @@ effect of setup.
 The optional `local-manager-v1` descriptor selects an existing protected human
 grant, exact Room instance/configuration digest, loopback authority and existing
 TLS file references. It does not generate credentials or trust arbitrary browser
-clients. Manager-only observation has no mutation action owner. After first startup,
+clients. An installation without runtime bindings is observation-only. With runtime
+bindings, the Manager dispatches into the existing native Run admission, Pi
+implementation and Claude reviewer owners on the same authenticated thread. After first startup,
 inspect the actual Room instance, stop the foreground host, and select the
 existing Manager descriptor reference explicitly:
 
@@ -104,3 +107,42 @@ The source tests use controlled process/Engine/network doubles and real local
 ledger projections. They do not establish that a user's host has the required
 native policy. Real native startup, image rebuild/import, personal accounts and
 provider/Git integration belong to the explicitly authorized final local test.
+
+
+## Enable the native Run path
+
+Before first starting a Room, select its `local-runtime-v1` descriptor using
+`local --root … select-runtime --room ROOM runtime-reference.json`. The reference
+again contains only `path` and `sha256`. The descriptor binds the existing Pi and
+Claude manifests, Forge broker metadata and approved human mergers; Git and Gate
+bindings use the existing paired manifests. Credential values are not copied.
+Runtime selections change required mounts, so changing them after Room creation
+is refused rather than silently reusing incompatible resources.
+
+The first start may report `waiting-for-manager`: it establishes the actual Room
+instance without starting brokers or models. Stop the host, select the existing
+Manager grant for that instance, then restart. The Manager's Issue form uses one
+operation ID and does not automatically retry an uncertain operation.
+
+Each explicit native operation retains its original authenticated HTTP request
+through admission, reviewer recruitment and the existing native session driver.
+The operation budget is at most 180 seconds (the host itself has no such expiry).
+A returned `finished` receipt is paired with `completed`, `attention`, `unknown`
+or `inconclusive`; `finished` alone never means the issue was completed. No
+request-scoped human session survives the response. The form supports one initial Run and an optional **preselected next issue**
+within that same authenticated request and operation budget. The existing
+retirement/reset path runs only after verified completion of the first Run. If
+the remaining budget is insufficient, the successor is not started and the
+receipt is inconclusive. A later separate Issue click is explicitly refused;
+this is not an indefinitely reusable background authority.
+
+Normal Stop sends a fixed pause to the retained child and requires its exact
+participant-revocation receipt before stopping the Workstation. The Hub and data
+remain. Missing/uncertain receipts are reported as such, never retried blindly.
+Actual accounts, native execution, browser TLS and provider integration remain
+part of the final authorized local test, not claims established by source tests.
+
+Absent protected Actor/Broker credential files leave the Hub available and
+report `missing-credentials`; they do not start broker processes. Malformed,
+changed or uncertain bindings still fail closed rather than masquerading as
+ordinary absence. Existing Manager observation remains available.
