@@ -111,7 +111,8 @@ class LocalServices:
                    'control_path':str(layout['control']/'hub.sock'),
                    'mapping_digest':mapping_digest(workstation['State']['Pid']),
                    'peer_fd':fds[0],'control_fd':fds[1]}
-        document={'version':1,'room':backend.profile.room,'resources':resources}
+        host_profile=backend.profile.host_profile
+        document={'version':2,'room':backend.profile.room,'resources':resources,'host_profile':host_profile.document()}
         runtime_plan=None if self.runtime_plan_for is None else self.runtime_plan_for(backend.profile)
         extra_fds=[];extra_groups=[]
         manager_reference=None if self.manager_reference_for is None else self.manager_reference_for(backend.profile)
@@ -136,7 +137,7 @@ class LocalServices:
                 'resources':{k:v for k,v in data.items() if k not in {'broker_fd','checkout_fd','git_fd'}}}
             if 'gate_manifest' in runtime_plan.installation:extra_groups=[165530]
         raw=_canonical(document)+b'\n';require(len(raw)<=2*1048576,'LOCAL_HUB_STARTUP_SIZE')
-        docker_group=os.stat('/run/docker.sock').st_gid
+        docker_group=os.stat(host_profile.socket).st_gid
         process=subprocess.Popen([sys.executable,'-m','uas.local_hub_host'],
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
             user=165533,group=165533,extra_groups=[165531,docker_group]+extra_groups,

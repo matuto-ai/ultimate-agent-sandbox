@@ -105,9 +105,7 @@ def apply(plan):
     """
     require(os.geteuid() == 0, 'HOST_APPLY_ROOT_REQUIRED')
     profile = LocalHostProfile.parse(plan['profile'])
-    require(profile.mode == 'reuse' and profile.offset == 100000 and profile.size == 65536
-            and profile.remap_user == 'uas-remap' and profile.socket == '/run/docker.sock'
-            and profile.data_root == '/var/lib/docker' and profile.exec_root == '/run/docker',
+    require(profile.mode == 'reuse' and profile.offset == 100000 and profile.size == 65536,
             'HOST_APPLY_PROFILE_INTEGRATION_REQUIRED')
     require(type(plan.get('operations')) is list and len(plan['operations']) == 2
             and [op.get('kind') for op in plan['operations']] ==

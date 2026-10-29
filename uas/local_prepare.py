@@ -157,12 +157,13 @@ def verified_output(directory,revision,*,hub):
 
 
 def assemble(config,settings,workstation,hub,*,observe=directory_identity):
-    require(type(settings) is dict and set(settings)=={'version','installation_id','storage_root',
-            'endpoints_root','engine_version','mapping','rooms'} and type(settings['version']) is int
-            and settings['version']==1,'exact host selections required')
+    require(type(settings) is dict and type(settings.get('version')) is int
+            and settings['version'] in (1,2), 'exact host selections required')
+    require(set(settings)==({'version','installation_id','storage_root','endpoints_root','engine_version','mapping','rooms'}
+            | ({'host_profile'} if settings['version']==2 else set())), 'exact host selections required')
     require(type(settings['rooms']) is dict and set(settings['rooms'])=={r['id'] for r in config['rooms']},
             'host selections must cover every Project Room exactly')
-    native={**deepcopy(settings),'profile':'local-native-v1','rooms':{}}
+    native={**deepcopy(settings),'profile':'local-native-v'+str(settings['version']),'rooms':{}}
     storage_identity=observe(settings['storage_root'])
     observe(settings['endpoints_root'])
     for room in config['rooms']:

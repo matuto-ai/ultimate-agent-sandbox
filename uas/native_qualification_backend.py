@@ -49,10 +49,13 @@ def exact(value, fields, code):
     return value
 
 
-def fixed_docker(arguments, *, timeout, missing_ok=False):
+def fixed_docker(arguments, *, timeout, missing_ok=False, socket_path="/run/docker.sock"):
     """Fixed trusted Engine endpoint; no ambient Docker context/config override."""
+    require(type(socket_path) is str and re.fullmatch(r'/[A-Za-z0-9_./-]+',socket_path)
+            and str(Path(socket_path))==socket_path and '..' not in Path(socket_path).parts
+            and socket_path!='/', 'ENGINE_SOCKET')
     try:
-        result = subprocess.run(['/usr/bin/docker','--host','unix:///run/docker.sock',*arguments],
+        result = subprocess.run(['/usr/bin/docker','--host','unix://'+socket_path,*arguments],
             capture_output=True,text=True,timeout=timeout,check=False,
             env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C','HOME':'/nonexistent',
                  'DOCKER_CONFIG':'/nonexistent'})
@@ -492,27 +495,32 @@ class NativeQualificationBackend(DockerFixtureBackend):
         else:
             raise LifecycleError('NATIVE_RESOURCE_KIND')
 
+    def engine_selection(self):
+        return {'version':'29.8.2','docker_root':'/var/lib/docker/100000.100000',
+                'remap_user':'uas-remap','offset':100000,'size':65536}
+
     def admit(self, state):
         self._guard(); self._binding(state); self.profile.observe_storage()
         self._network_policy(state)
         value = self._inspect_object(state, 'container')
         require(value is not None, 'CONTAINER_REQUIRED')
+        selected=self.engine_selection()
         security = json.loads(self._run(['info', '--format', '{{json .SecurityOptions}}']))
-        require(self._run(['version','--format','{{.Server.Version}}']).strip()=='29.8.2','ENGINE_PROFILE')
+        require(self._run(['version','--format','{{.Server.Version}}']).strip()==selected['version'],'ENGINE_PROFILE')
         require(type(security) is list and {'name=seccomp,profile=builtin', 'name=selinux', 'name=userns'}
                 <= set(security), 'DAEMON_CONFINEMENT')
         require(self._run(['info', '--format', '{{.DockerRootDir}}']).strip() ==
-                '/var/lib/docker/100000.100000', 'USERNS_MAPPING')
+                selected['docker_root'], 'USERNS_MAPPING')
         for name in ('subuid', 'subgid'):
-            rows = [line for line in Path('/etc/' + name).read_text().splitlines() if line.startswith('uas-remap:')]
-            require(rows == ['uas-remap:100000:65536'], 'USERNS_MAPPING')
+            rows = [line for line in Path('/etc/' + name).read_text().splitlines() if line.startswith(selected['remap_user']+':')]
+            require(rows == [selected['remap_user']+':'+str(selected['offset'])+':'+str(selected['size'])], 'USERNS_MAPPING')
         self.validate_container(state, value)
         if value['State']['Running']:
             pid = value['State'].get('Pid')
             require(type(pid) is int and pid > 0, 'KERNEL_MAPPING')
             for name in ('uid_map', 'gid_map'):
                 require(Path('/proc/' + str(pid) + '/' + name).read_text().split() ==
-                        ['0', '100000', '65536'], 'KERNEL_MAPPING')
+                        ['0', str(selected['offset']), str(selected['size'])], 'KERNEL_MAPPING')
         return value
 
     def validate_container(self, state, value):

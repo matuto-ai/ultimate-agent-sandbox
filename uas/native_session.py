@@ -262,7 +262,8 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
     else: supervisor = readonly_supervisor(plan, resources)
     room, instance = plan.room, resources['instance']
     journal = Path(resources['supervisor_directory'])
-    engine = DockerExecAPI('/run/docker.sock')
+    engine = DockerExecAPI(plan.native_profile.host_profile.socket
+                           if local_host is not None else '/run/docker.sock')
     peer_lease = EndpointLease(resources['peer_path'], owner=HOST_UID, group=RUNTIME_UID)
     admissions = []
     with ExitStack() as stack, admission_cleanup(admissions):

@@ -43,7 +43,7 @@ class ApplyTests(unittest.TestCase):
              patch('uas.local_host_apply.owned_directory', side_effect=AssertionError('effect forbidden')):
             with self.assertRaisesRegex(HostProfileError, 'UNSUPPORTED_OPERATION'): apply(p)
 
-    def test_unintegrated_engine_profile_refused_before_observer(self):
+    def test_selected_engine_profile_reaches_exact_observer(self):
         for field,value in (('socket','/run/another.sock'),('exec_root','/run/another'),
                             ('data_root','/var/lib/another')):
             doc=profile();doc['engine'][field]=value
@@ -51,8 +51,18 @@ class ApplyTests(unittest.TestCase):
             if field=='data_root':o['engine']['docker_root']=value+'/100000.100000'
             p=selected(p=doc,o=o)
             with patch('uas.local_host_apply.os.geteuid',return_value=0), \
-                 patch('uas.local_host_apply.inspect',side_effect=AssertionError('must not observe')):
-                with self.assertRaisesRegex(HostProfileError,'PROFILE_INTEGRATION_REQUIRED'): apply(p)
+                 patch('uas.local_host_apply.inspect',side_effect=RuntimeError('selected observer')) as observe:
+                with self.assertRaisesRegex(RuntimeError,'selected observer'):apply(p)
+                self.assertEqual(observe.call_args.args[0],doc)
+
+    def test_unintegrated_mapping_refused_before_observer(self):
+        doc=profile();doc['mapping']['offset']=200000
+        o=observation();o['subuid']=[doc['mapping']];o['subgid']=[doc['mapping']]
+        o['engine']['docker_root']='/var/lib/docker/200000.200000'
+        p=selected(p=doc,o=o)
+        with patch('uas.local_host_apply.os.geteuid',return_value=0), \
+             patch('uas.local_host_apply.inspect',side_effect=AssertionError('must not observe')):
+            with self.assertRaisesRegex(HostProfileError,'PROFILE_INTEGRATION_REQUIRED'):apply(p)
 
     def test_fake_first_apply_then_confirmed_resume(self):
         evidence={'identity':[3,22],'observed_sha256':'b'*64}

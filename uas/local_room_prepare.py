@@ -37,7 +37,9 @@ def request(host_plan, config, settings, workstation, hub):
     def planned_identity(path):
         if path not in declared: declared[path] = [1,len(declared)+1]
         return declared[path]
-    assemble(config, settings, workstation, hub, observe=planned_identity)
+    native=assemble(config, settings, workstation, hub, observe=planned_identity)
+    from .local_native import selected_host
+    require(selected_host(native).document()==host_plan['profile'], 'ROOM_ENGINE_BINDING')
     root = Path(settings['storage_root'])
     paths = [Path(p) for room in config['rooms'] for p in
              [*room['project']['roots'].values(),room['state_root']+'/runtime']]

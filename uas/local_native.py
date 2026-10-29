@@ -56,11 +56,33 @@ def image(value, *, hub=False):
     if hub: require(value['entrypoint']==LOCAL_HUB_COMMAND,'LOCAL_NATIVE_HUB_COMMAND')
 
 
+def selected_host(document):
+    """Resolve versioned endpoint selection; never use ambient Docker context."""
+    from .local_host_profile import LocalHostProfile
+    if document.get('version')==2:
+        selected=LocalHostProfile.parse(document['host_profile'])
+        require(selected.installation_id==document['installation_id']
+                and selected.engine_version==document['engine_version']
+                and {'offset':selected.offset,'size':selected.size}==document['mapping'],
+                'LOCAL_NATIVE_HOST_BINDING')
+    else:
+        selected=LocalHostProfile.parse({'version':1,'profile':'local-host-v1',
+            'installation_id':document['installation_id'],'mode':'reuse',
+            'engine':{'version':'29.8.2','socket':'/run/docker.sock','data_root':'/var/lib/docker','exec_root':'/run/docker'},
+            'mapping':{'user':'uas-remap','offset':100000,'size':65536}})
+    # Endpoint/data-root selection is usable independently. Offset changes must
+    # not enter until broker/Gate/Hub SO_PEERCRED and ownership all consume them.
+    require(selected.offset==100000 and selected.size==65536,'LOCAL_NATIVE_MAPPING_INTEGRATION_REQUIRED')
+    return selected
+
+
 def validate_document(document):
     """Pure shape/policy validation, never a claim about the selected machine."""
-    require(type(document) is dict and set(document)==FIELDS,'LOCAL_NATIVE_PROFILE')
-    require(type(document['version']) is int and document['version']==1
-            and document['profile']=='local-native-v1','LOCAL_NATIVE_PROFILE')
+    require(type(document) is dict,'LOCAL_NATIVE_PROFILE')
+    version=document.get('version')
+    require(type(version) is int and version in (1,2) and
+            set(document)==(FIELDS if version==1 else FIELDS|{'host_profile'})
+            and document['profile']=='local-native-v'+str(version),'LOCAL_NATIVE_PROFILE')
     require(type(document['installation_id']) is str
             and re.fullmatch(r'[0-9a-f]{32}',document['installation_id']),'LOCAL_NATIVE_INSTALLATION')
     storage,endpoints=path(document['storage_root']),path(document['endpoints_root'])
@@ -69,6 +91,10 @@ def validate_document(document):
     require(len(str(endpoints).encode())+len('/'+'0'*32+'/control/hub.sock')<108,'LOCAL_NATIVE_SOCKET_PATH')
     require(document['engine_version']=='29.8.2'
             and document['mapping']=={'offset':100000,'size':65536},'LOCAL_NATIVE_ENGINE_PROFILE')
+    host=selected_host(document)
+    require(all(Path(root)!=Path(engine) and Path(root) not in Path(engine).parents and Path(engine) not in Path(root).parents
+                for root in (document['storage_root'],document['endpoints_root'])
+                for engine in (host.socket,host.data_root,host.exec_root)), 'LOCAL_NATIVE_ENGINE_PATH_OVERLAP')
     rooms=document['rooms']; require(type(rooms) is dict and 1<=len(rooms)<=64,'LOCAL_NATIVE_ROOMS')
     quotas=set();levels=set();networks=[];all_paths=[]
     for room_id,row in rooms.items():
@@ -104,6 +130,7 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     def __init__(self, config, document, room_id, control_root):
         document=validate_document(document)
         self.native_document=deepcopy(document)
+        self.host_profile=selected_host(document)
         require(type(config) is dict and type(config.get('rooms')) is list,'LOCAL_NATIVE_CONFIG')
         selected=[r for r in config['rooms'] if r['id']==room_id]
         require(len(selected)==1 and room_id in document['rooms'],'LOCAL_NATIVE_ROOM')
@@ -187,6 +214,15 @@ class LocalNativeBackend(native.NativeQualificationBackend):
 
     def _guard(self, *, require_selinux=True):
         self.profile.guard(require_selinux=require_selinux)
+
+    def _run(self,arguments,*,missing_ok=False):
+        return native.fixed_docker(arguments,timeout=self.timeout,missing_ok=missing_ok,
+                                   socket_path=self.profile.host_profile.socket)
+
+    def engine_selection(self):
+        host=self.profile.host_profile
+        return {'version':host.engine_version,'docker_root':host.docker_root,
+                'remap_user':host.remap_user,'offset':host.offset,'size':host.size}
 
     def ensure_hub(self,state):
         self._guard();self._binding(state)
