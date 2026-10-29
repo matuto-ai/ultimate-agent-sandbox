@@ -36,13 +36,20 @@ class LocalController:
                 runtimeplans={room:installation.runtime_plan_for for room in self.value.get('runtime',{})})
 
     def authorize(self, action, room_id, instance):
-        return os.geteuid() == 0 and room_id in self.rooms and action in {'start', 'stop'}
+        return os.geteuid() == 0 and room_id in self.rooms and action in {'start', 'stop', 'checkout.allocate', 'checkout.status', 'checkout.release', 'checkout.reserve'}
 
     def revoke(self, instance, scope):
         # Actual service owner decides; never infer revocation from a PID or a flag.
         return self.services.revoke(instance, scope) is True
 
     def handle(self, raw):
+        from .local_services import LocalServices
+        if type(self.services) is LocalServices:
+            with self.services.operation_lock:
+                return self._handle(raw)
+        return self._handle(raw)
+
+    def _handle(self, raw):
         require(type(raw) is bytes and 0 < len(raw) <= MAX_REQUEST, 'REQUEST_SIZE')
         request = document(raw)
         require(set(request) == {'action', 'room_id'} and request['action'] in {'start','status','stop'}

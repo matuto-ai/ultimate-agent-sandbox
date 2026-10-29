@@ -7,11 +7,12 @@ from copy import deepcopy
 import hashlib
 import time
 
-from .context import FixtureContextHub, FixtureRun
+from .context import FixtureContextHub, FixtureRun, MAX_CONTEXT_GENERATION
 from .ledger import Command, LedgerError
 from .claude_native_admission import NativeClaudeRoot
 from .native_claude_retirement import NativeClaudeRetirement
 from .native_helper import NativeDescendantLease
+from .native_completed_retirement import retirement_supported, require_retired, preceding_scope, retirement_for
 
 
 class _NativeResetContexts(FixtureContextHub):
@@ -51,9 +52,11 @@ class NativeReviewerReset:
         participant=owner.selected['participant']
         row=state['fixture_context']['participants'][participant]
         preceding=row['bound_run'] or row['reserved_run']
+        if (type(row.get('context_generation')) is not int
+                or not 1 <= row['context_generation'] < MAX_CONTEXT_GENERATION):
+            raise LedgerError('CONTEXT_GENERATION_EXHAUSTED')
         if (row['status']!='READY' or not preceding or preceding['run_id']==owner._pin['run_id']
                 or root.scope['run_id']!=preceding['run_id']
-                or root.scope['generation']!=preceding['generation']
                 or root.scope['context_generation']!=row['context_generation']
                 or state['fixture_context']['runs'].get(preceding['run_id'],{}).get('status')!='CLOSED'
                 or state.get('runs',{}).get(preceding['run_id'],{}).get('status')!='CLOSED'):
@@ -61,16 +64,19 @@ class NativeReviewerReset:
         self.owner,self.previous=owner,previous
         self.completed=None
         stopped=state['runs'][preceding['run_id']].get('native_stop') or {}
-        candidate=(owner.owner._completed_retirements.get(stopped.get('operation_id'))
-                   if isinstance(stopped,dict) else None)
+        candidate=retirement_for(owner.owner,stopped)
         if candidate is not None:
             from .native_completed_retirement import NativeCompletedRetirement
-            if (type(candidate) is not NativeCompletedRetirement or candidate.owner is not owner.owner
+            if (not retirement_supported(candidate) or candidate.owner is not owner.owner
                     or candidate.reviewer is not previous or candidate.run_id!=preceding['run_id']
                     or candidate.owners.get(participant) is not root
                     or type(candidate.retirements.get(participant)) is not NativeClaudeRetirement):
                 raise LedgerError('NATIVE_RESET_OWNERS_REQUIRED')
             self.completed=candidate
+        canonical_scope=preceding_scope(candidate,participant) if candidate is not None else root.scope
+        if canonical_scope != {'room_id':owner.ledger.room_id,'participant_id':participant,
+                               **preceding,'context_generation':row['context_generation']}:
+            raise LedgerError('PRECEDING_RUN_OPEN')
         # Proven completed retirement permits LOST, never a replacement attachment.
         self.old_current(state)
         self.preceding=deepcopy(preceding)
@@ -94,7 +100,7 @@ class NativeReviewerReset:
         root=self.previous.root
         if self.completed is None:
             return root.review_host.identity.seat_current(root.forge_service,state)
-        self.completed.require_completed()
+        require_retired(self.completed)
         participant=self.owner.selected['participant']
         target=next((item for item in self.completed.targets if item['participant_id']==participant),None)
         row=state.get('peer_traffic',{}).get('connections',{}).get(participant)
@@ -103,7 +109,7 @@ class NativeReviewerReset:
         scope={'room_id':self.owner.ledger.room_id,'participant_id':participant,
                **(context['bound_run'] or context['reserved_run'] or {}),
                'context_generation':context['context_generation']}
-        if (not target or not row or not definition or (context_required and target['scope']!=scope)
+        if (not target or not row or not definition or (context_required and preceding_scope(self.completed,participant)!=scope)
                 or target['scope']!=root.scope or definition['actor_id']!=target['actor_id']
                 or row['incarnation_id']!=target['incarnation_id']
                 or row['attachment_id']!=target['attachment_id']):
@@ -147,7 +153,7 @@ class NativeReviewerReset:
 
     def allowed(self,state):
         if self.completed is not None:
-            self.completed.require_completed()
+            require_retired(self.completed)
             root=self.owner.root
             if root is None or getattr(root,'review_host',None) is None:
                 admission=None if root is None else root.admission
@@ -179,7 +185,7 @@ class NativeReviewerReset:
         self.owner._allowed()
         if self.completed is None:
             self.retirement.retire(timeout=self.owner.launcher.budget.remaining(10))
-        else:self.completed.require_completed()
+        else:require_retired(self.completed)
         self.retirement.require_exited(self.previous.root)
         self.owner._allowed()
 

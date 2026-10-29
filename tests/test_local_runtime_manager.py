@@ -30,11 +30,11 @@ class LocalRuntimeManagerTests(unittest.TestCase):
         return f,plan,resources,owner,selection
     def test_live_request_scope_typed_session_complete_result_and_cleanup(self):
         f,plan,resources,owner,selection=self.setup_owner();seen=[]
-        def open_human(op,number,*,session,attempt_id):
+        def open_human(op,number,*,session,grant,attempt_id):
             seen.append(session);self.assertTrue(session.allowed('open-run'))
-            return {'status':'finished','run_id':'run-one','generation':1,'outcome':'attention','internal':'PRIVATE'}
+            return {'status':'ACTIVE','run_id':'run-one','generation':1,'internal':'PRIVATE'}
         owner.open_human=Mock(side_effect=open_human)
-        def serve(manager,*_):
+        def serve(manager,*_,idle=None):
             from uas.lifecycle import LifecycleError
             with patch.object(f.supervisor,'manager_observations',side_effect=LifecycleError('UNAVAILABLE')):
                 observed=TLS(wire());manager.handle(observed)
@@ -44,14 +44,14 @@ class LocalRuntimeManagerTests(unittest.TestCase):
             channel=TLS(wire({'version':1,'action':'open-run','payload':{'operation_id':'open','issue_number':1}}))
             manager.handle(channel);self.assertIn(b'200 OK',channel.output)
             result=json.loads(channel.output.split(b'\r\n\r\n',1)[1])
-            self.assertEqual(result,{'status':'finished','run_id':'run-one','generation':1,'outcome':'attention'})
+            self.assertEqual(result,{'status':'ACTIVE','run_id':'run-one','generation':1})
             self.assertFalse(seen[0].allowed('open-run'))
         with patch.object(runtime.ManagerSelection,'read',return_value=selection), \
              patch.object(ManagerSelection,'tls_context',return_value=object()), \
              patch.object(runtime.socket,'socket') as socket,patch.object(LocalManager,'serve',serve), \
              patch.object(human.ssl,'SSLSocket',TLS):
             ready=Mock();runtime.serve_runtime_manager(plan,resources,owner,{},stopped=lambda:True,on_ready=ready)
-            self.assertEqual(ready.call_args.args[0]['mode'],'bounded-native-run')
+            self.assertEqual(ready.call_args.args[0]['mode'],'persistent-native-run')
             socket.return_value.bind.assert_called_once_with(('127.0.0.1',8765))
             socket.return_value.close.assert_called_once();owner.open_human.assert_called_once()
     def test_scope_wrong_owner_and_invalid_finished_receipt_refused(self):

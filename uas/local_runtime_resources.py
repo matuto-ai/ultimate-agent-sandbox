@@ -182,6 +182,22 @@ Initial admission and first successor remain the canonical supported scope.
                                            'instance':state['instance_id']},owner)
         self._initialize(plan,resources,child,channel,deadline=deadline)
 
+    def _authorized(self, request, *, initial):
+        from .local_successor_checkout import authorize_local
+        return authorize_local(self, request, initial=initial)
+
+    def operation(self, request):
+        from .local_successor_checkout import reuse_primary
+        if request['kind'] == 'REUSE_PRIMARY':
+            return reuse_primary(self, request)
+        if request['kind'] == 'OBSERVE' and getattr(self, 'reused_primary', None) == request['run_id']:
+            from .native_checkout_handoff import ready_slot
+            with self.allocator._locked('status') as state:
+                self._authorized(request, initial=False)
+                slot = self.allocator._observe(state, 'primary')
+            return ready_slot(slot, request['run_id'], self.pin[1])
+        return super().operation(request)
+
 
 def retained_manifest(ref,target):
     """Create once; a restart verifies exact public bytes instead of replacing."""
@@ -240,7 +256,7 @@ class LocalRuntimeResources:
         self.plan,self.owner,self.backend,self.state=plan,owner,backend,deepcopy(state)
         self.data=deepcopy(base_resources);self.lock_fd=host_lock_fd
         self.layout=backend.layout(state);self.brokers=LocalRuntimeBrokers(plan,state['instance_id'],self.layout,host_lock_fd)
-        self.extra_fds=[];self.prepared=False;self.child=None;self.handoff=None
+        self.extra_fds=[];self.prepared=False;self.child=None;self.handoff=None;self.services=None
 
     def prepare(self):
         require(not self.prepared,'LOCAL_RUNTIME_PREPARE_ALREADY_ATTEMPTED');self.prepared=True
@@ -347,8 +363,8 @@ class LocalCheckoutServer:
         return result
 
     def _epoch(self,request):
-        from .native_checkout_handoff import request_value
-        request_value(request)
+        from .local_successor_checkout import local_request
+        local_request(request)
         state=self._state()
         if request['kind']=='GATE_QUOTA':
             evaluation=state.get('gate_evaluations',{}).get(request['evaluation_id'],{})
@@ -357,7 +373,7 @@ class LocalCheckoutServer:
             return self.epochs[run]
         run=request['run_id']
         if run in self.epochs:return self.epochs[run]
-        require(len(self.epochs)<2,'LOCAL_CHECKOUT_SUPPORTED_EPOCH_LIMIT')
+        require(len(self.epochs)<1024,'LOCAL_CHECKOUT_SUPPORTED_EPOCH_LIMIT')
         for previous in self.epochs:
             row=state.get('runs',{}).get(previous,{})
             require(row.get('status')=='CLOSED' and row.get('native_stop',{}).get('status')=='VERIFIED',
@@ -369,8 +385,9 @@ class LocalCheckoutServer:
         try:
             # No effect before canonical PREPARING/seat/Human reservation proof.
             with resource.owner._locked(deadline=deadline):
-                epoch._authorized(request,initial=request['kind']=='ALLOCATE')
+                epoch._authorized(request,initial=request['kind'] in ('ALLOCATE','REUSE_PRIMARY'))
         except BaseException:epoch.close();raise
+        epoch.local_resources=resource
         self.epochs[run]=epoch
         return epoch
 
@@ -388,9 +405,16 @@ class LocalCheckoutServer:
             require(record.credentials==(self.child.pid,165533,165533) and alive(record.pidfd)
                     and _identity(record.pidfd)==self.identity and len(record.data)<=MAX_REQUEST,
                     'LOCAL_CHECKOUT_HOST_MISMATCH')
-            request=request_value(json.loads(record.data,object_pairs_hook=_unique))
+            from .local_successor_checkout import local_request
+            request=local_request(json.loads(record.data,object_pairs_hook=_unique))
         try:
-            epoch=self._epoch(request);epoch._held();epoch.count+=1
+            epoch=self._epoch(request)
+            # Each authenticated packet has a bounded I/O budget. Retained pins
+            # and one-effect attempts survive; elapsed Run time grants no retry.
+            epoch.deadline=time.monotonic()+self.resources.plan.operation_timeout_seconds
+            epoch.allocator.deadline=epoch.deadline
+            epoch._held()
+            if request['kind'] != 'GATE_QUOTA': epoch.count+=1
             require(epoch.count<=MAX_REQUESTS,'CHECKOUT_REQUEST_LIMIT')
             result=epoch.operation(request)
             reply={**request,'status':'OK','quota' if request['kind']=='GATE_QUOTA' else 'slot':result}
