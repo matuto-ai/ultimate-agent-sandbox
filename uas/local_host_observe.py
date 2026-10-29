@@ -7,10 +7,6 @@ import json
 import os
 from pathlib import Path
 import stat
-import subprocess
-import selectors
-import signal
-import time
 
 from .local_host_profile import LocalHostProfile, absolute_path, require
 from .local_host_plan import observe_value
@@ -32,53 +28,8 @@ def read_text(path):
 
 
 def command(arguments):
-    """Private fixed-call seam; callers below supply the entire argv."""
-    deadline = time.monotonic() + 10
-    # Pipes are drained incrementally, with one extra byte only to detect an
-    # exceeded bound. communicate()/capture_output would buffer before checking.
-    process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               env=LocalHostProfile.environment(), start_new_session=True)
-    output = {'stdout': bytearray(), 'stderr': bytearray()}
-    reaped = False
-    try:
-        with selectors.DefaultSelector() as selector:
-            for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr')):
-                selector.register(stream, selectors.EVENT_READ, name)
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                require(remaining > 0, 'HOST_READ_TIMEOUT')
-                for key, _ in selector.select(remaining):
-                    target = output[key.data]
-                    chunk = os.read(key.fileobj.fileno(), min(8192, LIMIT + 1 - len(target)))
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    target.extend(chunk)
-                    require(len(target) <= LIMIT, 'HOST_READ_BOUND')
-            remaining = deadline - time.monotonic()
-            require(remaining > 0, 'HOST_READ_TIMEOUT')
-            try:
-                result = process.wait(timeout=remaining)
-                reaped = True
-            except subprocess.TimeoutExpired:
-                require(False, 'HOST_READ_TIMEOUT')
-        require(result == 0, 'HOST_READ_COMMAND')
-        return output['stdout'].decode('utf-8', errors='strict').strip()
-    finally:
-        # Before wait() reaps it, the leader reserves its PID/group identity.
-        # Never signal that number after reaping: it could have been reused.
-        if not reaped:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        for stream in (process.stdout, process.stderr):
-            stream.close()
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            require(False, 'HOST_READ_CLEANUP_TIMEOUT')
+    from .local_host_process import run_fixed
+    return run_fixed(arguments, limit=LIMIT)
 
 
 def canonical_node(path, *, directory=True):

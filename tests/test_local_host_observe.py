@@ -14,11 +14,13 @@ class FakeStream:
 
 class FakeProcess:
     pid = 999999
+    returncode = None
     def __init__(self, result=0):
         self.stdout, self.stderr = FakeStream(31), FakeStream(32)
         self.result, self.waits = result, []
     def wait(self, timeout):
         self.waits.append(timeout)
+        self.returncode = self.result
         return self.result
 
 
@@ -55,13 +57,15 @@ class HostObservationParsingTests(unittest.TestCase):
             reads.append(count)
             answer=bytes(buffers[fd][:count]); del buffers[fd][:count]
             return answer
-        patches = [patch('uas.local_host_observe.subprocess.Popen', return_value=process),
-                   patch('uas.local_host_observe.selectors.DefaultSelector', FakeSelector),
-                   patch('uas.local_host_observe.os.read', side_effect=read),
-                   patch('uas.local_host_observe.os.killpg'),
-                   patch('uas.local_host_observe.LIMIT', 8)]
+        patches = [patch('uas.local_host_process.subprocess.Popen', return_value=process),
+                   patch('uas.local_host_process.selectors.DefaultSelector', FakeSelector),
+                   patch('uas.local_host_process.os.read', side_effect=read),
+                   patch('uas.local_host_process.os.killpg'),
+                   patch('uas.local_host_observe.LIMIT', 8),
+                   patch('uas.local_host_process.os.waitid', return_value=SimpleNamespace(
+                       si_pid=process.pid, si_code=__import__('os').CLD_EXITED, si_status=result))]
         if clock is not None:
-            patches.append(patch('uas.local_host_observe.time.monotonic', side_effect=clock))
+            patches.append(patch('uas.local_host_process.time.monotonic', side_effect=clock))
         from contextlib import ExitStack
         with ExitStack() as stack:
             mocks=[stack.enter_context(p) for p in patches]
@@ -79,7 +83,7 @@ class HostObservationParsingTests(unittest.TestCase):
     def test_fixed_command_incremental_capture(self):
         answer, process, reads, kills = self.run_fake(b'OK\n')
         self.assertEqual(answer, 'OK')
-        self.assertEqual(kills, 0)
+        self.assertEqual(kills, 1)
         self.assertGreater(len(reads), 1)
 
     def test_stdout_and_stderr_are_capped_before_buffering(self):
@@ -89,7 +93,7 @@ class HostObservationParsingTests(unittest.TestCase):
 
     def test_fixed_command_deadline(self):
         with self.assertRaisesRegex(HostProfileError, 'HOST_READ_TIMEOUT'):
-            self.run_fake(b'', clock=[0,11])
+            self.run_fake(b'', clock=[0,0,11])
 
     def test_nonzero_exit_is_not_absence(self):
         with self.assertRaisesRegex(HostProfileError, 'HOST_READ_COMMAND'):
