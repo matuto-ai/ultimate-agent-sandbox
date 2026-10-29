@@ -5,8 +5,7 @@ import uuid
 
 from .git_endpoint import EndpointPeer
 from .git_policy import parse_git
-from .git_service import decode, send
-from .git_worker_native import receive_blob
+from .git_protocol import decode, send, receive_blob
 from .kernel_origin import OriginDenied, enable, receive
 
 ENDPOINT = '/uas/git/request.sock'

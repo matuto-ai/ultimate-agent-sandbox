@@ -425,7 +425,7 @@ def exact_install_roots(manifest, exact_roots=None):
     """
     if exact_roots is None:
         return REQUIRED_PACKAGES
-    expect(manifest.get('profile') in ('native-pi-v1', 'artifacts-v1-source') and type(exact_roots) is dict
+    expect(manifest.get('profile') in ('native-pi-v1', 'artifacts-v1-source', 'room-launch-ipv4-v1') and type(exact_roots) is dict
            and bool(exact_roots) and set(exact_roots) <= set(REQUIRED_PACKAGES),
            'exact package roots require explicit native profile')
     selected = {}
@@ -547,9 +547,17 @@ def configure_public_namespace(nonce, descriptor):
     run('ip', 'route', 'add', 'default', 'via', '10.254.0.1')
 
 
-def connect(address):
-    with socket.create_connection((address, 5000), timeout=2) as connection:
-        return connection.recv(64) == b'uas-boundary-ok\n'
+def connect(address, *, deadline=None):
+    def remaining():
+        if deadline is None: return 2
+        budget = min(2, deadline - time.monotonic())
+        if budget <= 0: raise TimeoutError('decoy readiness deadline expired')
+        return budget
+    with socket.create_connection((address, 5000), timeout=remaining()) as connection:
+        if deadline is not None: connection.settimeout(remaining())
+        result = connection.recv(64) == b'uas-boundary-ok\n'
+        if deadline is not None: remaining()
+        return result
 
 
 def attribute_positive_control(storage):

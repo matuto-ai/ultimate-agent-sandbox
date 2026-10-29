@@ -1,0 +1,44 @@
+name: room-prepare
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-clean-base:
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.actor == 'puglab-reviewer') || (github.event.label.name == 'prepare-room-base' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install signed disposable preparation tools
+        timeout-minutes: 10
+        run: python3 tests/vm/install_runner_tools.py boundary
+      - name: Prepare clean base without qualification
+        env:
+          UAS_ROOM_VM_PROFILE: room-launch-ipv4-v1
+          UAS_ROOM_PRODUCER_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 tests/vm/prepare_room_base.py "$RUNNER_TEMP/room-prepared"
+      - name: Retain only verified clean base and signed pool
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: room-prepared-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/room-prepared/base.qcow2
+            ${{ runner.temp }}/room-prepared/receipt.json
+            ${{ runner.temp }}/room-prepared/pool/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false

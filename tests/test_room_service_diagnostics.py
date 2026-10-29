@@ -1,0 +1,828 @@
+"""Pure fixture diagnostics: no VM, native process, socket or kernel evidence."""
+import ast
+import json
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+import tempfile
+from contextlib import ExitStack
+
+VM = Path(__file__).parent / 'vm'
+sys.path.insert(0, str(VM))
+try:
+    import room_service
+    import guest_room
+    from room_service import ObservedAuthority, require_help_reply
+finally:
+    sys.path.pop(0)
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_first_help_refusal_is_terminal_before_second_request(self):
+        checks = {}
+        with self.assertRaisesRegex(RuntimeError, 'mounted help refused'):
+            require_help_reply(None, checks, 0)
+        self.assertEqual([None], checks['help_replies'])
+
+    def test_help_success_and_nonhelp_refusal(self):
+        checks = {}
+        require_help_reply({'code': 0, 'status': 'OK', 'stdout': b'not retained'}, checks, 0)
+        require_help_reply(None, checks, 1)
+        self.assertEqual([{'code': 0, 'status': 'OK'}, None], checks['help_replies'])
+        with self.assertRaisesRegex(RuntimeError, 'non-help unexpectedly admitted'):
+            require_help_reply({'code': 0, 'status': 'OK'}, {}, 1)
+        with self.assertRaisesRegex(RuntimeError, 'mounted help refused'):
+            require_help_reply({'code': 128, 'status': 'ERROR'}, {}, 0)
+
+    def test_bind_denial_keeps_original_exception_and_first_failure(self):
+        original = RuntimeError('lineage admission deadline exceeded')
+        delegate = Mock(); delegate.bind.side_effect = original
+        checks = {}; observed = ObservedAuthority(delegate, checks, lambda: None)
+        with self.assertRaises(RuntimeError) as caught: observed.bind('record')
+        self.assertIs(original, caught.exception)
+        self.assertEqual({'operation':'bind', 'phase':'lineage', 'error_type':'RuntimeError',
+                          'message':str(original)}, checks['authority_failure'])
+        delegate.current.side_effect = ValueError('later')
+        with self.assertRaises(ValueError): observed.current()
+        self.assertEqual('bind', checks['authority_failure']['operation'])
+        delegate.bind.assert_called_once_with('record')
+
+    def test_admitted_binding_still_rechecks_and_closes_same_authority(self):
+        binding = SimpleNamespace(origin=object(), current=Mock(return_value=True),
+                                  require=Mock(return_value=True), close=Mock())
+        delegate = SimpleNamespace(bind=Mock(return_value=binding), close=Mock())
+        checks = {}; observed = ObservedAuthority(delegate, checks, lambda: None)
+        admitted = observed.bind('record')
+        self.assertIs(binding.origin, admitted.origin)
+        self.assertTrue(admitted.current()); self.assertTrue(admitted.require('next'))
+        admitted.close(); observed.close()
+        binding.current.assert_called_once_with(); binding.require.assert_called_once_with('next')
+        binding.close.assert_called_once_with(); delegate.close.assert_called_once_with()
+        self.assertNotIn('authority_failure', checks)
+        self.assertEqual(3, len({key.split('.')[0] for key in checks['authority_phases']}))
+
+    def test_current_denial_bounded_without_replacing_exception(self):
+        error = RuntimeError('x' * 1000)
+        checks = {}; binding = Mock(); binding.current.side_effect = error
+        with self.assertRaises(RuntimeError) as caught: ObservedAuthority(binding, checks, lambda: None).current()
+        self.assertIs(error, caught.exception)
+        self.assertEqual(256, len(checks['authority_failure']['message']))
+        self.assertEqual('current', checks['authority_failure']['operation'])
+
+    def test_stage_and_partial_evidence_are_assigned_before_effects(self):
+        text = (VM/'room_service.py').read_text()
+        self.assertLess(text.index("checks['stage'] = 'help_accept'"), text.index('select.select([listener, launch.channel]'))
+        self.assertLess(text.index('require_help_reply(replies[-1]'), text.index("control({'kind': 'HELP_ONLY_PROVED'})"))
+        self.assertIn('launch.origin.require(record)', text)
+        guest = (VM/'guest_room.py').read_text()
+        self.assertLess(guest.index("checks['endpoint_service'] = {}"), guest.index("prove_service(supervisors['alpha']"))
+        self.assertIn("checks=checks['endpoint_service']", guest)
+        self.assertIn("checks.update(status='failed', error_type=type(error).__name__)", text)
+
+    def test_bootstrap_error_report_does_not_export_exception_text(self):
+        tree = ast.parse((VM.parent.parent/'uas/room_probe.py').read_text())
+        handlers = [n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)
+                    and "'BOOTSTRAP_FAILED'" in ast.unparse(n)]
+        self.assertEqual(1, len(handlers))
+        text = ast.unparse(handlers[0])
+        self.assertIn("'stage': stage", text)
+        self.assertIn("'error_type': type(error).__name__[:64]", text)
+        self.assertNotIn('str(error)', text)
+        self.assertIsInstance(handlers[0].body[-1], ast.Raise)
+
+    def test_failure_sender_holds_for_bounded_authenticated_ack(self):
+        probe = (VM.parent.parent/'uas/room_probe.py').read_text()
+        start = probe.index("'kind': 'BOOTSTRAP_FAILED'")
+        tail = probe[start:probe.index('except Exception:', start)]
+        self.assertLess(tail.index('channel.settimeout(5)'), tail.index('with receive(channel)'))
+        self.assertLess(tail.index('peer.require(record)'), tail.index("'BOOTSTRAP_FAILURE_RECORDED'"))
+        service = (VM/'room_service.py').read_text()
+        start = service.index('if launch.channel in ready:')
+        tail = service[start:service.index("raise RuntimeError('bootstrap ended", start)]
+        self.assertLess(tail.index('launch.origin.require(record)'), tail.index("checks['bootstrap_failure'] = value"))
+        self.assertLess(tail.index("checks['bootstrap_failure'] = value"), tail.index("'BOOTSTRAP_FAILURE_RECORDED'"))
+
+
+    def test_service_closer_attempts_every_owner_and_backend_and_keeps_first_failure(self):
+        names = ('authority', 'launch', 'provenance', 'broker')
+        for failing in names + ('backend_fd', 'all'):
+            with self.subTest(failing=failing):
+                checks, calls = {}, []
+                originals = {name: OSError(name) for name in names + ('backend_fd',)}
+                def close(name):
+                    calls.append(name)
+                    if failing in (name, 'all'): raise originals[name]
+                owners = [(name, SimpleNamespace(close=lambda name=name: close(name))) for name in names]
+                with patch.object(room_service.os, 'close', side_effect=lambda fd: close('backend_fd')):
+                    error = room_service.close_service_resources(checks, owners, 99)
+                self.assertEqual(list(names)+['backend_fd'], calls)
+                self.assertIs(error, originals['authority' if failing == 'all' else failing])
+                self.assertEqual('failed', checks['cleanup']['status'])
+                self.assertEqual(calls, checks['cleanup']['attempted'])
+                self.assertEqual(5 if failing == 'all' else 1, len(checks['cleanup']['errors']))
+                self.assertNotIn('message', str(checks))
+
+    def test_broker_constructor_rollback_closes_every_owned_handle_without_masking_startup(self):
+        import uas.kernel_origin as origin
+        import uas.git_service as service
+        primary = RuntimeError('startup failed')
+        for phase in ('enable_parent', 'enable_child', 'fork', 'child_close', 'pidfd', 'client', 'require'):
+            with self.subTest(phase=phase), ExitStack() as stack:
+                parent, child = Mock(), Mock()
+                parent.close.side_effect = OSError('parent cleanup')
+                directory = Mock(); root = Mock(); root.__truediv__ = Mock(return_value=directory)
+                root.lstat.return_value = SimpleNamespace(st_mode=0o40755, st_uid=0)
+                checks = {}
+                stack.enter_context(patch.object(room_service, 'BROKER_ROOT', root))
+                stack.enter_context(patch.object(room_service, 'fixed_executable', return_value=(91, 'a'*64)))
+                stack.enter_context(patch.object(room_service.os, 'chown'))
+                stack.enter_context(patch.object(room_service.os, 'close'))
+                stack.enter_context(patch.object(room_service.signal, 'getsignal', return_value=room_service.signal.SIG_DFL))
+                stack.enter_context(patch.object(room_service.socket, 'socketpair', return_value=(parent, child)))
+                enable = stack.enter_context(patch.object(origin, 'enable'))
+                if phase.startswith('enable_'): enable.side_effect = [primary] if phase == 'enable_parent' else [None, primary]
+                stack.enter_context(patch.object(room_service.os, 'fork', side_effect=primary if phase=='fork' else None, return_value=100))
+                if phase == 'child_close': child.close.side_effect = primary
+                stack.enter_context(patch.object(room_service.os, 'pidfd_open', side_effect=primary if phase=='pidfd' else None, return_value=92))
+                stack.enter_context(patch.object(service, 'GitBrokerClient', side_effect=primary if phase=='client' else None))
+                stack.enter_context(patch.object(room_service.BrokerProcess, 'require', side_effect=primary if phase=='require' else None))
+                cleanup = stack.enter_context(patch.object(room_service.BrokerProcess, 'close', side_effect=ValueError('broker cleanup')))
+                with self.assertRaises(RuntimeError) as caught:
+                    room_service.BrokerProcess(object(), 'owned-instance', checks=checks)
+                self.assertIs(primary, caught.exception); cleanup.assert_called_once()
+                self.assertEqual(['parent_channel','child_channel','broker'], checks['cleanup']['attempted'])
+                self.assertTrue(child.close.called)
+                self.assertEqual('failed', checks['cleanup']['status'])
+
+    def test_actual_prove_service_preserves_primary_and_records_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor = SimpleNamespace(directory=Path(temporary), _read=lambda:{
+                'phase':'running', 'room_id':'alpha', 'instance_id':'owned'})
+            primary = RuntimeError('Broker observation failed')
+            broker = SimpleNamespace(observe=Mock(side_effect=primary), close=Mock(side_effect=OSError('close')))
+            checks = {}
+            with patch.object(room_service, 'BrokerProcess', return_value=broker):
+                with self.assertRaises(RuntimeError) as caught:
+                    room_service.prove_service(supervisor, object(), SimpleNamespace(listeners=[object()]),
+                        'owned-container', run=Mock(), checks=checks)
+            self.assertIs(primary, caught.exception); broker.close.assert_called_once()
+            self.assertEqual('failed', checks['status'])
+            self.assertEqual({'owner':'broker','error_type':'OSError'}, checks['cleanup']['errors'][0])
+
+    def test_guest_cleanup_fault_matrix_keeps_attempting_all_owned_resources(self):
+        names = ('destroy', 'listener0', 'listener1', 'responder', 'veth', 'netns', 'public', 'image', 'storage')
+        for failure in names + ('all',):
+            with self.subTest(failure=failure):
+                calls, checks = [], {}
+                def effect(name):
+                    calls.append(name)
+                    if failure in (name, 'all'): raise OSError('synthetic cleanup fault')
+                    return {'phase':'destroyed'}
+                supervisor = SimpleNamespace(destroy=lambda:effect('destroy'))
+                endpoint = SimpleNamespace(listeners=[SimpleNamespace(close=lambda:effect('listener0')),
+                    SimpleNamespace(close=lambda:effect('listener1'))])
+                command_names = iter(('veth','netns','public','image','storage'))
+                with patch.object(guest_room, 'stop_child', side_effect=lambda p:effect('responder')), \
+                        patch.object(guest_room, 'run', side_effect=lambda *args:effect(next(command_names))):
+                    errors = guest_room.cleanup_owned({'alpha':supervisor}, {'alpha':endpoint}, [object()],
+                        {'veth','netns','public-host','storage'}, 'sha256:owned', Path('/owned'), checks)
+                self.assertEqual(list(names), calls)
+                self.assertEqual(9 if failure=='all' else 1, len(errors))
+                self.assertEqual('failed', checks['guest_cleanup']['status'])
+                self.assertTrue(checks['guest_cleanup']['outer_disposable_vm_removal_remains_mandatory'])
+
+
+    def network_case(self, *, public_error=None, failed_address=None, admission_at=None, decoy_error=None):
+        checks, calls, admissions = {}, [], [0]
+        primary = RuntimeError('fresh containment failed')
+        def admit(state):
+            admissions[0] += 1
+            if admission_at == admissions[0]: raise primary
+        backends = {name:SimpleNamespace(admit=admit, _firewall=lambda state:'fixed-firewall') for name in ('alpha','beta')}
+        def probe(room, mode, address):
+            calls.append(address)
+            if address == failed_address: return {'error':'OK'}
+            return {'error':'ENETUNREACH' if address.startswith('[') else 'TIMEOUT'}
+        def public(*args):
+            calls.append('public')
+            if public_error: raise public_error
+            return {'certificate_hostname_verified':True}
+        with patch.object(guest_room, 'wait_decoys', side_effect=decoy_error), \
+                patch.object(guest_room.boundary, 'denial_counter', side_effect=range(8)), \
+                patch.object(guest_room.boundary, 'require_sibling_denial', return_value={'exact':'synthetic'}):
+            error = None
+            try: guest_room.prove_network(probe, public, backends, {'alpha':{},'beta':{}},
+                {'beta':'owned'}, [], checks)
+            except BaseException as caught: error = caught
+        return checks, calls, error, primary
+
+    def test_public_failure_keeps_every_independent_deny_observation_and_first_error(self):
+        primary = RuntimeError('public HTTPS unavailable')
+        checks, calls, error, _ = self.network_case(public_error=primary)
+        self.assertIs(primary, error); self.assertEqual('failed', checks['status'])
+        self.assertEqual('failed', checks['observations']['public_https']['status'])
+        self.assertEqual({'host-private','host-public','LAN','metadata','sibling'}, set(checks['denied']))
+        self.assertTrue(all(checks['observations'][name]['status']=='passed' for name in checks['denied']))
+        self.assertEqual('passed', checks['observations']['ipv6']['status'])
+        self.assertEqual(6, len(calls))
+
+    def test_one_deny_failure_preserves_its_raw_counters_and_later_independent_results(self):
+        checks, _, error, _ = self.network_case(failed_address='10.89.1.1:5000')
+        self.assertIsNotNone(error); self.assertEqual('failed', checks['status'])
+        observation = checks['observations']['host-private']
+        self.assertEqual({'error':'OK'}, observation['result'])
+        self.assertEqual((0,1), (observation['before'],observation['after']))
+        self.assertNotIn('host-private',checks['denied'])
+        self.assertEqual('passed',checks['observations']['host-public']['status'])
+        self.assertEqual('passed',checks['observations']['sibling']['status'])
+
+    def test_fresh_admission_failure_blocks_all_later_workload_probes_and_preserves_prior_error(self):
+        for fail_at in (1,5,9):
+            with self.subTest(fail_at=fail_at):
+                primary = RuntimeError('first public failure')
+                checks, calls, error, admission = self.network_case(public_error=primary, admission_at=fail_at)
+                self.assertIs(error, admission if fail_at==1 else primary)
+                blocked = [entry for entry in checks['observations'].values() if entry['status']=='blocked']
+                self.assertTrue(blocked)
+                self.assertTrue(all(entry['reason']=='fresh_room_admission_failed' for entry in blocked))
+                self.assertNotIn('[2606:4700:4700::1111]:5000', calls)
+                if fail_at==1: self.assertEqual([], calls)
+
+    def test_decoy_failure_blocks_only_dependent_denies_not_public_sibling_or_ipv6(self):
+        primary = RuntimeError('decoy failed')
+        checks, calls, error, _ = self.network_case(decoy_error=primary)
+        self.assertIs(error, primary)
+        self.assertEqual(['public','[2606:4700:4700::1111]:5000'], calls)
+        for name in ('host-private','host-public','LAN','metadata'):
+            self.assertEqual({'status':'blocked','reason':'live_decoy_positive_control_failed'}, checks['observations'][name])
+        for name in ('public_https','sibling','ipv6'): self.assertEqual('passed',checks['observations'][name]['status'])
+
+    def test_network_success_still_requires_conjunction_of_all_observations(self):
+        checks, _, error, _ = self.network_case()
+        self.assertIsNone(error); self.assertEqual('passed',checks['status'])
+        self.assertEqual(8,len(checks['observations']))
+        self.assertTrue(all(item['status']=='passed' for item in checks['observations'].values()))
+
+    def test_decoy_readiness_has_one_absolute_deadline_and_nonreaping_child_check(self):
+        for mode in ('success','false','timeout','exit','late_success'):
+            with self.subTest(mode=mode):
+                now, deadlines, attempts = [0.0], [], []
+                def connect(address, *, deadline):
+                    attempts.append(address); deadlines.append(deadline)
+                    now[0] += 2.1 if mode=='late_success' else (2 if mode=='timeout' else .01)
+                    if mode=='timeout': raise TimeoutError('synthetic timeout')
+                    return mode != 'false'
+                def sleep(seconds): now[0] += seconds
+                with patch.object(guest_room.time,'monotonic',side_effect=lambda:now[0]), \
+                        patch.object(guest_room.time,'sleep',side_effect=sleep), \
+                        patch.object(guest_room.os,'waitid',return_value=object() if mode=='exit' else None) as waitid, \
+                        patch.object(guest_room.boundary,'connect',side_effect=connect):
+                    if mode=='success': guest_room.wait_decoys([SimpleNamespace(pid=123)])
+                    else:
+                        with self.assertRaisesRegex(AssertionError, 'deadline|exited'):
+                            guest_room.wait_decoys([SimpleNamespace(pid=123)])
+                self.assertTrue(all(value==guest_room.DECOY_TIMEOUT for value in deadlines))
+                self.assertLessEqual(now[0],guest_room.DECOY_TIMEOUT+.4)
+                self.assertTrue(all(call.args==(guest_room.os.P_PID,123,
+                    guest_room.os.WEXITED|guest_room.os.WNOHANG|guest_room.os.WNOWAIT) for call in waitid.call_args_list))
+                if mode=='exit': self.assertEqual([],attempts)
+
+    def test_decoy_connect_shares_deadline_across_connect_and_receive_without_changing_default(self):
+        channel=Mock();channel.__enter__=Mock(return_value=channel);channel.__exit__=Mock(return_value=False)
+        channel.recv.return_value=b'uas-boundary-ok\n'
+        with patch.object(guest_room.boundary.socket,'create_connection',return_value=channel) as connect, \
+                patch.object(guest_room.time,'monotonic',side_effect=[7,7.75,7.9]):
+            self.assertTrue(guest_room.boundary.connect('93.184.216.34',deadline=8))
+        connect.assert_called_once_with(('93.184.216.34',5000),timeout=1)
+        channel.settimeout.assert_called_once_with(.25)
+        channel.settimeout.reset_mock()
+        with patch.object(guest_room.boundary.socket,'create_connection',return_value=channel) as connect:
+            self.assertTrue(guest_room.boundary.connect('93.184.216.34'))
+        connect.assert_called_once_with(('93.184.216.34',5000),timeout=2)
+        channel.settimeout.assert_not_called()
+
+
+    def test_report_under_limit_is_unchanged_and_escaped_overflow_is_never_a_pass(self):
+        report = {'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,
+                  'checks':{name:{'status':'passed'} for name in guest_room.REQUIRED}}
+        self.assertEqual(json.dumps(report,sort_keys=True),guest_room.encode_report(report))
+        report['checks']['network']['synthetic_diagnostic'] = '\u0000' * 11000
+        encoded = guest_room.encode_report(report); compact = json.loads(encoded)
+        self.assertLessEqual(len(encoded.encode()),65536)
+        self.assertTrue(compact['report_overflow'] and compact['evidence_omitted'])
+        self.assertEqual({'error_type':'ReportBudgetExceeded'},compact['failure'])
+        self.assertGreater(compact['original_report_bytes'],65536)
+        self.assertTrue(compact['checks']['guest_cleanup']['outer_disposable_vm_removal_remains_mandatory'])
+
+    def test_report_overflow_preserves_primary_and_all_fixed_cleanup_failures(self):
+        report = {'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,
+            'failure':{'error_type':'RuntimeError'}, 'checks':{
+                'network':{'status':'failed','synthetic_diagnostic':'\u0000'*11000},
+                'guest_cleanup':{'status':'failed','errors':['OSError:listener:alpha:0']},
+                'endpoint_service':{'status':'failed','authority_failure':{'operation':'bind','phase':'lineage',
+                    'error_type':'RuntimeError','message':'\u0000'*256},
+                    'cleanup':{'status':'failed','errors':[{'owner':'broker','error_type':'OSError'}]},
+                    'broker':{'cleanup':{'status':'failed','errors':[{'owner':'parent_channel','error_type':'OSError'}]}},
+                    'foreign_room_mcs':{'label_restore':{'status':'failed','error_type':'PermissionError'}}}}}
+        encoded = guest_room.encode_report(report); compact = json.loads(encoded)
+        self.assertLessEqual(len(encoded.encode()),65536)
+        self.assertEqual(report['failure'],compact['primary_failure'])
+        self.assertEqual('failed',compact['checks']['guest_cleanup']['status'])
+        self.assertEqual(report['checks']['guest_cleanup']['errors'],compact['checks']['guest_cleanup']['errors'])
+        service = compact['checks']['endpoint_service']
+        self.assertEqual('OSError',service['cleanup']['errors'][0]['error_type'])
+        self.assertEqual('OSError',service['broker_cleanup']['errors'][0]['error_type'])
+        self.assertEqual('PermissionError',service['label_restore']['error_type'])
+        self.assertEqual('RuntimeError',service['authority_failure']['error_type'])
+
+    def test_pathname_restore_failure_never_masks_probe_failure_or_allows_endpoint_reuse(self):
+        endpoint = SimpleNamespace(parent=Path('/owned/git'), leases=[SimpleNamespace(path=Path('/owned/git/request.sock'))],
+            listeners=[SimpleNamespace(fileno=lambda:91)], require=Mock())
+        good = {'returncode':0,'timeout':False,'status':'observed','cleanup_errors':[],
+            'stdout':{'truncated':False},'stderr':{'truncated':False},'decoded':{'connected':False,'error':'EACCES'}}
+        for probe_fails in (False, True):
+            with self.subTest(probe_fails=probe_fails):
+                checks={}; endpoint.require.reset_mock(); primary=RuntimeError('probe failed'); restore=OSError('restore failed')
+                probe=Mock(side_effect=primary if probe_fails else None, return_value=good)
+                with patch.object(guest_room,'run',side_effect=['',restore]), \
+                        patch.object(guest_room.os,'getxattr',return_value=b'synthetic-fixed-label'):
+                    with self.assertRaises((RuntimeError,OSError)) as caught:
+                        guest_room.prove_foreign_pathname(endpoint,probe,checks)
+                self.assertIs(primary if probe_fails else restore,caught.exception)
+                self.assertEqual({'status':'failed','error_type':'OSError'},checks['label_restore'])
+                endpoint.require.assert_not_called()
+                if not probe_fails: self.assertEqual(good,checks['raw_probe'])
+
+    def test_recovery_preserves_completed_steps_and_stops_after_failed_ownership_gate(self):
+        import uas.guest_fixture as fixture
+        good_resume={'phase':'running','observed':{'container':{'id':'owned'}}}
+        good_refusal={'phase':'start_failed','observed':{'container':{'running':False}}}
+        for failure in ('stop','resume','stop_for_drift','drift_refusal','repair','reconcile',None):
+            with self.subTest(failure=failure):
+                checks={}; supervisor=Mock()
+                supervisor.stop.side_effect=[{'phase':'wrong' if failure=='stop' else 'stopped'},
+                    {'phase':'wrong' if failure=='stop_for_drift' else 'stopped'}]
+                supervisor.start.side_effect=[{'phase':'failed'} if failure=='resume' else good_resume,
+                    {'phase':'running'} if failure=='drift_refusal' else good_refusal]
+                supervisor.reconcile.return_value={'phase':'failed' if failure=='reconcile' else 'running'}
+                command=Mock(side_effect=[None,OSError('synthetic repair failure')] if failure=='repair' else None)
+                with patch.object(fixture,'command',command), patch.object(fixture,'network_names',return_value=('owned','bridge','table')), \
+                        patch.object(fixture,'firewall_document',return_value={'fixed':'fixture'}):
+                    if failure:
+                        with self.assertRaises((AssertionError,OSError)):
+                            guest_room.prove_recovery(supervisor,object(),{},'owned','a'*32,checks)
+                    else: guest_room.prove_recovery(supervisor,object(),{},'owned','a'*32,checks)
+                observed=checks['observations']
+                self.assertIn('stop',observed)
+                self.assertEqual('passed' if failure is None else 'incomplete',checks['status'])
+                if failure in ('stop','resume','stop_for_drift'):command.assert_not_called()
+                if failure in ('stop','resume','stop_for_drift','drift_refusal','repair'):supervisor.reconcile.assert_not_called()
+                if failure=='repair':
+                    self.assertEqual('start_failed',observed['drift_refusal']['phase'])
+                    self.assertFalse(observed['drift_refusal']['container']['running'])
+                if failure is None:
+                    self.assertEqual({'stop','resume','stop_for_drift','drift_refusal','reconcile'},set(observed))
+                    self.assertFalse(checks['persistent_participant_service_restart'])
+
+    def scenario_case(self, fault=None, *, quota_kind='block', cleanup_fault=False):
+        import native_rootfs
+        import room_policy_diagnostics
+        import uas.guest_fixture as fixture
+        import uas.lifecycle as lifecycle
+        import uas.room_fixture as room_fixture
+        # These are modeled component outcomes, not new target observations.
+        # The composed scenario/limits/network/recovery/cleanup functions below
+        # run unchanged; only native effects and separate service proofs are inert.
+        primary=RuntimeError('synthetic later service failure')
+        remove_error=OSError('synthetic owned quota probe removal failure')
+        checks={};calls=[];removed=[];current_quota=[None]
+        listeners={room:Mock() for room in ('alpha','beta')}
+        if cleanup_fault:listeners['alpha'].close.side_effect=OSError('synthetic listener failure')
+        endpoints={room:SimpleNamespace(listeners=[listeners[room]],parent=Path('/owned/'+room),
+            leases=[SimpleNamespace(path=Path('/owned/'+room+'/request.sock'))],require=Mock()) for room in listeners}
+        supervisors={room:Mock() for room in listeners}
+        backends={room:Mock() for room in listeners}
+        for room in listeners:
+            running={'phase':'running','observed':{'container':{'id':room}}}
+            supervisors[room].start.side_effect=[running,running,
+                {'phase':'start_failed','observed':{'container':{'running':False}}}]
+            supervisors[room].stop.return_value={'phase':'stopped'}
+            supervisors[room].reconcile.return_value={'phase':'running'}
+            supervisors[room].destroy.return_value={'phase':'destroyed'}
+            supervisors[room]._read.return_value={}
+            backends[room].admit.return_value={'HostConfig':{'LogConfig':{'Type':'local'}},'Mounts':[]}
+        def run(*args,**kwargs):
+            calls.append(args)
+            if args[:2]==('docker','version'):return '29.8.2'
+            if args[0]=='blockdev':return str(2*1024**3)
+            if args[:2]!=('docker','exec'):return ''
+            room=args[2];mode=args[4] if args[3]=='/fixture' else args[6]
+            if mode=='observe':
+                value={'uid':65532,'gid':65532,'files':{
+                    '/proc/self/status':'CapEff: 0000000000000000\nCapBnd: 0000000000000000\nNoNewPrivs: 1\nSeccomp: 2\n',
+                    '/proc/self/attr/current':'system_u:system_r:container_t:'+fixture.ROOMS[room][3]+'\0',
+                    '/proc/self/uid_map':'0     100000      65536','/proc/self/gid_map':'0     100000      65536',
+                    '/sys/fs/cgroup/memory.max':'100663296','/sys/fs/cgroup/pids.max':'24',
+                    '/sys/fs/cgroup/cpu.max':'75000 100000'}}
+            elif mode=='attributes':value={'clear_inherit':'EPERM','change_project':'EPERM',
+                'initial_project':fixture.ROOMS[room][0],'after_change_project':fixture.ROOMS[room][0],'after_clear_inherit':True}
+            elif mode=='private':value={'endpoint_unlink':'EROFS','/var/run/docker.sock':'ENOENT'}
+            elif mode=='write':value={'error':'EROFS' if args[5].endswith('/references') else 'OK'}
+            elif mode.startswith('quota-'):
+                current_quota[0]=mode[6:];bad=current_quota[0]==quota_kind
+                path=fixture.STORAGE/'alpha/workspace'/('quota-probe-'+current_quota[0])
+                if bad and fault=='unsafe-parent':path=fixture.STORAGE/'beta/workspace'/path.name
+                if bad and fault=='unsafe-name':path=path.with_name('human-file')
+                value={'error':'EIO' if bad and fault=='not-enospc' else 'ENOSPC','probe_path':str(path)}
+            elif mode=='write-new':value={'error':'EACCES' if current_quota[0]==quota_kind and fault=='sibling' else 'OK'}
+            elif mode=='public-head':value={'certificate_hostname_verified':True}
+            elif mode=='connect':value=({'error':'OK','reply':'uas-boundary-ok\n'} if room=='beta'
+                else {'error':'ENETUNREACH' if args[5].startswith('[') else 'TIMEOUT'})
+            else:raise AssertionError('unexpected dependent probe '+mode)
+            return json.dumps(value)
+        def service(*args,checks,**kwargs):
+            if fault=='service':checks.update(status='failed');raise primary
+            checks.update(status='passed',held_bootstrap_exit_observed=True)
+        def foreign(*args,checks,**kwargs):checks.update(status='passed',original_lease_restored=True)
+        def command(*args,**kwargs):
+            calls.append(args)
+            if args[0]=='xfs_quota':
+                limit='8192' if '-b' in args[3] else '128'
+                return '#101 0 0 '+limit+' 00 [--------]\n#102 0 0 '+limit+' 00 [--------]\n'
+            return ''
+        def space(path):
+            self.assertEqual(fixture.STORAGE,path);bad=current_quota[0]==quota_kind
+            return SimpleNamespace(f_bavail=16384 if bad and fault=='global-blocks' else 16385,
+                f_frsize=4096,f_favail=1000 if bad and fault=='global-inodes' else 1001)
+        original_resolve=Path.resolve
+        def resolve(path,*args,**kwargs):
+            if current_quota[0]==quota_kind and fault=='unsafe-resolve' and path.name.startswith('quota-probe-'):
+                return Path('/unowned/redirect')
+            return original_resolve(path,*args,**kwargs)
+        def remove(path):
+            removed.append(path)
+            if current_quota[0]==quota_kind and fault=='remove':raise remove_error
+        counters=iter(range(8))
+        def firewall(_state):
+            count=next(counters)
+            return {'nftables':[{'rule':{'chain':chain,'expr':[
+                {'match':{'left':{'payload':{'protocol':'ip','field':'daddr'}}}},
+                {'counter':{'packets':count}},{'drop':None}]}} for chain in ('input','forward')]}
+        backends['alpha']._firewall.side_effect=firewall
+        with ExitStack() as stack:
+            for owner,name,value in ((guest_room,'run',run),(native_rootfs,'build_room_rootfs',Mock(return_value={})),
+                    (guest_room.boundary,'start_engine',Mock()),(guest_room.boundary,'attribute_positive_control',Mock(return_value={})),
+                    (guest_room,'import_image',Mock(return_value='sha256:owned')),
+                    (room_service,'endpoint',lambda room,run:endpoints[room]),(room_service,'prove_service',service),
+                    (room_service,'prove_foreign_listener_admission',foreign),
+                    (room_policy_diagnostics,'capture_endpoint_probe',Mock(return_value={'returncode':0,'timeout':False,
+                        'status':'observed','cleanup_errors':[],'stdout':{'truncated':False},'stderr':{'truncated':False},
+                        'decoded':{'connected':False,'error':'EACCES'}})),
+                    (fixture,'prepare_storage',Mock()),(fixture,'command',command),
+                    (fixture,'network_names',Mock(return_value=('owned','bridge','table'))),
+                    (fixture,'firewall_document',Mock(return_value={'synthetic':'repair'})),
+                    (lifecycle,'Supervisor',lambda control,room,*args,**kwargs:supervisors[room]),
+                    (room_fixture,'RoomLaunchFixtureBackend',lambda nonce,room,**kwargs:backends[room]),
+                    (guest_room.os,'statvfs',space),(guest_room.os,'getxattr',Mock(return_value=b'synthetic-label')),
+                    (guest_room.os,'open',Mock(return_value=91)),(guest_room.os,'close',Mock()),
+                    (guest_room.os,'waitid',Mock(return_value=None)),
+                    (guest_room.subprocess,'Popen',Mock(side_effect=[SimpleNamespace(pid=101),SimpleNamespace(pid=102)])),
+                    (guest_room,'stop_child',Mock()),(guest_room.shutil,'rmtree',remove),
+                    (guest_room.boundary,'connect',Mock(return_value=True)),
+                    (guest_room.boundary,'verified_sibling',Mock(return_value={'address':'10.89.2.2','bridge':'uasbbbbbbbbbbbb'})),
+                    (guest_room.boundary,'read_sibling_raw',Mock(side_effect=[{'rule':['synthetic'],'packets':1,'bytes':60},
+                        {'rule':['synthetic'],'packets':2,'bytes':120}]))):
+                stack.enter_context(patch.object(owner,name,value))
+            stack.enter_context(patch.object(Path,'mkdir'))
+            stack.enter_context(patch.object(Path,'exists',return_value=True))
+            stack.enter_context(patch.object(Path,'iterdir',return_value=[]))
+            stack.enter_context(patch.object(Path,'resolve',resolve))
+            archive=Mock();archive.__enter__=Mock(return_value=archive);archive.__exit__=Mock(return_value=False)
+            stack.enter_context(patch.object(guest_room.tarfile,'open',return_value=archive))
+            stack.enter_context(patch.object(sys,'path',list(sys.path)))
+            result=error=None
+            try:result=guest_room.scenario('a'*32,{}, {},checks)
+            except BaseException as caught:error=caught
+        return SimpleNamespace(checks=checks,calls=calls,removed=removed,listeners=listeners,
+            supervisors=supervisors,result=result,error=error,primary=primary,remove_error=remove_error)
+
+    def test_scenario_retains_observed_limits_when_later_service_and_listener_cleanup_fail(self):
+        case=self.scenario_case('service',cleanup_fault=True);checks=case.checks
+        self.assertIs(case.primary,case.error)
+        self.assertEqual('blocked',checks['limits']['status'])
+        self.assertEqual('endpoint_service',checks['limits']['blocked_by'])
+        for room in case.listeners:
+            self.assertEqual('100663296',checks['limits']['observed'][room]['memory'])
+            self.assertIn('actual_xfs_b',checks['limits']['observed'][room])
+            case.listeners[room].close.assert_called_once();case.supervisors[room].destroy.assert_called_once()
+        self.assertEqual('failed',checks['guest_cleanup']['status'])
+        self.assertIn(('docker','image','rm','sha256:owned'),case.calls)
+        self.assertIn(('umount','/mnt/uas-boundary'),case.calls)
+        self.assertNotIn('network',checks)
+
+    def test_scenario_quota_faults_stop_dependent_work_and_preserve_first_failure_and_cleanup(self):
+        messages={'not-enospc':'configured XFS bound','global-blocks':'underlying filesystem exhausted',
+            'global-inodes':'underlying filesystem exhausted','unsafe-parent':'unsafe owned quota',
+            'unsafe-name':'unsafe owned quota','unsafe-resolve':'unsafe owned quota',
+            'sibling':'sibling quota isolation failed','remove':'owned quota probe removal failure'}
+        for kind in ('block','inode'):
+            for fault,message in messages.items():
+                with self.subTest(kind=kind,fault=fault):
+                    case=self.scenario_case(fault,quota_kind=kind,cleanup_fault=True);checks=case.checks
+                    self.assertIsNone(case.result);self.assertIn(message,str(case.error))
+                    if fault=='remove':self.assertIs(case.remove_error,case.error)
+                    else:self.assertIsInstance(case.error,AssertionError)
+                    self.assertEqual('failed',checks['limits']['status'])
+                    observed=checks['limits']['observed'];self.assertIn('exhaustion_'+kind,observed)
+                    if kind=='block':self.assertNotIn('exhaustion_inode',observed)
+                    else:self.assertEqual('ENOSPC',observed['exhaustion_block']['error'])
+                    self.assertEqual(([Path('/mnt/uas-boundary/alpha/workspace/quota-probe-block')] if kind=='inode' else [])+
+                        ([Path('/mnt/uas-boundary/alpha/workspace/quota-probe-'+kind)] if fault=='remove' else []),case.removed)
+                    probes=[call for call in case.calls if call[:2]==('docker','exec') and call[3]=='/fixture']
+                    self.assertEqual(['quota-block']+(['quota-inode'] if kind=='inode' else []),
+                        [call[4] for call in probes if call[4].startswith('quota-')])
+                    self.assertEqual(int(kind=='inode')+int(fault in ('sibling','remove')),
+                        len([call for call in probes if call[4]=='write-new']))
+                    self.assertNotIn(('ip','netns','add','uas-public'),case.calls)
+                    self.assertNotIn('network',checks);self.assertNotIn('recovery',checks)
+                    self.assertEqual('failed',checks['guest_cleanup']['status'])
+                    self.assertIn('OSError:listener:alpha:0',checks['guest_cleanup']['errors'])
+                    for room in case.listeners:
+                        case.listeners[room].close.assert_called_once();case.supervisors[room].destroy.assert_called_once()
+                    self.assertIn(('docker','image','rm','sha256:owned'),case.calls)
+                    self.assertIn(('umount','/mnt/uas-boundary'),case.calls)
+
+    def test_complete_synthetic_scenario_roundtrips_unchanged_bounded_report(self):
+        import run_room
+        case=self.scenario_case();checks=case.checks
+        self.assertIsNone(case.error);self.assertIs(case.result,checks)
+        self.assertEqual(guest_room.REQUIRED,set(checks))
+        self.assertTrue(all(entry['status']=='passed' for entry in checks.values()))
+        self.assertEqual([Path('/mnt/uas-boundary/alpha/workspace/quota-probe-'+kind) for kind in ('block','inode')],case.removed)
+        self.assertEqual({'host-private','host-public','LAN','metadata','sibling'},set(checks['network']['denied']))
+        self.assertTrue(checks['recovery']['same_container_resume'] and checks['recovery']['drift_failed_closed'])
+        self.assertEqual([],checks['guest_cleanup']['errors'])
+        report={'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,'checks':checks}
+        encoded=guest_room.encode_report(report)
+        self.assertLessEqual(len(encoded.encode()),65536)
+        self.assertEqual(json.dumps(report,sort_keys=True),encoded)
+        self.assertEqual(report,run_room.parse_report('UAS_ROOM_REPORT:'+'a'*32+':'+encoded,'a'*32))
+
+    def test_complete_scenario_cleanup_failure_cannot_roundtrip_as_success(self):
+        import run_room
+        case=self.scenario_case(cleanup_fault=True)
+        self.assertIsInstance(case.error,AssertionError);self.assertIsNone(case.result)
+        self.assertEqual('passed',case.checks['recovery']['status'])
+        self.assertEqual('failed',case.checks['guest_cleanup']['status'])
+        report={'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,'checks':case.checks}
+        with self.assertRaisesRegex(RuntimeError,'incomplete or failed'):
+            run_room.parse_report('UAS_ROOM_REPORT:'+'a'*32+':'+guest_room.encode_report(report),'a'*32)
+
+
+    def test_recovery_projection_does_not_duplicate_recorded_mounts_or_large_synthetic_state(self):
+        import uas.guest_fixture as fixture
+        # Exact Alpha Mounts from UAS_ROOM_REPORT in run40729545828/job122961802589.
+        # Other lifecycle fields and the oversized annotation are synthetic.
+        recorded_mounts = [{'Destination': '/state', 'Driver': 'local', 'Mode': 'z', 'Name': 'uas-fixture-06e264cc3f5f4d62a079f00f1a8511bc-state', 'Propagation': '', 'RW': True, 'Source': '/var/lib/docker/100000.100000/volumes/uas-fixture-06e264cc3f5f4d62a079f00f1a8511bc-state/_data', 'Type': 'volume'}, {'Destination': '/uas/git', 'Mode': '', 'Propagation': 'rprivate', 'RW': False, 'Source': '/run/uas-room-endpoints/alpha/git', 'Type': 'bind'}, {'Destination': '/mnt/uas-boundary/alpha/checkouts', 'Mode': '', 'Propagation': 'rprivate', 'RW': True, 'Source': '/mnt/uas-boundary/alpha/checkouts', 'Type': 'bind'}, {'Destination': '/mnt/uas-boundary/alpha/references', 'Mode': '', 'Propagation': 'rprivate', 'RW': False, 'Source': '/mnt/uas-boundary/alpha/references', 'Type': 'bind'}, {'Destination': '/mnt/uas-boundary/alpha/repository', 'Mode': '', 'Propagation': 'rprivate', 'RW': True, 'Source': '/mnt/uas-boundary/alpha/repository', 'Type': 'bind'}, {'Destination': '/mnt/uas-boundary/alpha/workspace', 'Mode': '', 'Propagation': 'rprivate', 'RW': True, 'Source': '/mnt/uas-boundary/alpha/workspace', 'Type': 'bind'}]
+        base={'room_id':'alpha','instance_id':'owned','desired':'running','fixture_only':True,
+            'production_launch':'unqualified','authority':'active','error':None,'leftovers':[],
+            'observed':{'container':{'id':'owned','running':False,'Mounts':recorded_mounts,
+                'synthetic_annotation':'x'*70000}},'pending_spec':None}
+        def result(phase,running):
+            return {**base,'phase':phase,'observed':{'container':{**base['observed']['container'],'running':running}}}
+        supervisor=Mock();supervisor.stop.side_effect=[result('stopped',False),result('stopped',False)]
+        supervisor.start.side_effect=[result('running',True),result('start_failed',False)]
+        supervisor.reconcile.return_value=result('running',True)
+        checks={}
+        with patch.object(fixture,'command'),patch.object(fixture,'network_names',return_value=('owned','bridge','table')), \
+                patch.object(fixture,'firewall_document',return_value={}):
+            guest_room.prove_recovery(supervisor,{}, {},'owned','a'*32,checks)
+        self.assertEqual('passed',checks['status']);self.assertLess(len(json.dumps(checks)),2048)
+        self.assertNotIn('Mounts',json.dumps(checks));self.assertNotIn('synthetic_annotation',json.dumps(checks))
+
+
+    def test_report_overflow_keeps_cli_and_foreign_listener_cleanup_uncertainty(self):
+        report={'version':1,'nonce':'a'*32,'profile':guest_room.PROFILE,'production_enabled':False,
+            'failure':{'error_type':'TimeoutError'},'checks':{'endpoint_service':{'status':'failed',
+                'oversized_synthetic_output':'\u0000'*11000,
+                'bind_cleanup':{'attempted':True,'closed':False,'error_type':'OSError','message':'not retained'},
+                'unrelated_task':{'status':'failed','stage':'accept','error_type':'TimeoutError',
+                    'cleanup':{'kill_attempted':True,'reaped':False,
+                        'errors':[{'operation':'wait','error_type':'TimeoutExpired'}]}},
+                'foreign_listener_admission':{'status':'failed','cleanup_errors':['OSError'],
+                    'original_lease_restored':False}},'guest_cleanup':{'status':'failed','errors':['OSError:responder']}}}
+        compact=json.loads(guest_room.encode_report(report));service=compact['checks']['endpoint_service']
+        self.assertEqual({'error_type':'TimeoutError'},compact['primary_failure'])
+        self.assertEqual({'attempted':True,'closed':False,'error_type':'OSError'},service['bind_cleanup'])
+        self.assertFalse(service['unrelated_task']['cleanup']['reaped'])
+        self.assertEqual('TimeoutExpired',service['unrelated_task']['cleanup']['errors'][0]['error_type'])
+        self.assertEqual(['OSError'],service['foreign_listener_admission']['cleanup_errors'])
+        self.assertFalse(service['foreign_listener_admission']['original_lease_restored'])
+        self.assertLessEqual(len(json.dumps(compact).encode()),65536)
+
+    def test_decoy_deadline_crossing_before_sleep_never_passes_negative_sleep(self):
+        with patch.object(guest_room.time,'monotonic',side_effect=[0,0,0,0,0,7.99,8.01]), \
+                patch.object(guest_room.time,'sleep') as sleep, \
+                patch.object(guest_room.boundary,'connect',return_value=False):
+            with self.assertRaisesRegex(AssertionError,'readiness deadline'):
+                guest_room.wait_decoys([])
+        sleep.assert_not_called()
+
+
+class BootstrapControlTests(unittest.TestCase):
+    """Actual fixture control functions; logical time, no native effects."""
+    def child(self, elapsed=16, *, fault=None, send_cost=0, auth_cost=0):
+        import ctypes
+        from contextlib import contextmanager
+        from uas import room_probe, git_endpoint, kernel_origin, git_service, git_launcher
+        now, sends, waits, received = [0.0], [], [], []
+        channel = Mock()
+        channel.__enter__ = Mock(return_value=channel)
+        channel.__exit__ = Mock(return_value=False)
+        channel.send.return_value = 36
+        channel.getsockopt.return_value = b'fixed-label'
+        channel.settimeout.side_effect = waits.append
+        peer = Mock(credentials=(1, 0, 0), identity=(2, 3))
+        def authenticate(record):
+            if len(received) == 3:
+                now[0] += auth_cost
+                if fault == 'revocation': raise RuntimeError('peer revoked')
+        peer.require.side_effect = authenticate
+        records = [b'UAS-RELEASE-1\n', b'{"kind":"PROVE_HELP_ONLY"}',
+                   b'{"kind":"RELEASE_WORKLOAD"}', b'{"kind":"EXIT"}']
+        @contextmanager
+        def receive(_channel):
+            index = len(received); received.append(index)
+            if index == 2:
+                waited = elapsed - now[0]
+                now[0] = elapsed
+                if waited >= waits[-1]: raise TimeoutError('mock socket receive deadline')
+                if fault == 'loss': raise EOFError('lost')
+                if fault == 'malformed': records[index] = b'{"kind":"KEEPALIVE"}'
+            yield SimpleNamespace(data=records[index])
+        def send(_channel, value):
+            sends.append(value['kind'])
+            if value['kind'] == 'HELP_ONLY_PROVED': now[0] += send_cost
+        failure = None
+        with patch.object(ctypes, 'CDLL', return_value=SimpleNamespace(prctl=lambda *args: 0)), \
+             patch.object(room_probe.os, 'read', return_value=b'x' * 32), \
+             patch.object(room_probe.os, 'getuid', return_value=65532), \
+             patch.object(room_probe.os, 'getgid', return_value=65532), \
+             patch.object(room_probe.socket, 'socket', return_value=channel), \
+             patch.object(room_probe.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(git_endpoint, 'EndpointPeer', return_value=peer), \
+             patch.object(kernel_origin, 'enable'), patch.object(kernel_origin, 'receive', side_effect=receive), \
+             patch.object(git_service, 'send', side_effect=send), \
+             patch.object(git_launcher, 'main', side_effect=[0, 128]):
+            try: room_probe.bootstrap()
+            except BaseException as error: failure = error
+        peer.close.assert_called_once_with()
+        return failure, sends, waits, received
+
+    def test_actual_bootstrap_receive_allows_simulated_sixteen_seconds(self):
+        error, sends, waits, received = self.child()
+        self.assertIsNone(error)
+        self.assertEqual(['HELD_BOOTSTRAP', 'HELP_ONLY_PROVED', 'WORKLOAD_STARTED'], sends)
+        self.assertEqual([12, 30, 30, 14, 12], waits)
+        self.assertEqual([0, 1, 2, 3], received)
+
+    def test_actual_bootstrap_exact_late_auth_and_failed_control_never_release(self):
+        for elapsed, fault, auth in [(30, None, 0), (31, None, 0), (29, None, 1),
+                                     (16, 'malformed', 0), (16, 'loss', 0), (16, 'revocation', 0)]:
+            with self.subTest(elapsed=elapsed, fault=fault, auth=auth):
+                error, sends, waits, received = self.child(elapsed, fault=fault, auth_cost=auth)
+                self.assertIsNotNone(error)
+                self.assertNotIn('WORKLOAD_STARTED', sends)
+                self.assertEqual([0, 1, 2], received)
+                self.assertEqual([12, 30, 30], waits)
+
+    def test_child_send_and_delivery_cost_never_refresh_control_deadline(self):
+        error, sends, waits, _ = self.child(29, send_cost=4)
+        self.assertIsNone(error); self.assertEqual([12, 30, 26, 1, 12], waits)
+        error, sends, waits, received = self.child(16, send_cost=30)
+        self.assertIsNotNone(error); self.assertNotIn('WORKLOAD_STARTED', sends)
+        self.assertEqual([0, 1], received)
+
+    def parent(self, *, admission_cost=5, failure_phase=None, bookkeeping_cost=0):
+        from uas.room_probe import bootstrap_control_remaining
+        tree = ast.parse((VM/'room_service.py').read_text())
+        function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'release_workload')
+        now, locked, order, sent, checks = [11.0], [False], [], [], {}
+        class Lock:
+            def __enter__(inner): locked[0] = True; order.append('lock')
+            def __exit__(inner, *args): locked[0] = False; order.append('unlock')
+        counts = {'current':0, 'resources':0}
+        def gate(name):
+            self.assertTrue(locked[0]); phase = name
+            if name in counts:
+                counts[name] += 1
+                if counts[name] == 2: phase = 'post_' + name
+            order.append(phase)
+            if name == 'admission': now[0] += admission_cost
+            if phase == failure_phase: raise RuntimeError('fresh ' + phase)
+        def send(channel, packet):
+            self.assertTrue(locked[0]); sent.append((now[0], packet))
+        def observed(checks, phase, call, *args):
+            if phase == 'final.write': now[0] += bookkeeping_cost
+            return room_service.observe_authority_phase(checks, phase, call, *args)
+        env = dict(ExitStack=ExitStack, observe_authority_phase=observed, checks=checks,
+                   supervisor=SimpleNamespace(_locked=Lock), current=lambda:gate('current'),
+                   resources=lambda:gate('resources'), backend=SimpleNamespace(admit=lambda state:gate('admission')),
+                   state=object(), broker=SimpleNamespace(require=lambda:gate('broker')), send=send,
+                   launch=SimpleNamespace(channel=Mock()), control_deadline=30,
+                   bootstrap_control_remaining=bootstrap_control_remaining)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<actual final release>', 'exec'), env)
+        error = None
+        with patch.object(room_service.time, 'monotonic', side_effect=lambda: now[0]):
+            try: env['release_workload']()
+            except BaseException as failure: error = failure
+        self.assertFalse(locked[0])
+        return error, sent, order, checks
+
+    def test_actual_final_full_admission_and_every_fresh_gate_remain_locked(self):
+        error, sent, order, checks = self.parent()
+        self.assertIsNone(error); self.assertEqual([(16, {'kind':'RELEASE_WORKLOAD'})], sent)
+        self.assertEqual(['lock','current','resources','admission','post_current','post_resources','broker','unlock'], order)
+        self.assertEqual(5, checks['authority_phases']['final.admission']['last_seconds'])
+        for phase in ('current','resources','admission','post_current','post_resources','broker'):
+            with self.subTest(phase=phase):
+                error, sent, order, checks = self.parent(failure_phase=phase)
+                self.assertIsNotNone(error); self.assertEqual([], sent)
+                self.assertEqual(1, checks['authority_phases']['final.'+phase]['failures'])
+
+    def test_parent_full_admission_and_timing_bookkeeping_at_boundary_deny(self):
+        for admission, bookkeeping in [(19,0), (20,0), (5,14)]:
+            with self.subTest(admission=admission, bookkeeping=bookkeeping):
+                error, sent, _, checks = self.parent(admission_cost=admission, bookkeeping_cost=bookkeeping)
+                self.assertIsNotNone(error); self.assertEqual([], sent)
+                self.assertEqual(1, checks['authority_phases']['final.write']['failures'])
+
+    def test_parent_origin_precedes_nonhelp_response_and_late_confirmation_denies(self):
+        from uas.room_probe import bootstrap_control_remaining
+        from contextlib import contextmanager
+        for path in (VM/'room_service.py', VM.parent/'linux/room_service_smoke.py'):
+            text = path.read_text(); tree = ast.parse(text)
+            loop = next(n for n in ast.walk(tree) if isinstance(n, ast.For)
+                        and isinstance(n.iter, ast.Call) and ast.unparse(n.iter) == 'range(2)')
+            source = ast.unparse(loop)
+            self.assertLess(source.index('control_deadline ='), source.index('serve_one('))
+            self.assertIn('if index == 1:', source)
+        tree = ast.parse((VM/'room_service.py').read_text())
+        control = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'control')
+        now = [0]
+        @contextmanager
+        def receive(channel):
+            now[0] = 30
+            yield SimpleNamespace(data=b'{"kind":"WORKLOAD_STARTED"}')
+        env = dict(control_deadline=30, bootstrap_control_remaining=bootstrap_control_remaining,
+                   launch=SimpleNamespace(channel=Mock(), origin=Mock()), receive=receive,
+                   decode=json.loads, require=room_service.require)
+        exec(compile(ast.Module(body=[control], type_ignores=[]), '<actual control>', 'exec'), env)
+        with patch.object(room_service.time, 'monotonic', side_effect=lambda: now[0]):
+            with self.assertRaisesRegex(RuntimeError, 'control deadline'):
+                env['control']({'kind':'WORKLOAD_STARTED'})
+
+    def test_final_diagnostics_survive_bounded_report_without_fabricating_stderr(self):
+        phases = {name:dict(calls=1, failures=0, last_seconds=5, max_seconds=5, total_seconds=5)
+                  for name in room_service.AUTHORITY_PHASES if name.startswith('final.')}
+        held = dict(alive=False, stderr='NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY')
+        report = dict(version=1, nonce='inert', profile=guest_room.PROFILE, production_enabled=False,
+                      failure=dict(error_type='PrimaryFailure'), checks=dict(endpoint_service=dict(
+                          status='failed', authority_phases=phases, held_pre_cleanup=held)))
+        self.assertEqual(report, json.loads(guest_room.encode_report(report)))
+        report['padding'] = 'x' * 65536
+        compact = json.loads(guest_room.encode_report(report))
+        self.assertEqual(phases, compact['checks']['endpoint_service']['authority_phases'])
+        self.assertEqual(held, compact['checks']['endpoint_service']['held_pre_cleanup'])
+        self.assertEqual('PrimaryFailure', compact['primary_failure']['error_type'])
+        self.assertLessEqual(len(json.dumps(compact)), 65536)
+
+
+    def test_actual_precleanup_diagnostic_failure_cannot_mask_first_error_or_cleanup(self):
+        tree = ast.parse((VM/'room_service.py').read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'prove_service')
+        final = next(n.finalbody for n in function.body if isinstance(n, ast.Try))
+        # Execute the real finalbody inside the first exception's active context.
+        code = compile(ast.Module(body=final, type_ignores=[]), '<actual service finally>', 'exec')
+        for fail_alive in (False, True):
+            checks, calls = {}, []
+            primary = RuntimeError('primary')
+            def alive(fd):
+                calls.append('alive')
+                if fail_alive: raise OSError('diagnostic')
+                return False
+            def close(*args): calls.append('cleanup'); return ValueError('cleanup')
+            env = dict(sys=sys, checks=checks, launch=SimpleNamespace(origin=SimpleNamespace(pidfd=7)),
+                       alive=alive, close_service_resources=close, authority=None, provenance=None,
+                       broker=None, backend_fd=-1)
+            with self.assertRaises(RuntimeError) as caught:
+                try: raise primary
+                finally: exec(code, env)
+            self.assertIs(primary, caught.exception)
+            self.assertEqual(['alive','cleanup'], calls)
+            self.assertEqual('failed', checks['status'])
+            self.assertEqual('NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY', checks['held_pre_cleanup']['stderr'])
+            self.assertEqual({'error_type':'OSError'} if fail_alive else {'alive':False},
+                             {k:v for k,v in checks['held_pre_cleanup'].items() if k != 'stderr'})

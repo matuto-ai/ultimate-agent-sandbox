@@ -188,7 +188,7 @@ class NativeRootfsTests(unittest.TestCase):
             (destination/'usr/bin/tini').write_bytes(b'packaged tini')
             (destination/'usr/bin/tini').chmod(0o555)
         with patch.object(rootfs,'guest_guard') as guard, patch.object(rootfs,'PAYLOAD',self.payload), \
-                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(generate_trust=lambda root,run: {'mock': True})}):
+                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(generate_trust=lambda root,run: {'mock': True}, validate_public_ca=lambda root: {'mock': True})}):
             result=rootfs.build_rootfs('a'*32,{'native_runtime':self.native},destination,run=fake_run)
         guard.assert_called_once_with('a'*32)
         args,timeout=calls[0]
@@ -211,11 +211,28 @@ class NativeRootfsTests(unittest.TestCase):
         with patch.object(rootfs, 'guest_guard'), patch.object(rootfs, 'PAYLOAD', self.payload), \
                 patch.object(rootfs, 'verify_filesystem_layout', return_value={}), \
                 patch.object(rootfs, 'extract_runtime') as extract, \
-                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(generate_trust=trust)}):
+                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(generate_trust=trust, validate_public_ca=unittest.mock.Mock())}):
             with self.assertRaisesRegex(ValueError, 'unexpected trust mutation'):
                 rootfs.build_rootfs('a'*32, {'native_runtime': self.native}, destination,
                                    run=lambda *args, **kwargs: '')
         trust.assert_called_once()
+        extract.assert_not_called()
+        self.assertFalse(destination.with_name(destination.name+'.manifest.json').exists())
+
+    def test_native_ca_validation_failure_prevents_extraction_and_manifest(self):
+        destination = self.directory/'failed-native-ca'
+        validate = unittest.mock.Mock(side_effect=ValueError('invalid generated PEM'))
+        generate = unittest.mock.Mock(return_value={'generated': True})
+        with patch.object(rootfs, 'guest_guard'), patch.object(rootfs, 'PAYLOAD', self.payload), \
+                patch.object(rootfs, 'verify_filesystem_layout', return_value={}), \
+                patch.object(rootfs, 'extract_runtime') as extract, \
+                patch.dict(sys.modules, {'native_trust': types.SimpleNamespace(
+                    generate_trust=generate, validate_public_ca=validate)}):
+            with self.assertRaisesRegex(ValueError, 'invalid generated PEM'):
+                rootfs.build_rootfs('a'*32, {'native_runtime': self.native}, destination,
+                                   run=lambda *args, **kwargs: '')
+        generate.assert_called_once()
+        validate.assert_called_once_with(destination)
         extract.assert_not_called()
         self.assertFalse(destination.with_name(destination.name+'.manifest.json').exists())
 
