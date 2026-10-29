@@ -10,6 +10,10 @@ from .ledger import LedgerError
 
 
 def main(argv=None):
+    selected = list(sys.argv[1:] if argv is None else argv)
+    if selected[:1] == ["local"]:
+        from .local_cli import main as local_main
+        return local_main(selected[1:])
     parser = argparse.ArgumentParser(prog="python -m uas")
     commands = parser.add_subparsers(dest="command", required=True)
     validate = commands.add_parser("validate-config", help="validate without starting processes or contacting providers")

@@ -104,6 +104,14 @@ def _hub(engine, resources, plan, peer, control_listener, stack, budget):
         'seats': [{'participant_id': s['participant'], 'actor_id': s['actor'], 'profile_id': s['profile'],
                    'capabilities': sorted(set(profiles[s['profile']]['capabilities']) | {'peer-traffic'})}
                   for s in room['seats']]}
+    return start_hub_channel(engine, resources, metadata, control_listener, stack, budget)
+
+
+def start_hub_channel(engine, resources, metadata, control_listener, stack, budget):
+    """One authenticated startup; callers retain stack for the owner lifetime."""
+    control_lease = EndpointLease(resources['control_path'], owner=HOST_UID, group=HUB_UID)
+    challenge = metadata['challenge']
+    room_id, instance = metadata['room_id'], metadata['room_instance']
     stream = engine.attach_hub(resources['hub_id']); stack.callback(stream.close)
     # Existing exact-owned stopped Hub only. An uncertain start is never repeated.
     engine.start_hub(resources['hub_id'])
@@ -122,7 +130,7 @@ def _hub(engine, resources, plan, peer, control_listener, stack, budget):
         origin.require(record); ready = json.loads(record.data, object_pairs_hook=_unique)
     require(type(ready) is dict and set(ready) == {'version', 'kind', 'controller', 'room_id', 'room_instance', 'observation'}
             and ready['version'] == 1 and ready['kind'] == 'HUB_READY'
-            and ready['room_id'] == room['id'] and ready['room_instance'] == instance,
+            and ready['room_id'] == room_id and ready['room_instance'] == instance,
             'HUB_STARTUP_SCOPE_MISMATCH')
     return control, origin, ready, metadata
 
