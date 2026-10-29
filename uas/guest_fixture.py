@@ -54,6 +54,24 @@ def guard(nonce, *, require_selinux=True):
         raise LifecycleError("GUEST_SELINUX_REQUIRED")
 
 
+def _admission_guard(nonce):
+    """One lexical admission observation; never retained on a backend.
+
+    Keep nonce, root and sysfs checks at every original guard site. Only the
+    duplicate command observation is shared, and the next admit starts fresh.
+    """
+    enforcement = None
+
+    def require():
+        nonlocal enforcement
+        guard(nonce, require_selinux=False)
+        if enforcement is None:
+            enforcement = command("getenforce").strip()
+        if enforcement != "Enforcing" or Path("/sys/fs/selinux/enforce").read_text().strip() != "1":
+            raise LifecycleError("GUEST_SELINUX_REQUIRED")
+    return require
+
+
 def identity(path):
     path = Path(path)
     if path.resolve() != path or not path.is_dir():
@@ -108,13 +126,21 @@ def project_attributes(path):
         os.close(descriptor)
 
 
-def prepare_storage(nonce):
+def prepare_storage(nonce, *, limits=None):
     """Provision only fresh fixture trees on the harness's disposable XFS disk.
 
     Project roots intentionally survive Supervisor Destroy. The harness removes
     the entire *VM*, not arbitrary files or mounts on an operator's machine.
     """
     guard(nonce)
+    if limits is None:
+        limits = {room: (BLOCK_KIB, INODES) for room in ROOMS}
+    if (type(limits) is not dict or set(limits) != set(ROOMS)
+            or any(type(value) is not tuple or len(value) != 2
+                or any(type(item) is not int for item in value)
+                or not 8192 <= value[0] <= 262144 or not 128 <= value[1] <= 8192
+                for value in limits.values())):
+        raise LifecycleError("GUEST_INVALID_QUOTA_SELECTION")
     if command("stat", "-f", "-c", "%T", str(STORAGE)).strip() != "xfs":
         raise LifecycleError("GUEST_XFS_REQUIRED")
     CONTROL.mkdir(mode=0o700, exist_ok=True)
@@ -131,10 +157,12 @@ def prepare_storage(nonce):
                 os.chown(path, WORKSTATION_HOST_UID, WORKSTATION_HOST_UID)
             paths[name] = identity(path)
         command("xfs_quota", "-x", "-c", f"project -s -p {root} {project}", str(STORAGE))
-        command("xfs_quota", "-x", "-c", f"limit -p bhard={BLOCK_KIB}k ihard={INODES} {project}", str(STORAGE))
+        blocks, inodes = limits[room]
+        command("xfs_quota", "-x", "-c", f"limit -p bhard={blocks}k ihard={inodes} {project}", str(STORAGE))
         command("chcon", "-R", "-t", "container_file_t", "-l", level, str(root))
         publish(CONTROL / (room + ".json"), {"nonce": nonce, "room": room,
-                "root": identity(root), "paths": paths, "project": project})
+                "root": identity(root), "paths": paths, "project": project,
+                "quota": list(limits[room])})
 
 
 def network_names(state):
@@ -198,13 +226,17 @@ class GuestBoundaryBackend(DockerFixtureBackend):
 
     def _storage(self, *, require_selinux=True):
         guard(self.nonce, require_selinux=require_selinux)
+        return self._storage_checked()
+
+    def _storage_checked(self):
         try:
             path = CONTROL / (self.room + ".json")
             if path.is_symlink() or path.stat().st_size > 4096:
                 raise OwnershipConflict()
             manifest = json.loads(path.read_text())
             if (manifest["nonce"] != self.nonce or manifest["room"] != self.room
-                    or manifest["project"] != self.project or manifest["root"] != identity(self.root)):
+                    or manifest["project"] != self.project or manifest["root"] != identity(self.root)
+                    or manifest["quota"] != list(self._quota_limits())):
                 raise OwnershipConflict()
             for name, expected in manifest["paths"].items():
                 if name not in {"repository", "workspace", "checkouts", "references", "runtime"}:
@@ -217,12 +249,19 @@ class GuestBoundaryBackend(DockerFixtureBackend):
             raise OwnershipConflict() from error
         return manifest
 
+    def _quota_limits(self):
+        return BLOCK_KIB, INODES
+
     def _quota(self):
         self._storage()
+        self._quota_checked()
+
+    def _quota_checked(self):
         state = command("xfs_quota", "-x", "-c", "state -p", str(STORAGE))
         if "Accounting: ON" not in state or "Enforcement: ON" not in state:
             raise LifecycleError("GUEST_QUOTA_DISABLED")
-        for flag, limit in (("b", BLOCK_KIB), ("i", INODES)):
+        blocks, inodes = self._quota_limits()
+        for flag, limit in (("b", blocks), ("i", inodes)):
             report = command("xfs_quota", "-x", "-c", f"report -p -{flag} -n -N", str(STORAGE))
             rows = [line.split() for line in report.splitlines() if line.split() and line.split()[0] == "#" + str(self.project)]
             if len(rows) != 1 or len(rows[0]) < 4 or rows[0][3] != str(limit):
@@ -233,6 +272,9 @@ class GuestBoundaryBackend(DockerFixtureBackend):
 
     def _project_paths(self, state):
         self._storage()
+        self._project_paths_checked(state)
+
+    def _project_paths_checked(self, state):
         expected = {str(self.root / name) for name in ("repository", "workspace", "checkouts", "references")}
         if state["room_id"] != self.room or set(state["spec"]["project_paths"]) != expected:
             raise OwnershipConflict()
@@ -259,6 +301,9 @@ class GuestBoundaryBackend(DockerFixtureBackend):
 
     def _runtime(self, state, *, create=False):
         self._storage()
+        return self._runtime_checked(state, create=create)
+
+    def _runtime_checked(self, state, *, create=False):
         path, marker, intent = self._runtime_path(state), self._runtime_marker(state), self._runtime_intent(state)
         if any(item.is_symlink() for item in self._runtime_artifacts(state)):
             raise OwnershipConflict()  # Includes dangling links; never absence.
@@ -433,13 +478,16 @@ class GuestBoundaryBackend(DockerFixtureBackend):
             raise BackendUnknown() from error
 
     def _verify_user_namespace(self, state, resource):
+        return self._verify_user_namespace_observed(state, resource,
+            lambda: self._run(["info", "--format", "{{.DockerRootDir}}"]).strip())
+
+    def _verify_user_namespace_observed(self, state, resource, root_observation):
         expected = ["0", str(USERNS_BASE), "65536"]
         for name in ("subuid", "subgid"):
             records = [line for line in Path("/etc/" + name).read_text().splitlines() if line.startswith("uas-remap:")]
             if records != ["uas-remap:" + str(USERNS_BASE) + ":65536"]:
                 raise LifecycleError("GUEST_USERNS_MAPPING_DRIFT")
-        root = self._run(["info", "--format", "{{.DockerRootDir}}"]).strip()
-        if root != "/var/lib/docker/100000.100000":
+        if root_observation() != "/var/lib/docker/100000.100000":
             raise LifecycleError("GUEST_USERNS_MAPPING_DRIFT")
         for path in [self._runtime_path(state), *(Path(path) for path in state["spec"]["project_paths"])]:
             info = path.stat()
@@ -454,18 +502,49 @@ class GuestBoundaryBackend(DockerFixtureBackend):
                     raise LifecycleError("GUEST_USERNS_MAPPING_DRIFT")
 
     def admit(self, state):
-        guard(self.nonce)
-        self._quota()
-        self._runtime(state)
-        if self._network(state) is None or self._firewall(state) is None:
+        return self._admit_guarded(state, _admission_guard(self.nonce))
+
+    def _admit_guarded(self, state, require):
+        # These private bodies are reached only after their original guards.
+        # No observation escapes this call or substitutes for a later admit.
+        def storage():
+            require()
+            return self._storage_checked()
+
+        require()
+        storage()
+        self._quota_checked()
+        storage()
+        self._runtime_checked(state)
+        if self._network(state) is None:
             raise LifecycleError("GUEST_NETWORK_MISSING")
-        if canonical_firewall(self._firewall(state)) != canonical_firewall(firewall_document(state, self.nonce)):
+        firewall = self._firewall(state)
+        if firewall is None:
+            raise LifecycleError("GUEST_NETWORK_MISSING")
+        if canonical_firewall(firewall) != canonical_firewall(firewall_document(state, self.nonce)):
             raise LifecycleError("GUEST_FIREWALL_DRIFT")
-        options = json.loads(self._run(["info", "--format", "{{json .SecurityOptions}}"]))
+        try:
+            # Fixed projection, not the daemon's unbounded full info document.
+            info = json.loads(self._run(["info", "--format",
+                '{"SecurityOptions":{{json .SecurityOptions}},"DockerRootDir":{{json .DockerRootDir}}}']))
+            if (type(info) is not dict or set(info) != {"SecurityOptions", "DockerRootDir"}
+                    or type(info["SecurityOptions"]) is not list
+                    or any(type(option) is not str for option in info["SecurityOptions"])
+                    or type(info["DockerRootDir"]) is not str):
+                raise BackendUnknown()
+            options = info["SecurityOptions"]
+        except (TypeError, ValueError) as error:
+            raise BackendUnknown() from error
         if "name=selinux" not in options or "name=userns" not in options:
             raise LifecycleError("GUEST_DOCKER_SELINUX_USERNS_REQUIRED")
-        resource = super().admit(state)
-        self._user_namespace(state, resource)
+        storage()
+        self._project_paths_checked(state)
+        self._require("name=seccomp,profile=builtin" in options, "DAEMON_SECCOMP")
+        resource = self._admit_resources(state)
+        try:
+            self._verify_user_namespace_observed(state, resource, lambda: info["DockerRootDir"])
+        except (OSError, KeyError, ValueError, TypeError) as error:
+            raise BackendUnknown() from error
         if (resource["ProcessLabel"] != "system_u:system_r:container_t:" + self.level
                 or resource["MountLabel"] != "system_u:object_r:container_file_t:" + self.level):
             raise LifecycleError("GUEST_CONTAINER_LABEL_REQUIRED")

@@ -285,3 +285,32 @@ def generate_trust(root, *, run):
                 'outputs': outputs}
     if len(canonical(evidence)) > 8192: raise ValueError('trust evidence exceeds bound')
     return evidence
+
+
+def validate_public_ca(root):
+    """Offline parse of the exact generated server-auth PEM, never host defaults.
+
+    This proves native SSL can load anchors, not that a remote peer will verify.
+    No socket, fallback store, verification override or certificate text output.
+    """
+    import ssl
+    from native_rootfs import resolve_inside, ordinary, digest
+    root = Path(root)
+    key = CA_OUTPUTS[1]
+    target = resolve_inside(root, key)
+    info = ordinary(target)
+    if target != root / key or not 0 < info.st_size <= 4 * 1024 * 1024:
+        raise ValueError('generated server-auth PEM path or size invalid')
+    before = digest(target)
+    context = ssl.create_default_context(cafile=str(target))
+    if context.verify_mode != ssl.CERT_REQUIRED or context.check_hostname is not True:
+        raise ValueError('native SSL verification defaults invalid')
+    stats = context.cert_store_stats()
+    if type(stats.get('x509_ca')) is not int or stats['x509_ca'] <= 0:
+        raise ValueError('generated server-auth PEM contains no CA anchors')
+    if digest(target) != before:
+        raise ValueError('generated server-auth PEM changed during validation')
+    return {'status': 'passed', 'path': key, 'sha256': before,
+            'bytes': info.st_size, 'ca_anchors': stats['x509_ca'],
+            'certificate_required': True, 'hostname_check': True,
+            'scope': 'offline-native-SSL-load-only'}

@@ -76,8 +76,8 @@ class StagedSourceClosureTests(unittest.TestCase):
                        and isinstance(node.targets[0], ast.Name)
                        and node.targets[0].id in ('MAX_SOURCE_FILES','MAX_SOURCE_BYTES','MAX_SOURCE_TOTAL')}
         self.assertEqual(expressions, {name: ast.dump(ast.parse(value, mode='eval').body)
-            for name,value in {'MAX_SOURCE_FILES':'143','MAX_SOURCE_BYTES':'256<<10','MAX_SOURCE_TOTAL':'3<<20'}.items()})
-        limits = {'MAX_SOURCE_FILES':143,'MAX_SOURCE_BYTES':256<<10,'MAX_SOURCE_TOTAL':3<<20}
+            for name,value in {'MAX_SOURCE_FILES':'145','MAX_SOURCE_BYTES':'256<<10','MAX_SOURCE_TOTAL':'3<<20'}.items()})
+        limits = {'MAX_SOURCE_FILES':145,'MAX_SOURCE_BYTES':256<<10,'MAX_SOURCE_TOTAL':3<<20}
         sizes = [(ROOT/name).stat().st_size for name in sources]
         self.assertLessEqual(len(sizes),limits['MAX_SOURCE_FILES'])
         self.assertTrue(all(size <= limits['MAX_SOURCE_BYTES'] for size in sizes))
@@ -92,7 +92,7 @@ class StagedSourceClosureTests(unittest.TestCase):
         # import: AST reachability alone must not silently omit that entry.
         self.assertTrue({'uas/human_mtls.py','uas/manager_stream.py','uas/manager_transport.py',
             'uas/native_human_control.py','uas/native_human_launch.py','uas/native_human_entry.py'} <= sources)
-        self.assertEqual(len(sources),136)
+        self.assertEqual(len(sources),138)
         self.assertEqual([], missing_imports(sources, include_lazy=True, optional_edges=OPTIONAL_LOCAL_EDGES))
         self.assert_stage_budget(sources)
 
@@ -143,9 +143,33 @@ class StagedSourceClosureTests(unittest.TestCase):
                        if isinstance(node,ast.Call) and isinstance(node.func,ast.Name)
                        and node.func.id=='stage_sources' for keyword in node.keywords
                        if keyword.arg=='extra_paths')
+        self.assertEqual((138,142,145),(len(base),len(base|artifact),len(base|set(command))))
         for sources in (base|artifact, base|set(command)):
             self.assertEqual([],missing_imports(sources))
             self.assert_stage_budget(sources)
+
+    def test_exact_file_count_boundary_145_and_146_with_modes_mocked(self):
+        # Count/copy behavior only; existing hosted tests prove actual modes.
+        import importlib.util
+        import tempfile
+        from unittest import mock
+        spec=importlib.util.spec_from_file_location('finite_stage',ROOT/'tests/linux/diff_smoke.py')
+        stage=importlib.util.module_from_spec(spec);spec.loader.exec_module(stage)
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); source=root/'input'; source.mkdir()
+            accepted=root/'accepted'; accepted.mkdir()
+            rejected=root/'rejected'; rejected.mkdir()
+            names=tuple('entry-'+str(i) for i in range(145))
+            with mock.patch.object(stage,'ROOT',source), mock.patch.object(stage,'SOURCES',names), \
+                 mock.patch.object(stage.os,'geteuid',return_value=0), \
+                 mock.patch.object(stage,'_source_bytes',return_value=b'fixed'), \
+                 mock.patch.object(stage.os,'fchmod'), mock.patch.object(Path,'chmod'):
+                destination,hashes=stage.stage_sources(accepted)
+                self.assertEqual(set(names),set(hashes))
+                self.assertEqual(145,len(list(destination.iterdir())))
+                with self.assertRaisesRegex(AssertionError,'file count'):
+                    stage.stage_sources(rejected,extra_paths=('entry-145',))
+                self.assertFalse((rejected/'source').exists())
 
     def test_optional_identity_route_has_fixed_dependency_files(self):
         # The unchanged native fixture leaves contributions=None. If a trusted
