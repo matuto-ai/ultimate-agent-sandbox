@@ -13,6 +13,7 @@ from unittest.mock import patch
 from uas import config as deployment_config
 from uas import library
 from uas import library_bundle
+from uas import library_gate
 from uas.ledger import Origin
 from uas.manager_actions import HumanSession
 
@@ -1493,6 +1494,530 @@ class BundleValidationTests(unittest.TestCase):
             b"sources:\n  - resource: https://example.com/a\n    title: Typo\n", b"")
         self.assertIn("context/pick-sqlite.md",
                       self.validate(scope, settings, optional, current=ordinary).updated)
+
+def gate_page(title, entries=()):
+    lines = ["# " + title, "", library_gate.NOTICE, ""]
+    lines.extend(entries)
+    return "\n".join(lines) + "\n"
+
+
+def gate_root(path, identity):
+    return ("---\nokf_version: \"0.2\"\n---\n\n# Project Library\n\n"
+            "Source coordinates: %s\nSource identity: %s\n\n%s\n"
+            "* [Context](context/index.md)\n* [Decisions](decisions/index.md)\n"
+            "* [Research](research/index.md)\n* [Pending](pending/index.md)\n"
+            % (path, identity, library_gate.NOTICE))
+
+
+def gate_concept(type_, title, status=None, body=None, sources=()):
+    fields = []
+    if sources:
+        fields.append("sources:")
+        for entry in sources:
+            fields.extend(entry)
+    return concept(type_, title, status,
+                   body=body or gate_page("Body", ("Text.",)), fields=tuple(fields))
+
+
+def source_entry(resource, title=None, range_=None, sha256=None):
+    lines = ["  - resource: " + resource]
+    if title is not None:
+        lines.append("    title: " + title)
+    if range_ is not None:
+        lines.append("    range: " + range_)
+    if sha256 is not None:
+        lines.append("    sha256: " + sha256)
+    return lines
+
+
+PINNED = "https://github.com/acme/source/blob/" + "a" * 40 + "/docs/pick.md"
+DIGEST = "b" * 64
+
+
+class CommitGateTests(unittest.TestCase):
+    """T05: one content-commit gate over the T04 structure seam."""
+
+    def settings(self, **limits):
+        value = document()
+        value["limits"].update(limits)
+        return admit(value)
+
+    def filtered(self, **modes):
+        value = document()
+        value["filters"].update(modes)
+        return admit(value)
+
+    def scope(self, project_id="alpha", repository="acme/alpha", source="1001"):
+        return library.participant_scope(ORIGIN, binding=binding(project_id, repository, source))
+
+    def initial(self, scope, notice=True):
+        prefix = "projects/" + scope.project_path
+        root = gate_root(scope.project_path, scope.project_identity)
+        if not notice:
+            root = root.replace(library_gate.NOTICE + "\n", "")
+        files = {
+            "index.md": root,
+            "log.md": ("# Update log\n\n## 2026-10-01\n"
+                       "* **Initialization**: Created the Project bundle.\n"),
+            "context/index.md": gate_page("Context"),
+            "decisions/index.md": gate_page("Decisions"),
+            "research/index.md": gate_page("Research"),
+            "pending/index.md": gate_page("Pending"),
+        }
+        return prefix, {prefix + "/" + name: value.encode("utf-8")
+                        for name, value in files.items()}
+
+    def update(self, scope, *, body=None, sources=(), extra=(), index=None):
+        prefix, files = self.initial(scope)
+        files[prefix + "/context/pick-sqlite.md"] = gate_concept(
+            "context", "Pick SQLite", "stable", body=body, sources=sources).encode("utf-8")
+        files[prefix + "/context/index.md"] = gate_page(
+            "Context", index or ("* [Pick SQLite](/context/pick-sqlite.md) - short.",)
+        ).encode("utf-8")
+        files[prefix + "/log.md"] = NEW_LOG.encode("utf-8")
+        for name, data in extra:
+            files[prefix + "/" + name] = data if isinstance(data, bytes) else data.encode("utf-8")
+        return prefix, files
+
+    def validate(self, scope, settings, proposed, current=None, selected=()):
+        return library_gate.validate(
+            scope, settings,
+            current=None if current is None else library_bundle.Tree(files=current),
+            proposed=library_bundle.Tree(files=proposed), selected=selected)
+
+    def refused(self, scope, settings, proposed, current=None, selected=(), code=None):
+        with self.assertRaises(library.LibraryError) as raised:
+            self.validate(scope, settings, proposed, current=current, selected=selected)
+        if code is not None:
+            self.assertEqual(code, raised.exception.code, raised.exception.field)
+        return raised.exception
+
+    def test_initialization_and_updates_require_the_reference_data_notice(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, files = self.initial(scope)
+        result = self.validate(scope, settings, files)
+        self.assertEqual(tuple(sorted(library_bundle.REQUIRED)), result.bundle.added)
+
+        _prefix, unannounced = self.initial(scope, notice=False)
+        self.refused(scope, settings, unannounced, code="MISSING_REFERENCE_NOTICE")
+        prefix = "projects/" + scope.project_path
+        _prefix, current = self.initial(scope)
+        without_pending_notice = dict(current)
+        without_pending_notice[prefix + "/pending/index.md"] = b"# Pending\n"
+        self.refused(scope, settings, without_pending_notice, current=current,
+                     code="MISSING_REFERENCE_NOTICE")
+        _prefix, undrafted = self.update(scope, body="# Draft\n\nNo notice here.\n")
+        self.refused(scope, settings, undrafted, current=current,
+                     code="MISSING_REFERENCE_NOTICE")
+
+    def test_ordinary_markdown_broken_links_and_legacy_reader_data_commit(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        legacy = ("---\ntype: BigQuery Table\ntitle: Legacy\n---\n\n# Legacy\n\n"
+                  "See [vendor](https://vendor.example.com/a) and <b>markup</b>.\n")
+        current[prefix + "/context/legacy.md"] = legacy.encode("utf-8")
+        current[prefix + "/context/index.md"] = gate_page(
+            "Context", ("* [Legacy](/context/legacy.md) - tolerated.",)).encode("utf-8")
+        body = gate_page("Pick", (
+            "* [Anchored](#decision) and [broken](missing.md) and [other](../context/gone.md).",
+            "", "```html", "<div>fenced code stays literal</div>", "![x](image.png)",
+            "```", "", "Reference style: [ref].", "",
+            "[ref]: /decisions/pick-sqlite.md", "",
+            "A bare URL such as https://example.com/a is prose, not a link.",
+        ))
+        _prefix, proposed = self.update(scope, body=body, index=(
+            "* [Legacy](/context/legacy.md) - tolerated.",
+            "* [Pick SQLite](/context/pick-sqlite.md) - short.",
+        ))
+        proposed[prefix + "/context/legacy.md"] = legacy.encode("utf-8")
+        result = self.validate(scope, settings, proposed, current=current)
+        self.assertIn("context/pick-sqlite.md", result.bundle.added)
+        self.assertEqual(legacy.encode("utf-8"), result.bundle.files[prefix + "/context/legacy.md"])
+
+    def test_unsafe_markdown_forms_refuse_the_whole_proposal(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        cases = {
+            "RAW_HTML": ("# Body\n\n" + library_gate.NOTICE + "\n\n<div>hi</div>\n"),
+            "IMAGE_NOT_ALLOWED": ("# Body\n\n" + library_gate.NOTICE
+                                  + "\n\n![chart](context/chart.png)\n"),
+            "EXTERNAL_LINK": ("# Body\n\n" + library_gate.NOTICE
+                              + "\n\nSee [vendor](https://example.com/a).\n"),
+        }
+        for code, body in cases.items():
+            with self.subTest(code=code):
+                _prefix, proposed = self.update(scope, body=body)
+                before = deepcopy(proposed)
+                error = self.refused(scope, settings, proposed, current=current, code=code)
+                self.assertEqual(before, proposed)
+                self.assertEqual(current, dict(current))
+                self.assertNotIn("example.com", str(error))
+        for name, snippet, code in (
+                ("autolink", "Read <https://example.com/a>.", "EXTERNAL_LINK"),
+                ("mail", "Write <ops@example.com>.", "EXTERNAL_LINK"),
+                ("protocol-relative", "[a](//example.com/a)", "EXTERNAL_LINK"),
+                ("javascript", "[a](javascript:alert(1))", "UNSAFE_LINK"),
+                ("data", "[a](data:text/html;base64,AAAA)", "UNSAFE_LINK"),
+                ("escaping", "[a](../../outside.md)", "UNSAFE_LINK"),
+                ("unnormalized", "[a](context/./other.md)", "UNSAFE_LINK"),
+                ("reference", "[ref]: https://example.com/a", "EXTERNAL_LINK"),
+                ("encoded", "[a](context/%2e%2e/escape.md)", "UNSAFE_LINK"),
+                ("comment", "<!-- hidden -->", "RAW_HTML")):
+            with self.subTest(name=name):
+                body = "# Body\n\n" + library_gate.NOTICE + "\n\n" + snippet + "\n"
+                _prefix, proposed = self.update(scope, body=body)
+                self.refused(scope, settings, proposed, current=current, code=code)
+
+    def test_markdown_forms_that_continue_after_a_line_ending_are_parsed(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("EXTERNAL_LINK", "[vendor](\nhttps://example.com/a)"),
+            ("RAW_HTML", "<div\nclass=\"notice\">"),
+            ("RAW_HTML", "<!--\nhidden\n-->"),
+            ("EXTERNAL_LINK", "[ref]:\nhttps://example.com/a"),
+        )
+        for code, snippet in cases:
+            with self.subTest(code=code, snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+        _prefix, continued = self.update(scope, body=gate_page(
+            "Pick", ("[other](\n/context/other.md) stays readable.",)))
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, continued, current=current).bundle.added)
+
+    def test_markup_lookalikes_are_scan_through_and_attribute_quotes_respected(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("RAW_HTML", '<a title="x>y">tail</a>'),
+            ("EXTERNAL_LINK", "range < here [x](https://example.com/a) rer > end"),
+            ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
+        )
+        for code, snippet in cases:
+            with self.subTest(code=code):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+        _prefix, prose = self.update(scope, body=gate_page(
+            "Pick", ("a < b and c > d, plus [other](context/other.md).",)))
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, prose, current=current).bundle.added)
+
+    def test_markdown_policy_follows_parsed_tokens_not_spellings(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("EXTERNAL_LINK", "`unmatched\n\n[x](https://example.com/a)"),
+            ("EXTERNAL_LINK", "[x](https&#58;//example.com/a)"),
+            ("UNSAFE_LINK", "[x](javascript&#58;alert(1))"),
+            ("EXTERNAL_LINK", "> [ref]: https://example.com/a\n>\n> [ref]"),
+            ("EXTERNAL_LINK", "```info`invalid\n[x](https://example.com/a)"),
+            ("EXTERNAL_LINK", r"\`literal [x](https://example.com/a) `"),
+            ("EXTERNAL_LINK", "`unmatched\n# [x](https://example.com/a)\n`"),
+            ("EXTERNAL_LINK", "`unmatched\n* [x](https://example.com/a)\n`"),
+            ("EXTERNAL_LINK", "`unmatched\n> [x](https://example.com/a)\n`"),
+            ("EXTERNAL_LINK", "# `heading\n[x](https://example.com/a) `"),
+            ("EXTERNAL_LINK", "* [x](\n  https://example.com/a)"),
+            ("EXTERNAL_LINK", "> [x](\n> https://example.com/a)"),
+            ("EXTERNAL_LINK", "> [x](\nhttps://example.com/a)"),
+            ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
+        )
+        for code, snippet in cases:
+            with self.subTest(code=code, snippet=snippet[:40]):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+        _prefix, prose = self.update(scope, body=gate_page(
+            "Pick", ("An unmatched ` stays literal, \\`escaped\\` text is not code,",
+                     "a `span", "over two lines` is code, and [other](context/other.md) is fine.",
+                     "", "> a quoted `span", "> over two lines` is code too.",
+                     "", "* [quoted](\n  context/other.md) stays a relative link.",
+                     "", "```", "<div>and [x](https://example.com/a)</div>", "```")))
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, prose, current=current).bundle.added)
+
+    def test_commonmark_containers_and_reference_destinations_enforce_policy(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("EXTERNAL_LINK", "> * [x](\n>   https://example.com/a)"),
+            ("EXTERNAL_LINK", "* outer\n  * [x](\n    https://example.com/a)"),
+            ("EXTERNAL_LINK", "[x][ref]\n\n> [ref]:\n> https://example.com/a"),
+            ("EXTERNAL_LINK", "[ref]: local.md\n[ref]: https://example.com/a"),
+            ("UNSAFE_LINK", r"[x](javascript\:alert\(1\))"),
+            ("UNSAFE_LINK", "[x][ref]\n\n[ref]: javascript&#58;alert(1)"),
+            ("UNSAFE_LINK", "[x](<context/other.md&#10;outside>)"),
+            ("UNSAFE_LINK", "[x](context/&#37;2e&#37;2e/outside.md)"),
+            ("IMAGE_NOT_ALLOWED", "![x][ref]\n\n[ref]: chart.png"),
+            ("RAW_HTML", "> <div\n> title='continued'>"),
+        )
+        for code, snippet in cases:
+            with self.subTest(snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+
+    def test_commonmark_literal_code_and_decoded_once_links_remain_allowed(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        for snippet in (
+                "> ```\n> [x](https://example.com/a)\n> <div>\n> ```",
+                "* item\n\n      [x](https://example.com/a)\n      <div>",
+                "    [x](https://example.com/a)\n    <div>",
+                "> * [x](\n>   context/other.md)",
+                "[x](context/a&amp;colon;b.md)",
+                "[x](context/other.md \"a title\")",
+                "<https://example.com/a\n>",  # Not an autolink or HTML tag.
+                r"\![literal](context/other.md)"):
+            with self.subTest(snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.assertIn("context/pick-sqlite.md", self.validate(
+                    scope, settings, proposed, current=current).bundle.added)
+
+    def test_url_edge_whitespace_cannot_hide_unsafe_destinations(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        for snippet in (
+                "[x](javascript:alert(1))",
+                "[x](&#32;javascript:alert(1))",
+                "[x](< javascript:alert(1)>)",
+                "[x](<  javascript:alert(1) >)",
+                "[x](&#32;https://example.com/a)",
+                "[x](&#32;//example.com/a)",
+                "[x][ref]\n\n[ref]: < javascript:alert(1)>",
+                "[x](context/other.md&#32;)"):
+            with self.subTest(snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code="UNSAFE_LINK")
+
+    def test_markdown_nesting_cannot_silently_hide_policy_tokens(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        for snippet in (
+                "> " * 40 + "[x](https://example.com/a)",
+                "\n".join("  " * n + "* item" for n in range(40))
+                + "\n" + "  " * 40 + "[x](https://example.com/a)",
+                "[" * 40 + "[x](https://example.com/a)" + "]" * 40):
+            with self.subTest(snippet=snippet[:60]):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current,
+                             code="MARKDOWN_NESTING_LIMIT")
+
+    def test_escaped_metadata_cannot_smuggle_a_credential(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        secret = "ghp_" + "A1b2" * 10
+        for name, title in (("literal", '"' + secret + '"'),
+                            ("escaped", '"\\u0067' + secret[1:] + '"'),
+                            ("plain", '"safe text"')):
+            with self.subTest(name=name):
+                _prefix, proposed = self.update(
+                    scope, sources=[source_entry(PINNED, title=title)])
+                if name == "plain":
+                    self.assertIn("context/pick-sqlite.md", self.validate(
+                        scope, settings, proposed, current=current).bundle.added)
+                    continue
+                error = self.refused(scope, settings, proposed, current=current,
+                                     code="SECRET_DETECTED")
+                self.assertNotIn(secret, str(error))
+                if name == "escaped":
+                    self.assertIn(".metadata", error.evidence["path"])
+
+    def test_source_references_and_excerpt_declarations(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        # Positive: a bundle concept, an unpinned resource and a pinned artifact
+        # with a complete bounded excerpt declaration all commit.
+        accepted = [
+            source_entry("decisions/pick-sqlite.md", title="Pick SQLite"),
+            source_entry("https://example.com/spec"),
+            source_entry(PINNED, range_="10-42", sha256=DIGEST),
+        ]
+        _prefix, proposed = self.update(scope, sources=accepted)
+        result = self.validate(scope, settings, proposed, current=current)
+        self.assertIn("context/pick-sqlite.md", result.bundle.added)
+        self.assertEqual({"resource": "https://example.com/spec", "kind": "resource",
+                          "pinned": False}, library_gate.source("https://example.com/spec"))
+        self.assertTrue(library_gate.source(PINNED)["pinned"])
+        self.assertTrue(library_gate.source("decisions/pick-sqlite.md")["pinned"])
+
+        self.assertFalse(library_gate.source(
+            "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md")["pinned"])
+        # Only the positional revision field can pin: a pin keyword inside the
+        # file path, or an owner, repository name or directory that looks like a
+        # commit, cannot upgrade a mutable reference.
+        for mutable in (
+                "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md",
+                "https://github.com/src/" + "a" * 40 + "/blob/main/doc.md",
+                "https://example.com/" + "a" * 40 + "/doc.md",
+                "https://github.com/acme/source/commit/" + "a" * 40):
+            with self.subTest(mutable=mutable):
+                self.assertFalse(library_gate.source(mutable)["pinned"])
+        self.assertTrue(library_gate.source(
+            "https://gitlab.com/acme/source/-/blob/" + "a" * 40 + "/doc.md")["pinned"])
+        self.assertTrue(library_gate.source(
+            "https://bitbucket.org/acme/source/src/" + "a" * 40 + "/doc.md")["pinned"])
+        cases = (
+            ("UNSAFE_SOURCE", source_entry("ftp://example.com/a")),
+            ("UNSAFE_SOURCE", source_entry("../escape.md")),
+            ("UNSAFE_SOURCE", source_entry("pending/" + DIGEST + ".md")),
+            ("UNSAFE_SOURCE", source_entry("research/index.md")),
+            ("UNSAFE_SOURCE", source_entry("https://user:pass@example.com/a")),
+            ("EXCERPT_UNPINNED_SOURCE",
+             source_entry("https://example.com/spec", range_="1-2", sha256=DIGEST)),
+            ("EXCERPT_UNPINNED_SOURCE", source_entry(
+                "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md",
+                range_="1-2", sha256=DIGEST)),
+            ("EXCERPT_UNPINNED_SOURCE", source_entry(
+                "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md",
+                range_="1-2", sha256=DIGEST)),
+            ("EXCERPT_UNPINNED_SOURCE", source_entry(
+                "https://github.com/src/" + "a" * 40 + "/blob/main/doc.md",
+                range_="1-2", sha256=DIGEST)),
+            ("INCOMPLETE_EXCERPT", source_entry(PINNED, range_="1-2")),
+            ("INCOMPLETE_EXCERPT", source_entry(PINNED, sha256=DIGEST)),
+            ("INVALID_EXCERPT_RANGE", source_entry(PINNED, range_="0-2", sha256=DIGEST)),
+            ("INVALID_EXCERPT_RANGE", source_entry(PINNED, range_="9-3", sha256=DIGEST)),
+            ("INVALID_EXCERPT_RANGE", source_entry(PINNED, range_="1-500", sha256=DIGEST)),
+            ("INVALID_SOURCE_HASH", source_entry(PINNED, range_="1-2", sha256="xyz")),
+        )
+        for code, declaration in cases:
+            with self.subTest(code=code, declaration=declaration):
+                _prefix, proposed = self.update(scope, sources=[declaration])
+                self.refused(scope, settings, proposed, current=current, code=code)
+
+    def test_writer_owned_excerpt_fields_remain_correctable(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        _prefix, first = self.update(
+            scope, sources=[source_entry(PINNED, range_="1-2", sha256=DIGEST)])
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, first, current=current).bundle.added)
+        _prefix, corrected = self.update(
+            scope, sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)])
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, corrected, current=first).bundle.updated)
+        _prefix, removed = self.update(scope, sources=())
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, removed, current=first).bundle.updated)
+        # A genuinely unknown source field stays as tolerated reader data, while
+        # the writer-owned excerpt fields next to it remain correctable.
+        prefix, tolerated = self.initial(scope)
+        concept_path = prefix + "/context/pick-sqlite.md"
+        tolerated[concept_path] = gate_concept(
+            "context", "Pick SQLite", "stable",
+            sources=[source_entry(PINNED, range_="1-2", sha256=DIGEST)
+                     + ["    author: LegacyAuthor"]],
+        ).encode("utf-8")
+        tolerated[prefix + "/context/index.md"] = gate_page(
+            "Context", ("* [Pick SQLite](/context/pick-sqlite.md) - short.",)
+        ).encode("utf-8")
+        tolerated[prefix + "/log.md"] = NEW_LOG.encode("utf-8")
+        _prefix, updated = self.update(
+            scope, sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)])
+        updated[concept_path] = gate_concept(
+            "context", "Pick SQLite", "stable",
+            sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)
+                     + ["    author: LegacyAuthor"]],
+        ).encode("utf-8")
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, updated, current=tolerated).bundle.updated)
+        _prefix, dropped = self.update(
+            scope, sources=[source_entry(PINNED, range_="3-4", sha256="c" * 64)])
+        self.refused(scope, settings, dropped, current=tolerated,
+                     code="EXISTING_FIELD_CHANGED")
+
+    def test_credentials_refuse_with_safe_evidence_and_no_echoed_value(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        secret = "-----BEGIN RSA PRIVATE KEY-----"
+        body = gate_page("Pick", ("```", secret, "MIIEowIBAAKCAQEA", "```"))
+        _prefix, proposed = self.update(scope, body=body)
+        error = self.refused(scope, settings, proposed, current=current,
+                             code="SECRET_DETECTED")
+        self.assertEqual("private-key", error.evidence["rule"])
+        self.assertEqual("context/pick-sqlite.md", error.evidence["path"])
+        located = (proposed[prefix + "/context/pick-sqlite.md"].decode("utf-8")
+                   .split("\n")[error.evidence["line"] - 1])
+        self.assertEqual(secret, located)
+        self.assertEqual(64, len(error.evidence["sha256"]))
+        for leaked in (secret, "MIIEowIBAAKCAQEA"):
+            self.assertNotIn(leaked, str(error))
+            self.assertNotIn(leaked, error.field)
+        self.assertNotIn(secret, error.evidence["sha256"])
+
+        for name, value in (("github", "ghp_" + "A1b2" * 10),
+                            ("aws", "AKIA" + "IOSFODNN7EXAMPLE"),
+                            ("spaced-key", "-----BEGIN  RSA  PRIVATE KEY-----")):
+            with self.subTest(name=name):
+                _prefix, proposed = self.update(scope, body=gate_page(
+                    "Pick", ("Token: " + value,)))
+                error = self.refused(scope, settings, proposed, current=current,
+                                     code="SECRET_DETECTED")
+                self.assertNotIn(value, str(error))
+        # An operator's explicit observe mode is a setting, not a caller bypass,
+        # and it still records the same safe facts instead of dropping them.
+        _prefix, observed = self.update(scope, body=gate_page("Pick", (secret,)))
+        record = self.validate(scope, self.filtered(high_confidence="observe"),
+                               observed, current=current)
+        self.assertIn("context/pick-sqlite.md", record.bundle.added)
+        self.assertEqual(1, len(record.observations))
+        self.assertEqual({"rule": "private-key", "path": "context/pick-sqlite.md",
+                          "line": record.observations[0]["line"],
+                          "sha256": record.observations[0]["sha256"]},
+                         record.observations[0])
+        self.assertNotIn(secret, str(record.observations))
+
+    def test_heuristic_modes_stay_observe_only_until_the_corpora_qualify(self):
+        scope = self.scope()
+        self.assertFalse(library_gate.heuristic_qualified())
+        _prefix, current = self.initial(scope)
+        body = gate_page("Pick", ('password = "hunter2-hunter2-hunter2"',))
+        _prefix, proposed = self.update(scope, body=body)
+        blocking = self.filtered(heuristic="block")
+        # Unqualified heuristic evidence cannot switch a suspicion into a veto.
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, blocking, proposed, current=current).bundle.added)
+        observed = self.validate(scope, self.filtered(heuristic="observe"),
+                                 proposed, current=current)
+        self.assertIn("context/pick-sqlite.md", observed.bundle.added)
+        self.assertEqual("assigned-secret", observed.observations[0]["rule"])
+        self.assertNotIn("hunter2", str(observed.observations))
+        with patch.object(library_gate, "HEURISTIC_FALSE_POSITIVES",
+                          ("Set the password in your environment.",)):
+            self.assertTrue(library_gate.heuristic_qualified())
+            error = self.refused(scope, blocking, proposed, current=current,
+                                 code="SECRET_DETECTED")
+            self.assertEqual("assigned-secret", error.evidence["rule"])
+            self.assertIn("context/pick-sqlite.md", self.validate(
+                scope, self.filtered(heuristic="observe"), proposed,
+                current=current).bundle.added)
+        # Only the admitted settings and the fixed corpora select the mode: no
+        # caller-supplied override exists to bypass a blocking rule.
+        with self.assertRaises(TypeError):
+            self.validate(scope, blocking, proposed, current=current, filters={"heuristic": "observe"})
+
+    def test_refused_content_needs_a_new_request_id_and_no_effects_run(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        _prefix, refused = self.update(
+            scope, body=gate_page("Pick", ("[vendor](https://example.com/a)",)))
+        with patch("builtins.open", side_effect=AssertionError("file access")), \
+                patch.object(socket, "socket", side_effect=AssertionError("socket")), \
+                patch.object(socket, "create_connection", side_effect=AssertionError("network")), \
+                patch.object(subprocess, "run", side_effect=AssertionError("process")):
+            self.refused(scope, settings, refused, current=current, code="EXTERNAL_LINK")
+
+        original = capture(settings, value={"type": "decision", "title": "Pick",
+                                            "body": "See [vendor](https://example.com/a).\n"})
+        corrected = capture(settings, value={"type": "decision", "title": "Pick",
+                                             "body": "See [vendor](decisions/vendor.md).\n"})
+        with self.assertRaises(library.LibraryError) as raised:
+            library.identity(original, corrected)
+        self.assertEqual("ID_CONFLICT", raised.exception.code)
+        refreshed = capture(settings, operation_id="op-2", request_id="request-2",
+                            value={"type": "decision", "title": "Pick",
+                                   "body": "See [vendor](decisions/vendor.md).\n"})
+        self.assertNotEqual(original.queue_id, refreshed.queue_id)
+
 
 if __name__ == "__main__":
     unittest.main()

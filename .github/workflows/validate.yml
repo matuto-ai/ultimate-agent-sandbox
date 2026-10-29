@@ -64,6 +64,13 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
+      - name: Install pinned Python dependencies
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
+
       - name: Validate successor interfaces
         if: steps.changes.outputs.skip_tests != 'true'
         env:
@@ -137,6 +144,13 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
+      - name: Install pinned Python dependencies
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
+
       - name: Validate measured slow unit partition
         if: steps.changes.outputs.skip_tests != 'true'
         env:
@@ -209,6 +223,13 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
+      - name: Install pinned Python dependencies
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
+
       - name: Validate measured integration unit partition
         if: steps.changes.outputs.skip_tests != 'true'
         env:

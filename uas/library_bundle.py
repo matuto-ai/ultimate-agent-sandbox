@@ -424,7 +424,7 @@ def _sequence(lines, index, indent, field, depth):
     return items, index
 
 
-def _frontmatter(text, field):
+def frontmatter(text, field):
     """Split canonical Markdown into (frontmatter mapping, body) with strict YAML."""
     lines = text.split("\n")
     if lines[0] != "---":
@@ -550,10 +550,11 @@ def _classify(relative):
     return "unknown", None, None
 
 
-def _concept(relative, directory, name, text, previous, selected, limits):
+def _concept(relative, directory, name, text, previous, selected, limits,
+             source_fields=()):
     """Validate one concept document against its directory and its own history."""
-    meta, _body = _frontmatter(text, relative)
-    previous_meta = _frontmatter(previous, relative)[0] if previous is not None else {}
+    meta, _body = frontmatter(text, relative)
+    previous_meta = frontmatter(previous, relative)[0] if previous is not None else {}
     declared = meta.get("type")
     if not isinstance(declared, str) or not declared.strip():
         _fail("MISSING_TYPE", relative + ".type")
@@ -573,7 +574,7 @@ def _concept(relative, directory, name, text, previous, selected, limits):
     if declared == "research" and not meta.get("sources"):
         _fail("SOURCE_REQUIRED", relative + ".sources")
     writer = previous is None or previous != text
-    _sources(relative, meta.get("sources"), limits, previous_meta, writer)
+    _sources(relative, meta.get("sources"), limits, previous_meta, writer, source_fields)
     if not writer:
         return meta.get("title")
     for key in meta:
@@ -623,11 +624,12 @@ def _concept(relative, directory, name, text, previous, selected, limits):
     return title
 
 
-def _sources(relative, sources, limits, previous_meta, writer):
+def _sources(relative, sources, limits, previous_meta, writer, source_fields=()):
     """Structural provenance: a bounded list of entries, each naming its resource."""
+    owned = ("resource", "title") + tuple(source_fields)
     if sources is None:
         if writer and any(unknown for _entry, unknown
-                          in _unknown_sources(previous_meta.get("sources"))):
+                          in _unknown_sources(previous_meta.get("sources"), owned)):
             _fail("EXISTING_FIELD_CHANGED", relative + ".sources")
         return
     if type(sources) is not list or not sources:
@@ -636,7 +638,7 @@ def _sources(relative, sources, limits, previous_meta, writer):
         _fail("TOO_MANY_SOURCES", relative + ".sources")
     previous = [entry for entry in (previous_meta.get("sources") or [])
                 if type(entry) is dict]
-    allowed = {"resource", "title"}
+    allowed = {"resource", "title"} | set(source_fields)
     for entry in previous:
         allowed.update(entry)
     for index, source in enumerate(sources):
@@ -659,22 +661,21 @@ def _sources(relative, sources, limits, previous_meta, writer):
         if _implicit(source):
             _fail("UNSAFE_SCALAR", field)
     if writer:
-        _preserved_sources(relative, previous, sources)
+        _preserved_sources(relative, previous, sources, owned)
 
 
-def _unknown_sources(sources):
-    return [(entry, {key: value for key, value in entry.items()
-                     if key not in ("resource", "title")})
+def _unknown_sources(sources, owned=("resource", "title")):
+    return [(entry, {key: value for key, value in entry.items() if key not in owned})
             for entry in (sources or []) if type(entry) is dict]
 
 
-def _preserved_sources(relative, previous, sources):
+def _preserved_sources(relative, previous, sources, owned=("resource", "title")):
     """Unknown source metadata stays with its resource, value and YAML kind.
 
-    Supported v1 source fields (resource, title) remain editable, so an ordinary
-    correction is not frozen; only reader data this writer does not own is.
+    Writer-owned source fields remain editable, so an ordinary correction is not
+    frozen; only reader data this writer does not own is.
     """
-    for entry, unknown in _unknown_sources(previous):
+    for entry, unknown in _unknown_sources(previous, owned):
         if not unknown:
             continue
         match = next((source for source in sources
@@ -698,7 +699,7 @@ def _index(relative, text, empty):
 
 
 def _root_index(text, scope):
-    meta, body = _frontmatter(text, ROOT_INDEX)
+    meta, body = frontmatter(text, ROOT_INDEX)
     if (set(meta) != {"okf_version"} or type(meta["okf_version"]) is not str
             or isinstance(meta["okf_version"], Implicit)
             or meta["okf_version"] != OKF_VERSION):
@@ -779,7 +780,7 @@ def _removals(previous, current, allowed):
             _fail("EXISTING_DATA_DELETION", relative)
         if relative not in allowed:
             _fail("UNSELECTED_PENDING_REMOVAL", relative)
-        meta = _frontmatter(text, relative)[0]
+        meta = frontmatter(text, relative)[0]
         if meta.get("status") != "draft":
             _fail("NOT_A_PENDING_DRAFT", relative)
         removed.append(relative)
@@ -788,14 +789,20 @@ def _removals(previous, current, allowed):
 
 # --- Public seam ----------------------------------------------------------
 
-def validate(scope, settings, *, proposed, current=None, selected=()):
+def validate(scope, settings, *, proposed, current=None, selected=(), source_fields=()):
     """Validate the complete proposed Project result, or refuse all of it.
 
     ``current`` is the canonical bundle tree or ``None`` before registration,
     ``proposed`` is the complete tree the operation wants published, and
     ``selected`` names the queue identities the operation may integrate out of
-    ``pending/``. A refusal raises ``LibraryError`` and mutates nothing.
+    ``pending/``. ``source_fields`` adds writer-owned source-entry fields whose
+    own semantics belong to the composing content policy (T05); structure only
+    bounds and type-checks them here. A refusal raises ``LibraryError`` and
+    mutates nothing.
     """
+    if type(source_fields) is not tuple or any(
+            type(name) is not str or not KEY.fullmatch(name) for name in source_fields):
+        _fail("INVALID_CONTRACT", "source_fields")
     limits = contracts.admit_settings_value(settings)["limits"]
     prefix = _prefix(scope)
     allowed = _selected(selected, limits)
@@ -810,7 +817,8 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
     # a malformed existing bundle fails closed instead of being overwritten.
     if not initialization:
         _structure(previous, previous, scope, limits, set(), False)
-    removed = _structure(files, previous, scope, limits, allowed, initialization)
+    removed = _structure(files, previous, scope, limits, allowed, initialization,
+                         source_fields)
     added = tuple(sorted(set(files) - set(previous)))
     updated = tuple(sorted(relative for relative in files
                            if relative in previous
@@ -821,7 +829,7 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
                   added=added, updated=updated, removed=removed)
 
 
-def _structure(files, previous, scope, limits, allowed, initialization):
+def _structure(files, previous, scope, limits, allowed, initialization, source_fields=()):
     """Check one complete tree against its predecessor; returns removed drafts."""
     if initialization:
         extra = set(files) - set(REQUIRED)
@@ -854,7 +862,7 @@ def _structure(files, previous, scope, limits, allowed, initialization):
                     and previous_text != text and relative not in allowed):
                 _fail("UNSELECTED_PENDING_MUTATION", relative)
             titles[relative] = _concept(relative, directory, name, text,
-                                        previous_text, allowed, limits)
+                                        previous_text, allowed, limits, source_fields)
 
     _root_index(files[ROOT_INDEX][1], scope)
     _log(files[LOG][1], previous[LOG][1] if previous else None, initialization)

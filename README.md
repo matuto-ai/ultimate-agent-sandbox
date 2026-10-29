@@ -129,6 +129,17 @@ exact-image qualification; #67 is not closed by source tests alone.
 
 ## Local test installation
 
+Use Python 3.11+ with `venv` and `pip` available. Install the hash-pinned Python dependencies before running checks or importing the Library content gate; validation does not install packages into your environment automatically. Keep the virtual environment outside the checkout:
+
+```sh
+python3 -m venv /tmp/uas-python
+. /tmp/uas-python/bin/activate
+python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+./validate.sh
+```
+
+The Library gate uses `markdown-it-py` in CommonMark mode (no rendering, plugins, or automatic bare-URL linking). HTML, images and destinations are checked as parsed tokens; fenced and indented code remain literal. Parser nesting at 32 levels is refused rather than silently leaving content unchecked. The parser and its sole runtime dependency, `mdurl`, are pinned with wheel hashes in `requirements.txt`; CI installs the same file in an isolated environment before each aggregate partition.
+
 See [the persistent local entrypoint](docs/local/entrypoint.md) for explicit setup,
 start/status/stop and authenticated Manager inspection. This is separate from
 disposable native qualification; required host preparation and currently absent
