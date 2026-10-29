@@ -41,7 +41,7 @@ class LocalCLITests(unittest.TestCase):
              patch('uas.local_cli.LocalController',return_value=controller), \
              patch('uas.local_cli.serve'),patch('uas.local_cli.signal.signal'):
             with self.assertRaisesRegex(local_cli.LocalInstallationError,'LOCAL_HOST_SHUTDOWN_UNCONFIRMED'):
-                local_cli.run_host(Mock())
+                local_cli.run_host(Mock(bootstrap=Mock(return_value=({}, {}, {'native':None}))))
         services.close.assert_called_once()
 
     def test_repeated_start_unknown_hub_receipt_remains_nonzero(self):

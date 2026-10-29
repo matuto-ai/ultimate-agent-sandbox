@@ -49,6 +49,8 @@ selection yourself if needed, without changing agent/model choices.
 The legacy version-1 handoff uses a private `host-selections.json` with these fields.
 For selected Engine and nondefault UID ranges, use the version-2 preparation
 flow in [host preparation](host-preparation.md); do not change a version-1 offset.
+The owned-XFS image path upgrades the generated handoff to version 3 after
+verified preparation; do not invent its image inode or UUID fields yourself.
 
 | Field | Value to supply |
 |---|---|

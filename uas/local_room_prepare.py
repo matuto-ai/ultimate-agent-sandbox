@@ -61,7 +61,7 @@ def _verify(value):
     return expected
 
 
-def _operations(value, identity):
+def _operations(value, identity, owned_xfs=None):
     settings=value['settings'];storage=settings['storage_root']
     operations=[{'kind':'prepare-room-parent','path':path} for path in value['ancestors']]
     for room in value['config']['rooms']:
@@ -75,12 +75,17 @@ def _operations(value, identity):
                 'mcs_level':selected['mcs_level']})
     body={'version':1,'request_id':value['request_id'],'operations':operations,
           'host_profile':value['host_plan']['profile']}
+    if owned_xfs is not None:body['owned_xfs']=deepcopy(owned_xfs)
     return dict(body,plan_id=digest(body))
 
 
-def observed_engine_allocations(profile_document):
+def observed_engine_allocations(profile_document, *, owned_ids=None):
     """Read only required labels/subnets, never container config or secrets."""
     profile=LocalHostProfile.parse(profile_document)
+    if owned_ids is None:owned_ids={'container':set(),'network':set()}
+    require(type(owned_ids) is dict and set(owned_ids)=={'container','network'}
+            and all(type(v) is set and all(type(i) is str and re.fullmatch('[0-9a-f]{64}',i) for i in v)
+                    for v in owned_ids.values()),'ROOM_OWNED_ENGINE_IDS')
     result={'levels':set(),'networks':set()}
     deadline=time.monotonic()+10
     remaining=1024*1024
@@ -108,6 +113,7 @@ def observed_engine_allocations(profile_document):
             require(type(row) is dict and set(row)=={'id','value'} and row['id'] in ids
                     and row['id'] not in seen,'ROOM_ENGINE_PROJECTION')
             seen.add(row['id']);value=row['value']
+            if row['id'] in owned_ids[resource]:continue
             if resource=='container':
                 require(type(value) is list and len(value)==2 and all(type(v) is str for v in value),'ROOM_ENGINE_LABELS')
                 for label in value:
@@ -123,10 +129,49 @@ def observed_engine_allocations(profile_document):
     return result
 
 
-def apply(value):
+def readmission_owned_ids(value,native, *, runtime_plan_for=None):
+    """Only canonical persisted instance ownership can exclude inventory IDs."""
+    from .lifecycle import Supervisor
+    from .local_native import LocalNativeBackend
+    import stat
+    result={'container':set(),'network':set()}
+    config=value['config'];root=Path(config['deployment']['state_root'])
+    for room in config['rooms']:
+        manifest=root/room['id']/'lifecycle.json'
+        if not os.path.lexists(manifest):continue
+        parent=canonical_node(manifest.parent);node=manifest.lstat()
+        require(parent.st_uid==0 and not parent.st_mode&0o022 and stat.S_ISREG(node.st_mode)
+                and node.st_uid==0 and node.st_nlink==1 and not node.st_mode&0o022,'ROOM_LIFECYCLE_OWNER')
+        profile=LocalNativeProfile(config,native,room['id'],str(root))
+        if runtime_plan_for is not None:
+            require(callable(runtime_plan_for),'ROOM_RUNTIME_SELECTOR')
+            runtime=runtime_plan_for(profile)
+            if runtime is not None:profile.bind_runtime(runtime)
+        backend=LocalNativeBackend(profile)
+        owner=Supervisor(root,room['id'],backend,authorize=lambda *_:False,revoke=lambda *_:False,
+            **({'state_reader_gid':profile.owners['supervisor']} if profile.runtime_plan is not None else {}))
+        with owner._locked():
+            state=owner._read();require(state is not None,'ROOM_LIFECYCLE_CHANGED')
+            backend._binding(state)
+            if backend._inspect_object(state,'volume') is None:continue
+            container=backend._inspect_object(state,'container');hub=backend._hub(state);network=backend._network(state)
+            for item in (container,hub):
+                if item is not None:result['container'].add(item['Id'])
+            if network is not None:
+                require(network.get('IPAM',{}).get('Config')==[{'Subnet':profile.subnet,'Gateway':profile.gateway}],
+                        'ROOM_OWNED_NETWORK_CHANGED')
+                result['network'].add(network['Id'])
+    return result
+
+
+def apply(value, *, readmission=False, runtime_plan_for=None):
     value=_verify(value)
     require(os.geteuid()==0,'ROOM_APPLY_ROOT_REQUIRED')
-    host=value['host_plan'];settings=value['settings']
+    host=value['host_plan'];settings=deepcopy(value['settings'])
+    if readmission:
+        require(host['operations'][0]['kind']=='prepare-owned-xfs-file'
+                and os.path.lexists(Path(host['receipt_root'])/'rooms'/'plan.json'),
+                'ROOM_READMISSION_PREPARED_REQUIRED')
     lock_path=Path(value['lock_path']);lock_identity=canonical_node(lock_path)
     require(lock_identity.st_uid==0 and not lock_identity.st_mode&0o022,'ROOM_LOCK_OWNER')
     lock=os.open(lock_path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
@@ -138,29 +183,56 @@ def apply(value):
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         current=inspect(host['profile'],storage_parent=host['storage_parent'],
                         proposed_paths=[host['storage_root'],host['endpoints_root'],host['receipt_root']])
-        allocations=observed_engine_allocations(host['profile'])
-        require(not any(row['mcs_level'] in allocations['levels'] for row in settings['rooms'].values()),
-                'ROOM_MCS_COLLISION')
-        networks=[ipaddress.ip_network(n) for n in [*current['networks'],*allocations['networks']]]
-        require(not any(ipaddress.ip_network(row['subnet']).overlaps(n)
-                        for row in settings['rooms'].values() for n in networks if n.version==4),'ROOM_NETWORK_COLLISION')
-        apply_host(host)
+        allocations=observed_engine_allocations(host['profile']) if not readmission else None
+        if not readmission:
+            require(not any(row['mcs_level'] in allocations['levels'] for row in settings['rooms'].values()),
+                    'ROOM_MCS_COLLISION')
+            networks=[ipaddress.ip_network(n) for n in [*current['networks'],*allocations['networks']]]
+            require(not any(ipaddress.ip_network(row['subnet']).overlaps(n)
+                            for row in settings['rooms'].values() for n in networks if n.version==4),'ROOM_NETWORK_COLLISION')
+        apply_host(host,**({'readmission':True} if readmission else {}))
         identity=directory_identity(settings['storage_root'])
-        plan=_operations(value,identity)
+        owned_xfs=None
+        if host['operations'][0]['kind']=='prepare-owned-xfs-file':
+            from .local_xfs_storage import selection,verify_owned_mount
+            with PreparationReceipt(Path(host['receipt_root']),host,owner_uid=0) as host_receipt:
+                owned_xfs=selection(host_receipt)
+                if readmission:
+                    require(host_receipt._read('room-request.json')==value,'ROOM_READMISSION_REQUEST_CHANGED')
+                else:host_receipt._append('room-request.json',value)
+            require(verify_owned_mount(owned_xfs,settings['storage_root'])['identity']==identity,'ROOM_STORAGE_CHANGED')
+            identity=[0,identity[1]]
+            settings.update(version=3,owned_xfs=owned_xfs)
+            require('host_profile' in settings,'ROOM_XFS_V2_SELECTION_REQUIRED')
+        if readmission:
+            candidate=assemble(value['config'],settings,value['workstation'],value['hub'])
+            owned=readmission_owned_ids(value,candidate,runtime_plan_for=runtime_plan_for)
+            allocations=observed_engine_allocations(host['profile'],owned_ids=owned)
+            require(not any(row['mcs_level'] in allocations['levels'] for row in settings['rooms'].values()),
+                    'ROOM_MCS_COLLISION')
+            require(not any(ipaddress.ip_network(row['subnet']).overlaps(ipaddress.ip_network(n))
+                    for row in settings['rooms'].values() for n in allocations['networks']),
+                    'ROOM_NETWORK_COLLISION')
+        plan=_operations(value,identity,owned_xfs)
         receipt_path=Path(host['receipt_root'])/'rooms'
         owned_directory(receipt_path,plan_id=plan['plan_id'],operation='room-receipts',
                         owner_uid=0,mode=0o700,create=not os.path.lexists(receipt_path))
         with PreparationReceipt(receipt_path,plan,owner_uid=0) as receipt:
+            if readmission:
+                require(all(receipt.state(i)['state']=='confirmed' for i in range(len(plan['operations']))),
+                        'ROOM_READMISSION_INCOMPLETE')
             for index,op in enumerate(plan['operations']):
                 if op['kind']=='prepare-room-parent':
                     state=receipt.state(index)
                     create=receipt.intent(index) if state['state']=='not-started' else False
                     parent=canonical_node(Path(op['path']).parent)
-                    require(parent.st_dev==identity[0],'ROOM_PARENT_DEVICE')
+                    require(parent.st_dev==(verify_owned_mount(owned_xfs,settings['storage_root'])['identity'][0]
+                        if owned_xfs is not None else identity[0]),'ROOM_PARENT_DEVICE')
                     evidence=owned_directory(Path(op['path']),plan_id=plan['plan_id'],
                         operation='room-parent',owner_uid=0,mode=0o711,create=create,
                         repair_partial=state['state']=='unknown',
-                        expected_parent_identity=[parent.st_dev,parent.st_ino])
+                        expected_parent_identity=[parent.st_dev,parent.st_ino],
+                        **({'owned_xfs':owned_xfs,'storage_root':settings['storage_root']} if owned_xfs is not None else {}))
                     if state['state']=='confirmed':require(evidence==state['evidence'],'ROOM_PARENT_DRIFT')
                     else:receipt.confirm(index,evidence)
                 elif op['kind']=='reserve-room-quota':reserve_quota(receipt,index)
@@ -216,7 +288,8 @@ def apply_file(envelope_path, output_directory):
     # Same existing artifact/source checks and exclusive output contract as the
     # manual prepared-host path. Unknown output writes are preserved, not retried.
     handoff=prepare(value['inputs']['project'],value['inputs']['settings'],
-                    value['workstation_output'],value['hub_output'],value['revision'],output_directory)
+                    value['workstation_output'],value['hub_output'],value['revision'],output_directory,
+                    **({'owned_xfs':result['native']['owned_xfs']} if result['native']['version']==3 else {}))
     require(file_request(value['inputs']['host_plan'],value['inputs']['project'],value['inputs']['settings'],
                          value['workstation_output'],value['hub_output'],value['revision'])==value,
             'ROOM_INPUT_CHANGED_DURING_HANDOFF')
@@ -230,6 +303,27 @@ def apply_file(envelope_path, output_directory):
             and handoff['native']==expected_reference, 'ROOM_HANDOFF_CHANGED')
     return {'version':1,'status':'local-host-prepared','request_id':result['request_id'],
             'handoff':handoff,'remaining':['native-runtime-admission']}
+
+
+def readmit_document(config,native, *, runtime_plan_for=None):
+    """Existing host startup re-admits v3 under its retained installation lock."""
+    from .local_native import validate_document
+    from .local_prepare import read_file
+    from .local_xfs_storage import selection
+    native=validate_document(native)
+    require(native['version']==3,'ROOM_READMISSION_V3_REQUIRED')
+    selected=native['owned_xfs'];root=Path(selected['receipt_root'])
+    canonical_node(root)
+    request=json.loads(read_file(root/'room-request.json'))
+    _verify(request)
+    require(request['config']==config and request['host_plan']['plan_id']==selected['plan_id']
+            and request['host_plan']['receipt_root']==str(root),'ROOM_READMISSION_REQUEST_CHANGED')
+    with PreparationReceipt(root,request['host_plan'],owner_uid=0) as receipt:
+        require(selection(receipt)==selected and receipt._read('room-request.json')==request,
+                'ROOM_READMISSION_REQUEST_CHANGED')
+    result=apply(request,readmission=True,runtime_plan_for=runtime_plan_for)
+    require(result['native']==native,'ROOM_HANDOFF_CHANGED')
+    return {'status':'owned-xfs-readmitted','request_id':result['request_id']}
 
 
 def main(argv=None):

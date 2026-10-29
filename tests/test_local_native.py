@@ -124,13 +124,24 @@ class LocalNativeTests(unittest.TestCase):
         stack.enter_context(patch.object(Path,'resolve',lambda p:p))
         def info(p):
             if p==root:return N(st_uid=0,st_mode=stat.S_IFDIR|0o711)
-            return N(st_uid=local.native.HOST_UID,st_gid=local.native.RUNTIME_UID if p.name=='peer' else local.native.HUB_UID,st_mode=stat.S_IFDIR|0o710)
+            return N(st_uid=backend.profile.owners['supervisor'],st_gid=backend.profile.owners['runtime'] if p.name=='peer' else backend.profile.owners['hub'],st_mode=stat.S_IFDIR|0o710)
         stack.enter_context(patch.object(Path,'stat',info));stack.enter_context(patch.object(local.os.path,'lexists',return_value=existing))
         stack.enter_context(patch.object(Path,'lstat',return_value=N(st_uid=0 if foreign else local.native.HOST_UID,
             st_gid=local.native.RUNTIME_UID,st_mode=stat.S_IFSOCK|0o620,st_dev=1,st_ino=2)))
         unlink=stack.enter_context(patch.object(Path,'unlink'))
         listener=stack.enter_context(patch.object(local.native,'labeled_listener',side_effect=[Mock(),Mock()]))
         return backend,state,listener,unlink
+    def test_recovery_uses_selected_supervisor_not_qualification_default(self):
+        from tests.test_local_native_engine import selections
+        self.config,self.doc=selections()
+        self.doc['mapping']['offset']=500000
+        self.doc['host_profile']['mapping']['offset']=500000
+        with ExitStack() as stack:
+            backend,state,listener,unlink=self.recovery(stack)
+            backend.reopen_listeners(state,owner_lock_fd=4)
+            self.assertEqual([c.kwargs['owner'] for c in listener.call_args_list],[565533,565533])
+            self.assertEqual([c.args[1] for c in listener.call_args_list],[565532,565531])
+
     def test_explicit_recovery_requires_stopped_exact_owned_resources(self):
         with ExitStack() as stack:
             backend,state,listener,unlink=self.recovery(stack)

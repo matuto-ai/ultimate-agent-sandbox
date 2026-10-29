@@ -260,9 +260,12 @@ class NativeBoundaryProfile:
 
     def storage_ancestors(self): return (self.storage, self.root, self.root/'state')
 
+    def storage_identity(self, path):
+        return directory_identity(path)
+
     def observe_storage(self):
         self.guard()
-        require(directory_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
+        require(self.storage_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
         require(self.root.stat().st_uid == 0 and not self.root.stat().st_mode & 0o022, 'ROOT_OWNER')
         for ancestor in self.storage_ancestors():
             info=ancestor.stat()
@@ -277,7 +280,7 @@ class NativeBoundaryProfile:
         require(len(rows) == 1 and len(rows[0]) >= 4
                 and rows[0][3] == str(self.limits['disk_bytes'] // 1024), 'QUOTA_DRIFT')
         for key, path in self.paths.items():
-            require(directory_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
+            require(self.storage_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
             info = Path(path).stat()
             require(info.st_dev == self.storage.stat().st_dev, 'QUOTA_FILESYSTEM')
             require(info.st_uid == self.owners['runtime'] and info.st_gid == self.owners['runtime'], 'PATH_OWNER')

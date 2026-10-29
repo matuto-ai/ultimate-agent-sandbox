@@ -186,9 +186,25 @@ class Installation:
         if 'runtime' in value:selected['runtime']=deepcopy(runtime)
         return config, selected
 
+    def bootstrap(self):
+        """Read only metadata needed to mount owned storage before runtime reads."""
+        with self._locked():
+            value=self._read()
+            native=None if value['native'] is None else document(read_reference(value['native']))
+            self._bootstrap_paths(value,native)
+            config=load(StringIO(read_reference(value['project']).decode('utf-8')))
+            return value,config,{'native':native}
+
+    def _bootstrap_paths(self,value,native):
+        if native is None or native.get('version')!=3:return
+        storage=Path(native['storage_root'])
+        for path in (self.root,Path(value['project']['path']),Path(value['native']['path'])):
+            require(path!=storage and storage not in path.parents,'LOCAL_BOOTSTRAP_INSIDE_OWNED_STORAGE')
+
     def setup(self, raw):
         value = selection(raw)
-        self.inspect(value)  # No directories or state written for invalid inputs.
+        _,selected=self.inspect(value)  # No directories or state written for invalid inputs.
+        self._bootstrap_paths(value,selected['native'])
         try:
             self.root.mkdir(mode=0o700)
         except FileExistsError:
@@ -249,7 +265,8 @@ class Installation:
                 if before.get('runtime',{}).get(room_id)!=selected:
                     require(not os.path.lexists(Path(rooms[room_id]['state_root'])/'lifecycle.json'),
                             'LOCAL_RUNTIME_RECONFIGURATION_REQUIRES_UNCREATED_ROOM')
-            self.inspect(after)
+            _,resolved=self.inspect(after)
+            self._bootstrap_paths(after,resolved['native'])
             receipt = {'installation': str(self.root), kind: selected,
                        'previous_sha256': hashlib.sha256(canonical(before)).hexdigest(),
                        'selected_sha256': hashlib.sha256(canonical(after)).hexdigest()}

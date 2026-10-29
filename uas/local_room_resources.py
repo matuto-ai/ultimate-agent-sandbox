@@ -64,18 +64,24 @@ def _operation(receipt, index, kind, fields):
     return operation
 
 
-def _storage(operation):
+def _storage(operation, receipt=None):
     path = Path(absolute_path(operation['storage_root']))
     info = canonical_node(path)
+    expected=[info.st_dev,info.st_ino]
+    if receipt is not None and 'owned_xfs' in receipt.plan:
+        from .local_xfs_storage import verify_owned_mount
+        mount=verify_owned_mount(receipt.plan['owned_xfs'],str(path))
+        require(mount['identity']==expected,'ROOM_STORAGE_CHANGED')
+        expected=[0,info.st_ino]
     require(info.st_uid == 0 and not info.st_mode & 0o022
-            and [info.st_dev, info.st_ino] == operation['storage_identity'], 'ROOM_STORAGE_CHANGED')
+            and expected == operation['storage_identity'], 'ROOM_STORAGE_CHANGED')
     return path, info
 
 
 def reserve_quota(receipt, index):
     operation = _operation(receipt, index, 'reserve-room-quota',
                            {'storage_root', 'storage_identity', 'project_id', 'disk_bytes'})
-    storage, identity = _storage(operation)
+    storage, identity = _storage(operation,receipt)
     project, size = operation['project_id'], operation['disk_bytes']
     require(type(project) is int and 0 < project < 2**31 and type(size) is int
             and 0 < size < 2**63 and size % 1024 == 0, 'ROOM_QUOTA_SELECTION')
@@ -88,19 +94,19 @@ def reserve_quota(receipt, index):
     if state['state'] == 'not-started' or (state['state'] == 'unknown' and absent):
         # A root-controlled canonical path is held unchanged before and after
         # this fixed tool call; no caller command, shell or /etc/projects edit.
-        _storage(operation)
+        _storage(operation,receipt)
         run_fixed(['/usr/sbin/xfs_quota', '-x', '-D', '/dev/null', '-P', '/dev/null', '-c',
                    'limit -p bhard='+str(size//1024)+'k '+str(project), str(storage)])
     # Unknown outcomes are observed first. Only verified absence in both quota
     # inventories permits the same reserved intent to make an effect again.
     after = observe_quotas(str(storage), project)
-    _storage(operation)
+    _storage(operation,receipt)
     require(project in after['blocks'] and after['blocks'][project]['hard'] == size//1024
             and after['blocks'][project]['soft'] == 0
             and (project not in after['inodes'] or
                  after['inodes'][project]['hard'] == after['inodes'][project]['soft'] == 0),
             'ROOM_QUOTA_UNCONFIRMED')
-    evidence = {'identity': [identity.st_dev, project],
+    evidence = {'identity': [0 if 'owned_xfs' in receipt.plan else identity.st_dev, project],
                 'observed_sha256': digest({'project': project, 'hard_bytes': size, 'storage': operation['storage_identity']})}
     if state['state'] == 'confirmed':
         require(evidence == state['evidence'], 'ROOM_QUOTA_CONFIRMED_DRIFT')
@@ -133,7 +139,7 @@ def _marker(parent_fd, name, value=None):
 def prepare_leaf(receipt, index):
     operation = _operation(receipt, index, 'prepare-room-leaf',
                            {'storage_root', 'storage_identity', 'path', 'project_id', 'mcs_level'})
-    storage, storage_info = _storage(operation)
+    storage, storage_info = _storage(operation,receipt)
     path = Path(absolute_path(operation['path']))
     require(storage in path.parents and len(path.name.encode()) < 220, 'ROOM_LEAF_PATH')
     project, level = operation['project_id'], operation['mcs_level']
@@ -170,12 +176,14 @@ def prepare_leaf(receipt, index):
         info = os.fstat(leaf_fd)
         require(info.st_dev == storage_info.st_dev, 'ROOM_LEAF_DEVICE')
         binding = {'version': 1, 'plan_id': receipt.plan['plan_id'], 'operation': digest(operation),
-                   'identity': [info.st_dev, info.st_ino], 'parent': [opened.st_dev, opened.st_ino]}
+                   'identity': [0 if 'owned_xfs' in receipt.plan else info.st_dev, info.st_ino],
+                   'parent': [0 if 'owned_xfs' in receipt.plan else opened.st_dev, opened.st_ino]}
         marker = _marker(parent_fd, marker_name, binding if first else None)
         require(marker == binding, 'ROOM_OWNER_RECORD_CHANGED')
         expected_label = 'system_u:object_r:container_file_t:'+level
 
         def current():
+            _storage(operation,receipt)
             fresh = os.fstat(leaf_fd)
             named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
             require(stat.S_ISDIR(named.st_mode) and (named.st_dev, named.st_ino) ==

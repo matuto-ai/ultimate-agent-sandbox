@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import uuid
 
 from .docker_fixture import DockerFixtureBackend
 from .lifecycle import Supervisor, LifecycleError, BackendUnknown
@@ -59,7 +60,7 @@ def image(value, *, hub=False):
 def selected_host(document):
     """Resolve versioned endpoint selection; never use ambient Docker context."""
     from .local_host_profile import LocalHostProfile
-    if document.get('version')==2:
+    if document.get('version') in (2,3):
         selected=LocalHostProfile.parse(document['host_profile'])
         require(selected.installation_id==document['installation_id']
                 and selected.engine_version==document['engine_version']
@@ -73,12 +74,29 @@ def selected_host(document):
     return selected
 
 
+def owned_xfs_selection(value):
+    """Version-three owned image policy, not evidence of a mounted filesystem."""
+    require(type(value) is dict and set(value)=={'receipt_root','plan_id','image_identity','uuid'},
+            'LOCAL_NATIVE_OWNED_XFS')
+    path(value['receipt_root'])
+    require(type(value['plan_id']) is str and re.fullmatch(r'[0-9a-f]{64}',value['plan_id']),
+            'LOCAL_NATIVE_OWNED_XFS')
+    identity(value['image_identity'])
+    require(value['image_identity'][1]>0,'LOCAL_NATIVE_OWNED_XFS')
+    try:
+        require(type(value['uuid']) is str and str(uuid.UUID(value['uuid']))==value['uuid'],
+                'LOCAL_NATIVE_OWNED_XFS')
+    except (ValueError,AttributeError):raise LifecycleError('LOCAL_NATIVE_OWNED_XFS') from None
+    return deepcopy(value)
+
+
 def validate_document(document):
     """Pure shape/policy validation, never a claim about the selected machine."""
     require(type(document) is dict,'LOCAL_NATIVE_PROFILE')
     version=document.get('version')
-    require(type(version) is int and version in (1,2) and
-            set(document)==(FIELDS if version==1 else FIELDS|{'host_profile'})
+    require(type(version) is int and version in (1,2,3) and
+            set(document)==(FIELDS | ({'host_profile'} if version>=2 else set())
+                             | ({'owned_xfs'} if version==3 else set()))
             and document['profile']=='local-native-v'+str(version),'LOCAL_NATIVE_PROFILE')
     require(type(document['installation_id']) is str
             and re.fullmatch(r'[0-9a-f]{32}',document['installation_id']),'LOCAL_NATIVE_INSTALLATION')
@@ -94,6 +112,11 @@ def validate_document(document):
     require(all(Path(root)!=Path(engine) and Path(root) not in Path(engine).parents and Path(engine) not in Path(root).parents
                 for root in (document['storage_root'],document['endpoints_root'])
                 for engine in (host.socket,host.data_root,host.exec_root)), 'LOCAL_NATIVE_ENGINE_PATH_OVERLAP')
+    if version==3:
+        selection=owned_xfs_selection(document['owned_xfs'])
+        receipt=path(selection['receipt_root'])
+        require(all(receipt!=root and receipt not in root.parents and root not in receipt.parents
+                    for root in (storage,endpoints)), 'LOCAL_NATIVE_OWNED_XFS_OVERLAP')
     rooms=document['rooms']; require(type(rooms) is dict and 1<=len(rooms)<=64,'LOCAL_NATIVE_ROOMS')
     quotas=set();levels=set();networks=[];all_paths=[]
     for room_id,row in rooms.items():
@@ -112,11 +135,15 @@ def validate_document(document):
                 and gateway==network.network_address+1 and all(not network.overlaps(n) for n in networks),
                 'LOCAL_NATIVE_NETWORK')
         networks.append(network);identity(row['root_identity'])
+        if version==3:
+            require(row['root_identity'][0]==0 and row['root_identity'][1]>0,'LOCAL_NATIVE_STABLE_IDENTITY')
         require(type(row['paths']) is dict and set(row['paths'])=={'repo','workspace','reference','checkouts','runtime'},
                 'LOCAL_NATIVE_PROJECT_PATHS')
         for record in row['paths'].values():
             require(type(record) is dict and set(record)=={'path','identity'},'LOCAL_NATIVE_PROJECT_PATH')
             selected=path(record['path']);identity(record['identity'])
+            if version==3:
+                require(record['identity'][0]==0 and record['identity'][1]>0,'LOCAL_NATIVE_STABLE_IDENTITY')
             require(storage in selected.parents and all(selected!=p and selected not in p.parents and p not in selected.parents
                     for p in all_paths),'LOCAL_NATIVE_PROJECT_OVERLAP')
             all_paths.append(selected)
@@ -202,6 +229,22 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     @property
     def owners(self): return self.host_profile.owners
     def storage_ancestors(self): return (self.storage,self.state_root.parent)
+
+    def storage_identity(self, selected_path):
+        self.require_host_unchanged()
+        if self.native_document['version']!=3:
+            return super().storage_identity(selected_path)
+        from .local_xfs_storage import verify_owned_mount
+        selected_path=path(str(selected_path))
+        require(selected_path==self.storage or self.storage in selected_path.parents,
+                'LOCAL_NATIVE_STORAGE_PATH')
+        selection=self.native_document['owned_xfs']
+        observed=verify_owned_mount(selection,self.storage)
+        require(observed['image_identity']==selection['image_identity'],'LOCAL_NATIVE_STORAGE_IMAGE')
+        require(observed['identity'][1]==self.boundary['root_identity'][1], 'ROOT_IDENTITY')
+        current=native.directory_identity(selected_path)
+        require(current[0]==observed['identity'][0], 'LOCAL_NATIVE_STORAGE_FILESYSTEM')
+        return [0,current[1]]
 
     def guard(self, *, require_selinux=True):
         self.require_host_unchanged()
@@ -305,7 +348,7 @@ class LocalNativeBackend(native.NativeQualificationBackend):
             selected_path.unlink()
         try:
             for selected_path,group in selected:
-                self.listeners.append(native.labeled_listener(selected_path,group,level=self.level))
+                self.listeners.append(native.labeled_listener(selected_path,group,level=self.level,owner=self.profile.owners['supervisor']))
         except BaseException:
             for listener in self.listeners:listener.close()
             self.listeners=[]

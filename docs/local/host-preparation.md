@@ -1,12 +1,37 @@
 # Persistent local host preparation (source checkpoint)
 
-This path prepares storage for an existing **compatible** local native host;
-it does not install an alternate Docker daemon, create an XFS backing image,
-change global Docker configuration, start Rooms, or authorize any host change.
-The isolated Engine/non-XFS installation path remains unfinished in #202.
+This path prepares storage for an existing **compatible** local native Engine.
+It reuses quota-enabled XFS or, with an explicitly sized plan, creates a private
+installation-owned XFS image and mounts it at the new storage root. It does not
+install an alternate Docker daemon, change global Docker configuration, start
+Rooms, or authorize host changes. Owned Engine provisioning remains unfinished.
+
+The image lives inside the private receipt root, which must be on the selected
+storage-parent filesystem. Size is explicitly selected (512 MiB–1 TiB), checked
+against available space, and physically allocated before formatting. No block
+device or existing file is formatted; there is no force-format option. Mounting
+uses project quotas, nodev and nosuid. Receipts bind file inode, filesystem UUID,
+mountpoint ownership and observed loop backing. Unknown operations are observed,
+not reissued; incomplete ownership evidence requires operator investigation.
+
+New image-backed preparation emits `local-native-v3` automatically. Only this
+owned-image path uses stable filesystem UUID plus inode identities; ordinary
+v1/v2 hosts retain exact device/inode checks. Every admission still verifies the
+live mount device, backing image ownership, UUID, quotas and path identities.
+A changed UUID, backing image, inode, ownership, MCS label or quota is refused.
+
+Normal local host startup re-admits completed v3 storage under its existing
+exclusive lock, before starting helpers. A new boot has a distinct mount and
+endpoint issuance record; unknown operations in the same boot are never retried.
+Re-admission observes existing Room ownership, never recursively repairs data.
+Installation metadata and Project/native references must remain outside the
+owned filesystem so startup can read them before mounting. No additional
+mandatory daemon, fstab edit or storage service is introduced. No separate storage service is required; the existing host startup owns this
+re-admission.
 
 The existing host plan must select Docker 29.8.2, an explicitly selected nonoverlapping subordinate mapping
-of size 65536, SELinux enforcing, and an existing quota-enabled XFS parent.
+of size 65536 and SELinux enforcing. Storage is either an existing quota-enabled
+XFS parent or the explicitly sized owned-image fallback described above.
 The Engine socket, data/exec roots and remap account may be explicitly selected;
 ambient Docker contexts and DOCKER_HOST are never used. Existing human trees
 are not imported.
@@ -24,7 +49,8 @@ that same profile. An overlapping rootless Podman or other allocation is still
 refused; never move an existing user's allocation to bypass the refusal. Select
 an existing compatible Engine with an independently allocated nonoverlapping
 range. This does not configure a new daemon or allocate a subordinate range.
-Qualification and version 1 retain offset 100000.
+Qualification and version 1 retain offset 100000. Version 3 uses the same
+selected Engine/mapping as version 2.
 
 `python -m uas.local_room_prepare plan` reads `--host-plan`, `--project`,
 `--settings`, `--workstation-output`, `--hub-output`, and `--revision`, then
@@ -63,3 +89,11 @@ failure preserve and inspect the partial directory, not overwrite it.
 Source tests use controlled command/privilege observations and ordinary temporary
 files. They are not evidence of a privileged apply on a real host. This checkpoint
 does not yet close #202's general existing-machine installation acceptance.
+
+### Remaining integration boundary
+
+This checkpoint re-admits storage and the installation endpoint root. Recovery
+of an existing Room's missing per-instance listener owner records after `/run`
+loss remains lifecycle work: stopped resource ownership must be proven before
+new listener generations can be created. A running or unproven resource is not
+adopted. Owned Engine provisioning is also not implemented by this path.

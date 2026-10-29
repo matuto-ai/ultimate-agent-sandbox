@@ -36,12 +36,34 @@ class ApplyTests(unittest.TestCase):
              patch('uas.local_host_apply.inspect', side_effect=AssertionError('must not observe')):
             with self.assertRaisesRegex(HostProfileError, 'ROOT_REQUIRED'): apply(selected())
 
-    def test_unsupported_allocation_refused_before_effects(self):
+    def test_allocation_refuses_receipt_on_another_filesystem(self):
         o=observation();o['storage']['filesystem']='btrfs'
         p=selected(o=o,allocation_bytes=1024**3)
         with patch('uas.local_host_apply.os.geteuid', return_value=0), \
+             patch('uas.local_host_apply.canonical_node', return_value=type('Node',(),{'st_dev':999})()), \
              patch('uas.local_host_apply.owned_directory', side_effect=AssertionError('effect forbidden')):
-            with self.assertRaisesRegex(HostProfileError, 'UNSUPPORTED_OPERATION'): apply(p)
+            with self.assertRaisesRegex(HostProfileError, 'XFS_BACKING_FILESYSTEM'): apply(p)
+
+    def test_allocation_composes_existing_apply_receipt_and_endpoints(self):
+        observed=observation();observed['storage']['filesystem']='btrfs'
+        proposed=selected(o=observed,allocation_bytes=1024**3)
+        evidence={'identity':[3,22],'observed_sha256':'b'*64}
+        def prepare(receipt,index,**kwargs):
+            self.assertEqual(index,0)
+            self.assertIn('make_directory',kwargs)
+            receipt.intent(index);receipt.confirm(index,evidence)
+        with patch('uas.local_host_apply.os.geteuid',return_value=0), \
+             patch('uas.local_host_apply.canonical_node',return_value=type('Node',(),{'st_dev':observed['storage']['identity'][0]})()), \
+             patch('uas.local_host_apply.os.path.lexists',return_value=False), \
+             patch('uas.local_host_apply.inspect',return_value=observed), \
+             patch('uas.local_host_apply.owned_directory',return_value=evidence), \
+             patch('uas.local_host_apply.PreparationReceipt',FakeReceipt), \
+             patch('uas.local_host_apply.fcntl.flock'), \
+             patch('uas.local_xfs_storage.prepare',side_effect=prepare) as storage:
+            result=apply(proposed)
+        storage.assert_called_once()
+        self.assertEqual(FakeReceipt.states[1]['state'],'confirmed')
+        self.assertFalse(result['native_ready'])
 
     def test_selected_engine_profile_reaches_exact_observer(self):
         for field,value in (('socket','/run/another.sock'),('exec_root','/run/another'),
