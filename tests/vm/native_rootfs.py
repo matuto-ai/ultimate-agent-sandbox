@@ -584,9 +584,12 @@ def _build_rootfs(manifest, destination, *, run):
     print('Native rootfs phase: filesystem-metadata start', flush=True)
     filesystem_layout = verify_filesystem_layout(root, run=run)
     print('Native rootfs phase: filesystem-metadata complete', flush=True)
-    from native_trust import generate_trust
+    from native_trust import generate_trust, validate_public_ca
     print('Native rootfs phase: trust-generation start', flush=True)
     trust_generation = generate_trust(root, run=run)
+    trust_generation['public_ca_validation'] = validate_public_ca(root)
+    if len(canonical(trust_generation)) > 8192:
+        raise ValueError('validated trust evidence exceeds bound')
     print('Native rootfs phase: trust-generation complete', flush=True)
     print('Native rootfs phase: runtime-extraction start', flush=True)
     extract_runtime(archive, files, root)

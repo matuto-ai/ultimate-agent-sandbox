@@ -359,4 +359,58 @@ class NativeTrustTests(unittest.TestCase):
         self.assertFalse(any(args[0]=='/usr/bin/chroot' for args,kwargs in self.commands))
 
 
+
+
+class NativePublicCAValidationTests(unittest.TestCase):
+    """Real offline SSL code-path tests; public fixture is NOT Fedora trust proof."""
+    def test_real_public_fixture_load_and_empty_malformed_fail_closed(self):
+        import ssl
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / trust.CA_OUTPUTS[1]
+            target.parent.mkdir(parents=True)
+            public = Path(__file__).parent / 'fixtures/public-isrg-root-x1.pem'
+            data = public.read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(),
+                '22b557a27055b33606b6559f37703928d3e4ad79f110b407d04986e1843543d1')
+            target.write_bytes(data)
+            receipt = trust.validate_public_ca(root)
+            self.assertEqual('passed', receipt['status'])
+            self.assertEqual(1, receipt['ca_anchors'])
+            self.assertTrue(receipt['certificate_required'])
+            self.assertTrue(receipt['hostname_check'])
+            self.assertEqual('offline-native-SSL-load-only', receipt['scope'])
+            for bad in (b'', b'not a PEM bundle'):
+                target.write_bytes(bad)
+                with self.assertRaises((ValueError, ssl.SSLError)):
+                    trust.validate_public_ca(root)
+            target.unlink()
+            with self.assertRaises((ValueError, FileNotFoundError)):
+                trust.validate_public_ca(root)
+
+
+class PublicCAContractTests(unittest.TestCase):
+    def test_exact_path_no_fallback_and_verification_or_anchor_failures(self):
+        import ssl
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); target = root / trust.CA_OUTPUTS[1]
+            target.parent.mkdir(parents=True); target.write_bytes(b'mocked parse input')
+            context = Mock(verify_mode=ssl.CERT_REQUIRED, check_hostname=True)
+            context.cert_store_stats.return_value = {'x509_ca': 1}
+            with patch.object(ssl, 'create_default_context', return_value=context) as create:
+                trust.validate_public_ca(root)
+                create.assert_called_once_with(cafile=str(target))
+            for field, bad in [('verify_mode', ssl.CERT_NONE), ('check_hostname', False)]:
+                original = getattr(context, field); setattr(context, field, bad)
+                with patch.object(ssl, 'create_default_context', return_value=context):
+                    with self.assertRaises(ValueError): trust.validate_public_ca(root)
+                setattr(context, field, original)
+            context.cert_store_stats.return_value = {'x509_ca': 0}
+            with patch.object(ssl, 'create_default_context', return_value=context):
+                with self.assertRaises(ValueError): trust.validate_public_ca(root)
+            with patch.object(ssl, 'create_default_context', side_effect=ssl.SSLError('synthetic')) as create:
+                with self.assertRaises(ssl.SSLError): trust.validate_public_ca(root)
+                create.assert_called_once_with(cafile=str(target))
+
 if __name__=='__main__':unittest.main()

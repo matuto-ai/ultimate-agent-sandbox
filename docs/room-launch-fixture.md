@@ -401,3 +401,19 @@ Child stderr and waitid exit evidence are captured before cleanup can erase the
 original failure. This regression demonstrates the composed waiting defect and
 its correction under measured injected latency. It does not retrospectively
 prove the unrecorded child-exit cause of VM run 40802696439.
+
+### Offline generated trust check
+
+Immediately after signed offline trust generation, before runtime extraction and
+image import, native SSL loads the exact generated server-auth PEM with an
+explicit `cafile`. Empty/malformed output, zero CA anchors or unexpected
+verification defaults fail closed. The bounded receipt records only path, hash,
+size, anchor count and verification settings. This is offline parsing, not a
+claim that public TLS succeeded. The public HTTPS probe still performs its own
+certificate and hostname verification under its existing deadline.
+
+`tests/fixtures/public-isrg-root-x1.pem` is the public ISRG Root X1 certificate
+from the development environment's Mozilla CA package (SHA256
+`22b557a27055b33606b6559f37703928d3e4ad79f110b407d04986e1843543d1`).
+Its real SSL test proves the validation code path only; it is not the generated
+Fedora bundle and does not qualify Fedora trust or external connectivity.
