@@ -1673,7 +1673,7 @@ class CommitGateTests(unittest.TestCase):
         _prefix, current = self.initial(scope)
         cases = (
             ("EXTERNAL_LINK", "[vendor](\nhttps://example.com/a)"),
-            ("UNSAFE_LINK", "<https://example.com/a\n>"),
+            ("RAW_HTML", "<https://example.com/a\n>"),
             ("RAW_HTML", "<div\nclass=\"notice\">"),
             ("RAW_HTML", "<!--\nhidden\n-->"),
             ("EXTERNAL_LINK", "[ref]:\nhttps://example.com/a"),
@@ -1717,6 +1717,9 @@ class CommitGateTests(unittest.TestCase):
             ("EXTERNAL_LINK", "`unmatched\n# [x](https://example.com/a)\n`"),
             ("EXTERNAL_LINK", "`unmatched\n* [x](https://example.com/a)\n`"),
             ("EXTERNAL_LINK", "`unmatched\n> [x](https://example.com/a)\n`"),
+            ("EXTERNAL_LINK", "# `heading\n[x](https://example.com/a) `"),
+            ("EXTERNAL_LINK", "> `heading\n> [x](https://example.com/a) `"),
+            ("EXTERNAL_LINK", "* `heading\n[x](https://example.com/a) `"),
             ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
         )
         for code, snippet in cases:
@@ -1770,9 +1773,20 @@ class CommitGateTests(unittest.TestCase):
 
         self.assertFalse(library_gate.source(
             "https://github.com/acme/source/blob/main/" + "a" * 40 + "/doc.md")["pinned"])
-        # A pin keyword inside the file path cannot upgrade a mutable revision.
-        self.assertFalse(library_gate.source(
-            "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md")["pinned"])
+        # Only the positional revision field can pin: a pin keyword inside the
+        # file path, or an owner, repository name or directory that looks like a
+        # commit, cannot upgrade a mutable reference.
+        for mutable in (
+                "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md",
+                "https://github.com/src/" + "a" * 40 + "/blob/main/doc.md",
+                "https://example.com/" + "a" * 40 + "/doc.md",
+                "https://github.com/acme/source/commit/" + "a" * 40):
+            with self.subTest(mutable=mutable):
+                self.assertFalse(library_gate.source(mutable)["pinned"])
+        self.assertTrue(library_gate.source(
+            "https://gitlab.com/acme/source/-/blob/" + "a" * 40 + "/doc.md")["pinned"])
+        self.assertTrue(library_gate.source(
+            "https://bitbucket.org/acme/source/src/" + "a" * 40 + "/doc.md")["pinned"])
         cases = (
             ("UNSAFE_SOURCE", source_entry("ftp://example.com/a")),
             ("UNSAFE_SOURCE", source_entry("../escape.md")),
@@ -1786,6 +1800,9 @@ class CommitGateTests(unittest.TestCase):
                 range_="1-2", sha256=DIGEST)),
             ("EXCERPT_UNPINNED_SOURCE", source_entry(
                 "https://github.com/acme/source/blob/main/src/" + "a" * 40 + "/doc.md",
+                range_="1-2", sha256=DIGEST)),
+            ("EXCERPT_UNPINNED_SOURCE", source_entry(
+                "https://github.com/src/" + "a" * 40 + "/blob/main/doc.md",
                 range_="1-2", sha256=DIGEST)),
             ("INCOMPLETE_EXCERPT", source_entry(PINNED, range_="1-2")),
             ("INCOMPLETE_EXCERPT", source_entry(PINNED, sha256=DIGEST)),

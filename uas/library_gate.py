@@ -135,8 +135,8 @@ FENCE = ("```", "~~~")
 DEFINITION = re.compile(r"\[([^\]\n]{1,200})\]:[ \t]*(\S.*)?\Z")
 BLOCK_PREFIX = re.compile(r"[ \t]*(?:>[ \t]*)*"
                           r"(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?[ \t]*")
-PIN_KEYWORDS = ("blob", "raw", "commit", "commits", "tree", "src",
-                "object", "objects", "revision", "revisions")
+# Path keywords that name an artifact revision position in a repository URL.
+PIN_KEYWORDS = ("blob", "raw", "tree", "commit", "commits", "src", "objects")
 
 
 def _tag(inner):
@@ -222,30 +222,40 @@ def _starts_block(line):
             or re.fullmatch(r"(?:[-*_][ \t]*){3,}", stripped) is not None)
 
 
-def _paragraph_end(text, start):
-    """Offset of the line ending that closes the paragraph containing ``start``.
+def _blocks(lines):
+    """Group body lines into Markdown blocks that inline content cannot cross.
 
-    A blank line, a heading, a list item, a blockquote, a thematic break or a
-    fence starts a new block, so inline content - including a code span - cannot
-    continue past it.
+    A blank line, a heading, a list item, a blockquote, a thematic break and a
+    fence each start a new block, so a code span, link or tag opened in one
+    block never consumes content from the next one.
     """
-    position = text.find("\n", start)
-    while position >= 0:
-        next_start = position + 1
-        line_end = text.find("\n", next_start)
-        if _starts_block(text[next_start:line_end if line_end >= 0 else len(text)]):
-            return position
-        position = line_end
-    return len(text)
+    block = []
+    for line in lines:
+        if not line.strip():
+            if block:
+                yield block
+                block = []
+            continue
+        if _starts_block(line):
+            if block:
+                yield block
+                block = []
+            # A block-start line - heading, quote, list item, break - is its own
+            # block: its inline content ends at its own line ending.
+            yield [line]
+            continue
+        block.append(line)
+    if block:
+        yield block
 
 
 def _code_end(text, start, run):
     """Offset of the backtick run that closes a code span, or None.
 
-    A code span closes inside its own paragraph with a run of exactly the same
+    A code span closes inside its own block with a run of exactly the same
     length; an unmatched opening run is literal text, never a skip to the end.
     """
-    limit, marker = _paragraph_end(text, start), "`" * run
+    limit, marker = len(text), "`" * run
     position = start
     while position < limit:
         found = text.find(marker, position, limit)
@@ -333,8 +343,9 @@ def scan(body):
     lines = _unfenced(body)
     for target in _definitions(lines):
         yield "link", target
-    for event in _inline("\n".join(lines)):
-        yield event
+    for block in _blocks(lines):
+        for event in _inline("\n".join(block)):
+            yield event
 
 
 def destination(relative, target):
@@ -419,15 +430,8 @@ def source(resource):
         if any(ord(c) < 33 or ord(c) == 127 for c in path):
             _fail("UNSAFE_SOURCE", "source.resource")
         parts = [part for part in path.split("#", 1)[0].split("?", 1)[0].split("/") if part]
-        # A revision segment only identifies an immutable artifact when the path
-        # names it as one (`/blob/<commit>/<file>`). The first pin keyword fixes
-        # that position, so `/blob/main/<dir>/<hash>/doc.md` stays mutable: its
-        # revision is `main`, and the later keyword is only part of the file path.
-        revision = next((number + 1 for number, part in enumerate(parts)
-                         if part.lower() in PIN_KEYWORDS and number + 1 < len(parts)),
-                        None)
-        pinned = bool(revision is not None and COMMIT_SEGMENT.match(parts[revision])
-                      and revision + 1 < len(parts))
+        revision = _revision(parts)
+        pinned = revision is not None and COMMIT_SEGMENT.match(parts[revision]) is not None
         return {"resource": resource,
                 "kind": "artifact" if pinned else "resource", "pinned": pinned}
     if SCHEME.match(resource) or resource.startswith("//") or "\\" in resource:
@@ -440,6 +444,25 @@ def source(resource):
             or not contracts.SLUG.fullmatch(parts[1][:-3])):
         _fail("UNSAFE_SOURCE", "source.resource")
     return {"resource": resource, "kind": "concept", "pinned": True}
+
+
+def _revision(parts):
+    """Index of an artifact path's revision field, or None when it has none.
+
+    A repository artifact path is `<owner>/<repository>/<keyword>/<revision>/...`
+    (GitLab adds `/-` before the keyword), so the revision is positional. An
+    owner, a repository name or a later directory that happens to look like a
+    commit or a pin keyword cannot pin the reference.
+    """
+    for keyword in (2, 3):
+        if len(parts) <= keyword:
+            continue
+        if parts[keyword].lower() not in PIN_KEYWORDS:
+            continue
+        if keyword == 3 and parts[2] != "-":
+            continue
+        return keyword + 1 if len(parts) > keyword + 2 else None
+    return None
 
 
 def _declaration(relative, entry, index):
