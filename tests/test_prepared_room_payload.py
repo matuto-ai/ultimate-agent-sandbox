@@ -7,17 +7,32 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from test_prepared_room_contract import PreparedRoomContractTests
+import test_prepared_room_contract as contracts
 import prepared_room
 import prepare_payload
 import prepare_room_payload
 
 
 class PreparedPayloadTests(unittest.TestCase):
+    def test_prepared_modules_have_unique_discoverable_partition_ids(self):
+        # unittest discovers imported TestCase classes as well as local ones.
+        # Keep the fixture helper behind its module, never as a class alias.
+        import ci_unit
+        loader=unittest.TestLoader()
+        suite=loader.loadTestsFromNames(('test_prepared_room_contract','test_prepared_room_payload'))
+        self.assertEqual([],loader.errors)
+        cases,groups=ci_unit.partition_suite(suite)
+        ids=[case.id() for case in cases]
+        self.assertEqual(len(ids),len(set(ids)))
+        self.assertEqual([],groups['slow'])
+        self.assertEqual(len(cases),len(groups['remainder']))
+        self.assertEqual(30,sum(value.startswith('test_prepared_room_contract.') for value in ids))
+        self.assertEqual(3,sum(value.startswith('test_prepared_room_payload.') for value in ids))
+
     def test_warm_pool_skips_network_solver_metadata_and_uses_fresh_source_nonce(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            repo, artifact, manifest, receipt, digest = PreparedRoomContractTests().fixture(root)
+            repo, artifact, manifest, receipt, digest = contracts.PreparedRoomContractTests().fixture(root)
             (repo / 'tests/vm/fedora-image.json').write_text(json.dumps({
                 'release':'44-1.7','signing_fingerprint':'A'*40,'keyring_url':'https://fedoraproject.org/fedora.gpg'}))
             (repo / 'tests/vm/boundary_fixture.go').write_bytes(b'fresh current source')
