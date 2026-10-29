@@ -44,7 +44,16 @@ FIELDS = ("type", "title", "description", "status", "sources")
 # YAML literals whose meaning depends on implicit type resolution; canonical
 # Library text writes them as explicit strings or not at all. Numeric and
 # timestamp-looking text stays a string, so OKF dates and counts round-trip.
-UNSAFE_SCALARS = frozenset({"~", "null", "true", "false", "yes", "no", "on", "off"})
+UNSAFE_SCALARS = frozenset({"~", "null", "true", "false", "yes", "no", "on", "off", "y", "n",
+                            ".nan", ".inf", "-.inf", "+.inf"})
+# Service-stamped fidelity fields: the deterministic service owns them, so a
+# structural gate neither invents their semantics (T05) nor freezes them. A
+# caller- or model-supplied value is refused by proposal/content admission,
+# not by re-reading intent from the final tree.
+SERVICE_FIELDS = ("verified", "stale_after", "generated")
+MAX_EVIDENCE = 200
+MAX_PATH = 1024
+MAX_COMPONENT = 255
 KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 HEADING = re.compile(r"#{1,6}[ \t]+\S")
@@ -78,7 +87,7 @@ class Bundle:
 
 
 def _fail(code, field="$"):
-    raise contracts.LibraryError(code, field)
+    raise contracts.LibraryError(code, str(field)[:MAX_EVIDENCE])
 
 
 # --- Trees, paths and canonical text --------------------------------------
@@ -104,9 +113,12 @@ def _path(path, field):
         _fail("UNSAFE_PATH", field)
     if unicodedata.normalize("NFC", path) != path:
         _fail("NON_CANONICAL_PATH", field)
-    if posixpath.normpath(path) != path:
+    if posixpath.normpath(path) != path or len(path) > MAX_PATH:
         _fail("UNSAFE_PATH", field)
-    if ".git" in parts or parts[-1] == ".gitmodules":
+    if any(len(part) > MAX_COMPONENT for part in parts):
+        _fail("UNSAFE_PATH", field)
+    folded = [part.casefold() for part in parts]
+    if ".git" in folded or folded[-1] == ".gitmodules":
         _fail("REPOSITORY_METADATA", field)
     return path
 
@@ -122,6 +134,23 @@ def _prefix(scope):
     return "projects/" + scope.project_path
 
 
+def _text_check(value, field):
+    """Canonical text rules, also applied to scalars decoded from YAML escapes."""
+    if unicodedata.normalize("NFC", value) != value:
+        _fail("NON_CANONICAL_TEXT", field)
+    for character in value:
+        point = ord(character)
+        if character == "\r":
+            _fail("CR_LINE_ENDING", field)
+        if character in "\u2028\u2029":
+            _fail("DISALLOWED_CONTROL", field)
+        if 0xD800 <= point <= 0xDFFF:
+            _fail("MALFORMED_UTF8", field)
+        if (point < 32 and character not in "\n\t") or 127 <= point < 160:
+            _fail("DISALLOWED_CONTROL", field)
+    return value
+
+
 def _canonical(path, data, field):
     if type(data) is not bytes:
         _fail("INVALID_TEXT", field)
@@ -129,15 +158,7 @@ def _canonical(path, data, field):
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         _fail("MALFORMED_UTF8", field)
-    if unicodedata.normalize("NFC", text) != text:
-        _fail("NON_CANONICAL_TEXT", field)
-    for character in text:
-        point = ord(character)
-        if character == "\r":
-            _fail("CR_LINE_ENDING", field)
-        if (point < 32 and character not in "\n\t") or 127 <= point < 160:
-            _fail("DISALLOWED_CONTROL", field)
-    return text
+    return _text_check(text, field)
 
 
 def _canonical_files(tree, prefix, limits, field):
@@ -148,7 +169,7 @@ def _canonical_files(tree, prefix, limits, field):
     for path, data in tree.files.items():
         _path(path, field)
         if not path.startswith(prefix + "/"):
-            _fail("FOREIGN_PROJECT", field + "." + str(path))
+            _fail("FOREIGN_PROJECT", field)
         folded = path.casefold()
         if folded in seen and seen[folded] != path:
             _fail("PATH_COLLISION", field + "." + path)
@@ -181,7 +202,7 @@ def _quoted(raw, field):
                 continue
             if raw[index + 1:].strip():
                 _fail("INVALID_YAML", field)
-            return "".join(value)
+            return _text_check("".join(value), field)
         if quote == '"' and character == "\\":
             escape = raw[index + 1:index + 2]
             if escape not in ('"', "\\", "/", "n", "t", "u"):
@@ -237,6 +258,8 @@ def _flow(raw, field, depth):
         key, rest = _split_key(item)
         if not rest:
             _fail("UNSAFE_SCALAR", field)
+        if not KEY.fullmatch(key):
+            _fail("UNSAFE_YAML", field)
         if key in mapping:
             _fail("DUPLICATE_YAML_KEY", field + "." + key)
         mapping[key] = _scalar(rest, field + "." + key, depth + 1)
@@ -382,7 +405,12 @@ def _optional_frontmatter(text, field):
 # --- Markdown structure ---------------------------------------------------
 
 def _scan(body):
-    """Yield inline link targets outside fenced code blocks and code spans."""
+    """Yield (link text, target) for inline links outside fenced code and code spans.
+
+    The canonical Library writer emits inline links, so reference-style link
+    definitions are not resolved here; a reference-style index entry reads as a
+    missing index entry instead of being guessed at.
+    """
     fence = None
     for line in body.split("\n"):
         stripped = line.lstrip()
@@ -408,7 +436,9 @@ def _scan(body):
                     depth += {"(": 1, ")": -1}.get(line[closing], 0)
                     closing += 1
                 if depth == 0:
-                    yield line[index + 2:closing - 1]
+                    opening = line.rfind("[", 0, index)
+                    yield (line[opening + 1:index] if opening >= 0 else "",
+                           line[index + 2:closing - 1])
                 index = closing
                 continue
             index += 1
@@ -440,16 +470,28 @@ def _target(target, index_relative):
 
 
 def _links(body, index_relative):
-    found = set()
-    for target in _scan(body):
+    found = {}
+    for text, target in _scan(body):
         candidate = _target(target, index_relative)
         if candidate is not None:
-            found.add(candidate)
+            found[candidate] = text.strip()
     return found
 
 
 def _headings(body):
     return any(HEADING.match(line) for line in body.split("\n"))
+
+
+def _entries(body):
+    return [line for line in body.split("\n")
+            if line.lstrip()[:2] in ("- ", "* ", "+ ")]
+
+
+def _plain(text, relative):
+    """Reserved files (index/log) carry no frontmatter block at all, even an empty one."""
+    if text.startswith("---\n"):
+        _fail("UNEXPECTED_FRONTMATTER", relative)
+    return text
 
 
 # --- Bundle relationships -------------------------------------------------
@@ -467,16 +509,29 @@ def _classify(relative):
     return "unknown", None, None
 
 
-def _concept(relative, directory, name, text, previous):
+def _concept(relative, directory, name, text, previous, selected, limits):
+    """Validate one concept document against its directory and its own history."""
     meta, _body = _frontmatter(text, relative)
     previous_meta = _frontmatter(previous, relative)[0] if previous is not None else {}
     declared = meta.get("type")
     if type(declared) is not str or not declared.strip():
         _fail("MISSING_TYPE", relative + ".type")
+    status = meta.get("status")
+    if directory == PENDING:
+        if status != "draft":
+            _fail("INCOHERENT_STATUS", relative + ".status")
+    else:
+        if status == "draft":
+            _fail("INCOHERENT_STATUS", relative + ".status")
+        # A tolerated unknown existing type stays readable; a supported v1 type
+        # never sits in another directory.
+        if declared in contracts.CAPTURE_TYPES and declared != DIRECTORY_TYPE[directory]:
+            _fail("TYPE_MISMATCH", relative + ".type")
+    _sources(relative, meta.get("sources"), limits)
     if previous is not None and previous == text:
-        return  # tolerated reader data: unknown types, keys and authored material stay readable
+        return meta.get("title")
     for key in meta:
-        if key not in FIELDS and key not in previous_meta:
+        if key not in FIELDS and key not in SERVICE_FIELDS and key not in previous_meta:
             _fail("UNSUPPORTED_FIELD", relative + "." + key)
     for key in ("type", "title"):
         if key not in meta:
@@ -484,46 +539,63 @@ def _concept(relative, directory, name, text, previous):
     title = meta["title"]
     if type(title) is not str or not title.strip() or "\n" in title:
         _fail("INVALID_TEXT", relative + ".title")
+    if len(title) > limits["title_chars"]:
+        _fail("TITLE_TOO_LONG", relative + ".title")
     description = meta.get("description")
     if description is not None and (not isinstance(description, str) or "\n" in description):
         _fail("INVALID_TEXT", relative + ".description")
-    status = meta.get("status")
     if status is not None and status not in STATUSES:
         _fail("UNSUPPORTED_STATUS", relative + ".status")
-    if directory == PENDING:
-        if status != "draft":
-            _fail("INCOHERENT_STATUS", relative + ".status")
+    previous_type = previous_meta.get("type")
+    if previous_type is not None and previous_type not in contracts.CAPTURE_TYPES:
+        if declared != previous_type:
+            _fail("TYPE_MISMATCH", relative + ".type")
+    elif directory == PENDING:
+        if declared not in contracts.CAPTURE_TYPES:
+            _fail("UNSUPPORTED_TYPE", relative + ".type")
         if not contracts.DIGEST.fullmatch(name):
             _fail("PENDING_PATH_NOT_QUEUE_DERIVED", relative)
-        if declared not in contracts.CAPTURE_TYPES and declared != previous_meta.get("type"):
-            _fail("UNSUPPORTED_TYPE", relative + ".type")
     else:
-        if status == "draft":
-            _fail("INCOHERENT_STATUS", relative + ".status")
-        if declared != DIRECTORY_TYPE[directory] and declared != previous_meta.get("type"):
+        if declared != DIRECTORY_TYPE[directory]:
             _fail("TYPE_MISMATCH", relative + ".type")
         if not contracts.SLUG.fullmatch(name):
             _fail("UNSAFE_PATH", relative)
-    if "sources" in meta:
-        sources = meta["sources"]
-        if type(sources) is not list or not sources:
-            _fail("INVALID_SOURCES", relative + ".sources")
-        for index, source in enumerate(sources):
-            field = "%s.sources[%d]" % (relative, index)
-            if type(source) is not dict or type(source.get("resource")) is not str:
-                _fail("INVALID_SOURCES", field + ".resource")
-            if not source["resource"].strip() or "\n" in source["resource"]:
-                _fail("INVALID_SOURCES", field + ".resource")
+    if directory == "research" and not meta.get("sources"):
+        _fail("SOURCE_REQUIRED", relative + ".sources")
+    # Document size is bounded by document_bytes for the stored file; body_bytes
+    # bounds one capture or proposal input, which a merged concept may exceed.
+    # Tolerated existing keys stay with their document: an update may not drop,
+    # rewrite or invent over reader data it did not author here.
+    for key, value in previous_meta.items():
+        if key in FIELDS or key in SERVICE_FIELDS:
+            continue
+        if key not in meta or meta[key] != value:
+            _fail("EXISTING_FIELD_CHANGED", relative + "." + key)
+    return title
+
+
+def _sources(relative, sources, limits):
+    """Structural provenance: a bounded list of entries, each naming its resource."""
+    if sources is None:
+        return
+    if type(sources) is not list or not sources:
+        _fail("INVALID_SOURCES", relative + ".sources")
+    if len(sources) > limits["sources"]:
+        _fail("TOO_MANY_SOURCES", relative + ".sources")
+    for index, source in enumerate(sources):
+        field = "%s.sources[%d]" % (relative, index)
+        if type(source) is not dict or type(source.get("resource")) is not str:
+            _fail("INVALID_SOURCES", field + ".resource")
+        if not source["resource"].strip() or "\n" in source["resource"]:
+            _fail("INVALID_SOURCES", field + ".resource")
 
 
 def _index(relative, text, empty):
-    meta, body = _optional_frontmatter(text, relative)
-    if meta:
-        _fail("UNEXPECTED_FRONTMATTER", relative)
+    body = _plain(text, relative)
     if not _headings(body):
         _fail("INVALID_INDEX", relative)
     links = _links(body, relative)
-    if empty and links:
+    if empty and (links or _entries(body)):
         _fail("INITIALIZATION_NOT_EMPTY", relative)
     return links
 
@@ -543,10 +615,8 @@ def _root_index(text, scope):
             _fail("MISSING_SOURCE_IDENTITY", ROOT_INDEX + "." + field)
 
 
-def _log(text, previous):
-    meta, body = _optional_frontmatter(text, LOG)
-    if meta:
-        _fail("UNEXPECTED_FRONTMATTER", LOG)
+def _log(text, previous, initialization):
+    body = _plain(text, LOG)
     found = [match.group(1) for match in
              (LOG_DATE.match(line) for line in body.split("\n")) if match]
     if not found:
@@ -554,8 +624,15 @@ def _log(text, previous):
     for value in found:
         if not _date(value):
             _fail("INVALID_LOG_DATE", LOG)
+    entries = _entries(body)
+    if initialization:
+        if len(found) != 1 or len(entries) != 1 or "**Initialization**" not in entries[0]:
+            _fail("INITIALIZATION_LOG_FORM", LOG)
+        return
+    # Parked drafts stay in pending/ with draft status and an index entry; the
+    # PARKED/DRAFT label itself is writer output and content policy (T05).
     if previous is not None:
-        old_body = _optional_frontmatter(previous, LOG)[1]
+        old_body = _plain(previous, LOG)
         remaining = iter(body.split("\n"))
         for line in old_body.split("\n"):
             if not line.strip():
@@ -566,25 +643,39 @@ def _log(text, previous):
 
 def _date(value):
     year, month, day = (int(part) for part in value.split("-"))
+    if not 1 <= year <= 9999:
+        return False
     days = [31, 29 if year % 4 == 0 and (year % 100 or year % 400 == 0) else 28,
             31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     return 1 <= month <= 12 and 1 <= day <= days[month - 1]
 
 
-def _removals(previous, current, selected):
+def _selected(selected, limits):
+    """Selected queue identities, turned into the only pending paths they may affect."""
+    if type(selected) is not tuple and type(selected) is not list:
+        _fail("INVALID_CONTRACT", "selected")
+    if len(selected) > limits["batch_drafts"]:
+        _fail("TOO_MANY_SELECTED", "selected")
     allowed = set()
     for queue_id in selected:
         if type(queue_id) is not str or not contracts.DIGEST.fullmatch(queue_id):
             _fail("INVALID_DIGEST", "selected")
         allowed.add(PENDING + "/" + queue_id + ".md")
+    return allowed
+
+
+def _removals(previous, current, allowed):
     removed = []
-    for relative in previous:
+    for relative, (_full, text) in previous.items():
         if relative in current:
             continue
         if _classify(relative)[0] != "concept" or not relative.startswith(PENDING + "/"):
             _fail("EXISTING_DATA_DELETION", relative)
         if relative not in allowed:
             _fail("UNSELECTED_PENDING_REMOVAL", relative)
+        meta = _frontmatter(text, relative)[0]
+        if meta.get("status") != "draft":
+            _fail("NOT_A_PENDING_DRAFT", relative)
         removed.append(relative)
     return tuple(sorted(removed))
 
@@ -601,17 +692,15 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
     """
     limits = contracts.admit_settings_value(settings)["limits"]
     prefix = _prefix(scope)
-    if type(selected) is not tuple and type(selected) is not list:
-        _fail("INVALID_CONTRACT", "selected")
-    if len(selected) > limits["batch_drafts"]:
-        _fail("TOO_MANY_SELECTED", "selected")
+    allowed = _selected(selected, limits)
     previous_tree = None if current is None else _tree(current, "current")
     proposed_tree = _tree(proposed, "proposed")
     previous = ({} if previous_tree is None
                 else _canonical_files(previous_tree, prefix, limits, "current"))
     files = _canonical_files(proposed_tree, prefix, limits, "proposed")
 
-    if previous_tree is None:
+    initialization = previous_tree is None
+    if initialization:
         extra = set(files) - set(REQUIRED)
         if extra:
             _fail("INITIALIZATION_NOT_EMPTY", sorted(extra)[0])
@@ -625,8 +714,9 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
             if required not in files:
                 _fail("MISSING_REQUIRED_FILE", required)
 
-    removed = _removals(previous, files, selected)
-    for relative, (_path_value, text) in files.items():
+    removed = _removals(previous, files, allowed)
+    titles = {}
+    for relative, (_full, text) in files.items():
         kind, directory, name = _classify(relative)
         before = previous.get(relative)
         previous_text = before[1] if before else None
@@ -637,18 +727,26 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
                 _fail("UNSUPPORTED_PATH", relative)
             continue
         if kind == "concept":
-            _concept(relative, directory, name, text, previous_text)
+            if (directory == PENDING and previous_text is not None
+                    and previous_text != text and relative not in allowed):
+                _fail("UNSELECTED_PENDING_MUTATION", relative)
+            titles[relative] = _concept(relative, directory, name, text,
+                                        previous_text, allowed, limits)
 
     _root_index(files[ROOT_INDEX][1], scope)
-    _log(files[LOG][1], previous[LOG][1] if previous else None)
-    empty = previous_tree is None
+    _log(files[LOG][1], previous[LOG][1] if previous else None, initialization)
     for directory in DIRECTORIES + (PENDING,):
         relative = directory + "/index.md"
-        links = _index(relative, files[relative][1], empty)
+        links = _index(relative, files[relative][1], initialization)
         for other in files:
             other_kind, other_directory, _name = _classify(other)
-            if other_kind == "concept" and other_directory == directory and other not in links:
+            if other_kind != "concept" or other_directory != directory:
+                continue
+            if other not in links:
                 _fail("MISSING_INDEX_ENTRY", relative + "." + other)
+            title = titles.get(other)
+            if title is not None and links[other] != title:
+                _fail("INDEX_TITLE_MISMATCH", relative + "." + other)
 
     added = tuple(sorted(set(files) - set(previous)))
     updated = tuple(sorted(relative for relative in files

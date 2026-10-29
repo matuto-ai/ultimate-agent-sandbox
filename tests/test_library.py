@@ -1168,5 +1168,170 @@ class BundleValidationTests(unittest.TestCase):
         self.assertEqual(operation.queue_id, queue_id)
 
 
+    def test_tolerated_existing_documents_still_meet_coherence_rules(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+
+        def with_legacy(text, link="/context/legacy.md"):
+            tree = dict(files)
+            tree[prefix + "/context/legacy.md"] = text.encode("utf-8")
+            tree[prefix + "/context/index.md"] = (
+                "# Context\n\n* [Legacy](%s) - tolerated.\n" % link).encode("utf-8")
+            return tree
+
+        draft = with_legacy("---\ntype: context\ntitle: Legacy\nstatus: draft\n---\n\n# L\n")
+        self.refused(scope, settings, draft, current=draft, code="INCOHERENT_STATUS")
+        moved_type = with_legacy("---\ntype: decision\ntitle: Legacy\n---\n\n# L\n")
+        self.refused(scope, settings, moved_type, current=moved_type, code="TYPE_MISMATCH")
+        unknown = with_legacy("---\ntype: BigQuery Table\ntitle: Legacy\n---\n\n# L\n")
+        self.validate(scope, settings, unknown, current=unknown)
+        no_title = with_legacy("---\ntype: BigQuery Table\n---\n\n# L\n")
+        self.validate(scope, settings, no_title, current=no_title)
+        bad_sources = with_legacy("---\ntype: context\ntitle: Legacy\nsources: nope\n---\n\n# L\n")
+        self.refused(scope, settings, bad_sources, current=bad_sources,
+                     code="INVALID_SOURCES")
+
+    def test_tolerated_existing_reader_data_cannot_be_rewritten(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+        legacy = ("---\ntype: BigQuery Table\ntitle: Legacy\nstatus: stable\n"
+                  "usage_count: 5000\n---\n\n# Legacy\n\nAuthored material.\n")
+        files[prefix + "/context/legacy.md"] = legacy.encode("utf-8")
+        files[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Legacy](/context/legacy.md) - tolerated.\n").encode("utf-8")
+        changed = dict(files)
+        changed[prefix + "/context/legacy.md"] = legacy.replace(
+            "usage_count: 5000", "usage_count: 1").encode("utf-8")
+        self.refused(scope, settings, changed, current=files,
+                     code="EXISTING_FIELD_CHANGED")
+        dropped = dict(files)
+        dropped[prefix + "/context/legacy.md"] = legacy.replace(
+            "usage_count: 5000\n", "").encode("utf-8")
+        self.refused(scope, settings, dropped, current=files,
+                     code="EXISTING_FIELD_CHANGED")
+        retyped = dict(files)
+        retyped[prefix + "/context/legacy.md"] = legacy.replace(
+            "type: BigQuery Table", "type: context").encode("utf-8")
+        self.refused(scope, settings, retyped, current=files, code="TYPE_MISMATCH")
+
+    def test_removal_requires_a_selected_pending_draft(self):
+        scope, settings = self.scope(), self.settings()
+        queue_id = capture(settings).queue_id
+        location = "pending/" + queue_id + ".md"
+        prefix, files = self.initial(scope)
+        files[prefix + "/" + location] = concept("decision", "Queued", "stable").encode("utf-8")
+        files[prefix + "/pending/index.md"] = (
+            "# Pending\n\n* [Queued](/%s) - short.\n" % location).encode("utf-8")
+        proposed = dict(files)
+        del proposed[prefix + "/" + location]
+        proposed[prefix + "/pending/index.md"] = b"# Pending\n"
+        self.refused(scope, settings, proposed, current=files, selected=(queue_id,),
+                     code="NOT_A_PENDING_DRAFT")
+        fresh = dict(files)
+        fresh[prefix + "/" + location] = concept("decision", "Queued", "draft").encode("utf-8")
+        fresh[prefix + "/pending/index.md"] = (
+            "# Pending\n\n* [Queued](/%s) - DRAFT.\n" % location).encode("utf-8")
+        self.assertEqual((location,), self.validate(
+            scope, settings, proposed, current=fresh, selected=(queue_id,)).removed)
+        rewritten = dict(fresh)
+        rewritten[prefix + "/" + location] = concept(
+            "decision", "Queued", "draft", body="# Changed\n").encode("utf-8")
+        self.refused(scope, settings, rewritten, current=fresh,
+                     code="UNSELECTED_PENDING_MUTATION")
+
+    def test_initialization_requires_the_registration_log_and_empty_indexes(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+        prefix_names = ("MISSING_LOG_ENTRY", "INITIALIZATION_LOG_FORM", "INVALID_LOG_DATE")
+        cases = {
+            "INITIALIZATION_LOG_FORM": b"# Update log\n\n## 2026-10-01\n* created\n",
+            "INVALID_LOG_DATE": (b"# Update log\n\n## 0000-01-01\n"
+                                 b"* **Initialization**: created\n"),
+            "MISSING_LOG_ENTRY": b"# Update log\n\n* **Initialization**: created\n",
+        }
+        self.assertTrue(prefix_names)
+        for code, log in cases.items():
+            with self.subTest(code=code):
+                value = dict(files, **{prefix + "/log.md": log})
+                self.refused(scope, settings, value, code=code)
+        two_dates = dict(files, **{prefix + "/log.md": (
+            b"# Update log\n\n## 2026-10-02\n* entry\n\n## 2026-10-01\n"
+            b"* **Initialization**: created\n")})
+        self.refused(scope, settings, two_dates, code="INITIALIZATION_LOG_FORM")
+        empty_frontmatter = dict(files, **{prefix + "/context/index.md": b"---\n---\n\n# Context\n"})
+        self.refused(scope, settings, empty_frontmatter, code="UNEXPECTED_FRONTMATTER")
+        listed = dict(files, **{prefix + "/context/index.md": b"# Context\n\n- reserved\n"})
+        self.refused(scope, settings, listed, code="INITIALIZATION_NOT_EMPTY")
+        self.validate(scope, settings, files)
+
+    def test_parsed_scalars_and_flow_keys_obey_canonical_text_rules(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        cases = {
+            "DISALLOWED_CONTROL": concept("context", "Pick\u0000SQLite"),
+            "CR_LINE_ENDING": concept("context", "Pick\u000dSQLite"),
+            "NON_CANONICAL_TEXT": concept("context", "Cafe\u0301"),
+            "UNSAFE_SCALAR": b"---\ntype: context\ntitle: .nan\n---\n\n# x\n",
+            "UNSAFE_YAML": (b"---\ntype: context\ntitle: x\n"
+                            b"sources:\n  - resource: a\n    \"resource\": b\n---\n\n# x\n"),
+        }
+        for code, text in cases.items():
+            with self.subTest(code=code):
+                _prefix, files = self.update(scope, document_text=text)
+                self.refused(scope, settings, files, current=current, code=code)
+        separator = dict(current)
+        separator[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Pick](\u2028/context/pick-sqlite.md)\n").encode("utf-8")
+        separator[prefix + "/context/pick-sqlite.md"] = concept(
+            "context", "Pick", "stable").encode("utf-8")
+        self.refused(scope, settings, separator, current=current,
+                     code="DISALLOWED_CONTROL")
+        uppercase_git = dict(current)
+        uppercase_git[prefix + "/.GIT/config"] = b"x"
+        self.refused(scope, settings, uppercase_git, code="REPOSITORY_METADATA")
+
+    def test_configured_content_ceilings_and_provenance_vocabulary(self):
+        scope = self.scope()
+        _prefix, current = self.initial(scope)
+        _prefix, files = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable"))
+        self.refused(scope, self.settings(title_chars=5), files, current=current,
+                     code="TITLE_TOO_LONG")
+        researched = dict(current)
+        researched[_prefix + "/research/survey.md"] = concept(
+            "research", "Survey", "stable").encode("utf-8")
+        researched[_prefix + "/research/index.md"] = (
+            "# Research\n\n* [Survey](/research/survey.md) - short.\n").encode("utf-8")
+        self.refused(scope, self.settings(), researched, current=current,
+                     code="SOURCE_REQUIRED")
+        sourced = ("---\ntype: research\ntitle: Survey\nstatus: stable\nsources:\n"
+                   "  - resource: https://example.com/a\n"
+                   "  - resource: https://example.com/b\n---\n\n# Survey\n")
+        swapped = dict(researched)
+        swapped[_prefix + "/research/survey.md"] = sourced.encode("utf-8")
+        self.refused(scope, self.settings(sources=1), swapped, current=current,
+                     code="TOO_MANY_SOURCES")
+        self.validate(scope, self.settings(), swapped, current=current)
+
+    def test_refusal_evidence_is_bounded_without_echoing_caller_paths(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+        foreign = dict(files)
+        foreign["projects/github.com/acme/" + "x" * 60 + "/index.md"] = b"x"
+        error = self.refused(scope, settings, foreign, code="FOREIGN_PROJECT")
+        self.assertEqual("proposed", error.field)
+        _prefix, update = self.update(scope)
+        long_path = dict(update)
+        long_path[prefix + "/context/" + "a" * 100000 + ".md"] = concept(
+            "context", "Long").encode("utf-8")
+        error = self.refused(scope, settings, long_path, current=files, code="UNSAFE_PATH")
+        self.assertLessEqual(len(error.field), 200)
+        long_text = dict(update)
+        long_text[prefix + "/context/pick-sqlite.md"] = concept(
+            "context", "Pick", "stable").replace("Text.", "x" * 100000).encode("utf-8")
+        with self.assertRaises(library.LibraryError) as raised:
+            self.validate(scope, self.settings(document_bytes=1024), long_text, current=files)
+        self.assertLessEqual(len(raised.exception.field), 200)
+
 if __name__ == "__main__":
     unittest.main()
