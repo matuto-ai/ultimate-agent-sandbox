@@ -527,8 +527,11 @@ class RoomProfileTests(unittest.TestCase):
 
     def test_network_vm_is_deliberate_exact_review_only_and_preserves_quota_controls(self):
         workflow=(Path(__file__).parents[1]/'.github/workflows/room-launch.yml').read_text()
-        self.assertEqual('  workflow_dispatch:\n  pull_request:\n    types: [labeled]',
-                         workflow.split('\non:\n',1)[1].split('\npermissions:',1)[0].strip('\n'))
+        triggers=workflow.split('\non:\n',1)[1].split('\npermissions:',1)[0]
+        self.assertEqual(['  pull_request:', '  workflow_dispatch:'],
+                         [line for line in triggers.splitlines() if line.startswith('  ') and not line.startswith('   ')])
+        self.assertIn('  pull_request:\n    types: [labeled]\n',triggers)
+        self.assertEqual(4,triggers.count('        required: true'))
         for expected in ("github.event.label.name == 'qualify-room-launch'",
                          "github.event.sender.login == 'puglab-reviewer'",
                          'github.event.pull_request.head.repo.full_name == github.repository',

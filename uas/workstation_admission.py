@@ -83,6 +83,7 @@ class AdmittedBinding:
     incarnation: str
     epoch: int
     readiness_digest: str
+    native_payload_digest: str | None = None
 
 
 @dataclass
@@ -90,12 +91,22 @@ class _Offer:
     document: dict
     channel: socket.socket
     origin: HeldOrigin
+    host_origin: HeldOrigin | None = None
 
     def close(self):
         try:
             self.origin.close()
         finally:
-            self.channel.close()
+            try:
+                if self.host_origin is not None:
+                    self.host_origin.close()
+            finally:
+                self.channel.close()
+
+
+@dataclass
+class _HelperOffer(_Offer):
+    pass
 
 
 def send_admit(control, *, launch, seat, operation_id, epoch, readiness_digest, exchange_id=None):
@@ -108,15 +119,24 @@ def send_admit(control, *, launch, seat, operation_id, epoch, readiness_digest, 
     packet = _canonical(document)
     if len(packet) > LIMIT:
         raise OriginDenied('oversized admission')
+    descriptors = [launch.channel.fileno(), launch.origin.pidfd]
+    if document['kind'] == 'ADMIT_NATIVE_CLAUDE':
+        descriptors.append(launch.host_origin.pidfd)
     sent = control.sendmsg([packet], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
-                            array.array('i', [launch.channel.fileno(), launch.origin.pidfd]))])
+                            array.array('i', descriptors))])
     if sent != len(packet):
         raise OriginDenied('partial ADMIT; outcome unknown, reconcile operation')
 
 
 def _admission_document(launch, seat, operation_id, epoch, readiness_digest, exchange_id=None):
     from .workstation_exec import ExecLaunch
-    if (type(launch) is not ExecLaunch or launch.state != 'active'
+    native = False
+    if type(launch) is not ExecLaunch:
+        from .claude_native_admission import NativeClaudeRoot
+        native = type(launch) is NativeClaudeRoot
+        if native:
+            launch.current()
+    if ((type(launch) is not ExecLaunch and not native) or launch.state != 'active'
             or type(seat) is not AdmissionSeat or launch.origin.revoked
             or not alive(launch.origin.pidfd)
             or any(getattr(launch.seat, key) != getattr(seat, key)
@@ -128,11 +148,26 @@ def _admission_document(launch, seat, operation_id, epoch, readiness_digest, exc
                 'seat': seat.document(), 'incarnation': launch.incarnation,
                 'epoch': epoch, 'readiness_digest': readiness_digest,
                 'origin_identity': list(launch.origin.identity)}
+    if native:
+        document['kind'] = 'ADMIT_NATIVE_CLAUDE'
+        document['native_payload_digest'] = launch.recipe.manifest_digest
+        document['host_identity'] = list(launch.host_origin.identity)
     _validate_document(document, seat)
     return document
 
 
 def _validate_document(document, seat):
+    native = type(document) is dict and document.get('kind') == 'ADMIT_NATIVE_CLAUDE'
+    if native:
+        digest = document.get('native_payload_digest')
+        host = document.get('host_identity')
+        if (type(digest) is not str or not DIGEST.fullmatch(digest)
+                or type(host) is not list or len(host) != 2
+                or any(type(v) is not int or v < 0 for v in host)
+                or host == document.get('origin_identity')):
+            raise OriginDenied('invalid native payload binding')
+        document = {k:v for k,v in document.items() if k not in ('native_payload_digest','host_identity')}
+        document['kind'] = 'ADMIT'
     if (type(document) is not dict or set(document) != {
             'version', 'kind', 'operation_id', 'exchange_id', 'seat', 'incarnation', 'epoch',
             'readiness_digest', 'origin_identity'}
@@ -153,12 +188,12 @@ def _validate_document(document, seat):
         raise OriginDenied('admission does not match trusted configuration')
 
 
-def _receive_offer(control, supervisor, seats, *, commands=False):
-    data, ancillary, flags, _ = control.recvmsg(LIMIT,
+def _receive_offer(control, supervisor, seats, *, commands=False, roots=None):
+    data, ancillary, flags, _ = control.recvmsg(MAX_PACKET,
         socket.CMSG_SPACE(12) + socket.CMSG_SPACE(4) + socket.CMSG_SPACE(253*4),
         socket.MSG_CMSG_CLOEXEC)
     installed, credentials, pidfds, rights = [], [], [], []
-    channel = origin = result = None
+    channel = origin = host_origin = result = None
     invalid = not data or bool(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
     try:
         for level, kind, raw in ancillary:
@@ -179,10 +214,16 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
         # Authenticate actual sender before accepting its asserted metadata.
         supervisor.require(Record(data, credentials[0], pidfds[0]))
         document = json.loads(data.decode('utf-8'), object_pairs_hook=_unique)
-        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE', 'POLL_DELIVERY', 'CONFIRM_DELIVERY'):
+        if len(data) > LIMIT and not (commands and type(document) is dict and document.get('kind') in ('RESERVE_FORGE','RESERVE_PI_FORGE')):
+            raise OriginDenied('oversized private control packet')
+        if commands and type(document) is dict and document.get('kind') in ('STATUS', 'REVOKE', 'POLL_DELIVERY', 'CONFIRM_DELIVERY', 'STATUS_NATIVE_HELPER', 'REVOKE_NATIVE_HELPER', 'RESERVE_FORGE', 'RESERVE_PI_FORGE'):
             expected_fields = {'version', 'kind', 'operation_id', 'controller', 'exchange_id'}
             if document['kind'] == 'CONFIRM_DELIVERY':
                 expected_fields.add('receipt')
+            if document['kind'] in ('RESERVE_FORGE','RESERVE_PI_FORGE'):
+                expected_fields.update(('envelope','digest'))
+                if document['kind'] == 'RESERVE_FORGE':
+                    expected_fields.add('helper_operation')
             if (rights or set(document) != expected_fields
                     or type(document['version']) is not int or document['version'] != 1
                     or type(document['operation_id']) is not str
@@ -194,15 +235,31 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
             if document['kind'] == 'CONFIRM_DELIVERY':
                 if type(document['receipt']) is not dict or len(_canonical(document['receipt'])) > LIMIT:
                     raise OriginDenied('bounded native receipt object required')
+            if document['kind'] in ('RESERVE_FORGE','RESERVE_PI_FORGE'):
+                if ((document['kind'] == 'RESERVE_FORGE' and (type(document['helper_operation']) is not str or not OPERATION.fullmatch(document['helper_operation'])))
+                        or type(document['envelope']) is not dict or type(document['digest']) is not str
+                        or hashlib.sha256(_canonical(document['envelope'])).hexdigest() != document['digest']):
+                    raise OriginDenied('invalid Forge reservation packet')
             return document
-        if len(rights) != 2:
+        native = type(document) is dict and document.get('kind') == 'ADMIT_NATIVE_CLAUDE'
+        if len(rights) != (3 if native else 2):
             raise OriginDenied('invalid ADMIT descriptor count')
-        participant = document.get('seat', {}).get('participant_id') if type(document) is dict and type(document.get('seat')) is dict else None
-        seat = seats.get(participant) if type(participant) is str else None
-        if seat is None:
-            raise OriginDenied('unknown admission seat')
-        _validate_document(document, seat)
-        if list(_identity(rights[1])) != document['origin_identity']:
+        helper = type(document) is dict and document.get('kind') == 'ADMIT_NATIVE_HELPER'
+        if helper:
+            _validate_helper_document(document)
+            root = (roots or {}).get(document['root_operation'])
+            if root is None:
+                raise OriginDenied('unknown native root')
+            seat = root[1].seat
+            identity = document['helper_identity']
+        else:
+            participant = document.get('seat', {}).get('participant_id') if type(document) is dict and type(document.get('seat')) is dict else None
+            seat = seats.get(participant) if type(participant) is str else None
+            if seat is None:
+                raise OriginDenied('unknown admission seat')
+            _validate_document(document, seat)
+            identity = document['origin_identity']
+        if list(_identity(rights[1])) != identity:
             raise OriginDenied('substituted runtime process object')
         channel = socket.socket(fileno=rights[0]); installed.remove(rights[0])
         if (channel.family != socket.AF_UNIX
@@ -216,8 +273,14 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
         record = Record(b'', (0, seat.receiver.uid, seat.receiver.gid), rights[1])
         origin = HeldOrigin(record, receiver=seat.receiver)
         installed.remove(rights[1])
-        result = _Offer(document, channel, origin)
-        channel = origin = None
+        if native:
+            if list(_identity(rights[2])) != document['host_identity']:
+                raise OriginDenied('substituted SDK host process object')
+            host_record = Record(b'', (0, seat.receiver.uid, seat.receiver.gid), rights[2])
+            host_origin = HeldOrigin(host_record, receiver=seat.receiver)
+            installed.remove(rights[2])
+        result = (_HelperOffer if helper else _Offer)(document, channel, origin, host_origin)
+        channel = origin = host_origin = None
         return result
     except (ValueError, UnicodeError, TypeError, RecursionError, OSError, OriginUnavailable) as error:
         raise OriginDenied('invalid ADMIT record or descriptors') from error
@@ -231,7 +294,7 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
                 os.close(fd)
             except BaseException as error:
                 cleanup_error = cleanup_error or error
-        for resource in (origin, channel):
+        for resource in (host_origin, origin, channel):
             if resource is not None:
                 try:
                     resource.close()
@@ -245,6 +308,21 @@ def _receive_offer(control, supervisor, seats, *, commands=False):
                     result.close()
             finally:
                 raise cleanup_error
+
+
+def _validate_helper_document(doc):
+    keys = {'version','kind','operation_id','exchange_id','controller','root_operation',
+            'root_incarnation','root_epoch','root_identity','helper_identity','helper_payload_digest'}
+    if (type(doc) is not dict or set(doc) != keys or type(doc['version']) is not int
+            or doc['version'] != 1 or doc['kind'] != 'ADMIT_NATIVE_HELPER'
+            or any(type(doc[k]) is not str or not OPERATION.fullmatch(doc[k])
+                   for k in ('operation_id','exchange_id','controller','root_operation','root_incarnation'))
+            or type(doc['root_epoch']) is not int or not 0 < doc['root_epoch'] < 2**53
+            or type(doc['helper_payload_digest']) is not str or not DIGEST.fullmatch(doc['helper_payload_digest'])
+            or any(type(doc[k]) is not list or len(doc[k]) != 2
+                   or any(type(v) is not int or v < 0 for v in doc[k])
+                   for k in ('root_identity','helper_identity'))):
+        raise OriginDenied('invalid fixed native helper admission')
 
 
 class HubAdmission:
@@ -269,6 +347,11 @@ class HubAdmission:
         self._lock = threading.RLock()
         self._authorization = threading.local()
         self._active = {}
+        self._helpers = {}
+        self._helper_history = {}
+        self._revocation_dispatcher = None
+        self._control = None
+        self._revocation_failed = set()
         self._fenced = False
         self._closed = False
         path = Path(journal)
@@ -305,6 +388,31 @@ class HubAdmission:
                 os.close(lease)
             raise
 
+    def bind_control(self, control):
+        """Trusted startup/serve seam; never selected by a peer packet."""
+        with self._lock:
+            if self._closed or self._fenced:
+                raise OriginDenied('Hub control is fenced')
+            previous = getattr(self, '_control', None)
+            if previous is not None and previous is not control:
+                raise OriginDenied('Hub control channel changed')
+            self._control = control
+
+    def bind_revocations(self, dispatcher):
+        from .workstation_peer import AdmittedPeerDispatcher
+        with self._lock:
+            if (type(dispatcher) is not AdmittedPeerDispatcher
+                    or dispatcher.admissions is not self
+                    or getattr(self, '_revocation_dispatcher', None) is not None):
+                raise OriginDenied('one trusted revocation dispatcher required')
+            self._revocation_dispatcher = dispatcher
+
+    def _fence_control(self):
+        self._fenced = True
+        control, self._control = getattr(self, '_control', None), None
+        if control is not None:
+            control.close()
+
     def _install(self, operation, offer, binding):
         self._active[operation] = (offer, binding)
 
@@ -330,7 +438,8 @@ class HubAdmission:
                 self.endpoint.require()
                 doc = offer.document
                 operation, participant = doc['operation_id'], doc['seat']['participant_id']
-                if not alive(offer.origin.pidfd):
+                if (not alive(offer.origin.pidfd) or (offer.host_origin is not None
+                        and (offer.host_origin.revoked or not alive(offer.host_origin.pidfd)))):
                     raise OriginDenied('runtime exited before admission')
                 digest = hashlib.sha256(_canonical(doc)).hexdigest()
                 if self.db.execute('SELECT 1 FROM admissions WHERE operation=?', (operation,)).fetchone():
@@ -344,7 +453,7 @@ class HubAdmission:
                 if any(binding.seat.participant_id == participant for _, binding in self._active.values()):
                     raise OriginDenied('existing seat must be fenced before replacement')
                 binding = AdmittedBinding(self.seats[participant], operation, doc['incarnation'],
-                                          doc['epoch'], doc['readiness_digest'])
+                                          doc['epoch'], doc['readiness_digest'], doc.get('native_payload_digest'))
                 receipt = {'version': 1, 'operation_id': operation, 'epoch': binding.epoch,
                            'controller': self.controller, 'admission_digest': digest}
                 self.db.execute('BEGIN IMMEDIATE')
@@ -370,7 +479,7 @@ class HubAdmission:
             if not installed:
                 offer.close()
 
-    def serve_once(self, control, *, on_admitted=None, on_delivery=None):
+    def serve_once(self, control, *, on_admitted=None, on_delivery=None, on_forge_reserve=None):
         """One authenticated bounded control packet; I/O never owns authority lock.
 
         The hosting loop serializes packets and must call control_lost on EOF or
@@ -382,14 +491,18 @@ class HubAdmission:
         """
         controller, supervisor = self.controller, self.supervisor
         try:
-            packet = _receive_offer(control, supervisor, self.seats, commands=True)
-            if type(packet) is _Offer:
+            packet = _receive_offer(control, supervisor, self.seats, commands=True, roots=self._active)
+            if type(packet) is _HelperOffer:
+                operation = packet.document['operation_id']
+                exchange_id = packet.document['exchange_id']
+                result = self._admit_helper(packet)
+            elif type(packet) is _Offer:
                 operation = packet.document['operation_id']
                 exchange_id = packet.document['exchange_id']
                 result = self._admit_offer(packet, controller, supervisor)
                 if on_admitted is not None:
                     on_admitted(operation)
-            else:
+            elif type(packet) is dict:
                 operation = packet['operation_id']
                 exchange_id = packet['exchange_id']
                 with self._lock:
@@ -399,10 +512,22 @@ class HubAdmission:
                             or not alive(supervisor.pidfd)):
                         raise OriginDenied('private controller changed or fenced')
                     self.endpoint.require()
+                    if packet['kind'] == 'REVOKE_NATIVE_HELPER':
+                        self.revoke_helper(operation)
+                    if packet['kind'] in ('STATUS_NATIVE_HELPER','REVOKE_NATIVE_HELPER', 'RESERVE_FORGE', 'RESERVE_PI_FORGE'):
+                        result = self.helper_status(operation)
                     if packet['kind'] == 'REVOKE':
                         self.revoke(operation)
                     if packet['kind'] in ('STATUS', 'REVOKE'):
                         result = self.status(operation)
+                if packet['kind'] in ('RESERVE_FORGE','RESERVE_PI_FORGE'):
+                    try:
+                        if on_forge_reserve is None:
+                            raise LedgerError('FORGE_UNAVAILABLE')
+                        result = on_forge_reserve(operation, packet.get('helper_operation'),
+                                                  packet['envelope'], packet['digest'])
+                    except LedgerError as error:
+                        result = {'error': error.code}
                 if packet['kind'] in ('POLL_DELIVERY', 'CONFIRM_DELIVERY'):
                     # No admission lock across application work or any native
                     # effects. The dispatcher owns the phase's authorization.
@@ -430,6 +555,95 @@ class HubAdmission:
             self.control_lost()
             raise
 
+    def _admit_helper(self, offer):
+        installed = False
+        try:
+            with self._lock:
+                doc = offer.document
+                root, binding = self._check_current(doc['root_operation'])
+                if (doc['controller'] != self.controller
+                        or binding.native_payload_digest is None
+                        or doc['root_incarnation'] != binding.incarnation
+                        or doc['root_epoch'] != binding.epoch
+                        or doc['root_identity'] != list(root.origin.identity)
+                        or doc['helper_payload_digest'] != binding.native_payload_digest
+                        or offer.origin.identity == root.origin.identity
+                        or not alive(offer.origin.pidfd) or offer.origin.revoked
+                        or doc['operation_id'] in self._helper_history
+                        or len(self._helper_history) >= 128
+                        or any(o.origin.identity == offer.origin.identity for o in self._helpers.values())
+                        or any(o.origin.identity == offer.origin.identity for o,_ in self._active.values())):
+                    raise OriginDenied('fixed helper binding mismatch or capacity')
+                digest = hashlib.sha256(_canonical({k:v for k,v in doc.items() if k != 'exchange_id'})).hexdigest()
+                self._helpers[doc['operation_id']] = offer
+                self._helper_history[doc['operation_id']] = digest
+                installed = True
+                # Initialization is local-only; this token opens actual tool traffic.
+                token = b'UAS-HELPER-ACTIVE-1\n'
+                if offer.channel.send(token) != len(token):
+                    raise OriginDenied('incomplete helper activation')
+                return {'state':'active','helper_digest':digest}
+        finally:
+            if not installed:
+                offer.close()
+
+    def _check_helper(self, operation, record=None):
+        offer = self._helpers.get(operation)
+        if offer is None:
+            raise OriginDenied('inactive fixed helper')
+        doc = offer.document
+        root, binding = self._check_current(doc['root_operation'])
+        if (doc['controller'] != self.controller or doc['root_identity'] != list(root.origin.identity)
+                or doc['root_epoch'] != binding.epoch or doc['root_incarnation'] != binding.incarnation
+                or doc['helper_payload_digest'] != binding.native_payload_digest
+                or offer.origin.revoked or not alive(offer.origin.pidfd)):
+            raise OriginDenied('stale fixed helper binding')
+        if record is not None:
+            offer.origin.require(record)
+        return offer, binding
+
+    def helper_channel(self, operation):
+        with self._lock:
+            return self._check_helper(operation)[0].channel
+
+    @contextmanager
+    def authorize_descendant(self, operation, record):
+        # Admission-time immediate-child proof; no claim of fresh procfs ancestry.
+        with self._lock:
+            _, binding = self._check_helper(operation, record)
+            self._authorization.depth = getattr(self._authorization, 'depth', 0) + 1
+            try:
+                yield binding
+            finally:
+                self._authorization.depth -= 1
+
+    def recheck_descendant(self, operation, record):
+        if not getattr(self._authorization, 'depth', 0):
+            raise OriginDenied('authority lock must precede ledger transaction')
+        self._check_helper(operation, record)
+        return True
+
+    def helper_status(self, operation):
+        with self._lock:
+            digest = self._helper_history.get(operation)
+            active = False
+            if operation in self._helpers:
+                try:
+                    self._check_helper(operation)
+                    active = True
+                except OriginDenied:
+                    pass
+            return {'state':'active' if active else ('revoked' if digest else 'absent'),
+                    'helper_digest':digest}
+
+    def revoke_helper(self, operation):
+        # The fixed helper is the native Participant transport. Losing it loses
+        # its root attachment, not merely an invisible auxiliary descriptor.
+        with self._lock:
+            offer = self._helpers.get(operation)
+            if offer is not None:
+                self.revoke(offer.document['root_operation'])
+
     def status(self, operation):
         """Read-only reconciliation for the trusted control loop; never relaunch."""
         with self._lock:
@@ -437,6 +651,8 @@ class HubAdmission:
             active = self._active.get(operation)
             installed = (not self._fenced and active is not None
                          and not active[0].origin.revoked and alive(active[0].origin.pidfd)
+                         and (active[0].host_origin is None or (not active[0].host_origin.revoked
+                              and alive(active[0].host_origin.pidfd)))
                          and not self.supervisor.revoked and alive(self.supervisor.pidfd))
             return {'receipt': None if row is None else json.loads(row[0]), 'installed': installed,
                     'state': 'absent' if row is None else row[1]}
@@ -449,7 +665,9 @@ class HubAdmission:
             raise OriginDenied('inactive admission')
         offer, binding = active
         self.endpoint.require()
-        if offer.origin.revoked or not alive(offer.origin.pidfd):
+        if (offer.origin.revoked or not alive(offer.origin.pidfd)
+                or (offer.host_origin is not None and
+                    (offer.host_origin.revoked or not alive(offer.host_origin.pidfd)))):
             raise OriginDenied('runtime task unavailable')
         if record is not None:
             offer.origin.require(record)
@@ -495,26 +713,54 @@ class HubAdmission:
 
     def revoke(self, operation):
         with self._lock:
+            if operation in getattr(self, '_revocation_failed', ()):
+                raise OriginDenied('revocation publication failed; controller fenced')
             active = self._active.pop(operation, None)
-            if active is not None:
-                active[0].origin.revoke()
-                try:
+            helpers = [self._helpers.pop(key) for key, offer in tuple(self._helpers.items())
+                       if offer.document['root_operation'] == operation]
+            error = None
+            try:
+                for offer in helpers:
+                    offer.origin.revoke()
+                if active is not None:
+                    active[0].origin.revoke()
+                    dispatcher = getattr(self, '_revocation_dispatcher', None)
+                    if dispatcher is not None:
+                        dispatcher.lost(operation)
                     self.db.execute("UPDATE admissions SET state='revoked' WHERE operation=?", (operation,))
+            except BaseException as failure:
+                error = failure
+            finally:
+                # A close failure must not strand another owned descriptor.
+                for offer in helpers + ([active[0]] if active is not None else []):
+                    try:
+                        offer.close()
+                    except BaseException as failure:
+                        error = error or failure
+            if error is not None:
+                # LOST may not have committed. Never acknowledge success; the
+                # host-visible fence is separate, not rollback of another commit.
+                if not hasattr(self, '_revocation_failed'):
+                    self._revocation_failed = set()
+                self._revocation_failed.add(operation)
+                try:
+                    self._fence_control()
                 except BaseException:
-                    self._fenced = True
-                    raise
-                finally:
-                    active[0].close()
+                    pass  # Keep the decisive original failure.
+                raise error
 
     def control_lost(self):
         with self._lock:
-            self._fenced = True
             error = None
+            try:
+                self._fence_control()
+            except BaseException as failure:
+                error = failure
             for operation in tuple(self._active):
                 try:
                     self.revoke(operation)
                 except BaseException as failure:
-                    error = failure
+                    error = error or failure
             if error is not None:
                 raise error
 

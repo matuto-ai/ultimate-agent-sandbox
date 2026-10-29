@@ -8,10 +8,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
 import json
+import math
+import time
 import os
 from pathlib import Path
 import re
 import shutil
+import threading
 import uuid
 
 from .manager_owner import REVISION_FIELDS, advance_revision, lifecycle_observations, validate_revision
@@ -92,6 +95,19 @@ class FixtureSpec:
         return {**asdict(self), "project_paths": sorted(paths)}
 
 
+class _HeldLifecycleScope:
+    """Transient proof of one exact Supervisor lock scope; never serialized."""
+    __slots__ = ('_supervisor',)
+
+    def __init__(self, supervisor):
+        self._supervisor = supervisor
+
+    def require(self, supervisor):
+        if type(supervisor) is not Supervisor or supervisor is not self._supervisor:
+            raise LifecycleError('LIFECYCLE_LOCK_REQUIRED')
+        Supervisor._require_lifecycle_scope(supervisor, self)
+
+
 class Supervisor:
     """Serialize one Room's intent/effects; preserve owned/unowned distinction.
 
@@ -114,20 +130,49 @@ class Supervisor:
         self._manifest = self.directory / "lifecycle.json"
         self._participant_controller = None
         self._control_plane = None
+        self._lifecycle_scopes = {}
 
     @contextmanager
-    def _locked(self):
+    def _locked(self, *, deadline=None):
         # The enclosing control store is trusted host state, not a Workstation
         # mount. This is not a substitute for #62 filesystem/process isolation.
+        if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            raise LifecycleError('INVALID_DEADLINE')
         if self.directory.resolve() != self.directory:
             raise LifecycleError("INVALID_PATH")
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = os.open(self.directory / "lifecycle.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        scope = None
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
+            if deadline is None:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            else:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise LifecycleError('LIFECYCLE_DEADLINE')
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(min(0.02, remaining))
+                if time.monotonic() >= deadline:
+                    raise LifecycleError('LIFECYCLE_DEADLINE')
+            scope = _HeldLifecycleScope(self)
+            self._lifecycle_scopes[scope] = (os.getpid(), threading.get_ident(), descriptor)
+            yield scope
         finally:
+            if scope is not None:
+                self._lifecycle_scopes.pop(scope, None)
             os.close(descriptor)
+
+    def _require_lifecycle_scope(self, scope):
+        if type(self) is not Supervisor or type(scope) is not _HeldLifecycleScope:
+            raise LifecycleError('LIFECYCLE_LOCK_REQUIRED')
+        held = self._lifecycle_scopes.get(scope)
+        if (held is None or scope._supervisor is not self
+                or held[:2] != (os.getpid(), threading.get_ident())):
+            raise LifecycleError('LIFECYCLE_LOCK_REQUIRED')
 
     def _read(self):
         if not self._manifest.exists():

@@ -117,14 +117,23 @@ class OwnerFence:
     """
     def __init__(self, ledger, session, value, actions, *, audit, repository, supervisor):
         self.ledger, self.session = ledger, session
-        self.audit, self.repository, self.supervisor = audit, repository, supervisor
         self._forge = None
         self.value = request(value, session)
+        from .native_broker_audit import NativeBrokerAudit
+        self.audit = audit.bind(self.value, session) if type(audit) is NativeBrokerAudit else audit
+        self.repository, self.supervisor = repository, supervisor
         if ledger.room_id != session.room_id or self.value['action'] not in actions:
             raise LedgerError('MANAGER_SCOPE_MISMATCH')
 
+    def prepare(self):
+        """Native external audit acquisition precedes all consuming owner locks."""
+        from .native_broker_audit import NativeAuditOperation
+        return self.audit.prepare_manager_guard() if type(self.audit) is NativeAuditOperation else nullcontext()
+
     def authorize(self):
         if not self.session.allowed(self.value['action']): return False
+        from .native_broker_audit import NativeAuditOperation
+        if type(self.audit) is NativeAuditOperation: self.audit.require_current()
         self.live()
         return True
 

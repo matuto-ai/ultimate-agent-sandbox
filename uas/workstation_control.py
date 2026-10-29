@@ -4,9 +4,13 @@ The existing ExecLaunch journal is the durable owner. Hub receives only the
 bounded messages/FDs in workstation_admission, never this object or its launch.
 A restarted owner cannot reconstruct live task authority from these records.
 """
+from contextlib import contextmanager
+import math
+import time
 import hashlib
 from _thread import LockType
 import json
+import select
 import threading
 import uuid
 
@@ -16,6 +20,50 @@ from .workstation_admission import (AdmissionSeat, OPERATION, _admission_documen
 from .workstation_exec import ExecLaunch
 from .ledger import LedgerError, MAX_SEQUENCE
 from .peer import Readiness
+
+
+def _remaining(deadline):
+    if type(deadline) not in (int, float) or not math.isfinite(deadline):
+        raise ValueError('finite control deadline required')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0: raise TimeoutError('control deadline expired')
+    return remaining
+
+
+@contextmanager
+def _deadline_lock(lock, deadline=None):
+    if deadline is None:
+        with lock: yield
+        return
+    if not lock.acquire(timeout=_remaining(deadline)):
+        raise TimeoutError('control lock deadline expired')
+    try: yield
+    finally: lock.release()
+
+
+def _socket_deadline(control, deadline):
+    if deadline is not None: control.settimeout(_remaining(deadline))
+
+
+@contextmanager
+def _control_exchange(owner, deadline=None):
+    with _deadline_lock(owner._io, deadline):
+        previous = owner.control.gettimeout() if deadline is not None else None
+        if deadline is not None: _socket_deadline(owner.control, deadline)
+        try: yield
+        finally:
+            if deadline is not None:
+                try: owner.control.settimeout(previous)
+                except OSError: pass  # Unknown exchange may already fence/close it.
+
+
+def _deadline_fence(owner):
+    # Deny-only fallback must not wait for a contended authority lock.
+    owner._fenced = True
+    try:
+        origin = owner.launch.origin
+        if origin is not None: origin.revoke()
+    finally: owner.control.close()
 
 
 class SupervisorAdmission:
@@ -33,10 +81,35 @@ class SupervisorAdmission:
         self._fenced = False
         self._delivery_lock = threading.Lock()
         self._delivery_pending = None
+        self.forge_service = None
         enable(control)
         control.settimeout(timeout)
 
+    def attach_forge_service(self, client):
+        from .native_host_forge import NativePiHostForge
+        if type(self) is not SupervisorAdmission or self.forge_service is not None:
+            raise OriginDenied('one direct native Pi Forge service required')
+        self.forge_service = NativePiHostForge(self, client)
+        return self.forge_service
+
+    def receive_forge_once(self):
+        if self.forge_service is None:
+            raise OriginDenied('trusted native Pi Forge service unavailable')
+        return self.forge_service.receive_once()
+
     def _current(self):
+        # poll reports HUP even with unread replies queued; PEEK alone cannot.
+        # Observation only: no control bytes consumed, no authority lock taken.
+        try:
+            poll = select.poll()
+            flags = select.POLLHUP | select.POLLERR | select.POLLNVAL | getattr(select, 'POLLRDHUP', 0)
+            poll.register(self.control, flags)
+            lost = any(events & flags for _, events in poll.poll(0))
+        except (OSError, ValueError):
+            lost = True
+        if lost:
+            self._fenced = True
+            raise OriginDenied('Supervisor control channel unavailable')
         if (self._fenced or self.hub_origin.revoked or not alive(self.hub_origin.pidfd)
                 or self.launch.origin is None or self.launch.origin.revoked
                 or not alive(self.launch.origin.pidfd) or self.launch.state != 'active'):
@@ -53,6 +126,17 @@ class SupervisorAdmission:
             self.control.close()  # Hub EOF monitor must fence transferred authority.
             raise
 
+    def _empty_native_forge(self):
+        import socket
+        channel = self.launch.forge_channel
+        if channel is None:
+            raise OriginDenied('native Pi Forge channel missing')
+        try:
+            channel.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except BlockingIOError:
+            return
+        raise OriginDenied('premature Pi Forge traffic or closed channel')
+
     def admit(self, operation_id, epoch):
         """Exactly one send attempt; any uncertain result requires status only."""
         with self._io:
@@ -61,6 +145,8 @@ class SupervisorAdmission:
                 proof = self.launch.native_readiness
                 if proof is None or self.launch.admission is not None:
                     raise OriginDenied('durable native readiness and unused admission required')
+                if type(self.launch) is ExecLaunch and getattr(self.launch, 'native_recipe', None) is not None:
+                    self._empty_native_forge()
                 exchange_id = uuid.uuid4().hex  # Correlation only, never bearer authority.
                 document = _admission_document(self.launch, self.seat, operation_id, epoch, proof['digest'], exchange_id)
                 self.launch.admission = {'version': 1, 'operation_id': operation_id,
@@ -95,14 +181,15 @@ class SupervisorAdmission:
             raise OriginDenied('partial private control command')
         return exchange_id
 
-    def _receive(self, kind, exchange_id):
+    def _receive(self, kind, exchange_id, *, deadline=None):
         # Blocking receive never holds lifecycle authorization. Revocation can
         # fence the task while this control call waits for its bounded response.
         try:
+            _socket_deadline(self.control, deadline)
             with receive(self.control) as record:
                 self.hub_origin.require(record)
                 reply = json.loads(record.data.decode('utf-8'), object_pairs_hook=_unique)
-            with self._authority:
+            with _deadline_lock(self._authority, deadline):
                 expected = self.launch.admission
                 if (type(reply) is not dict or set(reply) != {'version','kind','operation_id','controller','exchange_id','result'}
                         or type(reply['version']) is not int or reply['version'] != 1
@@ -139,7 +226,10 @@ class SupervisorAdmission:
                         channel.close()  # Only Hub consumes queued participant records.
                 return result
         except BaseException as error:
-            with self._authority:
+            if deadline is not None:
+                _deadline_fence(self)
+                raise
+            with _deadline_lock(self._authority, deadline):
                 try:
                     if self.launch.admission['state'] not in ('revoking','revoked'):
                         self._save('unknown')
@@ -246,30 +336,38 @@ class SupervisorAdmission:
             self._delivery_pending = None
             return result
 
-    def revoke(self):
+    def revoke(self, *, deadline=None):
         # Fence before waiting for another control exchange, then durably record.
-        with self._authority:
-            self._fenced = True
-            try:
-                self.launch.revoke()
-                if self.launch.admission is None:
-                    return
-                self._save('revoking')
-            except BaseException:
-                self.control.close()
-                raise
-        with self._io:
-            try:
-                exchange_id = self._send_command('REVOKE')
-                return self._receive('REVOKE', exchange_id)
-            except BaseException:
-                self.control.close()
-                raise
+        try:
+            with _deadline_lock(self._authority, deadline):
+                self._fenced = True
+                try:
+                    self.launch.revoke()
+                    if self.launch.admission is None:
+                        return
+                    self._save('revoking')
+                except BaseException:
+                    self.control.close()
+                    raise
+            with _control_exchange(self, deadline):
+                try:
+                    _socket_deadline(self.control, deadline)
+                    exchange_id = self._send_command('REVOKE')
+                    return (self._receive('REVOKE', exchange_id) if deadline is None else
+                            self._receive('REVOKE', exchange_id, deadline=deadline))
+                except BaseException:
+                    self.control.close()
+                    raise
+        except BaseException:
+            if deadline is not None: _deadline_fence(self)
+            raise
 
-    def control_lost(self):
-        with self._authority:
-            self._fenced = True
-            try:
-                self.launch.revoke()
-            finally:
-                self.control.close()
+    def control_lost(self, *, deadline=None):
+        try:
+            with _deadline_lock(self._authority, deadline):
+                self._fenced = True
+                try: self.launch.revoke()
+                finally: self.control.close()
+        except BaseException:
+            if deadline is not None: _deadline_fence(self)
+            raise

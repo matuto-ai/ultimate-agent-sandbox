@@ -7,7 +7,7 @@ import unittest
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1], 'claude-native.yml': [2],
+        budgets = {'validate.yml': [1, 1, 1, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1], 'claude-native.yml': [2],
                    'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
@@ -15,13 +15,13 @@ class VMCITriggerTests(unittest.TestCase):
                 actual = list(map(int, re.findall(r'^    timeout-minutes: (\d+)$', text, re.MULTILINE)))
                 self.assertEqual(expected, actual)
                 if name == 'validate.yml':
-                    # Both disjoint unit roots must pass before any integration.
+                    # All three disjoint unit roots must pass before any integration.
                     # Never sum sibling wall-clock budgets or weaken failures.
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
                     integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams', 'gate-linux-smoke', 'gate-command-native', 'gate-artifact-native', 'room-control-plane', 'manager-mtls', 'manager-field-notes'}
-                    roots = {'validate', 'unit-slow'}
+                    roots = {'validate', 'unit-slow', 'unit-integration'}
                     self.assertEqual(set(jobs), roots | integrations)
                     for root in roots:
                         self.assertEqual(re.findall(r'^    needs: (.+)$', jobs[root], re.MULTILINE), [])
@@ -34,13 +34,18 @@ class VMCITriggerTests(unittest.TestCase):
                                      .replace('./validate.sh remainder', './validate.sh PARTITION'),
                                      jobs['unit-slow'].replace('Validate measured slow unit partition', 'UNIT')
                                      .replace('./validate.sh slow', './validate.sh PARTITION'))
+                    self.assertEqual(jobs['unit-integration'].replace('Validate measured integration unit partition', 'UNIT')
+                                     .replace('./validate.sh integration', './validate.sh PARTITION'),
+                                     jobs['unit-slow'].replace('Validate measured slow unit partition', 'UNIT')
+                                     .replace('./validate.sh slow', './validate.sh PARTITION'))
+                    self.assertEqual(text.count('run: ./validate.sh integration\n'), 1)
                     self.assertEqual(text.count('run: ./validate.sh remainder\n'), 1)
                     self.assertEqual(text.count('run: ./validate.sh slow\n'), 1)
                     for job in integrations:
-                        self.assertEqual(re.findall(r'^    needs: (.+)$', jobs[job], re.MULTILINE), ['[validate, unit-slow]'])
+                        self.assertEqual(re.findall(r'^    needs: (.+)$', jobs[job], re.MULTILINE), ['[validate, unit-slow, unit-integration]'])
                         self.assertNotIn('continue-on-error:', jobs[job])
                         self.assertEqual(re.findall(r'^    if: (.+)$', jobs[job], re.MULTILINE), [
-                            "${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}"])
+                            "${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}"])
                     forge = jobs['forge-broker-smoke']
                     self.assertNotIn('continue-on-error:', forge)
                     self.assertEqual(re.findall(r'^        if: (.+)$', forge, re.MULTILINE), [])
@@ -81,7 +86,8 @@ class VMCITriggerTests(unittest.TestCase):
                         self.assertNotIn('tests/vm/', jobs[job])
                     manager = jobs['manager-mtls']
                     self.assertIn('UAS_MANAGER_TLS_TEST: "1"', manager)
-                    self.assertIn('timeout --signal=TERM --kill-after=2s 40s python3 -m unittest discover -s tests -p test_manager_tls.py -v', manager)
+                    self.assertEqual(re.findall(r'^        run: (.+)$', manager, re.MULTILINE), [
+                        'PYTHONPATH=tests timeout --signal=TERM --kill-after=2s 40s python3 -m unittest test_manager_tls test_native_human_tls -v'])
                     self.assertNotIn('sudo', manager)
                     room = jobs['room-control-plane']
                     self.assertIn("UAS_ROOM_CONTROL_TEST: '1'", room)
@@ -95,7 +101,7 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertNotIn('sudo', browser)
                     self.assertNotIn('npm ', browser)
                     self.assertNotIn('--no-sandbox', browser)
-                    self.assertLessEqual(max(actual[:2]) + max(actual[2:]), 3)
+                    self.assertLessEqual(max(actual[:3]) + max(actual[3:]), 3)
                 else:
                     self.assertLessEqual(sum(actual), 3)
 

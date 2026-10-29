@@ -1,8 +1,8 @@
-"""Standard discovery, two complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, three complete/disjoint unit partitions, no test exclusions.
 
-Measured modules share work between the existing parallel unit jobs. Every
+Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
-errors fail either invocation; imported tests are never run merely to select IDs.
+errors fail every invocation; imported tests are never run merely to select IDs.
 """
 import argparse
 import hashlib
@@ -11,22 +11,35 @@ import sys
 import unittest
 
 
-SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_forge_capacity',
-                          'test_gate_evaluation', 'test_forge_mutations',
-                          # Post-77 hosted log: approximately 16 seconds together.
-                          'test_context', 'test_artifact_manual_source',
+# Hosted 6c97 elapsed intervals: approximately 35.8 / 32.2 / 34.6 seconds.
+# Hosted 46f2154 remainder moved 3.624 + 3.314 + 2.929 seconds to integration.
+# Hosted 3678efe remainder overflow: move measured 17.581s / 11.223s into
+# existing parallel jobs (19.815s / 27.673s), not new jobs or larger limits.
+# Estimates become 37.396 / 38.896 / 43.763s; timings vary, not a guarantee.
+# Keep module ownership stable; new modules default to remainder, never disappear.
+SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
+                          'test_forge_mutations', 'test_artifact_manual_source',
                           'test_run_review', 'test_staged_source_closure',
-                          # Room hosted log: approximately 15 seconds together.
-                          'test_participant', 'test_artifact_native_source',
-                          'test_forge_mutation_audit', 'test_workstation_peer',
-                          'test_forge_read_process', 'test_native_trust'})
-PARTITIONS = ('slow', 'remainder')
+                          'test_claude_permission_policy', 'test_artifact_native_source',
+                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
+INTEGRATION_MODULES = frozenset({'test_context', 'test_forge_capacity',
+    'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
+    'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
+    'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
+    'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
+    'test_manager_action_host', 'test_forge_assignment',
+    'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
+PARTITIONS = ('slow', 'integration', 'remainder')
+assert not SLOW_MODULES & INTEGRATION_MODULES
 
 
 def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
-    return 'slow' if identifier.split('.', 1)[0] in SLOW_MODULES else 'remainder'
+    module = identifier.split('.', 1)[0]
+    if module in SLOW_MODULES:
+        return 'slow'
+    return 'integration' if module in INTEGRATION_MODULES else 'remainder'
 
 
 def verify_partition_ids(all_ids, groups):
@@ -82,7 +95,7 @@ def main(argv=None):
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
     print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
-          f'remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
+          f'integration={len(groups["integration"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
     return 0 if result.wasSuccessful() else 1

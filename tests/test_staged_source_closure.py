@@ -53,12 +53,31 @@ def missing_imports(paths, include_lazy=False):
 
 
 class StagedSourceClosureTests(unittest.TestCase):
+    def assert_stage_budget(self, sources):
+        tree = ast.parse((ROOT/'tests/linux/diff_smoke.py').read_bytes())
+        expressions = {node.targets[0].id: ast.dump(node.value)
+                       for node in tree.body if isinstance(node, ast.Assign)
+                       and isinstance(node.targets[0], ast.Name)
+                       and node.targets[0].id in ('MAX_SOURCE_FILES','MAX_SOURCE_BYTES','MAX_SOURCE_TOTAL')}
+        self.assertEqual(expressions, {name: ast.dump(ast.parse(value, mode='eval').body)
+            for name,value in {'MAX_SOURCE_FILES':'143','MAX_SOURCE_BYTES':'256<<10','MAX_SOURCE_TOTAL':'3<<20'}.items()})
+        limits = {'MAX_SOURCE_FILES':143,'MAX_SOURCE_BYTES':256<<10,'MAX_SOURCE_TOTAL':3<<20}
+        sizes = [(ROOT/name).stat().st_size for name in sources]
+        self.assertLessEqual(len(sizes),limits['MAX_SOURCE_FILES'])
+        self.assertTrue(all(size <= limits['MAX_SOURCE_BYTES'] for size in sizes))
+        self.assertLessEqual(sum(sizes),limits['MAX_SOURCE_TOTAL'])
+
     def test_diff_stage_closes_lazy_owner_imports_too(self):
         # Diff promises full UAS import closure. Other finite native profiles
         # do not call the opt-in Manager action routes and retain eager closure.
         sources = source_list('tests/linux/diff_smoke.py')
+        # native_human_entry is selected by a fixed -m string, not a Python
+        # import: AST reachability alone must not silently omit that entry.
+        self.assertTrue({'uas/human_mtls.py','uas/manager_stream.py','uas/manager_transport.py',
+            'uas/native_human_control.py','uas/native_human_launch.py','uas/native_human_entry.py'} <= sources)
+        self.assertEqual(len(sources),136)
         self.assertEqual([], missing_imports(sources, include_lazy=True))
-        self.assertLessEqual(len(sources), 128)
+        self.assert_stage_budget(sources)
 
     def test_fixed_source_manifests_have_eager_import_closure(self):
         for fixture in ('tests/linux/artifact_smoke.py', 'tests/linux/diff_smoke.py',
@@ -81,7 +100,7 @@ class StagedSourceClosureTests(unittest.TestCase):
                        if keyword.arg=='extra_paths')
         for sources in (base|artifact, base|set(command)):
             self.assertEqual([],missing_imports(sources))
-            self.assertLessEqual(len(sources),128)
+            self.assert_stage_budget(sources)
 
     def test_optional_identity_route_has_fixed_dependency_files(self):
         # The unchanged native fixture leaves contributions=None. If a trusted

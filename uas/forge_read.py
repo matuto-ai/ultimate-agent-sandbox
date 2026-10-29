@@ -136,8 +136,13 @@ class ExternalReadBroker:
                 raise
         if self.mutations is not None and self.mutations.failed: raise LedgerError('AUDIT_UNAVAILABLE')
         self._authorize(origin, authorize)
-        if (type(envelope) is not dict or set(envelope) != {'id', 'kind', 'argv'}
-                or envelope['kind'] != 'forge-read'):
+        admission = type(envelope) is dict and envelope.get('kind') == 'admission-read'
+        if (type(envelope) is not dict or
+                (admission and (set(envelope) != {'id', 'kind', 'issue_number'}
+                    or type(envelope['issue_number']) is not int
+                    or not 1 <= envelope['issue_number'] <= 9_999_999_999))
+                or (not admission and (set(envelope) != {'id', 'kind', 'argv'}
+                    or envelope['kind'] != 'forge-read'))):
             raise LedgerError('INVALID_FORGE_ENVELOPE')
         try:
             _json(envelope)
@@ -148,7 +153,8 @@ class ExternalReadBroker:
         # credentials remains external and cannot be influenced by argv.
         denied = None
         try:
-            route = parse_read_route(envelope['argv'], self.project)
+            # Host-only admission read has no argv/foreign repository selector.
+            route = (None if admission else parse_read_route(envelope['argv'], self.project))
         except LedgerError as error:
             route, denied = None, error.code
         metadata = {'room_id': self.binding.room_id, 'room_instance': self.room_instance,
@@ -157,7 +163,7 @@ class ExternalReadBroker:
             'authority_version': origin.authority_version, 'provider_host': 'github.com',
             'requested_repository': route.repository if route else self.project.repository,
             'effective_repository': route.repository if route else self.project.repository,
-            'route': route.kind if route else 'denied',
+            'route': 'admission-issue' if admission else (route.kind if route else 'denied'),
             'request_digest': _digest(envelope), 'origin_digest': _digest(origin.canonical())}
         try:
             begin = self.audit.begin_read(operation, metadata)
@@ -176,7 +182,7 @@ class ExternalReadBroker:
             contact = 'none'
             if denied:
                 result = {'status': denied, 'completeness': 'unknown'}
-            elif route.kind == 'help':
+            elif not admission and route.kind == 'help':
                 result = {'status': 'HELP', 'completeness': 'complete', 'text': help_text() + ('\n\n' + __import__('uas.github_mutation_routes',fromlist=['help_text']).help_text() if self.mutations is not None else '')}
             else:
                 try:
@@ -192,7 +198,8 @@ class ExternalReadBroker:
                 if provider is not None:
                     contact = 'read'
                     try:
-                        result = provider.read(route)
+                        result = (provider.read_admission(envelope['issue_number'])
+                                  if admission else provider.read(route))
                     except Exception as error:
                         code = error.code if isinstance(error,(LedgerError,ProviderFailure)) else None
                         result = {'status':code if code in READ_AUDIT_STATUSES else 'PROVIDER_FAILURE',

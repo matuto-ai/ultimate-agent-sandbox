@@ -66,9 +66,26 @@ warm performance. A separately authorized preparation run followed by one fresh
 warm qualification is still required to measure timings and validate those real
 boundaries. Cold-path qualification remains a distinct manual action.
 
-The current workflow permissions are not expanded by this source change.
-Cross-run Actions transport still needs reviewed, explicit producer run/artifact
-selection and an approved `actions:read` permission (no PAT/new credential).
-Download must enforce the exact artifact identity plus independently trusted
-receipt SHA, and reject archive traversal/symlinks/oversize before extraction.
-Do not treat an Actions download warning or a receipt's own hash as verification.
+## Explicit cross-run transport
+
+`room-prepare.yml` runs only on deliberate reviewer dispatch or the
+`prepare-room-base` reviewer label. It uploads the clean base, signed pool and
+NOT_RUN receipt for seven days, never credentials or human data. Preparation is
+not qualification; each execution still needs the applicable owner budget.
+
+`room-launch.yml` grants `actions: read` only to its consumer job, using the
+existing ephemeral token. Select the exact producer run ID, artifact ID, producer
+commit and independently reviewed receipt SHA256 as dispatch inputs. Before the
+workflow is available on the default branch, the same four values can be reviewed
+in `tests/vm/prepared-room-selection.json` (keys `run_id`, `artifact_id`, `commit`,
+`receipt`) before the deliberate `qualify-room-launch` reviewer label. The empty
+selection template fails closed; never fill it with inferred or latest values.
+
+The consumer verifies successful same-repository producer metadata, artifact/run
+binding and ZIP digest, bounded safe archive extraction, then the core receipt
+and current source contract. Only the API request receives the token. No download
+retry, automatic rebuild or cold fallback is allowed. Safe fixed failure codes
+distinguish permission, missing/expired artifact, metadata/receipt mismatch and
+timeout. Qcow2 backing checks and fresh nonce, overlay and enforcement tests still
+run in the warm launcher. Real artifact transfer and warm timings require a
+separately authorized execution; source/mock tests do not establish those facts.

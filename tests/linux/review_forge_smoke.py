@@ -36,6 +36,7 @@ SOURCES = (
     'uas/forge_read.py',
     'uas/forge_read_provider.py',
     'uas/forge_read_service.py',
+    'uas/native_broker_audit.py',
     'uas/forge_wire.py',
     'uas/gate_command_hub.py',
     'uas/gate_diff_hub.py',

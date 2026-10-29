@@ -31,7 +31,7 @@ def configuration(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= 8192:
         raise OriginDenied('bounded trusted Hub startup required')
     value = json.loads(raw.decode(), object_pairs_hook=_unique)
-    if (type(value) is not dict or set(value) != {'version','challenge','supervisor_identity',
+    if (type(value) is not dict or set(value) - {'forge'} != {'version','challenge','supervisor_identity',
             'mapping_digest','room_id','room_instance','run_id','seats'}
             or type(value['version']) is not int or value['version'] != 1
             or type(value['challenge']) is not str or len(value['challenge']) != 64
@@ -41,13 +41,24 @@ def configuration(raw):
             or any(type(v) is not int or v < 0 for v in value['supervisor_identity'])
             or type(value['seats']) is not list or len(value['seats']) != 2):
         raise OriginDenied('invalid trusted Hub startup')
+    if 'forge' in value:
+        from .forge import ForgeBinding
+        from .github_read import GitHubProject
+        forge = value['forge']
+        if (type(forge) is not dict or set(forge) != {'project_id','repository','host'}
+                or forge['host'] != 'github.com'):
+            raise OriginDenied('invalid trusted Forge binding')
+        from .ledger import _token
+        _token(forge['project_id']); GitHubProject(forge['repository'], forge['host'])
     receiver = ReceiverIdentity(65532,65532,'hub-'+value['room_instance'],value['mapping_digest'])
     seats=[]
     for seat in value['seats']:
-        if type(seat) is not dict or set(seat) != {'participant_id','actor_id','profile_id'}:
+        if type(seat) is not dict or set(seat) not in ({'participant_id','actor_id','profile_id'}, {'participant_id','actor_id','profile_id','capabilities'}):
             raise OriginDenied('invalid fixed Hub seat')
+        if 'capabilities' in seat and (type(seat['capabilities']) is not list or 'forge' not in value):
+            raise OriginDenied('explicit trusted Forge capability list required')
         seats.append(AdmissionSeat(value['room_id'],value['room_instance'],
-            seat['participant_id'],seat['actor_id'],seat['profile_id'],('peer-traffic',),receiver))
+            seat['participant_id'],seat['actor_id'],seat['profile_id'],tuple(seat.get('capabilities', ('peer-traffic',))),receiver))
     if len({s.participant_id for s in seats}) != 2 or len({s.actor_id for s in seats}) != 2:
         raise OriginDenied('two distinct native seat bindings required')
     # Existing Hub validates the actual Run token; reject malformed type early.
@@ -71,6 +82,10 @@ def report(ledger):
 def main():
     if len(sys.argv)!=1 or (os.getuid(),os.getgid())!=(65531,65531):
         raise OriginDenied('fixed unprivileged Hub entrypoint required')
+    # Only this Room ledger directory is shared with the trusted host owner.
+    # Setgid directory + group-readable/writable SQLite WAL files, never world
+    # access or a Supervisor-private-store mount into Hub.
+    os.umask(0o007)
     # Child of the fixed init, never unsupported PID1/parent0 or process scans.
     probe()
     kernel_status=process_status()
@@ -104,6 +119,9 @@ def main():
         hub=FixturePeerHub(ledger)
         hub.configure('native-integration-configure',tuple(FixtureParticipant(s.participant_id,s.actor_id) for s in seats),metadata['run_id'])
         dispatcher=AdmittedPeerDispatcher(admissions,hub)
+        if 'forge' in metadata:
+            from .forge import ForgeBinding
+            dispatcher.attach_host_forge_binding(ForgeBinding(metadata['room_id'], **metadata['forge']))
         ready=_canonical({'version':1,'kind':'HUB_READY','controller':admissions.controller,
                           'room_id':metadata['room_id'],'room_instance':metadata['room_instance'],
                           'observation':{'uid':os.getuid(),'gid':os.getgid(),'parent':os.getppid(),'kernel_status':kernel_status,
@@ -116,7 +134,8 @@ def main():
         if control.send(ready)!=len(ready):
             raise OriginDenied('incomplete Hub startup readiness')
         loop=AdmittedHubLoop(admissions,dispatcher,control,
-                            context_generations={s.participant_id:1 for s in seats})
+                            context_generations={s.participant_id:1 for s in seats},
+                            canonical_context_generations=True)
         stack.callback(loop.close)
         through=-1;deadline=time.monotonic()+180
         while time.monotonic()<deadline:
