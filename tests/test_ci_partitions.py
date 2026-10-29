@@ -25,13 +25,15 @@ class CIPartitionTests(unittest.TestCase):
                                           'test_gate_evaluation', 'test_forge_mutations',
                                           'test_artifact_manual_source',
                                           'test_run_review', 'test_staged_source_closure',
-                                          'test_claude_permission_policy', 'test_artifact_native_source'})
+                                          'test_claude_permission_policy', 'test_artifact_native_source',
+                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
         self.assertEqual(ci.INTEGRATION_MODULES, {'test_context', 'test_forge_capacity',
             'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
             'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
             'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
             'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
-            'test_manager_action_host', 'test_forge_assignment'})
+            'test_manager_action_host', 'test_forge_assignment',
+    'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
         self.assertFalse(ci.SLOW_MODULES & ci.INTEGRATION_MODULES)
         for module in ci.INTEGRATION_MODULES:
             self.assertEqual('integration', ci.partition_for(module + '.Case.test_one'))
@@ -54,8 +56,8 @@ class CIPartitionTests(unittest.TestCase):
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
-        self.assertEqual(len(groups['slow']), 9)
-        self.assertEqual(len(groups['integration']), 15)
+        self.assertEqual(len(groups['slow']), 15)
+        self.assertEqual(len(groups['integration']), 21)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))

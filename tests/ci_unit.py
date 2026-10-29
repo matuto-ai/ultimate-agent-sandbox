@@ -13,17 +13,22 @@ import unittest
 
 # Hosted 6c97 elapsed intervals: approximately 35.8 / 32.2 / 34.6 seconds.
 # Hosted 46f2154 remainder moved 3.624 + 3.314 + 2.929 seconds to integration.
+# Hosted 3678efe remainder overflow: move measured 17.581s / 11.223s into
+# existing parallel jobs (19.815s / 27.673s), not new jobs or larger limits.
+# Estimates become 37.396 / 38.896 / 43.763s; timings vary, not a guarantee.
 # Keep module ownership stable; new modules default to remainder, never disappear.
 SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_forge_mutations', 'test_artifact_manual_source',
                           'test_run_review', 'test_staged_source_closure',
-                          'test_claude_permission_policy', 'test_artifact_native_source'})
+                          'test_claude_permission_policy', 'test_artifact_native_source',
+                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
 INTEGRATION_MODULES = frozenset({'test_context', 'test_forge_capacity',
     'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
     'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
-    'test_manager_action_host', 'test_forge_assignment'})
+    'test_manager_action_host', 'test_forge_assignment',
+    'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
 PARTITIONS = ('slow', 'integration', 'remainder')
 assert not SLOW_MODULES & INTEGRATION_MODULES
 
