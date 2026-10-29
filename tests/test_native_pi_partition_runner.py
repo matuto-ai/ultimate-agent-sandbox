@@ -1,5 +1,7 @@
 """Source-only orchestration tests; never launch Pi/Node or native processes."""
 import importlib.util
+from importlib.machinery import PathFinder
+import sys
 import io
 import json
 from pathlib import Path
@@ -20,6 +22,52 @@ NAMES = ['test_pi_runtime.C.test_a', 'test_pi_forge.C.test_b', 'test_pi_assignme
 class PiPartitionRunnerTests(unittest.TestCase):
     def setUp(self):
         runner.CANCELLED = None
+
+    def clean_script_path(self):
+        # Model exec of tests/pi/parallel-tests.py, not this guard's preloaded
+        # project path. PathFinder ignores sys.modules, so cached uas cannot
+        # make this regression pass accidentally.
+        return [str(ROOT / 'tests/pi')] + [entry for entry in sys.path
+            if entry and Path(entry).resolve() not in (ROOT, ROOT / 'tests', ROOT / 'tests/pi')]
+
+    def assert_project_import_scope(self):
+        self.assertEqual([str(ROOT), str(ROOT / 'tests')], sys.path[:2])
+        package = PathFinder.find_spec('uas', sys.path)
+        self.assertIsNotNone(package)
+        self.assertEqual(ROOT / 'uas/__init__.py', Path(package.origin))
+        test = PathFinder.find_spec('test_pi_runtime', sys.path)
+        self.assertEqual(ROOT / 'tests/test_pi_runtime.py', Path(test.origin))
+
+    def test_direct_script_discovery_bootstraps_project_without_preloaded_path(self):
+        loader = Mock(errors=[])
+        def discover(*args, **kwargs):
+            self.assert_project_import_scope()
+            return unittest.TestSuite()
+        loader.discover.side_effect = discover
+        with patch.object(sys, 'path', self.clean_script_path()), \
+             patch.object(runner.unittest, 'TestLoader', return_value=loader):
+            self.assertIsNone(PathFinder.find_spec('uas', sys.path))
+            self.assertEqual([], runner.discover())
+            runner.configure_imports()
+            self.assertEqual(1, sys.path.count(str(ROOT)))
+
+    def test_direct_worker_bootstraps_project_before_loading_manifest_tests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'manifest.json'; path.write_text(json.dumps(NAMES))
+            loader = Mock(errors=[])
+            def load(names):
+                self.assert_project_import_scope()
+                self.assertEqual(NAMES, names)
+                return unittest.TestSuite()
+            loader.loadTestsFromNames.side_effect = load
+            result = Mock(testsRun=len(NAMES), skipped=[]); result.wasSuccessful.return_value=True
+            with patch.object(sys, 'path', self.clean_script_path()), \
+                 patch.object(runner.unittest, 'TestLoader', return_value=loader), \
+                 patch.object(runner, 'ids', return_value=iter(NAMES)), \
+                 patch.object(runner.unittest, 'TextTestRunner') as text:
+                self.assertIsNone(PathFinder.find_spec('uas', sys.path))
+                text.return_value.run.return_value=result
+                self.assertEqual(0, runner.worker(path))
 
     def test_partition_exact_unique_union_and_future_default(self):
         self.assertEqual([NAMES[:3], NAMES[3:]], runner.partition(NAMES))

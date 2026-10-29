@@ -47,8 +47,15 @@ def partition(inventory):
     return groups
 
 
+def configure_imports():
+    # Direct-script parent AND workers begin with tests/pi, not repository root.
+    # Match the old `python -m unittest` project import scope deterministically.
+    paths = [str(ROOT), str(ROOT / 'tests')]
+    sys.path[:] = paths + [entry for entry in sys.path if entry not in paths]
+
+
 def discover():
-    sys.path.insert(0, str(ROOT / 'tests'))
+    configure_imports()
     loader = unittest.TestLoader()
     suite = loader.discover(str(ROOT / 'tests'), pattern='test_pi_*.py')
     if loader.errors:
@@ -57,7 +64,7 @@ def discover():
 
 
 def worker(manifest):
-    sys.path.insert(0, str(ROOT / 'tests'))
+    configure_imports()
     names = json.loads(Path(manifest).read_text())
     if not names or len(set(names)) != len(names):
         raise ValueError('invalid worker inventory')
