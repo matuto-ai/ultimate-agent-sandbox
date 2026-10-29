@@ -46,43 +46,53 @@ prompts, comment bodies, raw Broker receipts or credentials. Its stored status
 is not a fresh GitHub observation. A controlled Run reaching CLOSED is still
 classified `controlled-composition`, with `real_lifecycle_qualified: false`.
 
-## Explicit blocked live preflight
+## Current native route and legacy controlled preflight
 
-`preflight()` reports the missing live seams; no environment flag, credential
-presence boolean or supplied evidence label enables live acceptance. Today:
+This `LifecycleScenario` driver still deliberately returns its historical
+`controlled-composition` preflight. That is not the current native CLI's
+capability inventory. The consumed native route is now
+[`qualify-native`](native-qualification-entrypoint.md), with optional
+[`native_human_entry`](native-human-qualification.md): an existing protected
+operator grant and accepted raw stream authenticate one retained HumanSession,
+which reaches native admission, reviewer recruitment, human changes and the
+finite `NativeSessionDriver`. Do not implement another host based on the older
+missing-host wording.
 
-1. `uas.__main__` provides validation and read-only launch preflight, not a
-   product launcher. `Supervisor` and current native recipes remain fixture
-   qualified. The selected Pi/Claude native launch, production admission and
-   provider/tool configuration need actual host composition, not a renamed
-   fixture recipe.
-2. The dispatcher/review/Git/Broker owners need to be assembled with actual
-   immutable seat authority, controlled Project history/target fences and the
-   selected authorized GitHub account. Existing controlled admission/provenance
-   facts do not establish this.
-3. Real Pi and Claude must execute the implementation/review return and retain
-   runtime/image versions, Actor/context generations, Work Requests, exact
-   candidate/base/integration revisions, native review identity and CI attempts.
-4. Stale review, crash/safe-point recovery, context reset, human changes and
-   ambiguous Forge write must be exercised through those seams. Finally an
-   authorized human merges the unchanged candidate, and the owner observes it.
+Remaining #78 acceptance is concrete:
 
-Those are existing [#78](https://github.com/matuto-ai/ultimate-agent-sandbox/issues/78)
-obligations, not new product gates. This preparation does not complete that
-issue. The next implementation work is the concrete native/host composition
-above, followed by authorized real execution—not another generic evidence store.
-Account availability, credentials and human merge are external prerequisites,
-not code that can be replaced by a successful controlled test.
+1. Prepare the selected Workstation **and Hub** images and actual installation
+   metadata for the existing disposable backend. Image packaging/readback does
+   not observe its XFS/SELinux/network/runtime boundary. The combined image passed
+   [one real stopped-container readback](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/40842890210)
+   at `475c1160509b1f9f2e5418d33d12f69fb010d1e0`; that run retained logs/hashes,
+   not a published or installed image.
+2. Select the actual Project/Room configuration and authorized GitHub target,
+   existing provider/Git/Forge references, explicit merger IDs and human TLS
+   grant/listener. These are operator choices/references, not new credentials or
+   missing source functions. Gate requirements must come from that selected
+   policy; do not weaken it or require optional Gate profiles unconditionally.
+3. Execute the original real Pi implementation/Claude review return, stale-review
+   denial, same-Run Pi crash/safe-point redelivery, context/reset observation,
+   human changes, uncertain Forge response reconciliation and unchanged-candidate
+   human merge. Existing canonical owners and retained native adapters provide
+   the source route; controlled tests are not those observations.
+
+The current qualification session is explicitly bounded to **180 seconds** and
+stops starting operations with less than 45 seconds remaining. This source slice
+does not enlarge that limit. Plan the real scenario and its human interaction
+against this bound before execution; a timeout is not a pass or permission to
+restart an uncertain effect. The one-Run crash route must not be confused with
+the separate successor-Run route, which still lacks a successor Git projection.
 
 See the [canonical review owner](architecture/run-review-owner.md),
 [admitted Workstation transport](workstation-pi-transport.md), and
 [accepted reconciliation](architecture/source-reconciliation.md). No additional
 VM or target-host execution is launched by this harness.
 
-The next source slice adds an [opt-in native Pi exact-exec recipe](native-pi-recipe.md)
-consumed by the existing Supervisor launch owner. It does not change this
-harness's live preflight classification; selected-image/provider execution,
-Claude native-child/MCP composition and full lifecycle qualification remain.
+The implemented [opt-in native Pi exact-exec recipe](native-pi-recipe.md)
+is consumed by the existing Supervisor launch owner. It does not change this
+controlled driver's classification; actual provider execution and full lifecycle
+qualification remain distinct from source composition.
 
 The opt-in Claude host/native/helper composition is described in
 [the runtime boundary](claude-native-admission.md) and

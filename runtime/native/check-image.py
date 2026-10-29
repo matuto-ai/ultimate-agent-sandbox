@@ -24,9 +24,13 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from uas.native_image_package import canonical, dockerfile, build_inventory, payload
 from uas.native_git_resources import verify_engine_payload, validate_payload
+from uas.native_image_archive import export_archive
 from uas.docker_exec_api import _UnixHTTP, API
 
 MAX_FILE = 512 * 1024 * 1024
+RETAINED_FILES = {'selection.json': 65536, 'Dockerfile.native-check': 65536,
+                  'pi-payload.json': 65536, 'claude-payload.json': 65536,
+                  'git-payload.json': 65536, 'git-backend': 64 * 1024 * 1024}
 
 
 def require(value, message):
@@ -139,10 +143,21 @@ def cleanup_container(docker, name, owner, image_id, *, uncertain=False):
     command(docker + ['rm', state['Id']], output=True)
 
 
+def retain_artifact(directory, name, raw, report):
+    """Retain only named public build products, never a whole work directory."""
+    require(name in RETAINED_FILES and type(raw) is bytes
+            and 0 < len(raw) <= RETAINED_FILES[name], 'bounded named artifact required')
+    with (directory / name).open('xb') as stream:
+        stream.write(raw)
+    report.setdefault('retained_artifacts', {})[name] = {
+        'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--selection', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--retain-image-archive', action='store_true', help='retain bounded public Docker image archive after readback')
     args = parser.parse_args()
     out = Path(args.output).resolve()
     out.mkdir(exist_ok=False)
@@ -156,7 +171,7 @@ def main():
     require(not command(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=ROOT, output=True).strip(),
             'clean tracked source required')
     report = {'version': 1, 'source_revision': revision, 'selection': selection,
-              'status': 'running', 'stage': 'build', 'build_execution': 'not-started', 'native_lifecycle': 'not-run'}
+              'status': 'running', 'stage': 'build', 'build_execution': 'not-started', 'archive_export': 'not-started' if args.retain_image_archive else 'not-requested', 'native_lifecycle': 'not-run'}
     container_name = None
     create_confirmed = False
     image_id = None
@@ -165,7 +180,11 @@ def main():
     config.mkdir()
     docker = ['docker', '--config', str(config), '--host', 'unix:///var/run/docker.sock']
     cleanup_error = None
+    artifacts = out / 'artifacts'
+    artifacts.mkdir()
     try:
+        retain_artifact(artifacts, 'selection.json', canonical(selection), report)
+        retain_artifact(artifacts, 'Dockerfile.native-check', recipe.encode('utf-8'), report)
         with tempfile.TemporaryDirectory(prefix='uas-image-check-') as temporary:
             work = Path(temporary)
             context = work / 'context'
@@ -211,6 +230,7 @@ def main():
             for runtime in ('pi', 'claude'):
                 value = document(read_file(container, '/opt/uas/' + runtime + '-manifest.json')['data'])
                 report['native_payloads'][runtime] = validate_native(value, runtime, lambda p: read_file(container, p))
+                retain_artifact(artifacts, runtime + '-payload.json', canonical(value), report)
             git = validate_payload(document(read_file(container, '/opt/uas/git-payload.json')['data']))
             require(git['python_version'] == selection['git_packages']['python_version'],
                     'built Python version differs from selection')
@@ -218,18 +238,31 @@ def main():
             exported = out / 'backend' / 'git-payload.json'
             require(backend.is_file() and not backend.is_symlink() and backend.stat().st_size <= 64 * 1024 * 1024
                     and exported.is_file() and not exported.is_symlink(), 'regular bounded export required')
-            validate_export(git, document(exported.read_bytes()), backend.read_bytes())
+            backend_bytes = backend.read_bytes()
+            validate_export(git, document(exported.read_bytes()), backend_bytes)
             # Reuse the production Engine readback owner, not a second Git verifier.
             report['git_payload'] = verify_engine_payload(
                 SimpleNamespace(socket_path='/var/run/docker.sock', timeout=10), container,
                 {**git, 'image_id': image_id}, deadline=time.monotonic() + 60)
+            retain_artifact(artifacts, 'git-payload.json', canonical(git), report)
+            retain_artifact(artifacts, 'git-backend', backend_bytes, report)
             report['backend_sha256'] = git['backend_sha256']
+            if args.retain_image_archive:
+                report.update(stage='archive', archive_export='running')
+                report['image_archive'] = export_archive(image_id, artifacts, artifact_name='combined-image.tar',
+                    max_bytes=2*1024**3, readback={'source_revision':revision,'image_id':image_id,
+                        'native_payloads':report['native_payloads'],'git_payload':report['git_payload'],
+                        'backend_sha256':report['backend_sha256']})
+                report['archive_export'] = 'complete'
             report['status'] = 'passed'
             report['stage'] = 'complete'
             # A local config ID is not a published digest-pinned reference.
             report['installation_envelopes'] = 'not-created-no-published-reference'
     except BaseException as error:
+        notes = getattr(error, '__notes__', ())
+        if notes: report['error_notes'] = [str(note)[:500] for note in notes[:8]]
         report['status'] = 'failed'
+        if report['archive_export'] == 'running': report['archive_export'] = 'failed'
         report['error'] = type(error).__name__ + ': ' + str(error)[:1000]
         if report['build_execution'] in ('running', 'export-running'):
             report['build_execution'] = ('unknown-daemon-outcome' if isinstance(error, subprocess.TimeoutExpired)

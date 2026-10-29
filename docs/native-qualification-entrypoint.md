@@ -265,7 +265,9 @@ Unexpected transport/owner exceptions stop conservatively with the attempted ID
 retained rather than being swallowed or automatically retried.
 
 This input is limited to one Run and cannot be combined with `next_request`.
-Authenticated external Manager hosting remains missing. The one-Run driver now
+The optional [authenticated native host](native-human-qualification.md) now
+constructs and consumes this inbox from its retained HumanSession and original
+Broker audit client. Without that explicit selection the pair-only path remains unchanged. The one-Run driver now
 composes [retained-owner Pi crash restoration](native-pi-same-run-restore.md),
 which still requires actual native qualification. No actual live scenario policy has been selected by this source:
 required Gates must come from the real configured snapshot, never a substituted

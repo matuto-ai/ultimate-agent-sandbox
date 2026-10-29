@@ -127,7 +127,7 @@ process/socket/thread/native-loader/privilege guards before repository imports.
 `runtime/native/check-image.py` builds from a clean tracked Git revision in a
 separate `git archive` context. It uses an empty Docker client configuration,
 never starts a container, never reads provider accounts, and never pushes an
-image. Invoke from the reviewed clean checkout:
+image. Optional explicit archive retention is described below. Invoke from the reviewed clean checkout:
 
 ```
 python3 runtime/native/check-image.py \
@@ -176,3 +176,83 @@ result records `build_execution: unknown-daemon-outcome` and fails without retry
 `container_cleanup` describes only the invocation's stopped readback container,
 not build/cache cleanup. A disposable hosted runner is the intended execution
 site; do not reinterpret a client timeout as permission to start another build.
+
+## Fixed Hub packaging and retained build products
+
+The native backend also requires its separate fixed Hub image. The pure
+`uas.native_hub_image` recipe installs the existing
+`tini → /usr/bin/python3 -m uas.workstation_service` contract, UID/GID65531,
+`PYTHONPATH=/opt/uas`, no bytecode writes and all flat UAS modules from the exact
+archived source revision. It is not another host implementation. The recipe
+reuses the already verified immutable Bookworm Node base (Node is not the Hub
+entrypoint), with the same Python package plus Debian Bookworm's exact amd64
+[`tini 0.19.0-1+b3`](https://packages.debian.org/bookworm/tini). No default mutable
+image, account, deployment or privilege is added.
+
+`runtime/native/check-hub-image.py --selection
+runtime/native/hub-image-check-selection.json --output /tmp/uas-hub-readback`
+performs one deliberate build followed by a stopped-container readback. It
+checks the image configuration, every committed UAS module against the archived
+source hashes, the fixed Python/tini files and the baked payload metadata. It
+reuses the Workstation checker's bounded archive parser and ownership cleanup.
+The Hub service is never started; this is packaging evidence, not native Hub
+handshake/isolation evidence. The build has not been executed by source tests.
+
+The existing manual workflow now sequences Workstation and Hub checks under the
+same 25-minute maximum. A future invocation still needs explicit execution
+approval; the earlier one-run approval was consumed. Build timeouts preserve
+unknown daemon outcome rather than automatically retrying.
+
+Build reports and a fixed allowlist of public build products are retained with
+pinned `actions/upload-artifact` for seven days: verified Pi/Claude/Git/Hub
+payloads, verified raw Git backend, selected inputs and rendered recipes. Upload
+runs after success or failure so partial evidence is not lost; each report's
+status and stage govern which products were verified. No Docker configuration,
+Git checkout, private state or credentials are uploaded, and no registry
+publication occurs. Explicit image archives are included as described below. Repository/artifact readers can read these intentionally public
+products. `contents: read` remains unchanged.
+
+### Explicit reusable image archives (no registry publication)
+
+`--retain-image-archive` opts each checker into export **only after** that exact
+image passed its stopped-container readback. The manual workflow supplies this
+flag so a successful authorized execution retains reusable images rather than
+requiring another build for transfer. The default CLI remains metadata-only.
+
+The helper requests the Engine's Docker-save stream by exact observed image ID,
+never a mutable tag or a running container. Limits are **2 GiB for Workstation,
+1 GiB for Hub**, at most120 seconds per export, and free disk of at least the
+selected limit plus512 MiB before each export. Streaming stops at the limit or
+deadline; it does not buffer an image in memory. Only invocation-owned exclusive
+partial files are cleaned on failure; existing files are never overwritten.
+
+`combined-image.tar`/`.json` and `hub-image.tar`/`.json` are the only added upload
+paths. The metadata binds archive SHA256/size, exact image ID, source revision
+and the prior readback payload hashes. Bounded archive inspection checks its
+single-image manifest, configuration digest and linux/amd64 platform without
+extracting or executing it. It is a Docker-save archive, not a registry manifest
+or an independent requalification of every layer. GitHub's artifact digest is
+additional transfer evidence, not a replacement for these recorded identities.
+Uploads use zero compression and seven-day retention; the combined archive cap
+is3 GiB. These intentionally public build products include base-image layers and
+repository source, but no provider accounts, private runtime state or credentials.
+
+To reuse after download, an authorized installation owner must:
+
+1. Check the terminal report passed, the metadata matches its exact source/image
+   and readback hashes, and the archive size and SHA256 match before loading.
+2. Use Docker's [image load](https://docs.docker.com/reference/cli/docker/image/load/)
+   with `--platform=linux/amd64` in the selected target Engine. Loading requires
+   installation authority; this checker does not do it or infer it from a build.
+3. Inspect the loaded exact image ID/platform and perform the existing stopped
+   payload readback before native admission. Loading alone is not runtime proof.
+4. Supply any required independently observed installation/registry reference
+   through the existing contract. Do not turn a local config ID into a fabricated
+   registry digest. Publication, tagging and installation remain separate actions.
+
+Docker documents this [save/load format](https://docs.docker.com/reference/cli/docker/image/save/)
+for image transfer. The exported images can be reused without rebuilding, but
+these checks still do not create installation envelopes or prove the live #78
+scenario. Archive failure fails the checker while retaining the original
+readback result and owned-container cleanup evidence; no automatic export retry
+or additional image build is performed.

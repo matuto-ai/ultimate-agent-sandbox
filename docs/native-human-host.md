@@ -1,4 +1,9 @@
-# Request-scoped human mTLS prerequisite (#78)
+# Request-scoped human mTLS prerequisite (#78, historical layer)
+
+The retained, consumed successor is documented in
+[native-human-qualification.md](native-human-qualification.md). The limitations
+below describe this original request-scoped layer, not absence of the later
+`native_human_entry`/`NativeHumanControl` integration.
 
 `uas.human_mtls` is a **source prerequisite**, not a consumed native host or
 completed authenticated scenario. It creates no listener, connection, thread,

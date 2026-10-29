@@ -24,7 +24,9 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Build pinned combined image and read back actual stopped-container files
-        run: python3 runtime/native/check-image.py --selection runtime/native/image-check-selection.json --output "$RUNNER_TEMP/native-image-readback"
+        run: python3 runtime/native/check-image.py --selection runtime/native/image-check-selection.json --output "$RUNNER_TEMP/native-image-readback" --retain-image-archive
+      - name: Build pinned Hub image and read back actual stopped-container files
+        run: python3 runtime/native/check-hub-image.py --selection runtime/native/hub-image-check-selection.json --output "$RUNNER_TEMP/native-hub-readback" --retain-image-archive
       - name: Preserve bounded build/readback report in the run log
         if: always()
         run: |
@@ -33,3 +35,33 @@ jobs:
           else
             echo 'No report: build/readback did not reach report creation.'
           fi
+          if test -f "$RUNNER_TEMP/native-hub-readback/report.json"; then
+            cat "$RUNNER_TEMP/native-hub-readback/report.json"
+          else
+            echo 'No Hub report: Hub build/readback did not reach report creation.'
+          fi
+      - name: Retain only named public build and readback products
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-image-readback-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          include-hidden-files: false
+          path: |
+            ${{ runner.temp }}/native-image-readback/report.json
+            ${{ runner.temp }}/native-image-readback/artifacts/selection.json
+            ${{ runner.temp }}/native-image-readback/artifacts/Dockerfile.native-check
+            ${{ runner.temp }}/native-image-readback/artifacts/pi-payload.json
+            ${{ runner.temp }}/native-image-readback/artifacts/claude-payload.json
+            ${{ runner.temp }}/native-image-readback/artifacts/git-payload.json
+            ${{ runner.temp }}/native-image-readback/artifacts/git-backend
+            ${{ runner.temp }}/native-hub-readback/report.json
+            ${{ runner.temp }}/native-hub-readback/artifacts/selection.json
+            ${{ runner.temp }}/native-hub-readback/artifacts/Dockerfile.hub-check
+            ${{ runner.temp }}/native-hub-readback/artifacts/hub-payload.json
+            ${{ runner.temp }}/native-image-readback/artifacts/combined-image.tar
+            ${{ runner.temp }}/native-image-readback/artifacts/combined-image.json
+            ${{ runner.temp }}/native-hub-readback/artifacts/hub-image.tar
+            ${{ runner.temp }}/native-hub-readback/artifacts/hub-image.json

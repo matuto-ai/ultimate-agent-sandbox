@@ -121,7 +121,7 @@ class NativeImageReadbackTests(unittest.TestCase):
         self.assertIn('qualify-native-image', workflow)
         self.assertIn('persist-credentials: false', workflow)
 
-    def scenario(self, failure=None, cleanup_failure=False):
+    def scenario(self, failure=None, cleanup_failure=False, retain_archive=False):
         image_id = 'sha256:' + 'b' * 64
         container = 'c' * 64
         backend = b'\x7fELFfixture'
@@ -182,10 +182,22 @@ class NativeImageReadbackTests(unittest.TestCase):
                 return {'image_id': image_id}
             argv = ['check-image', '--selection', str(ROOT / 'runtime/native/image-check-selection.json'),
                     '--output', str(output)]
-            with patch.object(CHECK.sys, 'argv', argv), patch.object(CHECK, 'command', side_effect=run), \
+            if retain_archive: argv.append('--retain-image-archive')
+            def export(image, directory, **kwargs):
+                self.assertEqual(image,image_id)
+                self.assertEqual(kwargs['readback']['source_revision'],'d'*40)
+                self.assertEqual(kwargs['readback']['image_id'],image_id)
+                self.assertIn('git_payload',kwargs['readback'])
+                self.assertEqual(kwargs['artifact_name'],'combined-image.tar')
+                self.assertEqual(kwargs['max_bytes'],2*1024**3)
+                if failure=='archive':raise ValueError('archive failed')
+                return {'image_id':image_id,'archive_sha256':'e'*64}
+            with patch.object(CHECK, 'export_archive',side_effect=export) as saved, \
+                 patch.object(CHECK.sys, 'argv', argv), patch.object(CHECK, 'command', side_effect=run), \
                  patch.object(CHECK, 'read_file', side_effect=read), \
                  patch.object(CHECK, 'verify_engine_payload', side_effect=verify), patch('builtins.print'):
                 status = CHECK.main()
+                self.assertEqual(saved.call_count,1 if retain_archive and failure in (None,'archive') else 0)
             report = json.loads((output / 'report.json').read_bytes())
         self.assertFalse(any('start' in args or 'push' in args or 'run' in args for args in commands))
         return status, report, commands
@@ -245,3 +257,12 @@ class NativeImageReadbackTests(unittest.TestCase):
         wrong = copy.deepcopy(value)
         wrong['artifacts']['/usr/bin/git'] = 'b' * 64
         with self.assertRaises(OriginDenied): CHECK.validate_payload(wrong)
+
+    def test_explicit_archive_uses_verified_identity_and_preserves_cleanup_on_failure(self):
+        status,report,_=self.scenario(retain_archive=True)
+        self.assertEqual(status,0);self.assertEqual(report['archive_export'],'complete')
+        status,report,_=self.scenario('archive',retain_archive=True)
+        self.assertEqual(status,1);self.assertEqual(report['archive_export'],'failed')
+        self.assertEqual(report['container_cleanup'],'complete')
+        status,report,_=self.scenario('readback',retain_archive=True)
+        self.assertEqual(status,1);self.assertEqual(report['archive_export'],'not-started')
