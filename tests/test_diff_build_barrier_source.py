@@ -50,7 +50,8 @@ class DiffBuildBarrierTests(unittest.TestCase):
                        pthread_sigmask=Mock(return_value=set()), signal=Mock(), alarm=Mock()),
                    time=SimpleNamespace(monotonic=lambda:clock[0]), tempfile=SimpleNamespace(mkdtemp=lambda **kw:'/tmp/inert-diff'),
                    identity=Mock(return_value='same-owned-root'), stage_sources=Mock(return_value=(Path('/inert-payload'), {})),
-                   subprocess=SimpleNamespace(run=run), hashlib=SimpleNamespace(sha256=digest), emit=emit, CASES=(),
+                   compile_fixed=lambda argv,timeout:run(argv,check=True,timeout=timeout),
+                   hashlib=SimpleNamespace(sha256=digest), emit=emit, CASES=(),
                    DEADLINE_SECONDS=30, BUILD_SECONDS=10, shutil=SimpleNamespace(rmtree=remove))
         exec(compile(ast.Module(body=functions,type_ignores=[]), '<fixed diff owner>', 'exec'), env)
         with patch.dict(sys.modules, {'mapped_namespace':SimpleNamespace(mapped_popen=Mock())}), \
@@ -160,10 +161,10 @@ class DiffBuildBarrierTests(unittest.TestCase):
         source=ast.unparse(build)
         self.assertEqual(1,source.count('deadline ='))
         self.assertLess(source.index('deadline ='),source.index('installed.mkdir'))
-        self.assertIn('timeout=remaining()',source)
+        self.assertIn('remaining())',source)
         loop=next(n for n in build.body if isinstance(n,ast.For))
         self.assertEqual('remaining()',ast.unparse(loop.body[-1]))
-        self.assertIn('subprocess.run(',ast.unparse(loop.body[1]))
+        self.assertIn('compile_fixed(',ast.unparse(loop.body[1]))
         self.assertEqual('remaining()',ast.unparse(loop.body[2]))
         self.assertEqual('remaining()',ast.unparse(build.body[-2]))
         self.assertIsInstance(build.body[-1],ast.Return)
