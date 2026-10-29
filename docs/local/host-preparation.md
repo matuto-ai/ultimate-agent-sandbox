@@ -2,9 +2,10 @@
 
 This path prepares storage for an existing **compatible** local native Engine.
 It reuses quota-enabled XFS or, with an explicitly sized plan, creates a private
-installation-owned XFS image and mounts it at the new storage root. It does not
-install an alternate Docker daemon, change global Docker configuration, start
-Rooms, or authorize host changes. Owned Engine provisioning remains unfinished.
+installation-owned XFS image and mounts it at the new storage root. Compatible Engine reuse remains preferred. The optional first-Engine bootstrap
+below creates only explicitly planned owned resources; it does not install a
+second daemon alongside an unrelated root Engine, overwrite global Docker
+configuration, start Rooms, or authorize host changes.
 
 The image lives inside the private receipt root, which must be on the selected
 storage-parent filesystem. Size is explicitly selected (512 MiB–1 TiB), checked
@@ -25,9 +26,8 @@ exclusive lock, before starting helpers. A new boot has a distinct mount and
 endpoint issuance record; unknown operations in the same boot are never retried.
 Re-admission observes existing Room ownership, never recursively repairs data.
 Installation metadata and Project/native references must remain outside the
-owned filesystem so startup can read them before mounting. No additional
-mandatory daemon, fstab edit or storage service is introduced. No separate storage service is required; the existing host startup owns this
-re-admission.
+owned filesystem so startup can read them before mounting. No additional mandatory daemon, fstab edit or storage service is introduced;
+the existing host startup owns re-admission.
 
 The existing host plan must select Docker 29.8.2, an explicitly selected nonoverlapping subordinate mapping
 of size 65536 and SELinux enforcing. Storage is either an existing quota-enabled
@@ -48,7 +48,8 @@ Preparation, retained owners, endpoint credentials and kernel map checks use
 that same profile. An overlapping rootless Podman or other allocation is still
 refused; never move an existing user's allocation to bypass the refusal. Select
 an existing compatible Engine with an independently allocated nonoverlapping
-range. This does not configure a new daemon or allocate a subordinate range.
+range. The existing-Engine path never changes those allocations; the explicit
+first-Engine path below can reserve its own previously unused range.
 Qualification and version 1 retain offset 100000. Version 3 uses the same
 selected Engine/mapping as version 2.
 
@@ -100,5 +101,67 @@ Git overlays are regenerated from the bound plan; all four Git-enabled listener
 endpoints retain their selected identities and listening modes. Per-boot intent
 and confirmation records prevent retries of uncertain partial restoration.
 Running resources, same-boot loss, foreign layouts, or missing manifests refuse
-recovery. Existing v1/v2 installations are not silently upgraded. Owned Engine
-provisioning is not implemented by this path.
+recovery. Existing v1/v2 installations are not silently upgraded. Engine provisioning remains separate from this narrowly scoped recovery owner.
+
+
+## Optional first/root Engine: one setup flow
+
+`python -m uas.local_setup plan` accepts the same Project, version-2 settings,
+verified Workstation/Hub build outputs and revision, plus `--host-receipt-root`.
+The settings' `host_profile.mode` selects `reuse` or `owned`. For `owned`, add
+`--engine-receipt-root`, explicit unused system `--account-uid`/`--account-gid`
+(100–999), and the independently selected nonoverlapping subordinate range in
+that profile. Add `--allocation-bytes` only for the bounded XFS fallback.
+`--output` writes a new private proposal directory. One subsequent action runs
+Engine preparation, Room storage preparation and the existing versioned handoff:
+
+```text
+python -m uas.local_setup apply --plan /absolute/proposal/request.json --output /absolute/new-handoff
+```
+
+The proposal explicitly includes the owned Engine config/unit and its resulting
+admission profile: identical endpoint, paths, installation identity and mapping,
+now consumed through the existing compatible-Engine runtime path. There is no
+manual JSON transfer between the two owners. The source's verified-image inputs
+are still required; this command does not build/download/import images or sign
+in providers. Follow the existing image load and local start/status/stop handoff.
+
+Supported first-Engine hosts have systemd/cgroup-v2, SELinux enforcing, the pinned
+Docker 29.8.2 and managed-containerd tools already installed, and IPv4 forwarding
+already enabled. Preflight reports missing tools or incompatible host policy;
+there is no package installer, sysctl rewrite or SELinux policy relaxation.
+Default Docker/containerd services and socket activation must be inactive and
+disabled/masked; existing root daemons, runtime/state directories, Docker bridges
+or firewall remnants block this path. Empty, root-managed `/etc/docker` and
+`/etc/containerd` directories are observed package scaffolding, never modified.
+Rootless Podman may remain when its IDs/ranges and routes do not overlap.
+The selected socket parent must already exist with root-managed, nonwritable
+ancestors (normally `/run`); its inode is pinned in the plan and checked before
+any effect and again immediately before service start. `/tmp`, user-writable
+namespaces, missing parents and substituted directories are refused.
+
+Apply creates only the selected system account/group, appends only that account's
+subordinate ranges using system tools, and writes an exclusive owned config/unit.
+The unit runs one dockerd with its managed containerd, no default Docker bridge,
+root-only socket group, overlay2, userns and SELinux. It is enabled for reboot;
+there is no automatic restart loop. Startup observes readiness for at most 60
+seconds without reissuing an uncertain start. Existing forwarding policy is not
+changed. Docker's own firewall chains are attributed only under the explicitly
+exclusive-host policy with authenticated pristine baseline, start intent and the
+sole exact owned daemon/unit/cgroup; unrelated networking remains untouched.
+The installer lock does not prevent a concurrent root administrator changing the
+host, so observations are repeated around effects and runtime admission rechecks.
+
+Every effect has an append-only intent/readback receipt. Repeated apply preserves
+completed resources; unknown or foreign account, file, unit, process or network
+state stops instead of retrying or adopting it. Keep private bootstrap metadata
+and the final handoff outside the owned storage mount. Target-host validation
+must still verify package compatibility, managed-containerd command identity,
+real quotas/SELinux/userns/NAT, reboot recovery and the eventual local Run. These
+controlled tests do not claim that a privileged host installation was executed.
+
+Storage cost is the selected, physically allocated XFS image size **plus** the
+separate Engine image/data directory and retained image archives. The backing
+image bound is not a quota on all Docker metadata or downloaded images. Recheck
+free space at apply; keep the existing reports' archive sizes in the installation
+budget. Package/download costs are not silently included or executed here.

@@ -181,3 +181,24 @@ class NativeRunAdmissionTests(unittest.TestCase):
                 owner.launch(object(),authorize=lambda:allowed[0])
         engine.create.assert_called_once();engine.start.assert_not_called()
         self.assertEqual(owner.state,'uncertain');self.assertEqual(owner.exec_id,'d'*64)
+
+
+class QualificationOptionalImportsTests(unittest.TestCase):
+    def test_qualification_successor_does_not_import_local_profile_modules(self):
+        import builtins
+        original=builtins.__import__
+        def imported(name,*args,**kwargs):
+            if name.rsplit('.',1)[-1] in {'local_runtime_plan','local_successor_checkout'}:
+                raise ModuleNotFoundError('local deployment not staged')
+            return original(name,*args,**kwargs)
+        with patch.object(builtins,'__import__',side_effect=imported):
+            f=fixture(self)
+            self.assertFalse(f.owner._local_checkout)
+            pending={'participant_id':f.participant,'admission_operation':'second-open',
+                     'preceding_run':{'run_id':'prior','generation':1}}
+            slot={'run':'second','participant':f.participant,'phase':'ready','reason':'ACTIVE',
+                  'observed_dirty':False,'observed_head':'head','base':'head'}
+            f.checkout.allocate.return_value=slot
+            with patch.object(f.owner,'_pending',return_value=pending):
+                self.assertEqual(f.owner._slot('second',f.participant),slot)
+            f.checkout.allocate.assert_called_once_with('second','second-open')

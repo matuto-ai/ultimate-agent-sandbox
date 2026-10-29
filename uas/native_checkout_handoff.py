@@ -58,7 +58,7 @@ def request_value(value):
     return value
 
 
-def reservation(state, request, room, actors, *, initial):
+def reservation(state, request, room, actors, *, initial, local_reuse=False):
     """Pure projection of canonical reservation, not a supplied authority claim."""
     run = request['run_id']
     seats = [s for s in room['seats'] if s['runtime'] == 'pi']
@@ -99,8 +99,17 @@ def reservation(state, request, room, actors, *, initial):
                      or (not initial and context.get('bound_run') == target and context.get('reserved_run') is None)),
                 'CHECKOUT_CONTEXT_CHANGED')
     else:
-        # Qualification supports exactly the first reuse, never arbitrary generations.
-        require(row['context_generation'] == 2 and type(predecessor) is dict
+        # Qualification retains its original first-reuse limit. Local repeated
+        # work derives the next epoch from the canonical predecessor admission.
+        expected_generation = 1
+        if local_reuse:
+            previous = state.get('run_admissions', {}).get(predecessor.get('run_id') if type(predecessor) is dict else None, {})
+            require(previous.get('participant_id') == seat['participant']
+                    and previous.get('actor_id') == seat['actor']
+                    and type(previous.get('context_generation')) is int
+                    and 1 <= previous['context_generation'] < 2**31 - 1, 'CHECKOUT_PREDECESSOR_CHANGED')
+            expected_generation = previous['context_generation']
+        require(row['context_generation'] == expected_generation + 1 and type(predecessor) is dict
                 and set(predecessor) == {'run_id', 'generation'}
                 and type(predecessor['run_id']) is str and predecessor['run_id'] != run
                 and type(predecessor['generation']) is int and predecessor['generation'] >= 1,
@@ -118,16 +127,16 @@ def reservation(state, request, room, actors, *, initial):
         reset = context.get('reset') if type(context) is dict else None
         reset_id = 'native-pi-reset-' + hashlib.sha256(request['operation_id'].encode()).hexdigest()
         immutable = {'id': reset_id, 'participant_id': seat['participant'],
-                     'expected_context_generation': 1, 'next_context_generation': 2,
+                     'expected_context_generation': expected_generation, 'next_context_generation': expected_generation + 1,
                      'preceding_run': predecessor, 'target_run': target, 'reason_code': None}
         require(type(reset) is dict and all(reset.get(k) == v for k, v in immutable.items()),
                 'CHECKOUT_RESET_CHANGED')
         requested = (reset.get('status') == 'REQUESTED' and context.get('status') == 'RESETTING'
-            and context.get('context_generation') == 1
+            and context.get('context_generation') == expected_generation
             and ((context.get('bound_run') == predecessor and context.get('reserved_run') is None)
                  or (context.get('reserved_run') == predecessor and context.get('bound_run') is None)))
         succeeded = (not initial and reset.get('status') == 'SUCCEEDED' and context.get('status') == 'READY'
-            and context.get('context_generation') == 2
+            and context.get('context_generation') == expected_generation + 1
             and ((context.get('bound_run') == target and context.get('reserved_run') is None)
                  or (context.get('reserved_run') == target and context.get('bound_run') is None)))
         require(requested or succeeded, 'CHECKOUT_CONTEXT_CHANGED')
@@ -207,14 +216,14 @@ class NativeCheckoutClient:
 
     def _call(self, kind, run=None, operation_id=None, *, evaluation_id=None):
         require(not self.closed, 'CHECKOUT_CHANNEL_FENCED')
-        request = request_value({'version': 1, 'kind': kind, 'evaluation_id': evaluation_id} if kind == 'GATE_QUOTA'
+        request = self._request({'version': 1, 'kind': kind, 'evaluation_id': evaluation_id} if kind == 'GATE_QUOTA'
             else {'version': 1, 'kind': kind, 'run_id': run, 'operation_id': operation_id})
         try:
             self.channel.settimeout(remaining(self.deadline))
             raw = canonical(request)
             require(len(raw) <= MAX_REQUEST and self.channel.send(raw) == len(raw), 'CHECKOUT_TRANSFER_UNKNOWN')
             self.channel.settimeout(remaining(self.deadline))
-            raw, ancillary, flags, _ = self.channel.recvmsg(MAX_REPLY, 0)
+            raw, ancillary, flags, _ = self._receive()
             require(raw and not flags and not ancillary, 'CHECKOUT_REPLY_INVALID')
             reply = json.loads(raw, object_pairs_hook=_unique)
             require(type(reply) is dict and all(reply.get(k) == v for k, v in request.items()),
@@ -231,6 +240,11 @@ class NativeCheckoutClient:
         except BaseException:
             self.close()
             raise
+
+    _request = staticmethod(request_value)
+
+    def _receive(self):
+        return self.channel.recvmsg(MAX_REPLY, 0)
 
     def observe_gate_quota(self, evaluation_id):
         return self._call('GATE_QUOTA', evaluation_id=evaluation_id)
