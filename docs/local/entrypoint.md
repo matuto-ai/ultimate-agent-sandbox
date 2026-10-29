@@ -158,7 +158,16 @@ authority. After Room Start, no old task is automatically resumed: the next
 explicit authenticated Open adopts those observations into canonical retirement
 and safely reuses the checkout. The Hub and data remain. An interrupted active
 Run is reported separately as stopped service/attention, not as completed; its
-explicit terminal recovery is a separate step, never an automatic new Run. Missing/uncertain receipts are reported as such, never retried blindly.
+after Room Start, a fresh explicit `terminal-stop` command can end that interrupted
+Run while retaining files. The Manager shows **End interrupted Run (keep files)**
+only for an existing `terminal-stop` grant; the command additionally requires
+`human-control-run`. Open/observe grants do not imply cancellation permission.
+The request pins the Run, generation and control revision. Verified native exits
+produce canonical `CLOSED/stopped` with a generation fence, not successful
+completion. A later, separately authenticated Open resets native contexts and
+reuses only a clean, quiescent checkout. Dirty files remain untouched and block
+reuse until explicitly resolved. No grant is installed by this implementation.
+Missing/uncertain receipts remain fenced, never retried blindly.
 Actual accounts, native execution, browser TLS and provider integration remain
 part of the final authorized local test, not claims established by source tests.
 

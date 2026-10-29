@@ -116,8 +116,14 @@ class LocalNativeGraph:
         if self.activity is not None:
             row=self.activity._row()
             if self.activity.blocked is not None:raise LedgerError("LOCAL_RUN_RECONCILIATION_REQUIRED")
-            if row["status"]!="CLOSED" or row.get("outcome")!="completed":
+            if row["status"]!="CLOSED":
                 raise LedgerError("LOCAL_PREVIOUS_RUN_NOT_COMPLETED")
+            if row.get("outcome")!="completed":
+                from .native_completed_retirement import retirement_for, require_retired
+                proof=retirement_for(self.owner,row.get("native_stop"))
+                if row.get("outcome")!="stopped" or proof is None:
+                    raise LedgerError("LOCAL_PREVIOUS_RUN_NOT_COMPLETED")
+                require_retired(proof)
 
     def open(self, request, grant):
         self.preflight()
@@ -127,14 +133,16 @@ class LocalNativeGraph:
         if self.activity is not None:
             row=self.activity._row()
             if self.activity.blocked is not None:raise LedgerError('LOCAL_RUN_RECONCILIATION_REQUIRED')
-            if row['status']!='CLOSED' or row.get('outcome')!='completed':
-                raise LedgerError('LOCAL_PREVIOUS_RUN_NOT_COMPLETED')
             if self.git_operations is not None:self._successor_git_ready()
-            operation='local-retire-'+hashlib.sha256((request.operation_id+':'+row['run_id']).encode()).hexdigest()
-            self.owner.retire_for_successor(request,grant,row['run_id'],row['generation'],
-                                            row['control_revision'],reviewer=previous,
-                                            observations=getattr(self,'stop_observations',None))
-            self.transition_retirement=self.owner._completed_retirements[operation]
+            if row.get('outcome')=='completed':
+                operation='local-retire-'+hashlib.sha256((request.operation_id+':'+row['run_id']).encode()).hexdigest()
+                self.owner.retire_for_successor(request,grant,row['run_id'],row['generation'],
+                                                row['control_revision'],reviewer=previous,
+                                                observations=getattr(self,'stop_observations',None))
+                self.transition_retirement=self.owner._completed_retirements[operation]
+            else:
+                from .native_completed_retirement import retirement_for
+                self.transition_retirement=retirement_for(self.owner,row.get('native_stop'))
             self.require_retired()
             self._forget_retired(self.transition_retirement)
             self._close_run_effects()
@@ -184,9 +192,16 @@ class LocalNativeGraph:
         """Root P revokes effects while retaining exact completed-Run exit proof."""
         if self.closed:return self.close()
         if self._stop_unknown:raise LedgerError('LOCAL_NATIVE_CLEANUP_UNKNOWN')
-        if self.suspended:return self.stop_observations.require_exited()
+        if self.suspended:
+            from .native_completed_retirement import retirement_for, require_retired
+            row=self.activity._row()
+            proof=retirement_for(self.owner,row.get('native_stop'))
+            if row.get('outcome')=='stopped' and proof is not None:
+                return require_retired(proof)
+            return self.stop_observations.require_exited()
         row=None if self.activity is None else self.activity._row()
-        if row is None or row['status']!='CLOSED' or row.get('outcome')!='completed':
+        if row is None or (row['status'] not in {'ACTIVE','PAUSED'} and
+                           (row['status']!='CLOSED' or row.get('outcome')!='completed')):
             return self.close()
         from .local_native_stop import LocalNativeStopObservations
         self._stop_unknown=True
@@ -239,12 +254,12 @@ class LocalNativeGraph:
         self.launcher.gate_profile=resources.gate_profile
 
     def require_retired(self):
-        from .native_completed_retirement import NativeCompletedRetirement
+        from .native_completed_retirement import retirement_supported, require_retired
         held=self.transition_retirement
-        if (self.closed or type(held) is not NativeCompletedRetirement
+        if (self.closed or not retirement_supported(held)
                 or held.owner is not self.owner or held.reviewer is not self.recruitment):
             raise LedgerError('LOCAL_NATIVE_RETIREMENT_REQUIRED')
-        return held.require_completed()
+        return require_retired(held)
 
     def step(self):
         if self.closed:raise LedgerError('LOCAL_NATIVE_GRAPH_CLOSED')

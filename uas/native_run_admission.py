@@ -473,7 +473,8 @@ class NativeRunAdmission(RunAdmission):
             if reset is None:
                 prior=self.ledger.snapshot()['state']['runs'].get(pending['preceding_run']['run_id'])
                 stopped={} if prior is None else prior.get('native_stop') or {}
-                retirement=self._completed_retirements.get(stopped.get('operation_id')) if isinstance(stopped,dict) else None
+                from .native_completed_retirement import retirement_for
+                retirement=retirement_for(self,stopped)
                 reset=NativePiReset(self,run,pending,retirement)
                 self._pi_resets[run]=reset
             reset.request(allowed)

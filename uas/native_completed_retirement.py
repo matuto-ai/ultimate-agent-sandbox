@@ -36,7 +36,8 @@ class NativeCompletedRetirement:
             if held.operation_id!=operation_id:raise LedgerError('LOCAL_STOP_ALREADY_ADOPTED')
             return held
         row=observations._unchanged()
-        if row.get('control_pending') is not None or row.get('control_revision',0)!=observations.revision:
+        if (row.get('status')!='CLOSED' or row.get('outcome')!='completed'
+                or row.get('control_pending') is not None or row.get('control_revision',0)!=observations.revision):
             raise LedgerError('LOCAL_STOP_SCOPE_CHANGED')
         held=cls(owner,reviewer,operation_id,run_id)
         if any(held.owners.get(key) is not value for key,value in observations.held.owners.items()):
@@ -160,3 +161,47 @@ class NativeCompletedRetirement:
             participant=target['participant_id']
             self.retirements[participant].require_exited(self.owners[participant])
         return True
+
+
+def _local_terminal(proof):
+    # Qualification fixtures intentionally do not ship any local-host modules.
+    # A local import is justified only by an actually held local proof object;
+    # the final exact type check remains mandatory.
+    kind=type(proof)
+    if kind.__module__!='uas.local_native_terminal' or kind.__name__!='LocalNativeTerminalProof':
+        return False
+    from .local_native_terminal import LocalNativeTerminalProof
+    return kind is LocalNativeTerminalProof
+
+
+def retirement_supported(proof):
+    return type(proof) is NativeCompletedRetirement or _local_terminal(proof)
+
+
+def retirement_for(owner, stopped):
+    if not isinstance(stopped,dict):return None
+    operation=stopped.get('operation_id')
+    completed=owner._completed_retirements.get(operation)
+    if completed is not None:return completed
+    terminal=getattr(owner,'_local_terminal_proofs',{}).get(operation)
+    if terminal is None:return None
+    if not _local_terminal(terminal):raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+    return terminal
+
+
+def require_retired(proof):
+    if type(proof) is NativeCompletedRetirement:return proof.require_completed()
+    if _local_terminal(proof):return proof.require_terminal()
+    raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+
+
+def preceding_scope(proof, participant):
+    completed=type(proof) is NativeCompletedRetirement
+    if not completed and not _local_terminal(proof):
+        raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+    scope=next((target['scope'] for target in proof.targets
+                if target['participant_id']==participant),None)
+    if scope is None:raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+    if completed:return scope
+    proof.require_terminal()
+    return {**scope,'generation':proof.generation+1}

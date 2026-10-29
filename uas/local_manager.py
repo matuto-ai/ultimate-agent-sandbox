@@ -72,6 +72,23 @@ document.body.appendChild(form);
 })();</script>"""
 
 
+TERMINAL_CLIENT = """<script>
+(function(){
+const data=JSON.parse(document.getElementById('native-runtime-status').dataset.runtime);
+if(!data.interrupted)return;
+const button=document.createElement('button'),status=document.createElement('p');
+button.textContent='End interrupted Run (keep files)';let operation=null,busy=false;
+button.onclick=async()=>{if(busy)return;if(!confirm('End this interrupted Run before starting new work? Files are preserved; this does not mark the issue completed.'))return;
+if(operation===null)operation=crypto.randomUUID();busy=true;button.disabled=true;
+try{const response=await fetch('/uas/human-action/v1',{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({version:1,action:'terminal-stop',payload:{operation_id:operation,run_id:data.run_id,generation:data.generation,control_revision:data.control_revision,reason:'operator-ended-interrupted-run'}})});
+const value=await response.json();if(!response.ok)throw Error('unknown');
+status.textContent='Run '+value.run_id+' ended as '+value.outcome+'. Refresh to open a new Run. Files remain preserved.';button.hidden=true;
+}catch(_){status.textContent='Outcome unconfirmed. Operation '+operation+'. No automatic retry; inspect the Run before explicitly retrying.';}
+finally{busy=false;button.disabled=false;}};
+document.body.append(button,status);
+})();</script>"""
+
+
 class LocalManager:
     """Use `serve(listener, tls_context, stopped)` on the trusted owner thread.
 
@@ -174,8 +191,10 @@ class LocalManager:
                     html=document.render()
                     if self.run_actions is not None:
                         status=self.run_actions.status(session)
-                        notice='<p id="native-runtime-status">Native runtime: '+html_encoding.escape(_json(status))+'</p>'
+                        notice='<p id="native-runtime-status" data-runtime="'+html_encoding.escape(_json(status),quote=True)+'">Native runtime: '+html_encoding.escape(_json(status))+'</p>'
                         html=html.replace('</body>',notice+'</body>')
+                        if status.get('interrupted') and 'terminal-stop' in connection._grant.actions:
+                            html=html.replace('</body>',TERMINAL_CLIENT+'</body>')
                     if self.action_host_for is not None or self.run_actions is not None:
                         html=html.replace('</body>',ACTION_CLIENT+'</body>')
                     # Rendering availability is not action authority: an observe
@@ -190,6 +209,9 @@ class LocalManager:
                     action_attempted = True
                     result=self.run_actions.open(payload,session,grant=connection.run_admission_lease(
                         session,payload.get('operation_id'),payload.get('issue_number')))
+                elif frame['action']=='terminal-stop' and self.run_actions is not None:
+                    action_attempted=True
+                    result=self.run_actions.terminal(payload,session)
                 elif self.run_actions is not None and self.action_host_for is None:
                     connection._current()
                     action_attempted=payload.get('kind')=='execute'

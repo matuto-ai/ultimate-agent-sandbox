@@ -60,7 +60,7 @@ class ThreeLocalRunsTests(unittest.TestCase):
                         'spec':{'project_id':c.room['project']['id'],'config_digest':'sha256:fixture'}}
         c.supervisor._read=lambda:self.lifecycle
         plan=object.__new__(LocalRuntimePlan)
-        for key in ('room','seats','config_text','installation'):
+        for key in ('room','seats','config','config_text','installation'):
             setattr(plan,key,getattr(c.plan,key))
         plan.require_unchanged=Mock();plan.operation_timeout_seconds=180;plan.config_digest='fixture'
         plan.review_configuration=c.plan.review_configuration
@@ -242,6 +242,99 @@ class ThreeLocalRunsTests(unittest.TestCase):
             state['fixture_context']['runs'][run]['status']='CLOSED'
             state['run_admissions'][run]['status']='CLOSED'
         self.c.seed(completion)
+
+    def active_stop_resume(self):
+        with self.request('first') as (session,grant):
+            receipt=self.host.open_human('first',1,session=session,grant=grant)
+        self.commands.append(b'P');self.host.current()
+        self.lifecycle.update(phase='stopped',desired='stopped')
+        self.assertTrue(self.graph.suspended);self.assertFalse(self.graph.closed)
+        self.assertEqual('ACTIVE',self.graph.activity._row()['status'])
+        self.lifecycle.update(phase='running',desired='running')
+        self.commands.append(b'R');self.host.current()
+        return receipt
+
+    @contextmanager
+    def terminal_request(self,payload):
+        c=self.c
+        action=human_mtls.HumanActionGrant(c.session.deployment_id,c.room['id'],'instance','manager',c.human,
+                                         ('terminal-stop',))
+        bindings=human_mtls.HumanActionBindings({hashlib.sha256(b'test-client').hexdigest():action})
+        connection=bindings.accept(TLS())
+        with connection.request({'version':1,'action':'terminal-stop','payload':payload}) as (_,session):
+            yield session
+        connection.close()
+
+    def terminal_payload(self,receipt):
+        return {'operation_id':'explicit-end','run_id':receipt['run_id'],
+                'generation':1,'control_revision':0,'reason':'operator-ended-interrupted-run'}
+
+    def test_explicit_terminal_fresh_request_then_successor_resets_without_restop(self):
+        from uas.local_manager_actions import LocalNativeRunActions
+        receipt=self.active_stop_resume();actions=LocalNativeRunActions(self.host)
+        payload=self.terminal_payload(receipt);workspace=deepcopy(self.primary)
+        before=list(self.events)
+        connection=self.bindings.accept(TLS())
+        with self.assertRaisesRegex(LedgerError,'HUMAN_ACTION_DENIED'):
+            with connection.request({'version':1,'action':'terminal-stop','payload':payload}):
+                self.fail('missing terminal grant accepted')
+        connection.close()
+        with self.request('no-implicit-cancel') as (session,grant):
+            with self.assertRaisesRegex(LedgerError,'LOCAL_PREVIOUS_RUN_NOT_COMPLETED'):
+                actions.open({'operation_id':'no-implicit-cancel','issue_number':1},session,grant=grant)
+            with self.assertRaisesRegex(LedgerError,'LOCAL_TERMINAL_AUTHENTICATION_REQUIRED'):
+                actions.terminal(payload,session)
+        self.assertEqual('ACTIVE',self.graph.activity._row()['status'])
+        self.assertEqual(before,self.events)
+        with self.terminal_request(payload) as session:pass
+        with self.assertRaisesRegex(LedgerError,'LOCAL_TERMINAL_AUTHENTICATION_REQUIRED'):
+            actions.terminal(payload,session)
+        from uas.local_manager import LocalManager
+        from test_local_manager import wire
+        terminal_grant=human_mtls.HumanActionGrant(self.c.session.deployment_id,self.c.room['id'],
+            'instance','manager',self.c.human,('terminal-stop',))
+        terminal_bindings=human_mtls.HumanActionBindings({hashlib.sha256(b'test-client').hexdigest():terminal_grant})
+        manager=LocalManager(terminal_bindings,lambda _:None,authority='localhost:8765',run_actions=actions)
+        channel=TLS(wire({'version':1,'action':'terminal-stop','payload':payload}))
+        manager.handle(channel)
+        self.assertIn(b'200 OK',channel.output)
+        result=json.loads(channel.output.split(b'\r\n\r\n',1)[1])
+        self.assertEqual('CLOSED',result['status']);self.assertEqual('stopped',result['outcome'])
+        self.assertEqual(2,result['generation']);self.assertEqual(workspace,self.primary)
+        self.assertEqual(before,self.events)
+        with self.terminal_request(payload) as session:
+            self.assertEqual(result,actions.terminal(payload,session))
+        # Repeated operator Stop/Start after explicit terminalization verifies
+        # retained terminal proof, not obsolete pre-fence canonical observations.
+        self.commands.append(b'P');self.host.current()
+        self.lifecycle.update(phase='stopped',desired='stopped')
+        self.lifecycle.update(phase='running',desired='running')
+        self.commands.append(b'R');self.host.current()
+        self.assertEqual(before,self.events)
+        with self.request('second') as (session,grant):
+            next_run=actions.open({'operation_id':'second','issue_number':1},session,grant=grant)
+        self.assertNotEqual(receipt['run_id'],next_run['run_id'])
+        self.assertEqual('ACTIVE',next_run['status']);self.assertEqual(2,self.events.count('retire'))
+        state=self.c.ledger.snapshot()['state']
+        for participant in (self.c.participant,self.host.plan.seats['claude']['participant']):
+            self.assertEqual(2,state['fixture_context']['participants'][participant]['context_generation'])
+        for connection in self.connections[:-2]:
+            with self.assertRaisesRegex(LedgerError,'STALE_CONNECTION'):
+                self.c.hub.observe(connection,Readiness.SAFE)
+
+    def test_unknown_stop_observation_refuses_terminal_and_successor(self):
+        from uas.local_manager_actions import LocalNativeRunActions
+        receipt=self.active_stop_resume();actions=LocalNativeRunActions(self.host)
+        before=list(self.events);workspace=deepcopy(self.primary)
+        self.graph.stop_observations.unknown=True
+        with self.terminal_request(self.terminal_payload(receipt)) as session:
+            with self.assertRaisesRegex(LedgerError,'LOCAL_STOP_CLEANUP_UNKNOWN'):
+                actions.terminal(self.terminal_payload(receipt),session)
+        with self.request('forbidden-successor') as (session,grant):
+            with self.assertRaisesRegex(LedgerError,'LOCAL_PREVIOUS_RUN_NOT_COMPLETED'):
+                actions.open({'operation_id':'forbidden-successor','issue_number':1},session,grant=grant)
+        self.assertEqual('ACTIVE',self.graph.activity._row()['status'])
+        self.assertEqual(before,self.events);self.assertEqual(workspace,self.primary)
 
     def test_three_fresh_requests_keep_work_and_advance_native_contexts(self):
         self.three_runs(ordinary_stop=False)

@@ -172,6 +172,7 @@ class LocalNativeRunSessionTests(unittest.TestCase):
         from uas.local_manager_actions import LocalNativeRunActions
         f,owner=self.make();graph=Mock();graph.closed=True;graph._cleanup_unknown=False
         graph.activity.status.return_value={'run_id':'run-one','generation':1,'status':'ACTIVE'}
+        graph.activity._row.return_value={'control_revision':0}
         owner._graph=graph
         # A fresh observe session may see stopped runtime without borrowing
         # the old admission grant or changing the canonical Run status.

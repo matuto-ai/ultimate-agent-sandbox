@@ -23,6 +23,7 @@ OPTIONAL_LOCAL_EDGES = {
     ('uas/native_run_admission.py', 'uas/local_native_stop.py'),
     ('uas/native_completed_retirement.py', 'uas/local_runtime_plan.py'),
     ('uas/native_completed_retirement.py', 'uas/local_native_stop.py'),
+    ('uas/native_completed_retirement.py', 'uas/local_native_terminal.py'),
     ('uas/native_checkout_handoff.py', 'uas/local_native.py'),
     ('uas/native_checkout_handoff.py', 'uas/local_runtime_resources.py'),
     ('uas/native_git_resources.py', 'uas/local_native.py'),

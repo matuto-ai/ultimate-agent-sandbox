@@ -31,10 +31,12 @@ class LocalNativeStopObservations:
         with self.owner.supervisor._locked() as capability:
             self.owner._room()
             state=self.owner.ledger.snapshot()['state'];row=state.get('runs',{}).get(self.run_id)
-            if (not row or row.get('status')!='CLOSED' or row.get('outcome')!='completed'
+            if (not row or row.get('status') not in {'ACTIVE','PAUSED','CLOSED'}
+                    or row.get('status')=='CLOSED' and row.get('outcome')!='completed'
                     or row.get('control_pending') is not None):
                 raise LedgerError('LOCAL_STOP_COMPLETED_RUN_REQUIRED')
             self.generation=row['generation'];self.revision=row.get('control_revision',0)
+            self.status=row['status'];self.outcome=row.get('outcome')
             self.digest=self.owner._completion_digest(row)
             self.targets=deepcopy(self.held._targets(state))
             self.held.targets=deepcopy(self.targets)
@@ -50,18 +52,31 @@ class LocalNativeStopObservations:
             self._unchanged()
 
     def _unchanged(self):
-        if (self.closed or self.graph.closed or self.graph.owner is not self.owner
-                or self.graph.recruitment is not self.reviewer):
-            raise LedgerError('LOCAL_STOP_OWNER_CHANGED')
-        self.graph.host.plan.require_unchanged()
+        self._native_unchanged()
+        if self.graph.recruitment is not self.reviewer:raise LedgerError('LOCAL_STOP_OWNER_CHANGED')
         state=self.owner.ledger.snapshot()['state'];row=state.get('runs',{}).get(self.run_id)
-        if (not row or row.get('status')!='CLOSED' or row.get('outcome')!='completed'
+        if (not row or row.get('status')!=self.status or row.get('outcome')!=self.outcome
                 or row.get('generation')!=self.generation
                 or self.owner._completion_digest(row)!=self.digest
                 or self.held._targets(state)!=self.targets):
             raise LedgerError('LOCAL_STOP_SCOPE_CHANGED')
         self.held._validate_owners()
         return row
+
+    def _native_unchanged(self):
+        if (self.closed or self.graph.closed or self.graph.owner is not self.owner):
+            raise LedgerError('LOCAL_STOP_OWNER_CHANGED')
+        self.graph.host.plan.require_unchanged()
+        # Retain the old reviewer owner even after the graph selects a new Run.
+        self.held._validate_owners()
+
+    def require_native_exited(self):
+        if self.unknown or not self.complete:raise LedgerError('LOCAL_STOP_CLEANUP_UNKNOWN')
+        self._native_unchanged()
+        for target in self.targets:
+            participant=target['participant_id']
+            self.held.retirements[participant].require_exited(self.held.owners[participant])
+        return True
 
     def retire(self, timeout=10):
         # Unknown effects are sticky. This is not an automatic retry engine.

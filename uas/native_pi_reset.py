@@ -8,6 +8,7 @@ from .context import FixtureContextHub, FixtureRun, MAX_CONTEXT_GENERATION
 from .ledger import Command, LedgerError
 from .native_completed_retirement import NativeCompletedRetirement
 from .workstation_control import SupervisorAdmission
+from .native_completed_retirement import retirement_supported, require_retired, preceding_scope
 
 
 class _NativePiResetContexts(FixtureContextHub):
@@ -30,7 +31,7 @@ class _NativePiResetContexts(FixtureContextHub):
 class NativePiReset:
     def __init__(self,owner,run,pending,retirement):
         from .native_run_admission import NativeRunAdmission
-        if (type(owner) is not NativeRunAdmission or type(retirement) is not NativeCompletedRetirement
+        if (type(owner) is not NativeRunAdmission or not retirement_supported(retirement)
                 or retirement.owner is not owner
                 or type(pending.get('context_generation')) is not int
                 or not 2 <= pending['context_generation'] <= MAX_CONTEXT_GENERATION
@@ -45,10 +46,12 @@ class NativePiReset:
             raise LedgerError('NATIVE_PI_RESET_OWNER_REQUIRED')
         old_scope=self.old.launch.native_recipe.scope
         self.expected_generation=old_scope.get('context_generation')
-        if (type(self.expected_generation) is not int
+        if (old_scope != next((target['scope'] for target in retirement.targets
+                              if target['participant_id']==self.participant),None)
+                or type(self.expected_generation) is not int
                 or not 1 <= self.expected_generation < MAX_CONTEXT_GENERATION
                 or pending['context_generation'] != self.expected_generation + 1
-                or old_scope != {'room_id': owner.ledger.room_id, 'participant_id': self.participant,
+                or preceding_scope(retirement,self.participant) != {'room_id': owner.ledger.room_id, 'participant_id': self.participant,
                                  **self.preceding, 'context_generation': self.expected_generation}):
             raise LedgerError('NATIVE_PI_RESET_OWNER_REQUIRED')
         self.next_generation=self.expected_generation+1
@@ -71,7 +74,7 @@ class NativePiReset:
 
     def allowed_locked(self,state=None):
         self.owner._require_owner();self.owner._room()
-        self.retirement.require_completed()
+        require_retired(self.retirement)
         if self.authorize is None or self.authorize() is not True:raise LedgerError('ADMISSION_REVOKED')
         state=self.owner.ledger.snapshot()['state'] if state is None else state
         pending=state.get('run_admissions',{}).get(self.run)

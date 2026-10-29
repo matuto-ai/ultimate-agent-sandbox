@@ -39,11 +39,42 @@ class LocalNativeRunActions:
         if graph.activity is not None:
             status=graph.activity.status()
             result.update({key:status[key] for key in ('run_id','generation','status')})
+            result['control_revision']=graph.activity._row().get('control_revision',0)
+            result['interrupted']=bool(getattr(graph,'suspended',False) and
+                status['status'] in {'ACTIVE','PAUSED'} and not self.owner._paused)
             if status['status']=='attention' and result['service']!='cleanup-unknown':
                 result['service']='attention'
             if 'outcome' in status:result['outcome']=status['outcome']
             if 'reason' in status:result['reason']=status['reason']
         return result
+
+    def terminal(self, payload, session):
+        from .local_native_run_session import LocalNativeRunSession
+        if type(self.owner) is not LocalNativeRunSession:raise LedgerError('LOCAL_NATIVE_CONTROLS_UNAVAILABLE')
+        self.owner.operation_current()
+        fields={'operation_id','run_id','generation','control_revision','reason'}
+        if (type(payload) is not dict or set(payload)!=fields
+                or type(payload['generation']) is not int or payload['generation']<1
+                or type(payload['control_revision']) is not int or payload['control_revision']<0):
+            raise LedgerError('LOCAL_TERMINAL_REQUEST_INVALID')
+        for key in ('operation_id','run_id','reason'):_token(payload[key])
+        if (type(session) is not HumanSession or not session.allowed('terminal-stop')
+                or 'human-control-run' not in session.human.capabilities
+                or session.deployment_id!=self.owner.plan.config['deployment']['id']
+                or session.room_id!=self.owner.plan.room['id']
+                or session.instance_id!=self.owner.resources['instance']):
+            raise LedgerError('LOCAL_TERMINAL_AUTHENTICATION_REQUIRED')
+        graph=self.owner._graph
+        if (graph is None or graph.closed or not graph.suspended
+                or graph.stop_observations is None or graph.activity is None
+                or graph.activity._row()['run_id']!=payload['run_id']):
+            raise LedgerError('LOCAL_TERMINAL_STOP_OBSERVATIONS_REQUIRED')
+        graph._new_budget()
+        from .local_native_terminal import terminal_stopped_run
+        result=terminal_stopped_run(graph.owner,graph.stop_observations,payload['operation_id'],
+            payload['run_id'],payload['generation'],payload['control_revision'],payload['reason'],session=session)
+        graph.terminal_proof=graph.owner._local_terminal_proofs[payload['operation_id']]
+        return {key:result[key] for key in ('status','run_id','generation','control_revision','outcome')}
 
     def control(self, frame, payload, session, *, available_actions=()):
         from .local_native_run_session import LocalNativeRunSession

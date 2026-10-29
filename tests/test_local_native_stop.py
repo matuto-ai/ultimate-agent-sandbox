@@ -52,7 +52,7 @@ class LocalStopTests(unittest.TestCase):
         with self.assertRaisesRegex(LedgerError,'CLEANUP_UNKNOWN'):self.adopt(bundle)
         self.assertEqual(count,len(self.stopped))
     def test_noncompleted_refused_before_any_capture(self):
-        self.seed(lambda state:state['runs'][self.run_id].update(status='ACTIVE'))
+        self.seed(lambda state:state['runs'][self.run_id].update(status='PREPARING'))
         with self.assertRaisesRegex(LedgerError,'COMPLETED_RUN_REQUIRED'):self.bundle()
         self.assertFalse(self.captured)
     def test_changed_attachment_between_captures_blocks_effects(self):

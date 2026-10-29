@@ -18,13 +18,14 @@ from .manager_transport import receive_frame
 
 PATH = '/uas/human-action/v1'
 ACTIONS = frozenset({'observe', 'open-run', 'authorize-run-request',
-                     'request-changes', 'reconcile-changes'})
+                     'request-changes', 'reconcile-changes', 'terminal-stop'})
 _FRAME_ACTIONS = {
     'observe': frozenset({'observe'}),
     'authorize-run-request': frozenset({'authorize-run-request'}),
     'open-run': frozenset({'open-run', 'authorize-run-request'}),
     'request-changes': frozenset({'request-changes', 'observe'}),
     'reconcile-changes': frozenset({'reconcile-changes', 'observe'}),
+    'terminal-stop': frozenset({'terminal-stop'}),
 }
 _AUTHORITY_FIELDS = frozenset({'principal', 'origin', 'callback', 'human', 'human_origin', 'actor_id',
     'incarnation_id', 'authority_version', 'capabilities', 'authorized', 'connected',
