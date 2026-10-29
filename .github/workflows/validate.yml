@@ -74,6 +74,14 @@ jobs:
           UAS_FORGE_CHANNEL_TEST: "1"
         run: ./validate.sh remainder
 
+      - name: Check account-free local CLI process lifecycle
+        if: steps.changes.outputs.skip_tests != 'true'
+        env:
+          UAS_LOCAL_PROCESS_SMOKE: "1"
+        # Existing fast lane: observed remainder ~28s + bounded smoke15s;
+        # unchanged1min job and unchanged aggregate<=180s dependency graph.
+        run: timeout --signal=TERM --kill-after=1s 15s python3 tests/linux/local_process_smoke.py --run
+
       - name: Report tests not applicable
         if: steps.changes.outputs.skip_tests == 'true'
         run: echo 'Tests not applicable — every changed path is in the exempt-folder allowlist. Tests did not run; this exemption is not runtime or security evidence.'

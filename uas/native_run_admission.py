@@ -21,7 +21,7 @@ from .native_admission_broker import NativeAdmissionBroker
 from .native_checkout_handoff import NativeCheckoutClient
 from .native_host_forge import NativePiHostForge
 from .native_pi_recipe import NativePiRecipe
-from .native_qualification import QualificationPlan
+from .native_qualification import QualificationPlan, is_local_runtime_plan
 from .peer import FixturePeerHub, Readiness
 from .run_admission import RunAdmission
 from .workstation_control import SupervisorAdmission
@@ -70,7 +70,7 @@ class NativeRunLauncher:
                  exec_seat, admission_seat, mounts, stack, admissions, budget, git_resources=None, gate_profile=None):
         from .native_session import SessionBudget
         from .docker_exec_api import DockerExecAPI
-        if (type(plan) is not QualificationPlan or type(broker) is not NativeAdmissionBroker
+        if (not (type(plan) is QualificationPlan or is_local_runtime_plan(plan)) or type(broker) is not NativeAdmissionBroker
                 or broker.ledger is not ledger or broker.client.supervisor is not supervisor
                 or type(engine) is not DockerExecAPI or type(endpoint) is not EndpointLease
                 or type(exec_seat) is not ExecSeat or type(admission_seat) is not AdmissionSeat

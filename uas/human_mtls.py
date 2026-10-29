@@ -189,8 +189,12 @@ class HumanActionConnection:
             return False
 
     @contextmanager
-    def receive(self):
-        """One frame-processing scope, never an indefinitely connected session.
+    def request(self, value):
+        """Process one already received frame on this authenticated TLS connection.
+
+        The trusted HTTP host may route a bounded request before entering here.
+        JSON still supplies no authority: the original peer, live binding and
+        exact grant are rechecked before and after frame validation.
 
         Owner/provider calls must finish within this scope and keep using the
         canonical HumanSession checks. Remote EOF can only be known when I/O
@@ -202,7 +206,7 @@ class HumanActionConnection:
             raise LedgerError('HUMAN_FRAME_ALREADY_ACTIVE')
         try:
             self._current()
-            value = _frame(receive_frame(self._channel, path=PATH), self._grant)
+            value = _frame(value, self._grant)
             self._current()
             grant, action = self._grant, value['action']
             permitted = _FRAME_ACTIONS[action]
@@ -226,3 +230,19 @@ class HumanActionConnection:
             if threading.get_ident() != self._owner_thread:
                 self._closed = True
                 raise LedgerError('HUMAN_AUTHENTICATION_OWNER_REQUIRED')
+
+    @contextmanager
+    def receive(self):
+        """Receive one fixed-protocol frame and retain the same request fences."""
+        self._owner()
+        if self._active is not None:
+            self.close()
+            raise LedgerError('HUMAN_FRAME_ALREADY_ACTIVE')
+        try:
+            self._current()
+            value = receive_frame(self._channel, path=PATH)
+            with self.request(value) as admitted:
+                yield admitted
+        except BaseException:
+            self.close()
+            raise
