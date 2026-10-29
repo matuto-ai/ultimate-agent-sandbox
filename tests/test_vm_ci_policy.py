@@ -28,9 +28,25 @@ class VMCITriggerTests(unittest.TestCase):
                         self.assertNotIn('continue-on-error:', jobs[root])
                         self.assertEqual(re.findall(r'^    if: (.+)$', jobs[root], re.MULTILINE), [
                             "${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}"])
+                    # The remainder lane also owns the explicit account-free
+                    # process smoke. Validate that exact bounded step once before
+                    # comparing the otherwise identical root/shard definitions.
+                    smoke = """      - name: Check account-free local CLI process lifecycle
+        if: steps.changes.outputs.skip_tests != 'true'
+        env:
+          UAS_LOCAL_PROCESS_SMOKE: "1"
+        # Existing fast lane: observed remainder ~28s + bounded smoke15s;
+        # unchanged1min job and unchanged aggregate<=180s dependency graph.
+        run: timeout --signal=TERM --kill-after=1s 15s python3 tests/linux/local_process_smoke.py --run
+
+"""
+                    self.assertEqual(text.count(smoke), 1)
+                    self.assertEqual(jobs['validate'].count(smoke), 1)
+                    self.assertEqual(text.count('python3 tests/linux/local_process_smoke.py --run'), 1)
+                    remainder = jobs['validate'].replace(smoke, '', 1)
                     # Same source diff, docs exemption and mandatory test env;
                     # only the root's label and selected complementary shard differ.
-                    self.assertEqual(jobs['validate'].replace('Validate successor interfaces', 'UNIT')
+                    self.assertEqual(remainder.replace('Validate successor interfaces', 'UNIT')
                                      .replace('./validate.sh remainder', './validate.sh PARTITION'),
                                      jobs['unit-slow'].replace('Validate measured slow unit partition', 'UNIT')
                                      .replace('./validate.sh slow', './validate.sh PARTITION'))
