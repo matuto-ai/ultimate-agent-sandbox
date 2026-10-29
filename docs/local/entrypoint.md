@@ -41,6 +41,10 @@ Changing the selected files in place invalidates their digest. Do not put API
 keys into this file or publish local configuration. Native operation requires a
 root-owned installation; offline inspection does not grant native authority.
 
+For exact producer inputs and validated descriptor generation, follow the
+[prepared-host operator handoff](operator-handoff.md). Host provisioning remains
+a separate operation; this entrypoint does not turn an unprepared machine into a native host.
+
 ## Native prerequisites
 
 Native startup consumes the `local-native-v1` descriptor validated by
@@ -103,7 +107,9 @@ No installation destroy/reset command is exposed.
 
 ## Validation boundary
 
-The source tests use controlled process/Engine/network doubles and real local
+The account-free real CLI/process/socket smoke passed in 1.846 seconds, including
+setup, host ownership, shutdown and restart with native bindings absent. The
+source tests additionally use controlled process/Engine/network doubles and real local
 ledger projections. They do not establish that a user's host has the required
 native policy. Real native startup, image rebuild/import, personal accounts and
 provider/Git integration belong to the explicitly authorized final local test.
