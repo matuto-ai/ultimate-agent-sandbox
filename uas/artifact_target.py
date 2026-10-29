@@ -723,7 +723,9 @@ class ArtifactTargetLease:
                 os.close(root)
             info = os.fstat(fd)
             if (_identity(info) != self.parent_identity or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) not in (0o700, 0o710)):
+                    or stat.S_IMODE(info.st_mode) not in (0o700, 0o710)
+                    or (stat.S_IMODE(info.st_mode) == 0o710
+                        and info.st_gid != self.owner.helper_host_gid)):
                 _fail('ARTIFACT_TARGET_OWNERSHIP_LOST')
             result, fd = fd, None
             return result
@@ -855,7 +857,10 @@ class ArtifactTargets:
     not merely compare this profile to the configured disk limit. Absent proof is
     refusal. The ledger independently reserves evaluations before calling here.
     """
-    def __init__(self, root, journal_root, resolver, *, reserve_capacity):
+    def __init__(self, root, journal_root, resolver, *, reserve_capacity, host_profile=None):
+        from .artifact_helper import helper_host_identity
+        helper_host_identity(host_profile)
+        self.host_profile = host_profile
         if not callable(reserve_capacity):
             _fail('ARTIFACT_CAPACITY_ADMISSION_REQUIRED')
         self.root, self.journal_root = Path(root), Path(journal_root)
@@ -878,6 +883,11 @@ class ArtifactTargets:
             self.journal_identity = _identity(info)
         finally:
             os.close(fd)
+
+    @property
+    def helper_host_gid(self):
+        from .artifact_helper import helper_host_identity
+        return helper_host_identity(self.host_profile)[1]
 
     def _journal(self, evaluation_id):
         return self.journal_root / (hashlib.sha256(evaluation_id.encode()).hexdigest() + '.json')
@@ -965,10 +975,10 @@ class ArtifactTargets:
                 lease.parent_identity = _identity(os.fstat(parent))
                 self._save(lease)
                 # No account/group setup or privilege escalation. The admitted
-                # Supervisor must already have this fixed mapped group grant.
-                os.fchown(parent, -1, HELPER_HOST_GID)
+                # Supervisor must already have the selected mapped group grant.
+                os.fchown(parent, -1, self.helper_host_gid)
                 info = os.fstat(parent)
-                if info.st_uid != os.getuid() or info.st_gid != HELPER_HOST_GID:
+                if info.st_uid != os.getuid() or info.st_gid != self.helper_host_gid:
                     _fail('ARTIFACT_HELPER_GROUP_UNAVAILABLE')
                 os.fchmod(parent, 0o710)
             finally:

@@ -311,13 +311,16 @@ class RunControl:
         return self._generation_control(operation_id, run_id, generation, revision,
             reason, human, 'terminal-stop', {'successor_run': successor_run})
 
+    def _control_document(self):
+        return self.controller._read()
+
     def _generation_control(self, operation_id, run_id, generation, revision, reason, human, kind, extra):
         command = Command(operation_id, 'run.human-' + kind, _token(run_id), generation,
                           {'expected_revision': revision, 'reason': _token(reason), **extra})
         terminal = Command(self._finish_id(operation_id), 'run.human-' + kind + '-result',
                            run_id, generation, {'operation_id': operation_id})
         with self.supervisor._locked():
-            document = self.controller._read()
+            document = self._control_document()
             def prepare(state, _):
                 # An explicit newer human stop can fence an interrupted
                 # migration/stop. Its old exact retry cannot finish this one.

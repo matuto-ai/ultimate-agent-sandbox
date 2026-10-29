@@ -1,13 +1,14 @@
-"""First retained Pi context reset using canonical context reducers and owners."""
+"""Repeated retained Pi context reset using canonical context reducers and owners."""
 from contextlib import contextmanager
 from copy import deepcopy
 import hashlib
 import re
 
-from .context import FixtureContextHub, FixtureRun
+from .context import FixtureContextHub, FixtureRun, MAX_CONTEXT_GENERATION
 from .ledger import Command, LedgerError
 from .native_completed_retirement import NativeCompletedRetirement
 from .workstation_control import SupervisorAdmission
+from .native_completed_retirement import retirement_supported, require_retired, preceding_scope
 
 
 class _NativePiResetContexts(FixtureContextHub):
@@ -30,8 +31,10 @@ class _NativePiResetContexts(FixtureContextHub):
 class NativePiReset:
     def __init__(self,owner,run,pending,retirement):
         from .native_run_admission import NativeRunAdmission
-        if (type(owner) is not NativeRunAdmission or type(retirement) is not NativeCompletedRetirement
-                or retirement.owner is not owner or pending.get('context_generation')!=2
+        if (type(owner) is not NativeRunAdmission or not retirement_supported(retirement)
+                or retirement.owner is not owner
+                or type(pending.get('context_generation')) is not int
+                or not 2 <= pending['context_generation'] <= MAX_CONTEXT_GENERATION
                 or type(pending.get('preceding_run')) is not dict
                 or pending['preceding_run'].get('run_id')!=retirement.run_id):
             raise LedgerError('NATIVE_PI_RESET_OWNER_REQUIRED')
@@ -39,8 +42,19 @@ class NativePiReset:
         self.preceding=deepcopy(pending['preceding_run'])
         self.participant=pending['participant_id'];self.operation=pending['admission_operation']
         self.old=retirement.owners.get(self.participant)
-        if type(self.old) is not SupervisorAdmission or self.old.launch.native_recipe.scope['context_generation']!=1:
+        if type(self.old) is not SupervisorAdmission:
             raise LedgerError('NATIVE_PI_RESET_OWNER_REQUIRED')
+        old_scope=self.old.launch.native_recipe.scope
+        self.expected_generation=old_scope.get('context_generation')
+        if (old_scope != next((target['scope'] for target in retirement.targets
+                              if target['participant_id']==self.participant),None)
+                or type(self.expected_generation) is not int
+                or not 1 <= self.expected_generation < MAX_CONTEXT_GENERATION
+                or pending['context_generation'] != self.expected_generation + 1
+                or preceding_scope(retirement,self.participant) != {'room_id': owner.ledger.room_id, 'participant_id': self.participant,
+                                 **self.preceding, 'context_generation': self.expected_generation}):
+            raise LedgerError('NATIVE_PI_RESET_OWNER_REQUIRED')
+        self.next_generation=self.expected_generation+1
         epoch=self.old.forge_service.binding.epoch
         if type(epoch) is not int or not 1<=epoch<2**53-1:raise LedgerError('NATIVE_RESET_EPOCH_EXHAUSTED')
         self.next_epoch=epoch+1
@@ -60,28 +74,28 @@ class NativePiReset:
 
     def allowed_locked(self,state=None):
         self.owner._require_owner();self.owner._room()
-        self.retirement.require_completed()
+        require_retired(self.retirement)
         if self.authorize is None or self.authorize() is not True:raise LedgerError('ADMISSION_REVOKED')
         state=self.owner.ledger.snapshot()['state'] if state is None else state
         pending=state.get('run_admissions',{}).get(self.run)
         if (not pending or pending['status']!='PREPARING' or pending['admission_operation']!=self.operation
-                or pending['participant_id']!=self.participant or pending.get('context_generation')!=2
+                or pending['participant_id']!=self.participant or pending.get('context_generation')!=self.next_generation
                 or pending.get('preceding_run')!=self.preceding):
             raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
         row=state['fixture_context']['participants'][self.participant]
         target={'run_id':self.run,'generation':1}
         reset=row.get('reset')
-        if not self.requested and row['status']=='READY' and row['context_generation']==1:
+        if not self.requested and row['status']=='READY' and row['context_generation']==self.expected_generation:
             if (row['bound_run'] or row['reserved_run'])!=self.preceding:
                 raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
         else:
             if (not reset or reset['id']!=self.reset_id or reset['preceding_run']!=self.preceding
-                    or reset['target_run']!=target or reset['expected_context_generation']!=1
-                    or reset['next_context_generation']!=2):raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
+                    or reset['target_run']!=target or reset['expected_context_generation']!=self.expected_generation
+                    or reset['next_context_generation']!=self.next_generation):raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
             if reset['status']=='REQUESTED':
-                if row['status']!='RESETTING' or row['context_generation']!=1:raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
+                if row['status']!='RESETTING' or row['context_generation']!=self.expected_generation:raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
             elif reset['status']=='SUCCEEDED':
-                if (row['status']!='READY' or row['context_generation']!=2
+                if (row['status']!='READY' or row['context_generation']!=self.next_generation
                         or (row['bound_run'] or row['reserved_run'])!=target):raise LedgerError('NATIVE_PI_RESET_SCOPE_CHANGED')
             else:raise LedgerError('NATIVE_PI_RESET_RECONCILIATION_REQUIRED')
         return True
@@ -90,7 +104,7 @@ class NativePiReset:
         self.authorize=authorize
         with self.fence():
             self.allowed_locked()
-            self.contexts.request_reset(self.reset_id,self.participant,1,FixtureRun(self.run))
+            self.contexts.request_reset(self.reset_id,self.participant,self.expected_generation,FixtureRun(self.run))
             self.requested=True
 
     def complete(self,admission):
@@ -116,4 +130,4 @@ class NativePiReset:
                     raise LedgerError('NATIVE_PI_RESET_FRESH_PROOF_REQUIRED')
                 return True
             fresh()
-            self.contexts.succeed_reset(self.reset_id,1,authorize=fresh)
+            self.contexts.succeed_reset(self.reset_id,self.expected_generation,authorize=fresh)

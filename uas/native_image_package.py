@@ -13,6 +13,13 @@ SHA = re.compile(r'[0-9a-f]{64}\Z')
 REFERENCE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}@sha256:[0-9a-f]{64}\Z')
 
 
+def valid_image_reference(reference, image_id):
+    """Registry digest or exact imported config ID; never a mutable tag."""
+    return (type(image_id) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',image_id) is not None
+            and type(reference) is str
+            and (reference == image_id or REFERENCE.fullmatch(reference) is not None))
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('ascii')
 
@@ -42,8 +49,7 @@ def envelope(selected_payload, *, image_reference, image_id):
     expected = payload(selected_payload.get('runtime'), selected_payload.get('artifacts'))
     if canonical(selected_payload) != canonical(expected):
         raise ValueError('unexpected payload fields or versions')
-    if (type(image_reference) is not str or not REFERENCE.fullmatch(image_reference)
-            or type(image_id) is not str or not re.fullmatch(r'sha256:[0-9a-f]{64}', image_id)):
+    if not valid_image_reference(image_reference, image_id):
         raise ValueError('exact observed image identities required')
     return {**expected, 'image_reference': image_reference, 'image_id': image_id,
             'payload_manifest_digest': hashlib.sha256(canonical(expected)).hexdigest()}

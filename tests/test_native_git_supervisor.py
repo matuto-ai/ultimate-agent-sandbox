@@ -28,7 +28,7 @@ class NativeGitSupervisorTests(unittest.TestCase):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         self.root=Path(temporary.name)
         self.resources=object.__new__(NativeGitResources)
-        self.resources.container_id='c'*64;self.resources.worker_host_uid=165530;self.resources.worker_host_gid=165532
+        self.resources.plan=N();self.resources.container_id='c'*64;self.resources.worker_host_uid=165530;self.resources.worker_host_gid=165532
         self.resources.require=Mock(return_value=True)
         self.resources.backend_fd=77;self.resources.backend_sha256='a'*64
         for name in ('request','worker'):

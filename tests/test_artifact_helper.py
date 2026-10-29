@@ -65,7 +65,7 @@ class ArtifactHelperPureTests(unittest.TestCase):
 
     def test_workstation_has_no_actor_or_participant_authority(self):
         self.assertEqual(set(workstation().__dict__), {'room_id', 'room_instance', 'container_id',
-            'image_digest', 'profile_digest', 'bootstrap_digest', 'evaluator_digest', 'mapping_digest', 'receiver_context', 'profile'})
+            'image_digest', 'profile_digest', 'bootstrap_digest', 'evaluator_digest', 'mapping_digest', 'receiver_context', 'profile', 'host_profile'})
         with self.assertRaises(ArtifactError):
             helper.GateWorkstation('alpha', 'instance-a', *['x' * 64] * 6, 'hub')
 

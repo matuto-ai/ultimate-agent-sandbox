@@ -137,7 +137,7 @@ class GateResourcesTests(unittest.TestCase):
         raw=gate.canonical(record)
         owner=backend.NativeQualificationBackend.__new__(backend.NativeQualificationBackend)
         owner.profile=N(nonce='a'*32,gate_manifest=self.manifest,gate_plan=self.plan,digest='9'*64,
-            limits={'disk_bytes':4096*1024})
+            limits={'disk_bytes':4096*1024},owners={'supervisor':165533})
         owner._binding=Mock()
         def metadata(path,**kwargs):
             for index,key in enumerate(('scratch_root','journal_root','launch_journal_root')):
@@ -180,13 +180,14 @@ class GateResourcesTests(unittest.TestCase):
         from pathlib import Path
         import stat
         owner=gate.NativeGateResources();owner._closed=False;owner.deadline=100
-        owner.workstation=object();owner.room_id='room';owner.instance='1'*32;owner.container_id='4'*64
+        owner.workstation=N(host_profile=None);owner.room_id='room';owner.instance='1'*32;owner.container_id='4'*64
         @contextmanager
         def locked():yield
         owner.supervisor=N(_locked=locked,_read=lambda:{'instance_id':owner.instance})
         owner.git_resources=Mock();owner.git_resources._container_pid=123
         owner.git_resources.profile.mount_tuples.return_value=()
         owner.plan=N(room={'project':{'roots':{}},'state_root':'/owned','resources':{'cpu':2}})
+        owner._host_owners=gate.host_owners(owner.plan)
         owner.data={'peer_path':'/run/uas-native/'+owner.instance+'/peer/pi.sock'}
         owner.profile=N(image_id='sha256:'+'4'*64,image_reference='selected',mount_tuples=lambda:())
         value={'State':{'Running':True,'Pid':123}};owner.engine=N(inspect_container=lambda _:deepcopy(value))

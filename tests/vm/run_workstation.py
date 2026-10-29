@@ -29,7 +29,7 @@ SOURCES = (
     'uas/gate_policy.py',
     'uas/context.py',
     'uas/forge.py',
-    'uas/ledger.py',
+    'uas/ledger.py', 'uas/typed_json.py',
     'uas/lifecycle.py',
     'uas/launch.py',
     'uas/peer.py',

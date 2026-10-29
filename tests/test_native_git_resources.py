@@ -95,6 +95,8 @@ class NativeGitResourceTests(unittest.TestCase):
         owner=git.NativeGitResources.__new__(git.NativeGitResources)
         owner._closed=False;owner._pidfd=42;owner._task_identity=(4,2);owner.plan=self.plan;owner.profile=self.profile
         owner.container_id=self.profile.container_id;owner.config_digest=self.plan.config_digest
+        owner._host_owners=git.host_owners(self.plan);owner._host_mapping=git.host_mapping(self.plan)
+        owner.worker_host_uid=owner._host_owners['gate'];owner.worker_host_gid=owner._host_owners['runtime']
         owner.supervisor=Mock();owner.supervisor._read.return_value=deepcopy(self.state)
         owner.backend_fd=50;owner.backend_sha256='4'*64;owner._backend_identity=(8,9)
         owner._socket_identities={'request':(1,2),'worker':(1,2)}

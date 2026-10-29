@@ -89,7 +89,7 @@ class ArtifactTraversalTests(unittest.TestCase):
 
 class ArtifactDirectoryConsumerCleanupTests(unittest.TestCase):
     def lease(self):
-        owner = SimpleNamespace(root=Path('/owned'), root_identity=[2, 3])
+        owner = SimpleNamespace(root=Path('/owned'), root_identity=[2, 3], helper_host_gid=165530)
         return target.ArtifactTargetLease(owner, 'evaluation', {}, 'target', [2, 4])
 
     def test_observe_initial_fstat_failure_releases_returned_leaf(self):
@@ -143,7 +143,7 @@ class ArtifactDirectoryConsumerCleanupTests(unittest.TestCase):
     def test_parent_success_transfers_exact_readable_leaf(self):
         with patch.object(target, '_open_dir', return_value=41), \
                 patch.object(target.os, 'fstat', side_effect=[SimpleNamespace(st_dev=2, st_ino=3),
-                    SimpleNamespace(st_dev=2, st_ino=4, st_uid=65533, st_mode=0o40710)]), \
+                    SimpleNamespace(st_dev=2, st_ino=4, st_uid=65533, st_gid=165530, st_mode=0o40710)]), \
                 patch.object(target.os, 'getuid', return_value=65533), \
                 patch.object(target.os, 'open', return_value=42) as opened, \
                 patch.object(target.os, 'close') as closed:

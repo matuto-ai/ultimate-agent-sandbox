@@ -19,7 +19,7 @@ import re
 import socket
 import stat
 
-from .native_image_package import canonical, REFERENCE
+from .native_image_package import canonical, REFERENCE, valid_image_reference
 from .native_pi_recipe import read_manifest, path, SHA
 from .kernel_origin import OriginDenied, alive, _identity
 
@@ -43,6 +43,49 @@ def require(value, message):
 
 def identifier(value):
     return type(value) is str and re.fullmatch(r'[0-9a-f]{32}', value) is not None
+
+
+def local_profile(plan):
+    """Only the concrete local declaration selects non-qualification roots."""
+    from .native_qualification import is_local_runtime_plan
+    if is_local_runtime_plan(plan):
+        plan.require_unchanged()
+        return plan.native_profile
+    return None
+
+
+def host_profile(plan):
+    """Validated local selection only; qualification retains its fixed mapping."""
+    profile=local_profile(plan)
+    return None if profile is None else profile.host_profile
+
+
+def host_owners(plan):
+    from .local_host_profile import plan_owners
+    return plan_owners(plan)
+
+
+def host_mapping(plan):
+    profile=host_profile(plan)
+    return (100000,65536) if profile is None else (profile.offset,profile.size)
+
+
+def endpoint_root(plan):
+    profile=local_profile(plan)
+    return ENDPOINT_ROOT if profile is None else profile.endpoints
+
+
+def backend_path(plan):
+    profile=local_profile(plan)
+    if profile is not None:return profile.state_root/'git-backend'
+    require(identifier(plan.installation.get('nonce')), 'qualification nonce required')
+    return STORAGE_ROOT/plan.installation['nonce']/'git-backend'
+
+
+def selected_image(plan):
+    profile=local_profile(plan)
+    if profile is not None:return profile.image_reference
+    return next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
 
 
 def selection(plan, *, filename=None):
@@ -78,19 +121,21 @@ def validate_selection(value, plan):
     fields=PAYLOAD_FIELDS|{'image_reference','image_id','backend_path'}
     require(type(value) is dict and set(value)==fields, 'invalid prepared selection')
     validate_payload({key:value[key] for key in PAYLOAD_FIELDS})
-    require(type(value['image_reference']) is str and REFERENCE.fullmatch(value['image_reference'])
-        and type(value['image_id']) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',value['image_id']), 'image identity required')
-    image=next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
+    require(valid_image_reference(value['image_reference'],value['image_id']), 'image identity required')
+    image=selected_image(plan)
     require(value['image_reference']==image, 'prepared image differs')
-    require(identifier(plan.installation['nonce']) and value['backend_path']==str(STORAGE_ROOT/plan.installation['nonce']/'git-backend'), 'fixed backend path required')
+    require(value['backend_path']==str(backend_path(plan)), 'fixed backend path required')
+    profile=local_profile(plan)
+    if profile is not None:require(value['image_id']==profile.image_id,'local image identity differs')
     return value
 
 
 def git_mounts(plan, state):
     """Parent-before-child mount order is part of this exact finite contract."""
-    require(identifier(state['instance_id']) and identifier(plan.installation['nonce']), 'instance required')
+    require(identifier(state['instance_id']), 'instance required')
+    backend_path(plan)  # Validate fixed local profile or legacy nonce.
     repo=path(plan.room['project']['roots']['repo'])
-    root=ENDPOINT_ROOT/state['instance_id']; views=root/'git-views'; fixed=root/'git-fixed'
+    root=endpoint_root(plan)/state['instance_id']; views=root/'git-views'; fixed=root/'git-fixed'
     return (
         NativeGitMount(str(views),'/opt/uas/git-views',True),
         NativeGitMount(repo+'/.git','/opt/uas/git-views/primary/gitdir',False),
@@ -217,24 +262,25 @@ def prepare_views(plan,state):
     """New owned overlay files only; never create/repair Project metadata."""
     from .forge import ForgeBinding
     from .git_runtime import compile_git_config
+    owners=host_owners(plan);offset,_=host_mapping(plan)
     repo=Path(plan.room['project']['roots']['repo']);gitdir=repo/'.git'
     require(repo.resolve()==repo and gitdir.resolve()==gitdir and gitdir.is_dir(),'primary gitdir required')
-    require(gitdir.stat().st_uid==RUNTIME_UID and gitdir.stat().st_gid==RUNTIME_UID,'existing Project ownership differs')
+    require(gitdir.stat().st_uid==owners['runtime'] and gitdir.stat().st_gid==owners['runtime'],'existing Project ownership differs')
     for filename in ('config','commondir'):
         fd=os.open(gitdir/filename,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
         try:
             info=os.fstat(fd);require(stat.S_ISREG(info.st_mode),'existing Git metadata required')
             if filename=='commondir':require(info.st_size==2 and os.read(fd,3)==b'.\n','explicit neutral primary setup required')
         finally:os.close(fd)
-    root=ENDPOINT_ROOT/state['instance_id']
+    root=endpoint_root(plan)/state['instance_id']
     for relative in ('git-views','git-views/primary','git-views/primary/gitdir','git-views/primary/common','git-fixed','git-workspace'):
-        target=root/relative;target.mkdir(mode=0o755);os.chown(target,100000,100000);os.chmod(target,0o755)
+        target=root/relative;target.mkdir(mode=0o755);os.chown(target,offset,offset);os.chmod(target,0o755)
     binding=ForgeBinding(plan.room['id'],plan.room['project']['id'],plan.room['project']['repository'])
     for name,raw in (('config',compile_git_config(binding)),
                      ('commondir',b'/opt/uas/git-views/primary/common\n')):
         fd=os.open(root/'git-fixed'/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o444)
         try:
-            require(os.write(fd,raw)==len(raw),'overlay write incomplete');os.fchown(fd,100000,100000);os.fchmod(fd,0o444);os.fsync(fd)
+            require(os.write(fd,raw)==len(raw),'overlay write incomplete');os.fchown(fd,offset,offset);os.fchmod(fd,0o444);os.fsync(fd)
         finally:os.close(fd)
 
 
@@ -246,15 +292,23 @@ class NativeGitResources:
     pins the exact initially observed image, mounts and userns mapping.
     """
     @classmethod
-    def from_session(cls,plan,resource_dict,engine,*,supervisor,deadline):
+    def from_session(cls,plan,resource_dict,engine,*,supervisor,deadline,resume_local_listener=False):
         from .docker_exec_api import DockerExecAPI
         from .lifecycle import Supervisor
         from .native_qualification_backend import NativeQualificationObserver
         from .workstation_exec import EndpointLease
-        require(type(supervisor) is Supervisor and type(supervisor.backend) is NativeQualificationObserver
+        require(type(resume_local_listener) is bool and (not resume_local_listener or local_profile(plan) is not None),
+                'local retained listener resume required')
+        expected=NativeQualificationObserver
+        if local_profile(plan) is not None:
+            from .local_native import LocalNativeObserver
+            expected=LocalNativeObserver
+        require(type(supervisor) is Supervisor and type(supervisor.backend) is expected
             and type(engine) is DockerExecAPI,'canonical readonly owners required')
         self=cls();self._closed=False;self._pidfd=-1;self._listeners=[]
         self.supervisor=supervisor;self.plan=plan;self.config_digest=plan.config_digest
+        self._host_profile=host_profile(plan);self._host_owners=host_owners(plan)
+        self._host_mapping=host_mapping(plan)
         with supervisor._locked():
             state=supervisor._read()
             require(state is not None and state['phase']=='running' and state['room_id']==plan.room['id']
@@ -276,12 +330,13 @@ class NativeGitResources:
             observed=engine.inspect_container(self.container_id)
             self._verify_container(observed,resource_dict)
             pid=observed['State']['Pid'];require(type(pid) is int and pid>0,'current container process required')
-            before=process_binding(pid,self.container_id)
+            process_options={} if self._host_profile is None else {'host_profile':self._host_profile}
+            before=process_binding(pid,self.container_id,**process_options)
             self._pidfd=os.pidfd_open(pid);require(alive(self._pidfd),'container process unavailable')
             self._task_identity=_identity(self._pidfd);self._container_pid=pid
-            require(process_binding(pid,self.container_id)==before,'container task changed during capture')
+            require(process_binding(pid,self.container_id,**process_options)==before,'container task changed during capture')
             maps={name:Path('/proc/'+str(pid)+'/'+name).read_text() for name in ('uid_map','gid_map')}
-            require(all(v.split()==['0','100000','65536'] for v in maps.values()),'observed mapping differs')
+            require(all(v.split()==['0',str(self._host_mapping[0]),str(self._host_mapping[1])] for v in maps.values()),'observed mapping differs')
             for name in ('uid','gid'):
                 maps['overflow_'+name]=int(Path('/proc/sys/kernel/overflow'+name).read_text())
                 require(maps['overflow_'+name]==65534,'overflow mapping differs')
@@ -291,23 +346,23 @@ class NativeGitResources:
             again=engine.inspect_container(self.container_id);self._verify_container(again,resource_dict)
             require(again['State']['Pid']==pid and alive(self._pidfd)
                 and _identity(self._pidfd)==self._task_identity
-                and process_binding(pid,self.container_id)==before,'container task replaced during observation')
+                and process_binding(pid,self.container_id,**process_options)==before,'container task replaced during observation')
             self.backend_fd=resource_dict['git_backend_fd'];self.backend_sha256=manifest['backend_sha256']
             self._backend_identity=require_sealed(self.backend_fd,self.backend_sha256)
-            root=ENDPOINT_ROOT/self.profile.instance_id/'git'
+            root=endpoint_root(plan)/self.profile.instance_id/'git'
             self._socket_identities={}
             for kind in ('request','worker'):
                 endpoint=root/(kind+'.sock')
                 require(resource_dict['git_'+kind+'_path']==str(endpoint),'fixed endpoint differs')
-                lease=EndpointLease(endpoint,owner=HOST_UID,group=RUNTIME_UID)
+                lease=EndpointLease(endpoint,owner=self._host_owners['supervisor'],group=self._host_owners['runtime'])
                 fd=resource_dict['git_'+kind+'_fd'];require(type(fd) is int and fd>=3,'inherited listener required')
-                listener=socket.socket(fileno=fd);self._listeners.append(listener)
+                listener=socket.socket(fileno=os.dup(fd) if local_profile(plan) is not None else fd);self._listeners.append(listener)
                 require(listener.family==socket.AF_UNIX and listener.type==socket.SOCK_SEQPACKET
                     and listener.getsockname()==str(endpoint)
-                    and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)==(0 if kind=='request' else 1),'prebound listener differs')
+                    and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN) in ((0,1) if kind=='request' and resume_local_listener else (0,) if kind=='request' else (1,)),'prebound listener differs')
                 setattr(self,kind+'_listener',listener);setattr(self,kind+'_endpoint',lease)
                 info=os.fstat(fd);self._socket_identities[kind]=(info.st_dev,info.st_ino)
-            self.worker_host_uid=WORKER_HOST_UID;self.worker_host_gid=WORKER_HOST_GID
+            self.worker_host_uid=self._host_owners['gate'];self.worker_host_gid=self._host_owners['runtime']
             with supervisor._locked():self.require()
             return self
         except BaseException:self.close();raise
@@ -315,7 +370,7 @@ class NativeGitResources:
     def _verify_container(self,value,resources):
         base=[(p,p,k!='reference') for k,p in self.plan.room['project']['roots'].items() if k in ('repo','workspace','reference','checkouts')]
         runtime=self.plan.room['state_root']+'/runtime';peer=str(Path(resources['peer_path']).parent)
-        require(peer==str(ENDPOINT_ROOT/self.profile.instance_id/'peer'),'peer mount differs')
+        require(peer==str(endpoint_root(self.plan)/self.profile.instance_id/'peer'),'peer mount differs')
         expected=set(base+[(runtime,runtime,True),(peer,peer,False)]+list(self.profile.mount_tuples()))
         if 'gate_manifest' in self.plan.installation:
             from .native_gate_resources import gate_mounts
@@ -337,7 +392,11 @@ class NativeGitResources:
         require((room_id or self.profile.room_id)==self.profile.room_id
             and (instance or self.profile.instance_id)==self.profile.instance_id
             and (container_id or self.container_id)==self.container_id,'resource binding differs')
-        self.plan.require_unchanged();state=self.supervisor._read()
+        self.plan.require_unchanged()
+        require(host_owners(self.plan)==self._host_owners and host_mapping(self.plan)==self._host_mapping
+            and (self.worker_host_uid,self.worker_host_gid)==(self._host_owners['gate'],self._host_owners['runtime']),
+            'host mapping changed')
+        state=self.supervisor._read()
         require(state is not None and state['phase']=='running'
             and state['room_id']==self.profile.room_id and state['instance_id']==self.profile.instance_id
             and state['spec']['config_digest']=='sha256:'+self.config_digest,'lifecycle replaced')
@@ -359,12 +418,18 @@ class NativeGitResources:
         # borrowed descriptor a caller may still hold for another fixed owner.
 
 
-def parse_process_binding(pid,container_id,status,stat_text,cgroup):
+def parse_process_binding(pid,container_id,status,stat_text,cgroup,*,host_profile=None):
     from .git_process import parse_status
+    if host_profile is None:runtime_uid=RUNTIME_UID
+    else:
+        from .local_host_profile import LocalHostProfile
+        require(type(host_profile) is LocalHostProfile, 'validated host profile required')
+        host_profile=LocalHostProfile.parse(host_profile.document())
+        runtime_uid=host_profile.host_id(65532)
     parsed=parse_status(status)
     require(parsed['Pid']==(pid,) and parsed['NSpid'][-1]==1
-        and len(parsed['NSpid'])>=2 and parsed['Uid']==(RUNTIME_UID,)*4
-        and parsed['Gid']==(RUNTIME_UID,)*4,'PID1 mapping differs')
+        and len(parsed['NSpid'])>=2 and parsed['Uid']==(runtime_uid,)*4
+        and parsed['Gid']==(runtime_uid,)*4,'PID1 mapping differs')
     end=stat_text.rfind(')');require(end>0 and stat_text[:stat_text.find(' ')]==str(pid),'process stat differs')
     tail=stat_text[end+2:].split()
     require(len(tail)>=20 and tail[0] not in ('Z','X','x') and tail[19].isdigit(),'process start identity unavailable')
@@ -375,7 +440,7 @@ def parse_process_binding(pid,container_id,status,stat_text,cgroup):
     return (pid,int(tail[19]),tuple(parsed['NSpid']),rows[0][2])
 
 
-def process_binding(pid,container_id):
+def process_binding(pid,container_id,*,host_profile=None):
     directory=os.open('/proc/'+str(pid),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
     try:
         values=[]
@@ -384,7 +449,7 @@ def process_binding(pid,container_id):
             try:
                 raw=os.read(fd,16385);require(len(raw)<=16384,'process observation oversized');values.append(raw)
             finally:os.close(fd)
-        return parse_process_binding(pid,container_id,values[0],values[1].decode('ascii'),values[2].decode('ascii'))
+        return parse_process_binding(pid,container_id,values[0],values[1].decode('ascii'),values[2].decode('ascii'),host_profile=host_profile)
     finally:os.close(directory)
 
 
