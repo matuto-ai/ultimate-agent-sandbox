@@ -4,6 +4,9 @@
     "@earendil-works/pi-coding-agent": "1.4.0"
   },
   "name": "ultimate-pi-native-fixture",
+  "overrides": {
+    "undici": "8.12.2"
+  },
   "private": true,
   "type": "module"
 }
