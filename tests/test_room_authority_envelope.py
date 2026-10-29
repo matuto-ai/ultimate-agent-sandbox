@@ -4,7 +4,7 @@ Finite fake time distinguishes resource observations outside the lineage clock
 from fresh seat and proc observations inside its unchanged absolute deadline.
 """
 import ast
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -307,6 +307,48 @@ class FixtureWiringTests(unittest.TestCase):
         current = ast.unparse(self.functions['current'])
         self.assertIn("observe_authority_phase(checks, 'seat.current', fresh_current)", current)
         self.assertIn('GitSeat(origin, launch.origin, current, namespace, depth)', self.source)
+
+    def test_prelaunch_to_G_rechecks_actual_current_endpoint_and_broker(self):
+        prelaunch = next(n for n in ast.walk(self.prove)
+                         if isinstance(n, ast.FunctionDef) and n.name == 'prelaunch_unrelated')
+        predicates = [self.functions[name] for name in ('fresh_current', 'current', 'resources')]
+        for mutation in ('active', 'missing', 'phase', 'instance', 'revoked', 'dead', 'endpoint', 'broker'):
+            with self.subTest(mutation=mutation):
+                state = {'phase': 'running', 'instance_id': 'instance'}
+                origin = SimpleNamespace(revoked=False, pidfd=10)
+                locked = [False]
+                @contextmanager
+                def lock():
+                    self.assertFalse(locked[0], 'nested lifecycle acquisition')
+                    locked[0] = True
+                    try: yield
+                    finally: locked[0] = False
+                supervisor = SimpleNamespace(_read=Mock(return_value=state), _locked=lock)
+                endpoint, broker, backend = Mock(), Mock(), Mock()
+                alive = Mock(return_value=True)
+                namespace = dict(supervisor=supervisor, active=True, instance='instance',
+                    launch=SimpleNamespace(origin=origin), alive=alive, OriginDenied=OriginDenied,
+                    endpoint_=endpoint, broker=broker, backend=backend, state=state, checks={},
+                    ExitStack=ExitStack, contextmanager=contextmanager,
+                    observe_authority_phase=observe_authority_phase)
+                exec(compile(ast.Module(body=predicates+[prelaunch], type_ignores=[]),
+                             '<actual prelaunch and fresh predicates>', 'exec'), namespace)
+                write = Mock()
+                with self.assertRaises((OriginDenied, RuntimeError)):
+                    with namespace['prelaunch_unrelated']() as release:
+                        self.assertTrue(locked[0]); backend.admit.assert_called_once_with(state)
+                        if mutation == 'active': namespace['active'] = False
+                        elif mutation == 'missing': supervisor._read.return_value = None
+                        elif mutation == 'phase': state['phase'] = 'stopped'
+                        elif mutation == 'instance': state['instance_id'] = 'replacement'
+                        elif mutation == 'revoked': origin.revoked = True
+                        elif mutation == 'dead': alive.return_value = False
+                        elif mutation == 'endpoint': endpoint.require.side_effect = RuntimeError('endpoint drift')
+                        else: broker.require.side_effect = RuntimeError('broker dead')
+                        release(write)
+                self.assertFalse(locked[0]); write.assert_not_called()
+                backend.admit.assert_called_once_with(state)
+                self.assertEqual(2, supervisor._read.call_count)
 
     def test_resource_checks_remain_at_direct_bootstrap_and_release_locked_gates(self):
         resources = ast.unparse(self.functions['resources'])

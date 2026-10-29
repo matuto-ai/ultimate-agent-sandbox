@@ -1,5 +1,6 @@
 """Inert CLI/pipe/clock diagnostics tests; no real process, socket or SELinux."""
 import ast
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import subprocess
@@ -21,11 +22,11 @@ finally:
 
 class CLIDiagnosticsTests(TestCase):
     def exercise(self, fault=None, *, noisy=False, startup=.1, lock_cost=0, check_cost=0,
-                 gate_fault=None, delivery_lag=0, child_schedule=0, compose=False,
+                 gate_fault=None, preflight_cost=0, delivery_lag=0, child_schedule=0, compose=False,
                  startup_chunks=None, after_startup=b'inert stderr\n', bookkeeping_cost=0, release_bookkeeping_cost=0):
         checks = {}
         clock = [0.0]
-        calls = {'select': [], 'read': 0, 'wait': 0, 'killed': False, 'order': [], 'launcher': 0}
+        calls = {'select': [], 'read': 0, 'wait': 0, 'killed': False, 'order': [], 'launcher': 0, 'locked': False, 'spawned': False}
         error = OSError('inert original ' + str(fault))
         stdin = Mock(); stdin.fileno.return_value = 23
         stdout = Mock(); stdout.fileno.return_value = 21
@@ -53,6 +54,7 @@ class CLIDiagnosticsTests(TestCase):
             if timeout == 0:
                 return ([listener] if fault=='early-at-release' else []), [], []
             if checks.get('stage') == 'startup' and not calls['killed']:
+                if compose: self.assertTrue(calls['locked'])
                 if fault=='startup-timeout':clock[0]+=timeout;return [],[],[]
                 clock[0] += min(1,timeout) if fault=='startup-flood' else startup
                 if fault=='startup-listener':return [listener],[],[]
@@ -83,6 +85,7 @@ class CLIDiagnosticsTests(TestCase):
                 raise error
             return chunks[fd].pop(0) if chunks[fd] else b''
         def wait(*, timeout):
+            if compose: self.assertFalse(calls['locked'])
             self.assertGreaterEqual(timeout, 0)
             self.assertLessEqual(timeout, 5)
             calls['wait'] += 1
@@ -96,6 +99,7 @@ class CLIDiagnosticsTests(TestCase):
             if fault == 'startup-exit' or (fault == 'early-exit' and checks.get('stage') != 'startup'): process.returncode = 7
             return process.returncode
         def kill():
+            if compose: self.assertFalse(calls['locked'])
             self.assertIsNone(process.returncode, 'never signal a known reaped child')
             calls['killed'] = True
             if fault == 'kill': raise error
@@ -104,12 +108,20 @@ class CLIDiagnosticsTests(TestCase):
         process.kill.side_effect = kill
         if fault == 'close': stdout.close.side_effect = error
         if fault=='stdin-close':stdin.close.side_effect=error
-        serve = Mock(return_value=None)
-        if fault == 'serve': serve.side_effect = error
+        def serving(channel):
+            if compose:
+                self.assertFalse(calls['locked'], 'service must acquire its own lock after G')
+                calls['order'].append('serve')
+            if fault == 'serve': raise error
+        serve = Mock(side_effect=serving)
         def setup(fd, blocking):
             self.assertFalse(blocking)
             if fault == 'pipe_setup' and fd == 22: raise error
         def launch(*args, **kwargs):
+            calls['spawned'] = True
+            if compose:
+                self.assertTrue(calls['locked'])
+                calls['order'].append('Popen')
             self.assertEqual('launch', checks['stage'])
             self.assertEqual('in_progress', checks['status'])
             self.assertEqual(['docker', 'exec', '-i', 'a' * 64, '/usr/bin/python3', '-I',
@@ -146,30 +158,39 @@ class CLIDiagnosticsTests(TestCase):
             if fault=='release-write':raise error
             return 0 if fault=='short-release' else 1
         def release(write_fixed):
-            if compose:
-                tree = ast.parse((VM/'room_service.py').read_text())
-                callback = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'release_unrelated')
-                class Lock:
-                    def __enter__(inner):
-                        calls['order'].append('lock'); clock[0] += lock_cost
-                        if gate_fault == 'lock': raise error
-                        calls['locked'] = True
-                    def __exit__(inner, *args):
-                        calls['order'].append('unlock'); calls['locked'] = False
-                def gate(name):
-                    self.assertTrue(calls['locked'])
-                    calls['order'].append(name); clock[0] += check_cost
-                    if gate_fault == name: raise error
-                env = dict(ExitStack=room_service.ExitStack, checks=checks,
-                           observe_authority_phase=room_service.observe_authority_phase,
-                           supervisor=SimpleNamespace(_locked=Lock), current=lambda: gate('current'),
-                           resources=lambda: gate('resources'), backend=SimpleNamespace(admit=lambda state: gate('admit')),
-                           state=object(), broker=SimpleNamespace(require=lambda: gate('broker')))
-                exec(compile(ast.Module(body=[callback], type_ignores=[]), '<actual release callback>', 'exec'), env)
-                return env['release_unrelated'](write_fixed)
             if fault=='release-gate':raise error
             if fault=='release-timeout':clock[0]+=5
             if fault!='no-release':write_fixed()
+        @contextmanager
+        def prelaunch():
+            if not compose:
+                yield release
+                return
+            tree = ast.parse((VM/'room_service.py').read_text())
+            callback = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                            and n.name == 'prelaunch_unrelated')
+            class Lock:
+                def __enter__(inner):
+                    self.assertFalse(calls['locked'], 'lifecycle lock must not be reacquired')
+                    calls['order'].append('prelaunch.lock'); clock[0] += lock_cost
+                    if gate_fault == 'prelaunch.lock': raise error
+                    calls['locked'] = True
+                def __exit__(inner, *args):
+                    calls['order'].append('unlock'); calls['locked'] = False
+            def gate(name):
+                self.assertTrue(calls['locked'])
+                phase = ('release.' if calls['spawned'] else 'prelaunch.') + name
+                calls['order'].append(phase)
+                clock[0] += check_cost if calls['spawned'] else (preflight_cost if name == 'admission' else 0)
+                if gate_fault == phase: raise error
+            env = dict(ExitStack=room_service.ExitStack, contextmanager=contextmanager, checks=checks,
+                       observe_authority_phase=room_service.observe_authority_phase,
+                       supervisor=SimpleNamespace(_locked=Lock), current=lambda: gate('current'),
+                       resources=lambda: gate('resources'), backend=SimpleNamespace(admit=lambda state: gate('admission')),
+                       state=object(), broker=SimpleNamespace(require=lambda: gate('broker')))
+            exec(compile(ast.Module(body=[callback], type_ignores=[]), '<actual prelaunch context>', 'exec'), env)
+            with env['prelaunch_unrelated']() as guarded_release:
+                yield guarded_release
         def observed_clock():
             if (bookkeeping_cost and checks.get('stage') == 'startup'
                     and len(checks['startup']['milestones_observed_elapsed_seconds']) == 4
@@ -189,7 +210,7 @@ class CLIDiagnosticsTests(TestCase):
              patch.object(room_service.os, 'read', side_effect=read), \
              patch.object(room_service.os, 'write', side_effect=write):
             try:
-                result = room_service.observe_unrelated_cli(listener, 'a' * 64, serve, checks=checks, release=release)
+                result = room_service.observe_unrelated_cli(listener, 'a' * 64, serve, checks=checks, prelaunch=prelaunch)
             except BaseException as failure:
                 caught = failure
         return checks, result, caught, error, process, serve, calls
@@ -347,24 +368,29 @@ class CLIDiagnosticsTests(TestCase):
                 self.assertTrue(process.stdin.close.called)
 
     def test_release_write_is_inside_same_fresh_lifecycle_lock(self):
-        tree=ast.parse((VM/'room_service.py').read_text())
-        callback=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='release_unrelated')
-        self.assertEqual(1,len(callback.body));self.assertIsInstance(callback.body[0],ast.With)
-        text=ast.unparse(callback.body[0])
-        self.assertIn('with ExitStack() as stack:',text)
-        self.assertIn('stack.enter_context(supervisor._locked())',text)
-        phases = ['release.' + name for name in ('lock','current','resources','admission','broker','write')]
-        self.assertEqual(phases, [node.value for node in ast.walk(callback)
-                         if isinstance(node, ast.Constant) and node.value in phases])
-
-
+        tree = ast.parse((VM/'room_service.py').read_text())
+        prelaunch = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'prelaunch_unrelated')
+        release = next(n for n in ast.walk(prelaunch) if isinstance(n, ast.FunctionDef) and n.name == 'release_unrelated')
+        text = ast.unparse(prelaunch)
+        self.assertEqual(1, text.count('stack.enter_context(supervisor._locked())'))
+        self.assertIn('yield release_unrelated', text)
+        self.assertNotIn('_locked', ast.unparse(release))
+        self.assertNotIn('backend.admit', ast.unparse(release))
+        observer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'observe_unrelated_cli')
+        held = next(n for n in ast.walk(observer) if isinstance(n, ast.With)
+                    and 'prelaunch()' in ast.unparse(n.items[0].context_expr))
+        held_text = ast.unparse(held)
+        self.assertIn('subprocess.Popen', held_text)
+        self.assertIn('release(write_fixed_release)', held_text)
+        self.assertNotIn('serve(channel)', held_text)
 
     def test_parent_and_child_release_phases_compose_without_spending_startup_twice(self):
         checks, result, caught, _, _, _, calls = self.exercise(
-            startup=2.732526, check_cost=3.6527/4, compose=True)
+            startup=2.732526, check_cost=3.6527/3, compose=True)
         self.assertIsNone(caught)
         self.assertIsNotNone(result)
-        self.assertEqual(['lock','current','resources','admit','broker','G','unlock'], calls['order'])
+        self.assertEqual(['prelaunch.lock','prelaunch.current','prelaunch.resources','prelaunch.admission',
+                          'Popen','release.current','release.resources','release.broker','G','unlock','serve'], calls['order'])
         self.assertEqual(1, calls['launcher'])
         self.assertEqual(5, checks['timeout_seconds']['release'])
         self.assertEqual(2.732526, checks['release']['started_elapsed_seconds'])
@@ -374,33 +400,67 @@ class CLIDiagnosticsTests(TestCase):
         self.assertNotIn('authority_refusal_proved', checks)
 
     def test_startup_lock_and_fresh_check_costs_fail_at_exact_phase_bounds(self):
-        for kwargs in (dict(startup=5), dict(startup=5.1), dict(lock_cost=5),
-                       dict(check_cost=1.25), dict(lock_cost=2, check_cost=.75),
-                       dict(check_cost=2)):
+        for kwargs in (dict(startup=5), dict(startup=5.1), dict(check_cost=2),
+                       dict(check_cost=1, release_bookkeeping_cost=2)):
             with self.subTest(kwargs=kwargs):
                 checks, result, caught, _, _, serve, calls = self.exercise(compose=True, **kwargs)
                 self.assertIsNotNone(caught); self.assertIsNone(result)
                 self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
                 serve.assert_not_called(); self.assertFalse(checks['startup']['release_sent'])
                 self.assertEqual('failed', checks['status'])
-                self.assertTrue(checks['cleanup']['reaped'])
+                self.assertTrue(checks['cleanup']['reaped']); self.assertFalse(calls['locked'])
+
+    def test_slow_prelaunch_admission_and_lock_do_not_spend_helper_clocks(self):
+        checks, result, caught, _, _, serve, calls = self.exercise(
+            compose=True, lock_cost=8, preflight_cost=5.298689, startup=2.73, check_cost=.01)
+        self.assertIsNone(caught); self.assertIsNotNone(result)
+        self.assertEqual(16.028689, checks['release']['started_elapsed_seconds'])
+        self.assertEqual(21.028689, checks['release']['deadline_elapsed_seconds'])
+        self.assertEqual(16.058689, checks['release']['sent_elapsed_seconds'])
+        self.assertEqual(5.298689, checks['authority_phases']['prelaunch.admission']['last_seconds'])
+        self.assertNotIn('release.admission', checks['authority_phases'])
+        self.assertEqual(1, calls['launcher']); serve.assert_called_once()
+        self.assertFalse(calls['locked'])
 
     def test_each_fresh_gate_failure_preserves_locked_order_and_never_writes(self):
-        gates = ['current','resources','admit','broker']
+        before = ['prelaunch.lock','prelaunch.current','prelaunch.resources','prelaunch.admission','Popen']
+        gates = ['release.current','release.resources','release.broker']
         for index, gate in enumerate(gates):
             with self.subTest(gate=gate):
                 checks, result, caught, original, _, serve, calls = self.exercise(compose=True, gate_fault=gate)
                 self.assertIs(original, caught); self.assertIsNone(result)
-                self.assertEqual(['lock', *gates[:index+1], 'unlock'], calls['order'])
+                self.assertEqual([*before, *gates[:index+1], 'unlock'], calls['order'])
                 self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
                 serve.assert_not_called(); self.assertEqual('release', checks['stage'])
-                self.assertTrue(checks['cleanup']['reaped'])
+                self.assertTrue(checks['cleanup']['reaped']); self.assertFalse(calls['locked'])
+
+    def test_prelaunch_failure_never_creates_helper_or_starts_phase_clocks(self):
+        gates = ['prelaunch.lock','prelaunch.current','prelaunch.resources','prelaunch.admission']
+        for index, gate in enumerate(gates):
+            with self.subTest(gate=gate):
+                checks, result, caught, original, process, serve, calls = self.exercise(compose=True, gate_fault=gate)
+                self.assertIs(original, caught); self.assertIsNone(result)
+                self.assertFalse(calls['spawned']); self.assertFalse(calls['locked'])
+                self.assertEqual(gates[:index+1] + ([] if index == 0 else ['unlock']), calls['order'])
+                self.assertNotIn('release', checks); self.assertNotIn('startup', checks['stage_elapsed_seconds'])
+                self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
+                process.kill.assert_not_called(); process.wait.assert_not_called(); serve.assert_not_called()
+
+    def test_all_owned_failure_paths_release_prelaunch_lock_before_cleanup(self):
+        for fault in ('launch','pipe_setup','startup-read','startup-malformed','release-write','short-release',
+                      'stdin-close','accept-call','serve','kill','cleanup-wait','close'):
+            with self.subTest(fault=fault):
+                checks, result, caught, _, _, _, calls = self.exercise(fault, compose=True)
+                self.assertIsNotNone(caught); self.assertIsNone(result)
+                self.assertFalse(calls['locked'])
+                self.assertEqual(1, calls['order'].count('prelaunch.lock'))
+                self.assertEqual(1, calls['order'].count('unlock'))
 
     def test_delayed_delivery_and_G_scheduling_cannot_extend_child_deadline(self):
         for lag, schedule in ((2,0), (0,2), (1,1)):
             with self.subTest(lag=lag, schedule=schedule):
                 checks, result, caught, _, _, serve, calls = self.exercise(
-                    compose=True, startup=2.73, check_cost=.8, delivery_lag=lag, child_schedule=schedule)
+                    compose=True, startup=2.75, check_cost=1.125, delivery_lag=lag, child_schedule=schedule)
                 self.assertTrue(checks['startup']['release_sent'])
                 self.assertEqual(0, calls['launcher']); self.assertTrue(calls['child_expired'])
                 self.assertIsInstance(caught, TimeoutError); self.assertIsNone(result)
@@ -500,32 +560,32 @@ class CLIDiagnosticsTests(TestCase):
 
     def test_release_gate_timings_are_fixed_success_aggregates_under_same_lock(self):
         checks, result, caught, _, _, _, calls = self.exercise(
-            compose=True, lock_cost=.25, check_cost=.5)
+            compose=True, lock_cost=.25, preflight_cost=1.5, check_cost=.5)
         self.assertIsNone(caught); self.assertIsNotNone(result)
-        self.assertEqual(['lock','current','resources','admit','broker','G','unlock'], calls['order'])
         phases = checks['authority_phases']
-        expected = {'lock':.25, 'current':.5, 'resources':.5, 'admission':.5, 'broker':.5, 'write':0}
-        self.assertEqual({'release.' + name for name in expected}, set(phases))
+        expected = {'prelaunch.lock':.25, 'prelaunch.current':0, 'prelaunch.resources':0,
+                    'prelaunch.admission':1.5, 'release.current':.5, 'release.resources':.5,
+                    'release.broker':.5, 'release.write':0}
+        self.assertEqual(set(expected), set(phases))
         for name, elapsed in expected.items():
             self.assertEqual(dict(calls=1, failures=0, last_seconds=elapsed,
-                                  max_seconds=elapsed, total_seconds=elapsed), phases['release.' + name])
+                                  max_seconds=elapsed, total_seconds=elapsed), phases[name])
 
     def test_release_timings_retain_completed_and_failing_gate_without_G(self):
-        gates = ['lock','current','resources','admit','broker']
+        gates = ['prelaunch.lock','prelaunch.current','prelaunch.resources','prelaunch.admission',
+                 'release.current','release.resources','release.broker']
         for index, gate in enumerate(gates):
             with self.subTest(gate=gate):
                 checks, result, caught, original, _, serve, calls = self.exercise(
-                    compose=True, gate_fault=gate, lock_cost=.25, check_cost=.5)
+                    compose=True, gate_fault=gate, lock_cost=.25, preflight_cost=1.5, check_cost=.5)
                 self.assertIs(original, caught); self.assertIsNone(result)
-                names = ['release.' + ('admission' if name == 'admit' else name) for name in gates[:index+1]]
+                names = gates[:index+1]
                 self.assertEqual(names, list(checks['authority_phases']))
                 for name in names:
                     self.assertEqual(int(name == names[-1]), checks['authority_phases'][name]['failures'])
-                self.assertEqual(.25 if gate == 'lock' else .5,
-                                 checks['authority_phases'][names[-1]]['last_seconds'])
                 self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
-                self.assertEqual(['lock'] if gate == 'lock' else ['lock',*gates[1:index+1],'unlock'], calls['order'])
-                serve.assert_not_called(); self.assertTrue(checks['cleanup']['reaped'])
+                self.assertFalse(calls['locked']); serve.assert_not_called()
+                self.assertEqual(index >= 4, checks['cleanup']['reaped'])
 
     def test_release_write_failure_retains_all_timings_and_unlocks(self):
         checks, result, caught, original, _, serve, calls = self.exercise('release-write', compose=True)
@@ -537,7 +597,7 @@ class CLIDiagnosticsTests(TestCase):
 
     def test_release_timing_bookkeeping_cannot_make_late_G_eligible(self):
         checks, result, caught, _, _, serve, calls = self.exercise(
-            compose=True, check_cost=1, release_bookkeeping_cost=1)
+            compose=True, check_cost=1, release_bookkeeping_cost=2)
         self.assertIsNotNone(caught); self.assertIsNone(result)
         self.assertTrue(calls['release_bookkeeping_spent'])
         self.assertNotIn('write_stage', calls); self.assertEqual(0, calls['launcher'])
@@ -547,9 +607,10 @@ class CLIDiagnosticsTests(TestCase):
 
 
     def test_release_timings_survive_normal_and_overflow_report_with_primary_cleanup(self):
-        phases = {'release.' + name: dict(calls=1, failures=int(name == 'broker'),
+        phases = {name: dict(calls=1, failures=int(name == 'release.broker'),
                   last_seconds=.5, max_seconds=.5, total_seconds=.5)
-                  for name in ('lock','current','resources','admission','broker')}
+                  for name in ('prelaunch.lock','prelaunch.current','prelaunch.resources','prelaunch.admission',
+                               'release.current','release.resources','release.broker')}
         endpoint = dict(status='failed', authority_phases=phases,
                         cleanup=dict(status='failed', errors=[dict(owner='broker', error_type='OSError')]))
         report = dict(version=1, nonce='inert', profile=guest_room.PROFILE,
@@ -565,6 +626,22 @@ class CLIDiagnosticsTests(TestCase):
         self.assertEqual('ReportBudgetExceeded', compact['failure']['error_type'])
         self.assertEqual(endpoint['cleanup'], compact['checks']['endpoint_service']['cleanup'])
         self.assertTrue(compact['report_overflow']); self.assertTrue(compact['evidence_omitted'])
+
+    def test_prelaunch_failure_timings_survive_overflow_without_release_evidence(self):
+        checks, _, caught, original, _, _, calls = self.exercise(
+            compose=True, gate_fault='prelaunch.admission', preflight_cost=5.298689)
+        self.assertIs(original, caught); self.assertFalse(calls['spawned'])
+        report = dict(version=1, nonce='inert', profile=guest_room.PROFILE,
+                      production_enabled=False, failure=dict(error_type='OSError'),
+                      checks=dict(endpoint_service=dict(status='failed',
+                                  authority_phases=checks['authority_phases'])), padding='x' * 65536)
+        compact = json.loads(guest_room.encode_report(report))
+        phases = compact['checks']['endpoint_service']['authority_phases']
+        self.assertEqual(checks['authority_phases'], phases)
+        self.assertEqual(1, phases['prelaunch.admission']['failures'])
+        self.assertEqual(5.298689, phases['prelaunch.admission']['last_seconds'])
+        self.assertFalse(any(name.startswith('release.') for name in phases))
+        self.assertEqual('OSError', compact['primary_failure']['error_type'])
 
     def test_release_overflow_projection_drops_unknown_malformed_and_unbounded_fields(self):
         phases = {'payload': 'secret' * 20000, 'release.lock': 'not a timing',

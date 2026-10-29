@@ -84,15 +84,15 @@ there is no positive cache, removed check, retry or time-limit increase. Direct
 bootstrap and workload-release gates retain their resource checks as well.
 A post-bind resource failure closes the newly created binding before exposure,
 retaining the first failure even if cleanup also fails. Fixed phase aggregates
-(count, failures and elapsed last/max/total seconds, at most seventeen keys) retain
+(count, failures and elapsed last/max/total seconds, at most nineteen keys) retain
 resource pre/post, core operation, fresh-current and failed-bind cleanup timing
-without storing requests or an unbounded history. The six fixed release phases
-also retain lock acquisition, current authority, resources, full admission,
-final Broker check and the release write; their accounting never restarts either
-five-second phase or the core 50 ms budget. Callback timing bookkeeping
-still participates in the core deadline. This separation is source-backed
-composition alignment, not proof of which subphase exhausted the previous
-run's deadline; final VM qualification remains required.
+without storing requests or an unbounded history. Four fixed prelaunch phases
+retain lock acquisition, current authority, resources and full admission; four
+release phases retain fresh current authority, resources, final Broker check
+and the release write. Their accounting never restarts either five-second
+phase or the core 50 ms budget. Callback timing bookkeeping still participates
+in the core deadline. These are bounded diagnostics, not authority receipts or
+runtime qualification.
 
 One admission now shares only its duplicate command observations: the same owned
 firewall document supplies existence and rule checks, and one fixed Docker-info
@@ -123,14 +123,33 @@ Mode-only ctypes and HTTPS imports are local to their existing consumers; the
 actual launcher import still completes before READY. This is dependency cleanup
 and observability, not a measured startup performance fix.
 
-Preparation has a five-second marker-readiness phase and a separate five-second
-parent release phase, started once on validating the complete marker, before
-lock acquisition and every fresh release check. The hosted smoke follows the
-same phase boundary. The child independently requires G within five seconds
+Immediately before creating the unrelated negative helper, the VM fixture
+acquires the existing lifecycle lock and performs fresh current/resource checks
+and the complete backend admission. No helper is created on preflight failure.
+The same lock spans helper creation, READY observation and the actual G write;
+there is no nested acquisition. At G, current manifest/instance/origin,
+endpoint/retained resources and the private Broker are freshly checked again.
+The observer exits the prelaunch context before accepting/serving the request,
+so the actual service acquires its own fresh lifecycle lock without deadlock.
+Every failure unwinds this context before bounded owned-CLI cleanup.
+
+This moves one fixture-specific late TCB configuration sample from after READY
+to immediately before helper creation; it is not an identical continuous-drift
+detection claim. The held lock excludes ordinary lifecycle changes, not arbitrary
+out-of-band host mutation. All full admission predicates still run, with no
+positive cache or reused help admission. Canonical Room-start admission,
+PROVE_HELP_ONLY admission and the final RELEASE_WORKLOAD admission are unchanged.
+The final full admission still blocks workload release on configuration drift.
+
+Preparation retains its five-second marker-readiness phase (after pipe setup)
+and a separate five-second parent release phase, started once on validating the
+complete marker, before the fresh release checks. Preflight consumes neither
+helper clock; overall VM bounds are unchanged. The hosted smoke retains the
+same READY/G protocol. The child independently requires G within five seconds
 after emitting its marker; delayed delivery or scheduling can still exhaust
 that stricter child window. Parent release eligibility is checked immediately
 before G, not a hard wall-time interruption of synchronous callbacks. No
-check is cached or skipped; all fresh checks and G remain under the same lock.
+check is cached or skipped; fresh release checks and G remain under the same lock.
 Release start/deadline/write timestamps are diagnostics, not authority evidence.
 The accept and collection deadlines remain five seconds each, and draining
 output does not restart them. A timeout or early client exit is incomplete

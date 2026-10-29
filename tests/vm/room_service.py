@@ -6,7 +6,7 @@ credentials, executable-child capability or network creation. This is not the
 native Git worker/RuntimeView profile or the native Pi/Hub topology.
 """
 import ctypes
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import errno
 import hashlib
 import json
@@ -43,7 +43,8 @@ def require(value, message):
 AUTHORITY_PHASES = frozenset(
     method + '.' + phase for method in ('bind', 'current', 'require')
     for phase in ('pre_resource', 'lineage', 'post_resource')) | {'seat.current', 'bind.cleanup'} | {
-    'release.' + phase for phase in ('lock', 'current', 'resources', 'admission', 'broker', 'write')}
+    'release.' + phase for phase in ('current', 'resources', 'broker', 'write')} | {
+    'prelaunch.' + phase for phase in ('lock', 'current', 'resources', 'admission')}
 
 
 def observe_authority_phase(checks, phase, call, *args):
@@ -461,7 +462,7 @@ def prove_foreign_listener_admission(supervisor, endpoint_, probe, *, run, check
         return checks
 
 
-def observe_unrelated_cli(listener, container, serve, *, checks, release):
+def observe_unrelated_cli(listener, container, serve, *, checks, prelaunch):
     """Bounded evidence around the existing fixed same-UID negative, not denial.
 
     Draining output never extends any five-second phase deadline. Killing this
@@ -510,67 +511,69 @@ def observe_unrelated_cli(listener, container, serve, *, checks, release):
             ready, _, _ = select.select(list(streams), [], [], remaining)
             drain(ready)
     try:
-        stage('launch')
-        process = subprocess.Popen(['docker', 'exec', '-i', container, '/usr/bin/python3', '-I',
-            '/opt/uas/uas/room_probe.py', 'denied-help-ready'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        checks['pid'] = process.pid  # Diagnostic CLI PID, never request authority.
-        stage('pipe_setup')
-        for name in buffers:
-            stream = getattr(process, name)
-            os.set_blocking(stream.fileno(), False)
-            streams[stream] = name
-        os.set_blocking(process.stdin.fileno(), False)
-        stage('startup')
-        deadline = time.monotonic() + DENIED_HELP_SETUP_SECONDS
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0: raise TimeoutError('unrelated CLI startup deadline')
-            ready, _, _ = select.select([listener, *streams], [], [], remaining)
-            drain(ready)
-            require(listener not in ready, 'unrelated CLI connected before preparation release')
-            require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
-            prefix = bytes(buffers['stderr'])
-            # Retain completed diagnostic prefixes even if a later byte is bad.
-            # These are parent observation times, not child phase durations.
-            through = b''
-            for name, marker in DENIED_HELP_STARTUP_STEPS:
-                through += marker
-                if prefix.startswith(through):
-                    checks['startup']['milestones_observed_elapsed_seconds'].setdefault(
-                        name, round(time.monotonic() - started, 6))
-            require(counts['stdout'] == 0 and counts['stderr'] <= len(DENIED_HELP_STARTUP)
-                    and DENIED_HELP_STARTUP.startswith(prefix), 'malformed unrelated CLI readiness marker')
-            require(not eof['stdout'] and not eof['stderr'] and process.poll() is None,
-                    'unrelated CLI exited before preparation release')
-            if prefix == DENIED_HELP_STARTUP:
+        stage('prelaunch')
+        with prelaunch() as release:
+            stage('launch')
+            process = subprocess.Popen(['docker', 'exec', '-i', container, '/usr/bin/python3', '-I',
+                '/opt/uas/uas/room_probe.py', 'denied-help-ready'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            checks['pid'] = process.pid  # Diagnostic CLI PID, never request authority.
+            stage('pipe_setup')
+            for name in buffers:
+                stream = getattr(process, name)
+                os.set_blocking(stream.fileno(), False)
+                streams[stream] = name
+            os.set_blocking(process.stdin.fileno(), False)
+            stage('startup')
+            deadline = time.monotonic() + DENIED_HELP_SETUP_SECONDS
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: raise TimeoutError('unrelated CLI startup deadline')
+                ready, _, _ = select.select([listener, *streams], [], [], remaining)
+                drain(ready)
+                require(listener not in ready, 'unrelated CLI connected before preparation release')
                 require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
-                checks['startup'].update(marker_observed=True, marker_bytes=len(DENIED_HELP_READY),
-                                         marker=DENIED_HELP_READY.decode('ascii'))
-                break
-        # Start once at the validated marker, before lock acquisition and all
-        # fresh checks. This guards G eligibility, not callback wall runtime.
-        # The child's emission-based deadline remains independently authoritative.
-        release_started = time.monotonic()
-        release_deadline = release_started + DENIED_HELP_SETUP_SECONDS
-        checks['release'] = {'started_elapsed_seconds': round(release_started - started, 6),
-                             'deadline_elapsed_seconds': round(release_deadline - started, 6)}
-        stage('release')
-        def write_fixed_release():
-            nonlocal stdin_closed
-            require(not checks['startup']['release_sent'], 'duplicate unrelated preparation release')
-            require(time.monotonic() < release_deadline, 'unrelated CLI release deadline')
-            ready, _, _ = select.select([listener], [], [], 0)
-            require(not ready, 'unrelated CLI connected before preparation release')
-            require(time.monotonic() < release_deadline, 'unrelated CLI release deadline')
-            require(os.write(process.stdin.fileno(), DENIED_HELP_RELEASE) == 1, 'incomplete unrelated preparation release')
-            checks['startup']['release_sent'] = True
-            checks['release']['sent_elapsed_seconds'] = round(time.monotonic() - started, 6)
-            process.stdin.close(); stdin_closed = True
-        # The caller holds its lifecycle lock and rechecks fresh prerequisites
-        # through this exact write, not just before returning a readiness bit.
-        release(write_fixed_release)
-        require(checks['startup']['release_sent'], 'unrelated preparation not released')
+                prefix = bytes(buffers['stderr'])
+                # Retain completed diagnostic prefixes even if a later byte is bad.
+                # These are parent observation times, not child phase durations.
+                through = b''
+                for name, marker in DENIED_HELP_STARTUP_STEPS:
+                    through += marker
+                    if prefix.startswith(through):
+                        checks['startup']['milestones_observed_elapsed_seconds'].setdefault(
+                            name, round(time.monotonic() - started, 6))
+                require(counts['stdout'] == 0 and counts['stderr'] <= len(DENIED_HELP_STARTUP)
+                        and DENIED_HELP_STARTUP.startswith(prefix), 'malformed unrelated CLI readiness marker')
+                require(not eof['stdout'] and not eof['stderr'] and process.poll() is None,
+                        'unrelated CLI exited before preparation release')
+                if prefix == DENIED_HELP_STARTUP:
+                    require(time.monotonic() < deadline, 'unrelated CLI startup deadline')
+                    checks['startup'].update(marker_observed=True, marker_bytes=len(DENIED_HELP_READY),
+                                             marker=DENIED_HELP_READY.decode('ascii'))
+                    break
+            # Start once at the validated marker, before fresh release checks.
+            # This guards G eligibility, not callback wall runtime.
+            # The child's emission-based deadline remains independently authoritative.
+            release_started = time.monotonic()
+            release_deadline = release_started + DENIED_HELP_SETUP_SECONDS
+            checks['release'] = {'started_elapsed_seconds': round(release_started - started, 6),
+                                 'deadline_elapsed_seconds': round(release_deadline - started, 6)}
+            stage('release')
+            def write_fixed_release():
+                nonlocal stdin_closed
+                require(not checks['startup']['release_sent'], 'duplicate unrelated preparation release')
+                require(time.monotonic() < release_deadline, 'unrelated CLI release deadline')
+                ready, _, _ = select.select([listener], [], [], 0)
+                require(not ready, 'unrelated CLI connected before preparation release')
+                require(time.monotonic() < release_deadline, 'unrelated CLI release deadline')
+                require(os.write(process.stdin.fileno(), DENIED_HELP_RELEASE) == 1, 'incomplete unrelated preparation release')
+                checks['startup']['release_sent'] = True
+                checks['release']['sent_elapsed_seconds'] = round(time.monotonic() - started, 6)
+                process.stdin.close(); stdin_closed = True
+            # The caller holds its lifecycle lock and rechecks fresh prerequisites
+            # through this exact write, not just before returning a readiness bit.
+            release(write_fixed_release)
+            require(checks['startup']['release_sent'], 'unrelated preparation not released')
         stage('accept')
         deadline = time.monotonic() + 5
         listener.settimeout(5)
@@ -800,21 +803,26 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         # ancestry to the held bootstrap. The real service must reject it.
         checks['stage'] = 'unrelated_task_refusal'
         checks['unrelated_task'] = {}
-        def release_unrelated(write):
-            # Measure acquisition, not the whole locked body. The stack retains
-            # the same lifecycle lock through every prerequisite and the final
-            # deadline-guarded G write, including timing bookkeeping.
+        @contextmanager
+        def prelaunch_unrelated():
+            # Full launch invariants precede helper creation, not its five-second
+            # READY/G exchange. Retain the same lifecycle lock through actual G;
+            # the observer exits this context before serve_one takes its lock.
             with ExitStack() as stack:
-                observe_authority_phase(checks, 'release.lock',
+                observe_authority_phase(checks, 'prelaunch.lock',
                     lambda: stack.enter_context(supervisor._locked()))
-                observe_authority_phase(checks, 'release.current', current)
-                observe_authority_phase(checks, 'release.resources', resources)
-                observe_authority_phase(checks, 'release.admission', backend.admit, state)
-                observe_authority_phase(checks, 'release.broker', broker.require)
-                observe_authority_phase(checks, 'release.write', write)
+                observe_authority_phase(checks, 'prelaunch.current', current)
+                observe_authority_phase(checks, 'prelaunch.resources', resources)
+                observe_authority_phase(checks, 'prelaunch.admission', backend.admit, state)
+                def release_unrelated(write):
+                    observe_authority_phase(checks, 'release.current', current)
+                    observe_authority_phase(checks, 'release.resources', resources)
+                    observe_authority_phase(checks, 'release.broker', broker.require)
+                    observe_authority_phase(checks, 'release.write', write)
+                yield release_unrelated
         denied, stdout, stderr = observe_unrelated_cli(listener, container,
             lambda channel: serve_one(channel, service, authority, lifecycle_lock=supervisor._locked),
-            checks=checks['unrelated_task'], release=release_unrelated)
+            checks=checks['unrelated_task'], prelaunch=prelaunch_unrelated)
         observed = checks['unrelated_task']
         require(not observed['stdout']['truncated'] and not observed['stderr']['truncated'],
                 'unrelated CLI evidence exceeded capture bound')

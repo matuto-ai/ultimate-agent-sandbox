@@ -440,14 +440,15 @@ def encode_report(report):
                         'status':str(cleanup.get('status','unknown'))[:32],
                         'errors':[{field:str(error.get(field,''))[:64] for field in ('owner','error_type')}
                                   for error in cleanup.get('errors',[])[:8]]}
-            # Fixed release gates only; no arbitrary phase names or payloads
+            # Fixed prelaunch/release gates only; no arbitrary phase names or payloads
             # survive overflow. Invalid/non-finite diagnostics are omitted, not
             # converted into authority or a successful compact report.
             phases = original.get('authority_phases', {})
             if isinstance(phases, dict):
                 projected = {}
-                for phase in ('lock', 'current', 'resources', 'admission', 'broker', 'write'):
-                    key = 'release.' + phase
+                for key in ('prelaunch.lock', 'prelaunch.current', 'prelaunch.resources',
+                            'prelaunch.admission', 'release.current', 'release.resources',
+                            'release.broker', 'release.write'):
                     timing = phases.get(key)
                     if not isinstance(timing, dict): continue
                     fields = {}
