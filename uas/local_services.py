@@ -23,10 +23,13 @@ def require(ok,code):
     if not ok:raise LifecycleError(code)
 
 
-def mapping_digest(pid):
+def mapping_digest(pid, *, host_profile=None):
     require(type(pid) is int and pid>0,'LOCAL_HUB_WORKSTATION_PID')
     value={name:Path('/proc/'+str(pid)+'/'+name).read_text() for name in ('uid_map','gid_map')}
-    require(all(value[k].split()==['0','100000','65536'] for k in value),'LOCAL_HUB_MAPPING')
+    from .local_host_profile import LocalHostProfile
+    require(host_profile is None or type(host_profile) is LocalHostProfile,'LOCAL_HUB_HOST_PROFILE')
+    offset,size=(100000,65536) if host_profile is None else (host_profile.offset,host_profile.size)
+    require(all(value[k].split()==['0',str(offset),str(size)] for k in value),'LOCAL_HUB_MAPPING')
     for name,filename in (('overflow_uid','overflowuid'),('overflow_gid','overflowgid')):
         value[name]=int(Path('/proc/sys/kernel/'+filename).read_text())
     require(value['overflow_uid']==65534 and value['overflow_gid']==65534,'LOCAL_HUB_OVERFLOW')
@@ -110,9 +113,10 @@ class LocalServices:
         layout=backend.layout(state);fds=[backend.listeners[i].fileno() for i in (0,1)]
         resources={'hub_id':hub['Id'],'instance':state['instance_id'],
                    'control_path':str(layout['control']/'hub.sock'),
-                   'mapping_digest':mapping_digest(workstation['State']['Pid']),
+                   'mapping_digest':mapping_digest(workstation['State']['Pid'],host_profile=backend.profile.host_profile),
                    'peer_fd':fds[0],'control_fd':fds[1]}
-        document={'version':1,'room':backend.profile.room,'resources':resources}
+        host_profile=backend.profile.host_profile
+        document={'version':2,'room':backend.profile.room,'resources':resources,'host_profile':host_profile.document()}
         runtime_plan=None if self.runtime_plan_for is None else self.runtime_plan_for(backend.profile)
         extra_fds=[];extra_groups=[]
         manager_reference=None if self.manager_reference_for is None else self.manager_reference_for(backend.profile)
@@ -135,12 +139,12 @@ class LocalServices:
                 'manager_reference':manager_reference,
                 'broker_fd':data['broker_fd'],'checkout_fd':data['checkout_fd'],'git_fd':data.get('git_fd'),
                 'resources':{k:v for k,v in data.items() if k not in {'broker_fd','checkout_fd','git_fd'}}}
-            if 'gate_manifest' in runtime_plan.installation:extra_groups=[165530]
+            if 'gate_manifest' in runtime_plan.installation:extra_groups=[host_profile.owners['gate']]
         raw=_canonical(document)+b'\n';require(len(raw)<=2*1048576,'LOCAL_HUB_STARTUP_SIZE')
-        docker_group=os.stat('/run/docker.sock').st_gid
+        docker_group=os.stat(host_profile.socket).st_gid
         process=subprocess.Popen([sys.executable,'-m','uas.local_hub_host'],
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
-            user=165533,group=165533,extra_groups=[165531,docker_group]+extra_groups,
+            user=host_profile.owners['supervisor'],group=host_profile.owners['supervisor'],extra_groups=[host_profile.owners['hub'],docker_group]+extra_groups,
             pass_fds=tuple(dict.fromkeys(fds+list(extra_fds)+[self._lock_fd])),cwd='/',
             env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(Path(__file__).resolve().parents[1]),
                  'PYTHONDONTWRITEBYTECODE':'1'})

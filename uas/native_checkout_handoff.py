@@ -272,8 +272,10 @@ class RootCheckoutHandoff:
         remaining(deadline)
         self.plan, self.resources, self.child, self.channel = plan, resources, child, channel
         self.owner, self.deadline = resources._supervisor, deadline
+        from .local_host_profile import plan_owners
+        self.host_owners = plan_owners(plan)
         self.allocator = CheckoutAllocator(self.owner, StringIO(plan.config_text), deadline=deadline,
-            manifest_reader_gid=HOST_UID, git_identity=(165532, 165532))
+            manifest_reader_gid=self.host_owners['supervisor'], git_identity=(self.host_owners['runtime'], self.host_owners['runtime']))
         self.actors = {a['id']: a for a in plan.config['deployment']['actors']}
         self.pin = None
         self.pins = {}
@@ -423,7 +425,7 @@ class RootCheckoutHandoff:
         require(self.count <= MAX_REQUESTS, 'CHECKOUT_REQUEST_LIMIT')
         self.channel.settimeout(remaining(self.deadline))
         with receive(self.channel) as record:
-            require(record.credentials == (self.child.pid, HOST_UID, HOST_UID)
+            require(record.credentials == (self.child.pid, self.host_owners['supervisor'], self.host_owners['supervisor'])
                     and alive(record.pidfd) and _identity(record.pidfd) == self.identity
                     and len(record.data) <= MAX_REQUEST, 'CHECKOUT_HOST_MISMATCH')
             request = request_value(json.loads(record.data, object_pairs_hook=_unique))

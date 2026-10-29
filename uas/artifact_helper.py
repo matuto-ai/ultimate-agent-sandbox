@@ -42,6 +42,20 @@ _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
 
 
+def helper_host_identity(host_profile=None):
+    """Trusted composition input only; never deserialize this from Gate wire data."""
+    if host_profile is None:
+        return HELPER_HOST_UID, HELPER_HOST_GID
+    from .local_host_profile import LocalHostProfile, HostProfileError
+    if type(host_profile) is not LocalHostProfile:
+        raise ArtifactError('INVALID_GATE_HOST_PROFILE')
+    try:
+        LocalHostProfile.parse(host_profile.document())
+    except (HostProfileError, TypeError, ValueError):
+        raise ArtifactError('INVALID_GATE_HOST_PROFILE') from None
+    return host_profile.host_id(HELPER_UID), host_profile.host_id(HELPER_GID)
+
+
 def _profile_target(profile, value):
     if profile == COMMAND_PROFILE:
         from .gate_repository import validate_command_target
@@ -111,8 +125,10 @@ class GateWorkstation:
     mapping_digest: str
     receiver_context: str
     profile: str = PROFILE_ID
+    host_profile: object = None
 
     def __post_init__(self):
+        helper_host_identity(self.host_profile)
         if self.profile not in BOOTSTRAPS:
             raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
         if (any(type(v) is not str or not _TOKEN.fullmatch(v)
@@ -263,7 +279,8 @@ class GateHelperLaunch:
                 or value.get('ContainerID') != self.workstation.container_id
                 or value.get('Running') is not True or type(value.get('Pid')) is not int
                 or self.origin is None or self.origin.revoked or not alive(self.origin.pidfd)
-                or value['Pid'] != self.origin.credentials[0]):
+                or value['Pid'] != self.origin.credentials[0]
+                or self.origin.credentials[1:] != helper_host_identity(self.workstation.host_profile)):
             raise ArtifactError('GATE_EXEC_IDENTITY_UNVERIFIED')
         self._remaining()
 
@@ -299,7 +316,7 @@ class GateHelperLaunch:
             with receive(self.channel) as record:
                 if (len(record.data) != 36 or record.data[:4] != b'AGH1'
                         or not hmac.compare_digest(record.data[4:], challenge)
-                        or record.credentials[1:] != (HELPER_HOST_UID, HELPER_HOST_GID)):
+                        or record.credentials[1:] != helper_host_identity(self.workstation.host_profile)):
                     raise ArtifactError('GATE_BOOTSTRAP_ORIGIN_MISMATCH')
                 self.origin = HeldOrigin(record)
             challenge = None

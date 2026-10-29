@@ -59,11 +59,26 @@ class ThreeLocalRunsTests(unittest.TestCase):
         self.lifecycle={'phase':'running','desired':'running','instance_id':'instance',
                         'spec':{'project_id':c.room['project']['id'],'config_digest':'sha256:fixture'}}
         c.supervisor._read=lambda:self.lifecycle
-        plan=object.__new__(LocalRuntimePlan)
-        for key in ('room','seats','config','config_text','installation'):
-            setattr(plan,key,getattr(c.plan,key))
-        plan.require_unchanged=Mock();plan.operation_timeout_seconds=180;plan.config_digest='fixture'
-        plan.review_configuration=c.plan.review_configuration
+        # Use a real validated selected host with nondefault UID range for
+        # every composed Run/Stop/terminal/reset flow; native effects stay doubled.
+        from uas.local_native import LocalNativeProfile
+        from tests.test_local_installation import native_selection
+        from tests.test_local_host_plan import profile as host_selection
+        document=native_selection(c.plan.config)
+        host_profile=host_selection();host_profile['installation_id']=document['installation_id']
+        host_profile['mapping']['offset']=500000
+        document.update(version=2,profile='local-native-v2',host_profile=host_profile,
+                        mapping={'offset':500000,'size':65536})
+        for value in document['rooms'].values():
+            value['workstation']['image_reference']=value['workstation']['image_id']
+        native=LocalNativeProfile(c.plan.config,document,c.room['id'],c.plan.config['deployment']['state_root'])
+        selection={'version':1,'profile':'local-runtime-v1','room_id':c.room['id'],
+            'installation_id':native.nonce,'human_mergers':[7],
+            **{k+'_manifest':{'path':'/installation/'+k+'.json','sha256':'a'*64}
+               for k in ('pi','claude','broker')}}
+        plan=LocalRuntimePlan(c.plan.config_text,selection,installation_digest='f'*64,native_profile=native)
+        self.assertEqual(plan.native_profile.host_profile.owners['runtime'],565532)
+        self.lifecycle['spec']['config_digest']='sha256:'+plan.config_digest
         c.launcher.plan=plan
         c.launcher.exec_seat=N(participant_id=c.participant);c.launcher.stack=self.stack
         c.launcher.control=object();c.launcher.budget=SessionBudget(180)

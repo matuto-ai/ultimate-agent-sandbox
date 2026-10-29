@@ -25,6 +25,10 @@ def run_host(installation):
     previous = {}
     def stop(*_): stopped.set()
     with host_lock(installation) as lock_fd:
+        _,config,selected=installation.bootstrap()
+        if selected['native'] is not None and selected['native']['version']==3:
+            from .local_room_prepare import readmit_document
+            readmit_document(config,selected['native'],runtime_plan_for=installation.runtime_plan_for)
         services = LocalServices(lock_fd, runtime_plan_for=installation.runtime_plan_for,
             manager_reference_for=lambda profile:installation.open()[0]['manager'])
         manager = ManagerOwner(installation)

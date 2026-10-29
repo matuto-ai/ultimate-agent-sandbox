@@ -16,7 +16,7 @@ import stat
 
 from .config import load
 from .local_installation import canonical, document, reference
-from .local_native import LOCAL_HUB_COMMAND, LocalNativeProfile, validate_document
+from .local_native import LOCAL_HUB_COMMAND, LocalNativeProfile, validate_document, owned_xfs_selection
 from .native_image_package import payload, envelope
 
 MAX_BYTES=1024*1024
@@ -157,14 +157,29 @@ def verified_output(directory,revision,*,hub):
 
 
 def assemble(config,settings,workstation,hub,*,observe=directory_identity):
-    require(type(settings) is dict and set(settings)=={'version','installation_id','storage_root',
-            'endpoints_root','engine_version','mapping','rooms'} and type(settings['version']) is int
-            and settings['version']==1,'exact host selections required')
+    require(type(settings) is dict and type(settings.get('version')) is int
+            and settings['version'] in (1,2,3), 'exact host selections required')
+    require(set(settings)==({'version','installation_id','storage_root','endpoints_root','engine_version','mapping','rooms'}
+            | ({'host_profile'} if settings['version']>=2 else set())
+            | ({'owned_xfs'} if settings['version']==3 else set())), 'exact host selections required')
     require(type(settings['rooms']) is dict and set(settings['rooms'])=={r['id'] for r in config['rooms']},
             'host selections must cover every Project Room exactly')
-    native={**deepcopy(settings),'profile':'local-native-v1','rooms':{}}
+    native={**deepcopy(settings),'profile':'local-native-v'+str(settings['version']),'rooms':{}}
+    raw_observe=observe
+    if settings['version']==3:
+        from .local_xfs_storage import verify_owned_mount
+        selection=owned_xfs_selection(settings['owned_xfs'])
+        mounted=verify_owned_mount(selection,Path(settings['storage_root']))
+        require(mounted['image_identity']==selection['image_identity'],'owned XFS image identity mismatch')
+        def observe_storage(name):
+            actual=raw_observe(name)
+            require(actual[0]==mounted['identity'][0], 'owned XFS filesystem mismatch')
+            return [0,actual[1]]
+        observe=observe_storage
+    if settings['version']==3:
+        require(raw_observe(settings['storage_root'])==mounted['identity'], 'owned XFS root identity mismatch')
     storage_identity=observe(settings['storage_root'])
-    observe(settings['endpoints_root'])
+    raw_observe(settings['endpoints_root'])
     for room in config['rooms']:
         declared=settings['rooms'][room['id']]
         require(type(declared) is dict and set(declared)=={'quota_project_id','mcs_level','subnet','gateway'},
@@ -179,10 +194,13 @@ def assemble(config,settings,workstation,hub,*,observe=directory_identity):
     return native
 
 
-def prepare(project,settings,workstation_output,hub_output,revision,output_directory):
+def prepare(project,settings,workstation_output,hub_output,revision,output_directory, *, owned_xfs=None):
     require(type(revision) is str and re.fullmatch('[0-9a-f]{40}',revision),'full selected source revision required')
     project=Path(project);raw=read_file(project);config=load(StringIO(raw.decode('utf-8')))
     selected=document(read_file(settings))
+    if owned_xfs is not None:
+        require(selected['version']==2,'owned XFS requires version-2 explicit Engine selections')
+        selected={**selected,'version':3,'owned_xfs':owned_xfs}
     ws,payloads=verified_output(workstation_output,revision,hub=False)
     hub,unused=verified_output(hub_output,revision,hub=True)
     images={image['id']:image['reference'] for image in config['deployment']['images']}

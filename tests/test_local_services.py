@@ -15,6 +15,9 @@ class LocalServicesTests(unittest.TestCase):
             return services.LocalServices(8)
     def backend(self):
         backend=Mock();backend.profile.room={'id':'alpha','seats':[]}
+        from uas.local_host_profile import LocalHostProfile
+        from tests.test_local_host_plan import profile
+        backend.profile.host_profile=LocalHostProfile.parse(profile())
         backend.admit.return_value={'State':{'Running':True,'Pid':90}}
         backend.ensure_hub.return_value={'Id':'owned','State':{'Running':False}}
         backend.listeners=[Mock(),Mock()];backend.listeners[0].fileno.return_value=9;backend.listeners[1].fileno.return_value=10

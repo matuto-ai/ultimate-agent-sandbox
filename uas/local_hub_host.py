@@ -24,8 +24,9 @@ def startup_document(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= 2*1048576:
         raise QualificationError('LOCAL_HUB_STARTUP_DOCUMENT')
     value=json.loads(raw,object_pairs_hook=_unique)
-    if (type(value) is not dict or set(value) not in ({'version','room','resources'},{'version','room','resources','runtime'})
-            or type(value['version']) is not int or value['version']!=1
+    if (type(value) is not dict or type(value.get('version')) is not int or value['version'] not in (1,2)
+            or set(value) not in (({'version','room','resources'}|({'host_profile'} if value['version']==2 else set())),
+                                  ({'version','room','resources','runtime'}|({'host_profile'} if value['version']==2 else set())))
             or type(value['room']) is not dict or type(value['resources']) is not dict):
         raise QualificationError('LOCAL_HUB_STARTUP_DOCUMENT')
     resources=value['resources']
@@ -33,7 +34,27 @@ def startup_document(raw):
             or any(type(resources[k]) is not int or resources[k]<3 for k in ('control_fd','peer_fd'))
             or resources['control_fd']==resources['peer_fd']):
         raise QualificationError('LOCAL_HUB_STARTUP_RESOURCES')
+    startup_engine(value)
     return value
+
+
+def startup_engine(value):
+    from .local_host_profile import LocalHostProfile
+    if value['version']==1:
+        socket_path='/run/docker.sock';selected=None
+    else:
+        selected=LocalHostProfile.parse(value['host_profile'])
+        socket_path=selected.socket
+    if 'runtime' in value:
+        from .local_native import validate_document, selected_host
+        runtime=value['runtime']
+        if type(runtime) is not dict or 'native_document' not in runtime:
+            raise QualificationError('LOCAL_RUNTIME_STARTUP_SCHEMA')
+        native_host=selected_host(validate_document(runtime['native_document']))
+        if ((selected is not None and native_host.document()!=selected.document())
+                or (selected is None and native_host.socket!=socket_path)):
+            raise QualificationError('LOCAL_RUNTIME_ENGINE_BINDING')
+    return socket_path
 
 
 def metadata(room,resources,identity,challenge):
@@ -67,16 +88,22 @@ def retain(control,origin,parent_fd):
 
 
 def run(raw,parent_fd):
-    if (os.getuid(),os.getgid())!=(HOST_UID,HOST_UID):
+    if os.getuid()==0 or os.getgid()==0:
         raise QualificationError('LOCAL_HUB_FIXED_OWNER_REQUIRED')
-    document=startup_document(raw);resources=document['resources'];probe()
+    document=startup_document(raw)
+    from .local_host_profile import LocalHostProfile
+    host_profile=LocalHostProfile.parse(document['host_profile']) if document['version']==2 else None
+    owner=HOST_UID if host_profile is None else host_profile.owners['supervisor']
+    if (os.getuid(),os.getgid())!=(owner,owner):
+        raise QualificationError('LOCAL_HUB_FIXED_OWNER_REQUIRED')
+    resources=document['resources'];probe()
     with ExitStack() as stack:
         self_fd=os.pidfd_open(os.getpid(),0);stack.callback(os.close,self_fd)
         startup=metadata(document['room'],resources,_identity(self_fd),secrets.token_hex(32))
         listener=socket.socket(fileno=resources['control_fd']);stack.callback(listener.close)
         peer=socket.socket(fileno=resources['peer_fd']);stack.callback(peer.close)
-        control,origin,ready,_=start_hub_channel(DockerExecAPI('/run/docker.sock'),resources,
-                                               startup,listener,stack,SessionBudget(30))
+        control,origin,ready,_=start_hub_channel(DockerExecAPI(startup_engine(document)),resources,
+                                               startup,listener,stack,SessionBudget(30),host_profile=host_profile)
         receipt={'version':1,'status':'ready','room_id':startup['room_id'],
                  'room_instance':startup['room_instance'],'controller':ready['controller']}
         def announce(_=None):

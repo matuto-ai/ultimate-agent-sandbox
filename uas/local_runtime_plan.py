@@ -68,6 +68,8 @@ class LocalRuntimePlan:
 
     def _bindings(self):
         return canonical({'native_digest':self.native_profile.digest,
+            'native_document':self.native_profile.native_document,
+            'host_profile':self.native_profile.host_profile.document(),
             'native_room':self.native_profile.room,'native_paths':self.native_profile.paths,
             'native_image_id':self.native_profile.image_id,'native_image_reference':self.native_profile.image_reference,
             'native_config_digest':self.native_profile.config_digest,

@@ -13,6 +13,7 @@ import sys
 import json
 
 from .ledger import LedgerError
+from .local_host_profile import plan_owners
 from .kernel_origin import alive
 from .local_runtime_plan import LocalRuntimePlan
 from .local_native import readonly_local_supervisor
@@ -95,13 +96,13 @@ class LocalNativeRunSession:
         channel=socket.socket(fileno=os.dup(self.broker_fd))
         try:
             broker=ReadBrokerClient(channel,self.supervisor,binding,self.resources['instance'],
-                                    worker_uid=165534,worker_gid=165534)
+                                    worker_uid=plan_owners(self.plan)['broker'],worker_gid=plan_owners(self.plan)['broker'])
         except BaseException:channel.close();raise
         git=None
         try:
             if self.git_fd is not None:
                 git_channel=socket.socket(fileno=os.dup(self.git_fd))
-                try:git=GitBrokerClient(git_channel,binding,self.resources['instance'],broker_uid=165534,broker_gid=165534)
+                try:git=GitBrokerClient(git_channel,binding,self.resources['instance'],broker_uid=plan_owners(self.plan)['broker'],broker_gid=plan_owners(self.plan)['broker'])
                 except BaseException:git_channel.close();raise
         except BaseException:broker.close();raise
         self._broker,self._git_broker=broker,git

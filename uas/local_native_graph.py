@@ -45,14 +45,12 @@ class LocalNativeGraph:
 
     def _prepare(self):
         host=self.host;plan=host.plan;data=host.resources;room=plan.room
-        # The profile is validated by LocalNativeProfile; qualification defaults
-        # are only retained for the existing v1 profile pending #202 integration.
-        profile=getattr(plan.native_profile,'host_profile',None)
-        ids=({'supervisor':165533,'runtime':165532,'hub':165531,'broker':165534}
-             if profile is None else profile.owners)
+        from .local_host_profile import plan_owners
+        ids=plan_owners(plan)
+        profile=plan.native_profile.host_profile
         if (os.getuid(),os.getgid())!=(ids['supervisor'],ids['supervisor']):
             raise LedgerError('LOCAL_NATIVE_OWNER_IDENTITY')
-        self.engine=DockerExecAPI('/run/docker.sock' if profile is None else profile.socket)
+        self.engine=DockerExecAPI(profile.socket)
         self.budget=SessionBudget(plan.operation_timeout_seconds,current=host.operation_current)
         stack=self.stack;self.peer=stack.enter_context(closing(socket.socket(fileno=os.dup(data['peer_fd']))))
         enable(self.peer)

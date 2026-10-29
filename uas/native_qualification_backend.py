@@ -49,10 +49,13 @@ def exact(value, fields, code):
     return value
 
 
-def fixed_docker(arguments, *, timeout, missing_ok=False):
+def fixed_docker(arguments, *, timeout, missing_ok=False, socket_path="/run/docker.sock"):
     """Fixed trusted Engine endpoint; no ambient Docker context/config override."""
+    require(type(socket_path) is str and re.fullmatch(r'/[A-Za-z0-9_./-]+',socket_path)
+            and str(Path(socket_path))==socket_path and '..' not in Path(socket_path).parts
+            and socket_path!='/', 'ENGINE_SOCKET')
     try:
-        result = subprocess.run(['/usr/bin/docker','--host','unix:///run/docker.sock',*arguments],
+        result = subprocess.run(['/usr/bin/docker','--host','unix://'+socket_path,*arguments],
             capture_output=True,text=True,timeout=timeout,check=False,
             env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C','HOME':'/nonexistent',
                  'DOCKER_CONFIG':'/nonexistent'})
@@ -251,11 +254,18 @@ class NativeBoundaryProfile:
     def guard(self, *, require_selinux=True):
         guard(self.nonce, require_selinux=require_selinux)
 
+    @property
+    def owners(self):
+        return {'gate':165530,'hub':HUB_UID,'runtime':RUNTIME_UID,'supervisor':HOST_UID,'broker':BROKER_UID}
+
     def storage_ancestors(self): return (self.storage, self.root, self.root/'state')
+
+    def storage_identity(self, path):
+        return directory_identity(path)
 
     def observe_storage(self):
         self.guard()
-        require(directory_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
+        require(self.storage_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
         require(self.root.stat().st_uid == 0 and not self.root.stat().st_mode & 0o022, 'ROOT_OWNER')
         for ancestor in self.storage_ancestors():
             info=ancestor.stat()
@@ -270,10 +280,10 @@ class NativeBoundaryProfile:
         require(len(rows) == 1 and len(rows[0]) >= 4
                 and rows[0][3] == str(self.limits['disk_bytes'] // 1024), 'QUOTA_DRIFT')
         for key, path in self.paths.items():
-            require(directory_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
+            require(self.storage_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
             info = Path(path).stat()
             require(info.st_dev == self.storage.stat().st_dev, 'QUOTA_FILESYSTEM')
-            require(info.st_uid == RUNTIME_UID and info.st_gid == RUNTIME_UID, 'PATH_OWNER')
+            require(info.st_uid == self.owners['runtime'] and info.st_gid == self.owners['runtime'], 'PATH_OWNER')
             require(project_attributes(path) == (self.project_id, True), 'PROJECT_QUOTA')
             label = command('stat', '-c', '%C', path).strip()
             require(label == 'system_u:object_r:container_file_t:' + self.level, 'PATH_LABEL')
@@ -492,27 +502,32 @@ class NativeQualificationBackend(DockerFixtureBackend):
         else:
             raise LifecycleError('NATIVE_RESOURCE_KIND')
 
+    def engine_selection(self):
+        return {'version':'29.8.2','docker_root':'/var/lib/docker/100000.100000',
+                'remap_user':'uas-remap','offset':100000,'size':65536}
+
     def admit(self, state):
         self._guard(); self._binding(state); self.profile.observe_storage()
         self._network_policy(state)
         value = self._inspect_object(state, 'container')
         require(value is not None, 'CONTAINER_REQUIRED')
+        selected=self.engine_selection()
         security = json.loads(self._run(['info', '--format', '{{json .SecurityOptions}}']))
-        require(self._run(['version','--format','{{.Server.Version}}']).strip()=='29.8.2','ENGINE_PROFILE')
+        require(self._run(['version','--format','{{.Server.Version}}']).strip()==selected['version'],'ENGINE_PROFILE')
         require(type(security) is list and {'name=seccomp,profile=builtin', 'name=selinux', 'name=userns'}
                 <= set(security), 'DAEMON_CONFINEMENT')
         require(self._run(['info', '--format', '{{.DockerRootDir}}']).strip() ==
-                '/var/lib/docker/100000.100000', 'USERNS_MAPPING')
+                selected['docker_root'], 'USERNS_MAPPING')
         for name in ('subuid', 'subgid'):
-            rows = [line for line in Path('/etc/' + name).read_text().splitlines() if line.startswith('uas-remap:')]
-            require(rows == ['uas-remap:100000:65536'], 'USERNS_MAPPING')
+            rows = [line for line in Path('/etc/' + name).read_text().splitlines() if line.startswith(selected['remap_user']+':')]
+            require(rows == [selected['remap_user']+':'+str(selected['offset'])+':'+str(selected['size'])], 'USERNS_MAPPING')
         self.validate_container(state, value)
         if value['State']['Running']:
             pid = value['State'].get('Pid')
             require(type(pid) is int and pid > 0, 'KERNEL_MAPPING')
             for name in ('uid_map', 'gid_map'):
                 require(Path('/proc/' + str(pid) + '/' + name).read_text().split() ==
-                        ['0', '100000', '65536'], 'KERNEL_MAPPING')
+                        ['0', str(selected['offset']), str(selected['size'])], 'KERNEL_MAPPING')
         return value
 
     def validate_container(self, state, value):
@@ -570,12 +585,12 @@ class NativeQualificationBackend(DockerFixtureBackend):
             os.fsync(descriptor)
         finally:os.close(descriptor)
         for key, path in layout.items():
-            mode, uid, gid = ((0o700, HOST_UID, HOST_UID) if key == 'supervisor' else
-                (0o700, BROKER_UID, BROKER_UID) if key in ('broker','git-broker') else
-                (0o711, HOST_UID, HOST_UID) if key == 'gate-targets' else
-                (0o710, HOST_UID, 165530) if key == 'gate' else
-                (0o2770, HOST_UID, HUB_UID) if key == 'hub' else
-                (0o710, HOST_UID, RUNTIME_UID if key in ('peer','git') else HUB_UID))
+            mode, uid, gid = ((0o700, self.profile.owners['supervisor'], self.profile.owners['supervisor']) if key == 'supervisor' else
+                (0o700, self.profile.owners['broker'], self.profile.owners['broker']) if key in ('broker','git-broker') else
+                (0o711, self.profile.owners['supervisor'], self.profile.owners['supervisor']) if key == 'gate-targets' else
+                (0o710, self.profile.owners['supervisor'], self.profile.owners['gate']) if key == 'gate' else
+                (0o2770, self.profile.owners['supervisor'], self.profile.owners['hub']) if key == 'hub' else
+                (0o710, self.profile.owners['supervisor'], self.profile.owners['runtime'] if key in ('peer','git') else self.profile.owners['hub']))
             path.mkdir(mode=mode); os.chown(path, uid, gid); os.chmod(path, mode)
             if key not in ('supervisor','broker','git-broker'): command('chcon', '-t', 'container_file_t', '-l', self.level, str(path))
         if getattr(self.profile,'gate_manifest',None) is not None:
@@ -583,7 +598,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
             selected=paths(self.profile.gate_plan,state)
             for key in ('journal_root','launch_journal_root'):
                 selected[key].mkdir(mode=0o700)
-                os.chown(selected[key],HOST_UID,HOST_UID);os.chmod(selected[key],0o700)
+                os.chown(selected[key],self.profile.owners['supervisor'],self.profile.owners['supervisor']);os.chmod(selected[key],0o700)
             # Assign only these freshly created owned trees, never Project data.
             for key in ('scratch_root','journal_root','launch_journal_root'):
                 path=selected[key]
@@ -600,17 +615,17 @@ class NativeQualificationBackend(DockerFixtureBackend):
             finally:os.close(fd)
         # Gate socket is deliberately NOT created here: its actual creator must
         # be Supervisor UID/GID165533 so bootstrap SO_PEERCRED is truthful.
-        for path,group in ((layout['peer'] / 'pi.sock',RUNTIME_UID),(layout['control'] / 'hub.sock',HUB_UID)):
-            self.listeners.append(labeled_listener(path,group,level=self.level))
+        for path,group in ((layout['peer'] / 'pi.sock',self.profile.owners['runtime']),(layout['control'] / 'hub.sock',self.profile.owners['hub'])):
+            self.listeners.append(labeled_listener(path,group,level=self.level,owner=self.profile.owners['supervisor']))
         if self.profile.git_manifest is not None:
             from .native_git_resources import prepare_views
             journal=layout['supervisor']/'git-launches'
-            journal.mkdir(mode=0o700);os.chown(journal,HOST_UID,HOST_UID);os.chmod(journal,0o700)
+            journal.mkdir(mode=0o700);os.chown(journal,self.profile.owners['supervisor'],self.profile.owners['supervisor']);os.chmod(journal,0o700)
             prepare_views(self.profile.git_plan,state)
             for name in ('git-views','git-fixed','git-workspace'):
                 command('chcon','-R','-t','container_file_t','-l',self.level,str(endpoint_root/name))
             for name in ('request.sock','worker.sock'):
-                self.listeners.append(labeled_listener(layout['git']/name,RUNTIME_UID,listen=name!='request.sock',level=self.level))
+                self.listeners.append(labeled_listener(layout['git']/name,self.profile.owners['runtime'],listen=name!='request.sock',level=self.level,owner=self.profile.owners['supervisor']))
 
     def observe_gate_quota(self,state,*,deadline):
         """Fixed read-only current usage, outside lifecycle/Room locks."""
@@ -633,8 +648,8 @@ class NativeQualificationBackend(DockerFixtureBackend):
             identities={}
             for key in ('scratch_root','journal_root','launch_journal_root'):
                 path=selected[key];node=path.stat(follow_symlinks=False)
-                require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==HOST_UID
-                    and node.st_gid==HOST_UID and stat.S_IMODE(node.st_mode)==(0o711 if key=='scratch_root' else 0o700)
+                require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==self.profile.owners['supervisor']
+                    and node.st_gid==self.profile.owners['supervisor'] and stat.S_IMODE(node.st_mode)==(0o711 if key=='scratch_root' else 0o700)
                     and node.st_dev==self.storage.stat().st_dev and project_attributes(path)==(self.project_id,True), 'GATE_QUOTA_RESOURCE')
                 identities[key]={'path':str(path),'identity':[node.st_dev,node.st_ino]}
             require(record=={'version':1,'instance':state['instance_id'],'profile_digest':self.profile.digest,
@@ -719,7 +734,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return True
 
 
-def labeled_listener(path, group, *, listen=True, level=None):
+def labeled_listener(path, group, *, listen=True, level=None, owner=HOST_UID):
     """Existing disposable fixed socket-context seam, not a domain transition."""
     level = LEVEL if level is None else level
     original = Path('/proc/self/attr/current').read_text()
@@ -735,7 +750,7 @@ def labeled_listener(path, group, *, listen=True, level=None):
         listener.bind(str(path))
         if listen: listener.listen(4)
         listener.settimeout(3)
-        os.chown(path, HOST_UID, group); os.chmod(path, 0o620)
+        os.chown(path, owner, group); os.chmod(path, 0o620)
     except BaseException:
         if listener is not None: listener.close()
         raise
@@ -842,7 +857,7 @@ def readonly_supervisor(plan, resources):
     return owner
 
 
-def copy_public_manifest(ref, target):
+def copy_public_manifest(ref, target, *, owner=HOST_UID):
     value = read_manifest(ref['path'],ref['sha256'])
     # Preserve exact bytes, not a reserialization with a different digest. Open
     # again only for public metadata; digest comparison protects this copy race.
@@ -856,7 +871,7 @@ def copy_public_manifest(ref, target):
     fd = os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
     try:
         with os.fdopen(fd,'wb') as stream:
-            stream.write(raw);stream.flush();os.fsync(stream.fileno());os.fchown(stream.fileno(),HOST_UID,HOST_UID)
+            stream.write(raw);stream.flush();os.fsync(stream.fileno());os.fchown(stream.fileno(),owner,owner)
     except BaseException:
         raise
     return value

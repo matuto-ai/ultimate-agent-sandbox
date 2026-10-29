@@ -34,6 +34,9 @@ class GraphTests(unittest.TestCase):
 
     def prepared(self, *, mapped=False):
         fixture=plan_fixture.LocalRuntimePlanTests();fixture.setUp();plan=fixture.plan()
+        if mapped:
+            from tests.test_local_git_gate_identities import local_plan
+            plan=local_plan(500000)
         f=admission_fixture.fixture(self)
         host=object.__new__(LocalNativeRunSession)
         host.plan=plan;host.supervisor=f.supervisor
@@ -49,11 +52,8 @@ class GraphTests(unittest.TestCase):
         host.hub_channel=lambda:(object(),object(),{'controller':'controller'},metadata)
         client=f.owner.broker.client
         host.clients=lambda:(client,None)
-        ids={'supervisor':165533,'runtime':165532,'hub':165531,'broker':165534}
-        endpoint='/run/docker.sock'
-        if mapped:
-            ids={key:value+100000 for key,value in ids.items()};endpoint='/run/selected/docker.sock'
-            plan.native_profile.host_profile=N(owners=ids,socket=endpoint)
+        ids=plan.native_profile.host_profile.owners
+        endpoint=plan.native_profile.host_profile.socket
         provenance=subject.GitProvenance(Path(root.name)/'git-history.db',plan.room['id'],plan.room['project']['id'])
         patch.object(subject,'GitProvenance',return_value=provenance).start()
         patch.object(subject.os,'getuid',return_value=ids['supervisor']).start()
@@ -86,7 +86,7 @@ class GraphTests(unittest.TestCase):
         self.assertFalse(any(type(value) is HumanSession for value in vars(graph).values()))
         graph.close();self.assertTrue(graph.peer.closed);self.assertTrue(graph.checkout.closed)
 
-    def test_unselected_v1_endpoint_constructor_and_bounded_refresh(self):
+    def test_validated_v1_endpoint_constructor_and_bounded_refresh(self):
         graph,_,endpoint=self.prepared()
         self.assertEqual(graph.engine.socket_path,endpoint)
         budget=graph.budget;old=budget.deadline
