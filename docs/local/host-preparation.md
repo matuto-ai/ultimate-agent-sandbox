@@ -1,5 +1,78 @@
 # Persistent local host preparation (source checkpoint)
 
+## Guided first installation
+
+Start with observation, **before** Project, account or image choices:
+
+```sh
+python -m uas.local_setup inspect --output /absolute/private/host-inspection
+```
+
+This is read-only host inspection (it may require root to observe host facts).
+It reports unsupported/foreign host state rather than modifying it. The default
+parent is `/var/lib`; `--parent` and `--engine-socket` select another existing
+canonical parent or Engine. No package, image or provider account is installed.
+
+Then propose a new Project using the native Pi implementer / Claude independent
+reviewer profile. The wizard asks only for actual identity/reference choices,
+not UID ranges, quota IDs, MCS categories, subnets or manually written JSON:
+
+```sh
+python -m uas.local_setup propose --new-project \
+  --inspection /absolute/private/host-inspection/inspection.json \
+  --allocation-bytes 21474836480 --output /absolute/private/proposal
+```
+
+`--allocation-bytes` is an explicit owned-XFS backing budget, needed only when
+existing quota-enabled XFS is unavailable. It is never an implicit allocation.
+The Project's Room disk limit defaults to 10 GiB; `--room-disk-bytes` changes that
+limit, not the backing budget. Review both before apply. CPU/memory/PID/log
+limits are bounded initial declarations, not measured machine capacity.
+
+The wizard asks for project/repository, both actual actor names and GitHub
+numeric identities, their Git author names/emails, and Pi/Claude provider
+credential **reference names**. Optional models remain unset unless supplied.
+Git/Forge reference slots derive from each actor (`<actor>-git`, `<actor>-forge`)
+and are displayed. These are names, not tokens; no credentials are provisioned
+and the selected role profile does not authorize a Run. All fields also have
+named CLI options for a bootstrap script.
+
+Supply the actual Manager HTTPS URL and client/trust reference names if this
+Project will use a remote Manager. An empty URL explicitly selects local-only;
+that pinned Project cannot silently acquire remote Manager settings later.
+No placeholder URL or fake credential is generated. For an existing Project,
+use `--project /absolute/project.json` instead of `--new-project`; its runtime,
+model, identity, credential and repository choices are preserved.
+
+After obtaining the **current matching verified Workstation and Hub image
+reports**, bind them to the proposal and review the actual canonical plan:
+
+```sh
+python -m uas.local_setup plan --proposal /absolute/private/proposal/proposal.json \
+  --workstation-output /absolute/verified-workstation \
+  --hub-output /absolute/verified-hub --revision <exact-revision> \
+  --output /absolute/private/install-plan
+python -m uas.local_setup apply --plan /absolute/private/install-plan/request.json \
+  --output /absolute/private/prepared
+```
+
+`plan` also creates private `install-plan-inputs` alongside its output. Never
+edit or overwrite those pinned files. Inspection/proposal are not reservations:
+the canonical planner/apply owners freshly check collisions and ownership.
+A failed/partial apply must be reconciled from its receipts, not rerun under a
+new identity. The legacy explicit `plan --project ... --settings ...` remains
+available below for advanced integrations.
+
+**Correct next sequence:** load the verified images; prepare an owned Git
+checkout using the existing Git contracts; compose/select runtime bindings with `runtime-descriptor` as shown in
+[operator handoff](operator-handoff.md#4-attach-runtime-and-manager-bindings-when-available)
+**before the first Room start**; then provision actual credentials
+through the supported account flow and admit a Run. Setup creates storage and
+metadata, not a clone or a provider login. Starting an idle Room first and only
+then adding runtime selection is refused by the pinned lifecycle. Old image
+archives are not evidence that the current persistent Hub image is available.
+
+
 This path prepares storage for an existing **compatible** local native Engine.
 It reuses quota-enabled XFS or, with an explicitly sized plan, creates a private
 installation-owned XFS image and mounts it at the new storage root. Compatible Engine reuse remains preferred. The optional first-Engine bootstrap

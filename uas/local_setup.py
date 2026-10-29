@@ -130,19 +130,156 @@ def apply(value,output_directory):
             'remaining':['image-load-and-native-runtime-admission']}
 
 
+def guided_proposal(inspection, *, project=None, intent=None, allocation_bytes=None):
+    """Image-independent private proposal; no allocation or reservation."""
+    from .local_host_guided import select_rooms
+    require((project is None) != (intent is None),'GUIDED_ONE_PROJECT_SOURCE_REQUIRED')
+    selection=None
+    if project is not None:
+        from .config import load
+        load(StringIO(json.dumps(project)))
+        if not inspection['blockers']:
+            selection=select_rooms(project,inspection,allocation_bytes)
+    body={'version':1,'inspection':deepcopy(inspection),'project':deepcopy(project),
+          'intent':deepcopy(intent),'selection':selection,'allocation_bytes':allocation_bytes}
+    return {**body,'proposal_id':digest(body)}
+
+
+def bind_guided(value,workstation_output,hub_output,revision,output_directory):
+    """Bind verified images and feed generated files to the existing planner.
+
+    Inputs remain private beside the output. A failed plan leaves them intact
+    for inspection rather than guessing whether earlier output was complete.
+    """
+    from .local_host_guided import select_rooms
+    from .local_prepare import write_output
+    require(value.get('version')==1 and value.get('proposal_id')==digest({k:v for k,v in value.items() if k!='proposal_id'}),
+            'GUIDED_PROPOSAL_CHANGED')
+    inspection=value['inspection'];require(not inspection['blockers'],'GUIDED_HOST_BLOCKED')
+    ws,_=verified_output(workstation_output,revision,hub=False)
+    verified_output(hub_output,revision,hub=True)
+    if value['intent'] is not None:
+        from .local_project_guided import materialize
+        require(value['project'] is None,'GUIDED_ONE_PROJECT_SOURCE_REQUIRED')
+        project=materialize(value['intent'],ws['image_id'],inspection['defaults']['storage_root'])
+    else:
+        project=value['project']
+        require(project is not None,'GUIDED_ONE_PROJECT_SOURCE_REQUIRED')
+    selected=select_rooms(project,inspection,value['allocation_bytes'])
+    require(not selected['blockers'],'GUIDED_HOST_BLOCKED')
+    if value['selection'] is not None:
+        require(selected==value['selection'],'GUIDED_SELECTION_CHANGED')
+    output=Path(output_directory);inputs=output.with_name(output.name+'-inputs')
+    require(not os.path.lexists(output),'SETUP_OUTPUT_MUST_BE_NEW')
+    storage=Path(selected['settings']['storage_root'])
+    require(all(p!=storage and storage not in p.parents for p in (output,inputs)), 'SETUP_BOOTSTRAP_INSIDE_STORAGE')
+    write_output(inputs,{'project.json':canonical(selected['config']),'settings.json':canonical(selected['settings']),
+                         'guided-proposal.json':canonical(value)})
+    defaults=inspection['defaults'];owned=selected['settings']['host_profile']['mode']=='owned'
+    request_value=proposal(inputs/'project.json',inputs/'settings.json',workstation_output,hub_output,revision,
+        host_receipt_root=defaults['host_receipt_root'],allocation_bytes=value['allocation_bytes'],
+        engine_receipt_root=defaults['engine_receipt_root'] if owned else None,
+        account_uid=defaults['account_uid'] if owned else None,account_gid=defaults['account_gid'] if owned else None)
+    write_output(output,{'request.json':canonical(request_value)})
+    return {'status':'planned','plan_id':request_value['plan_id'],'request':str(output/'request.json'),
+            'inputs':str(inputs),'proposal_id':value['proposal_id']}
+
+
 def main(argv=None):
     import argparse
     from .local_prepare import write_output
     parser=argparse.ArgumentParser(description='Explicit first-Engine or existing-Engine native setup')
     sub=parser.add_subparsers(dest='action',required=True)
+    runtime=sub.add_parser('runtime-descriptor',help='Validate public runtime metadata before first Room start; no credentials provisioned')
+    runtime.add_argument('--prepared',required=True)
+    runtime.add_argument('--room')
+    runtime.add_argument('--broker-manifest',required=True)
+    runtime.add_argument('--human-merger',type=int,action='append',required=True)
+    for name in ('git-manifest','git-broker-manifest','gate-manifest','output'):
+        runtime.add_argument('--'+name)
+    observing=sub.add_parser('inspect' ,help='Read host facts without Project or image reports')
+    proposing=sub.add_parser('propose',help='Choose bounded defaults; no host changes')
+    for command in (observing,proposing):
+        command.add_argument('--parent',default='/var/lib')
+        command.add_argument('--engine-socket',default='/run/docker.sock')
+        command.add_argument('--installation-id')
+        command.add_argument('--output',required=True)
+    proposing.add_argument('--inspection')
+    proposing.add_argument('--project')
+    proposing.add_argument('--new-project',action='store_true',help='Guided native Pi implementer + Claude reviewer pair; prompts only for missing non-secret choices')
+    for name in ('project-id','repository','pi-actor','claude-actor','pi-auth-ref','claude-auth-ref',
+                 'pi-git-name','pi-git-email','claude-git-name','claude-git-email','pi-model','claude-model',
+                 'manager-url','manager-client-ref','manager-trust-ref'):
+        proposing.add_argument('--'+name)
+    proposing.add_argument('--reviewer-github-id',type=int)
+    proposing.add_argument('--pi-github-id',type=int)
+    proposing.add_argument('--room-disk-bytes',type=int)
+    proposing.add_argument('--allocation-bytes',type=int)
     planning=sub.add_parser('plan')
-    for name in ('project','settings','workstation-output','hub-output','revision','host-receipt-root','output'):
+    planning.add_argument('--proposal')
+    for name in ('workstation-output','hub-output','revision','output'):
         planning.add_argument('--'+name,required=True)
+    for name in ('project','settings','host-receipt-root'):
+        planning.add_argument('--'+name)
     planning.add_argument('--engine-receipt-root')
     for name in ('account-uid','account-gid','allocation-bytes'):planning.add_argument('--'+name,type=int)
     applying=sub.add_parser('apply');applying.add_argument('--plan',required=True);applying.add_argument('--output',required=True)
     args=parser.parse_args(argv)
-    if args.action=='plan':
+    if args.action=='runtime-descriptor':
+        from .local_setup_runtime import prepare_runtime
+        result=prepare_runtime(args.prepared,room_id=args.room,broker_manifest=args.broker_manifest,
+            human_mergers=args.human_merger,git_manifest=args.git_manifest,git_broker_manifest=args.git_broker_manifest,
+            gate_manifest=args.gate_manifest,output=args.output)
+    elif args.action in ('inspect','propose'):
+        from .local_host_guided import inspect_host
+        inspection=(json.loads(read_file(args.inspection)) if args.action=='propose' and args.inspection
+                    else inspect_host(args.parent,args.installation_id,args.engine_socket))
+        if args.action=='inspect':
+            write_output(Path(args.output),{'inspection.json':canonical(inspection)})
+            result={'status':'blocked' if inspection['blockers'] else 'inspected','blockers':inspection['blockers'],
+                    'inspection':str(Path(args.output)/'inspection.json')}
+        else:
+            require(bool(args.project) != args.new_project,'GUIDED_ONE_PROJECT_SOURCE_REQUIRED')
+            intent=None
+            if args.new_project:
+                from .local_project_guided import project_intent
+                fields=('project_id','repository','pi_actor','claude_actor','reviewer_github_id','pi_github_id','pi_auth_ref','claude_auth_ref',
+                        'pi_git_name','pi_git_email','claude_git_name','claude_git_email')
+                choices={}
+                for name in fields:
+                    value=getattr(args,name)
+                    if value is None:
+                        value=input(name.replace('_',' ')+' (reference/identity only, never a secret): ').strip()
+                        if name in ('reviewer_github_id','pi_github_id'):value=int(value)
+                    choices[name]=value
+                choices.update(pi_model=args.pi_model,claude_model=args.claude_model)
+                manager_url=args.manager_url
+                if manager_url is None:
+                    manager_url=input('Manager HTTPS URL (empty selects local-only Project; remote Manager cannot be added transparently after first start): ').strip() or None
+                if manager_url:
+                    choices.update(manager_url=manager_url,
+                        manager_client_ref=args.manager_client_ref or input('Manager client credential reference name (not a secret): ').strip(),
+                        manager_trust_ref=args.manager_trust_ref or input('Manager trust credential reference name (not a secret): ').strip())
+                else:
+                    require(args.manager_client_ref is args.manager_trust_ref is None,'GUIDED_MANAGER_TRIO_REQUIRED')
+                if args.room_disk_bytes is not None:choices['disk_bytes']=args.room_disk_bytes
+                intent=project_intent(**choices)
+            value=guided_proposal(inspection,project=json.loads(read_file(args.project)) if args.project else None,
+                                  intent=intent,allocation_bytes=args.allocation_bytes)
+            write_output(Path(args.output),{'proposal.json':canonical(value)})
+            blockers=inspection['blockers']+(value['selection']['blockers'] if value['selection'] else [])
+            result={'status':'blocked' if blockers else 'proposed','blockers':blockers,
+                    'proposal':str(Path(args.output)/'proposal.json'),
+                    'profile':intent['profile'] if intent else 'existing-project',
+                    'storage_root':inspection['defaults']['storage_root'],
+                    'credentials':intent['credentials'] if intent else [],
+                    'next':'Bind verified images with plan --proposal; select runtime before first Room start'}
+    elif args.action=='plan' and args.proposal:
+        require(all(v is None for v in (args.project,args.settings,args.host_receipt_root,args.engine_receipt_root,
+                                        args.account_uid,args.account_gid,args.allocation_bytes)), 'GUIDED_NO_MANUAL_SELECTION_OVERRIDE')
+        result=bind_guided(json.loads(read_file(args.proposal)),args.workstation_output,args.hub_output,args.revision,args.output)
+    elif args.action=='plan':
+        require(all(v is not None for v in (args.project,args.settings,args.host_receipt_root)),'SETUP_MANUAL_INPUTS_REQUIRED')
         value=proposal(args.project,args.settings,args.workstation_output,args.hub_output,args.revision,
             host_receipt_root=args.host_receipt_root,engine_receipt_root=args.engine_receipt_root,
             account_uid=args.account_uid,account_gid=args.account_gid,allocation_bytes=args.allocation_bytes)

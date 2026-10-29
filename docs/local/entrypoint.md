@@ -17,6 +17,14 @@ without that grant it stays unavailable, not anonymously authenticated.
 
 ## Prepare once
 
+For a new installation, start with the [guided host inspection and proposal](host-preparation.md#guided-first-installation).
+It generates Project/settings files without hand-authoring security IDs. The
+manual JSON below is an advanced input path, not a prerequisite for inspection.
+Select runtime bindings **before the first Room start**, even if credentials
+will be supplied later. An already-started idle lifecycle cannot be silently
+upgraded by adding a runtime selection.
+
+
 Run the source with Python 3.11 or later. Select an existing validated Project
 JSON and record its absolute canonical path and SHA-256. The installation
 selection contains references only, never credential values:
@@ -47,7 +55,7 @@ a separate operation; this entrypoint does not turn an unprepared machine into a
 
 ## Native prerequisites
 
-Native startup consumes the `local-native-v1` descriptor validated by
+Native startup consumes the `local-native-v1` (or selected-profile v2 / owned-XFS v3) descriptor validated by
 `uas.local_native.validate_document`. It records exact imported image IDs,
 prepared per-Room storage identities, XFS project quotas, MCS categories,
 endpoint root and private network selection. Its images must include the
