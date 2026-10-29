@@ -20,6 +20,7 @@ REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}\Z"
 IMAGE_PATH = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*\Z")
 CAPABILITIES = {
     "implement": "hub", "review": "hub", "can-open-requested-run": "hub",
+    "library:enqueue": "hub",
     "forge-read": "broker", "forge-write": "broker", "git-read": "broker", "git-push": "broker",
 }
 CONTROLS = ("non_root", "outer_confinement", "process_binding", "private_endpoints", "no_host_runtime_socket")
