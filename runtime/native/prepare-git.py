@@ -40,8 +40,14 @@ def source_closure(sources):
         for node in ast.walk(ast.parse(text)):
             if isinstance(node, ast.ImportFrom):
                 if node.level:
-                    require(node.level == 1 and node.module is not None, 'unsupported relative import')
-                    pending.append(node.module)
+                    require(node.level == 1, 'unsupported relative import')
+                    if node.module is None:
+                        # Flat package-module aliases are explicit dependencies.
+                        # Missing files/star/nested names fail the same bounded
+                        # canonical module checks at the top of the loop.
+                        pending.extend(alias.name for alias in node.names)
+                    else:
+                        pending.append(node.module)
                 elif (node.module or '').startswith('uas.'):
                     pending.append(node.module[4:])
                 else:

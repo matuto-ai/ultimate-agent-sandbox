@@ -47,8 +47,8 @@ def identifier(value):
 
 def local_profile(plan):
     """Only the concrete local declaration selects non-qualification roots."""
-    from .local_runtime_plan import LocalRuntimePlan
-    if type(plan) is LocalRuntimePlan:
+    from .native_qualification import is_local_runtime_plan
+    if is_local_runtime_plan(plan):
         plan.require_unchanged()
         return plan.native_profile
     return None
@@ -280,8 +280,10 @@ class NativeGitResources:
         from .lifecycle import Supervisor
         from .native_qualification_backend import NativeQualificationObserver
         from .workstation_exec import EndpointLease
-        from .local_native import LocalNativeObserver
-        expected=LocalNativeObserver if local_profile(plan) is not None else NativeQualificationObserver
+        expected=NativeQualificationObserver
+        if local_profile(plan) is not None:
+            from .local_native import LocalNativeObserver
+            expected=LocalNativeObserver
         require(type(supervisor) is Supervisor and type(supervisor.backend) is expected
             and type(engine) is DockerExecAPI,'canonical readonly owners required')
         self=cls();self._closed=False;self._pidfd=-1;self._listeners=[]

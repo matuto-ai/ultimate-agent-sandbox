@@ -187,10 +187,21 @@ class QualificationPlan:
         return result
 
 
+def is_local_runtime_plan(plan):
+    """Keep the qualifier independent of optional local-host source modules.
+
+    The module-name check is only an import prefilter, never authority: the
+    concrete class identity is still required before selecting local policy.
+    """
+    if type(plan).__module__ != 'uas.local_runtime_plan':
+        return False
+    from .local_runtime_plan import LocalRuntimePlan
+    return type(plan) is LocalRuntimePlan
+
+
 def credential_excluded_roots(plan):
     roots=list(plan.room['project']['roots'].values())+[plan.room['state_root']+'/runtime']
-    from .local_runtime_plan import LocalRuntimePlan
-    if type(plan) is LocalRuntimePlan:
+    if is_local_runtime_plan(plan):
         plan.require_unchanged();roots.append(str(plan.native_profile.endpoints))
     return roots
 
@@ -264,8 +275,7 @@ def check_git_credentials(plan,selection):
     mounted.append(Path(plan.room['state_root']+'/runtime').resolve(strict=True))
     # Every additional fixed Git/peer projection is below this root; none may
     # become a credential source even if its public-file mode were changed.
-    from .local_runtime_plan import LocalRuntimePlan
-    mounted.append(plan.native_profile.endpoints if type(plan) is LocalRuntimePlan else Path('/run/uas-native'))
+    mounted.append(plan.native_profile.endpoints if is_local_runtime_plan(plan) else Path('/run/uas-native'))
     for row in selection['credentials']:
         for name in ('key_path','known_hosts_path'):
             candidate=Path(row[name]);resolved=candidate.resolve(strict=True);info=candidate.lstat()

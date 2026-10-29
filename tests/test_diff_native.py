@@ -270,6 +270,7 @@ class DiffStagingTests(unittest.TestCase):
         text=(ROOT/'tests/linux/diff_smoke.py').read_text();tree=ast.parse(text)
         declared=next(ast.literal_eval(node.value) for node in tree.body if isinstance(node,ast.Assign)
             and any(isinstance(name,ast.Name) and name.id=='SOURCES' for name in node.targets))
+        from test_staged_source_closure import OPTIONAL_LOCAL_EDGES
         paths=set(declared);self.assertIn('uas/__init__.py',paths)
         self.assertLessEqual(len(paths),self.module.MAX_SOURCE_FILES)
         for relative in sorted(path for path in paths if path.startswith('uas/') and path.endswith('.py')):
@@ -282,7 +283,10 @@ class DiffStagingTests(unittest.TestCase):
                     if name=='uas':names=['uas.'+alias.name for alias in node.names]
                     elif name.startswith('uas.'):names=[name]
                 elif isinstance(node,ast.Import):names=[alias.name for alias in node.names if alias.name.startswith('uas.')]
-                for name in names:self.assertIn(name.replace('.','/')+'.py',paths,(relative,name))
+                for name in names:
+                    dependency=name.replace('.','/')+'.py'
+                    if (relative,dependency) not in OPTIONAL_LOCAL_EDGES:
+                        self.assertIn(dependency,paths,(relative,name))
         self.assertIn("payload,source_hashes=stage_sources(root)",text)
         self.assertIn("script=payload/'tests/linux/diff_smoke.py'",text)
         self.assertEqual(text.count('str(script)'),2)

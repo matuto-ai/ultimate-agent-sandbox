@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import stat
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,6 +35,30 @@ class LocalInstallationTests(unittest.TestCase):
         self.project.write_bytes((Path(__file__).parent/'fixtures/two-rooms.json').read_bytes())
         self.value = {'version':1, 'project':self.ref(self.project), 'native':None, 'manager':None}
         self.install = Installation(self.root/'install')
+        # These tests exercise selection/schema/write recovery, not the host's
+        # directory ownership. Hosted TMPDIR ancestors may be group-writable.
+        # Model ONLY this fixture's exact directory chain as pre-provisioned;
+        # file modes, digest checks and all production guards remain real.
+        from uas.native_pi_recipe import read_manifest
+        original_fstat=os.fstat
+        ancestors={ (p.stat().st_dev,p.stat().st_ino)
+                    for p in (self.root,*self.root.parents) }
+        def fixture_reader(filename,digest):
+            selected=Path(filename)
+            if self.root not in selected.parents:
+                return read_manifest(filename,digest)
+            def prepared_directory(fd):
+                info=original_fstat(fd)
+                if stat.S_ISDIR(info.st_mode) and (info.st_dev,info.st_ino) in ancestors:
+                    values={name:getattr(info,name) for name in dir(info) if name.startswith('st_')}
+                    return SimpleNamespace(**{**values,'st_uid':0,'st_mode':info.st_mode & ~0o022})
+                return info
+            with patch('uas.native_pi_recipe.os.fstat',side_effect=prepared_directory):
+                return read_manifest(filename,digest)
+        self.fixture_reader=fixture_reader
+        for module in ('uas.local_manager','uas.local_runtime_plan'):
+            reader=patch(module+'.read_manifest',side_effect=fixture_reader)
+            reader.start();self.addCleanup(reader.stop)
 
     def ref(self, p):
         return {'path':str(p), 'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
@@ -217,3 +243,17 @@ class LocalInstallationTests(unittest.TestCase):
         ref=self.runtime_reference();self.value['native']=None;self.value['runtime']={'alpha':ref}
         with self.assertRaisesRegex(LocalInstallationError,'LOCAL_RUNTIME_NATIVE_REQUIRED'):self.install.setup(self.raw())
         self.assertFalse(self.install.root.exists())
+
+    def test_manifest_fixture_keeps_private_file_and_digest_guards_real(self):
+        from uas.native_pi_recipe import NativeRecipeError
+        target=self.root/'unprotected.json'
+        # Creating 0644 is ordinary fixture output, never chmod or host repair.
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o644)
+        with os.fdopen(fd,'w') as out:out.write('{}')
+        with self.assertRaisesRegex(NativeRecipeError,'private regular manifest required'):
+            self.fixture_reader(str(target),self.ref(target)['sha256'])
+        private=self.root/'protected.json'
+        fd=os.open(private,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as out:out.write('{}')
+        with self.assertRaisesRegex(NativeRecipeError,'manifest digest mismatch'):
+            self.fixture_reader(str(private),'0'*64)
