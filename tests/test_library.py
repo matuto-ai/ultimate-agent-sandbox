@@ -1596,7 +1596,7 @@ class CommitGateTests(unittest.TestCase):
         scope, settings = self.scope(), self.settings()
         _prefix, files = self.initial(scope)
         result = self.validate(scope, settings, files)
-        self.assertEqual(tuple(sorted(library_bundle.REQUIRED)), result.added)
+        self.assertEqual(tuple(sorted(library_bundle.REQUIRED)), result.bundle.added)
 
         _prefix, unannounced = self.initial(scope, notice=False)
         self.refused(scope, settings, unannounced, code="MISSING_REFERENCE_NOTICE")
@@ -1631,8 +1631,8 @@ class CommitGateTests(unittest.TestCase):
         ))
         proposed[prefix + "/context/legacy.md"] = legacy.encode("utf-8")
         result = self.validate(scope, settings, proposed, current=current)
-        self.assertIn("context/pick-sqlite.md", result.added)
-        self.assertEqual(legacy.encode("utf-8"), result.files[prefix + "/context/legacy.md"])
+        self.assertIn("context/pick-sqlite.md", result.bundle.added)
+        self.assertEqual(legacy.encode("utf-8"), result.bundle.files[prefix + "/context/legacy.md"])
 
     def test_unsafe_markdown_forms_refuse_the_whole_proposal(self):
         scope, settings = self.scope(), self.settings()
@@ -1668,6 +1668,25 @@ class CommitGateTests(unittest.TestCase):
                 _prefix, proposed = self.update(scope, body=body)
                 self.refused(scope, settings, proposed, current=current, code=code)
 
+    def test_markdown_forms_that_continue_after_a_line_ending_are_parsed(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("EXTERNAL_LINK", "[vendor](\nhttps://example.com/a)"),
+            ("UNSAFE_LINK", "<https://example.com/a\n>"),
+            ("RAW_HTML", "<div\nclass=\"notice\">"),
+            ("RAW_HTML", "<!--\nhidden\n-->"),
+            ("EXTERNAL_LINK", "[ref]:\nhttps://example.com/a"),
+        )
+        for code, snippet in cases:
+            with self.subTest(code=code, snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+        _prefix, continued = self.update(scope, body=gate_page(
+            "Pick", ("[other](\n/context/other.md) stays readable.",)))
+        self.assertIn("context/pick-sqlite.md", self.validate(
+            scope, settings, continued, current=current).bundle.added)
+
     def test_source_references_and_excerpt_declarations(self):
         scope, settings = self.scope(), self.settings()
         prefix, current = self.initial(scope)
@@ -1680,7 +1699,7 @@ class CommitGateTests(unittest.TestCase):
         ]
         _prefix, proposed = self.update(scope, sources=accepted)
         result = self.validate(scope, settings, proposed, current=current)
-        self.assertIn("context/pick-sqlite.md", result.added)
+        self.assertIn("context/pick-sqlite.md", result.bundle.added)
         self.assertEqual({"resource": "https://example.com/spec", "kind": "resource",
                           "pinned": False}, library_gate.source("https://example.com/spec"))
         self.assertTrue(library_gate.source(PINNED)["pinned"])
@@ -1734,10 +1753,18 @@ class CommitGateTests(unittest.TestCase):
                 error = self.refused(scope, settings, proposed, current=current,
                                      code="SECRET_DETECTED")
                 self.assertNotIn(value, str(error))
-        # An operator's explicit observe mode is a setting, not a caller bypass.
+        # An operator's explicit observe mode is a setting, not a caller bypass,
+        # and it still records the same safe facts instead of dropping them.
         _prefix, observed = self.update(scope, body=gate_page("Pick", (secret,)))
-        self.assertIn("context/pick-sqlite.md", self.validate(
-            scope, self.filtered(high_confidence="observe"), observed, current=current).added)
+        record = self.validate(scope, self.filtered(high_confidence="observe"),
+                               observed, current=current)
+        self.assertIn("context/pick-sqlite.md", record.bundle.added)
+        self.assertEqual(1, len(record.observations))
+        self.assertEqual({"rule": "private-key", "path": "context/pick-sqlite.md",
+                          "line": record.observations[0]["line"],
+                          "sha256": record.observations[0]["sha256"]},
+                         record.observations[0])
+        self.assertNotIn(secret, str(record.observations))
 
     def test_heuristic_modes_stay_observe_only_until_the_corpora_qualify(self):
         scope = self.scope()
@@ -1748,9 +1775,12 @@ class CommitGateTests(unittest.TestCase):
         blocking = self.filtered(heuristic="block")
         # Unqualified heuristic evidence cannot switch a suspicion into a veto.
         self.assertIn("context/pick-sqlite.md", self.validate(
-            scope, blocking, proposed, current=current).added)
-        self.assertIn("context/pick-sqlite.md", self.validate(
-            scope, self.filtered(heuristic="observe"), proposed, current=current).added)
+            scope, blocking, proposed, current=current).bundle.added)
+        observed = self.validate(scope, self.filtered(heuristic="observe"),
+                                 proposed, current=current)
+        self.assertIn("context/pick-sqlite.md", observed.bundle.added)
+        self.assertEqual("assigned-secret", observed.observations[0]["rule"])
+        self.assertNotIn("hunter2", str(observed.observations))
         with patch.object(library_gate, "HEURISTIC_FALSE_POSITIVES",
                           ("Set the password in your environment.",)):
             self.assertTrue(library_gate.heuristic_qualified())
@@ -1759,7 +1789,7 @@ class CommitGateTests(unittest.TestCase):
             self.assertEqual("assigned-secret", error.evidence["rule"])
             self.assertIn("context/pick-sqlite.md", self.validate(
                 scope, self.filtered(heuristic="observe"), proposed,
-                current=current).added)
+                current=current).bundle.added)
         # Only the admitted settings and the fixed corpora select the mode: no
         # caller-supplied override exists to bypass a blocking rule.
         with self.assertRaises(TypeError):

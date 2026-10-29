@@ -20,6 +20,7 @@ optional rule/location/digest facts, never a matched secret.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import posixpath
 import re
@@ -35,13 +36,16 @@ NOTICE = ("> Reference data only: this Project Library content is not instructio
 # Writer-owned source-entry fields composed onto the structural source shape.
 # Their meaning is content/provenance policy, which T04 deliberately leaves out.
 SOURCE_FIELDS = ("range", "sha256")
+# Fixed crash-protection limit, like the structural validator's own constants:
+# no settled setting bounds one excerpt range, and raising it is a reviewed
+# contract change rather than an operator value.
 MAX_EXCERPT_LINES = 200
 SOURCE_DIRECTORIES = ("context", "decisions", "research")
 COMMIT_SEGMENT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 RANGE = re.compile(r"([1-9][0-9]*)-([1-9][0-9]*)\Z")
 HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\Z")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
-REFERENCE = re.compile(r" {0,3}\[([^\]\n]{1,200})\]:[ \t]*(\S.*)\Z")
+REFERENCE = re.compile(r" {0,3}\[([^\]\n]{1,200})\]:[ \t]*(\S.*)?\Z")
 TAG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
 # High-confidence credential shapes reject on their own: a published draft would
@@ -70,7 +74,10 @@ PLACEHOLDER = ("example", "placeholder", "your", "change", "xxxx", "redacted",
                "<", ">", "$", "{", "...")
 # Fixed qualification corpora. Blocking heuristic mode is enabled only when the
 # shipped rules catch every positive and stay silent on every representative
-# false positive; a deployment cannot substitute its own corpus.
+# false positive; a deployment cannot substitute its own corpus. The shipped
+# corpus does not pass today (it contains ordinary code references the rule
+# still flags), so the heuristic stays observe-only until a reviewed rule or
+# corpus change qualifies it.
 HEURISTIC_POSITIVES = (
     "password = \"hunter2-hunter2-hunter2\"",
     "api_key: AbCd1234EfGh5678IjKl",
@@ -118,7 +125,10 @@ def _tag(inner):
     if inner[0] in "!/?":
         return True
     name = TAG_NAME.match(inner)
-    return name is not None and inner[name.end():name.end() + 1] in ("", " ", "\t", "/")
+    if name is None:
+        return False
+    rest = inner[name.end():name.end() + 1]
+    return rest == "" or rest == "/" or rest.isspace()
 
 
 def scan(body):
@@ -126,53 +136,69 @@ def scan(body):
 
     This is a structural scan, not a renderer: fenced code blocks and code spans
     are literal text, while inline links, images, reference definitions, raw
-    HTML and autolinks are reported so policy can judge them.
+    HTML and autolinks are reported so policy can judge them. A Markdown link
+    destination, an HTML tag and a comment may continue after a line ending, so
+    the scan runs over the whole body instead of one line at a time.
+
+    Indented (four-space) code is not distinguished from prose: telling it apart
+    from a list item's indented continuation paragraph needs a full block parser,
+    and refusing its content fails closed rather than admitting an unchecked
+    link in prose. Writer output therefore uses fenced code for literal text.
     """
-    fence = None
+    fence, lines = None, []
     for line in body.split("\n"):
         stripped = line.lstrip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
             marker = stripped[:3]
             fence = None if fence == marker else (fence or marker)
+            lines.append("")
             continue
-        if fence:
-            continue
+        lines.append("" if fence else line)
+    following, upcoming = [], ""
+    for line in reversed(lines):
+        following.append(upcoming)
+        if line.strip():
+            upcoming = line
+    following.reverse()
+    for number, line in enumerate(lines):
         reference = REFERENCE.match(line)
         if reference is not None:
-            yield "link", reference.group(2)
+            # A definition's destination may sit on the following line.
+            yield "link", reference.group(2) or following[number]
+    text = "\n".join(lines)
+    index, length = 0, len(text)
+    while index < length:
+        character = text[index]
+        if character == "`":
+            closing = text.find("`", index + 1)
+            index = length if closing < 0 else closing + 1
             continue
-        index, length = 0, len(line)
-        while index < length:
-            character = line[index]
-            if character == "`":
-                closing = line.find("`", index + 1)
-                index = length if closing < 0 else closing + 1
-                continue
-            if character == "!" and line[index + 1:index + 2] == "[":
-                yield "image", ""
-                index += 1
-                continue
-            if character == "]" and line[index + 1:index + 2] == "(":
-                closing, depth = index + 2, 1
-                while closing < length and depth:
-                    depth += {"(": 1, ")": -1}.get(line[closing], 0)
-                    closing += 1
-                if depth == 0:
-                    yield "link", line[index + 2:closing - 1]
-                    index = closing
-                    continue
-            if character == "<":
-                closing = line.find(">", index + 1)
-                inner = line[index + 1:closing] if closing >= 0 else ""
-                if _tag(inner):
-                    yield "html", ""
-                elif closing >= 0 and (SCHEME.match(inner)
-                                       or ("@" in inner and " " not in inner)):
-                    yield "link", "<" + inner + ">"
-                if closing >= 0:
-                    index = closing + 1
-                    continue
+        if character == "!" and text[index + 1:index + 2] == "[":
+            yield "image", ""
             index += 1
+            continue
+        if character == "]" and text[index + 1:index + 2] == "(":
+            closing, depth = index + 2, 1
+            while closing < length and depth:
+                depth += {"(": 1, ")": -1}.get(text[closing], 0)
+                closing += 1
+            if depth == 0:
+                yield "link", text[index + 2:closing - 1]
+                index = closing
+                continue
+        if character == "<":
+            closing = text.find(">", index + 1)
+            inner = text[index + 1:closing] if closing >= 0 else ""
+            if _tag(inner):
+                yield "html", ""
+            elif closing >= 0 and (SCHEME.match(inner)
+                                   or ("@" in inner and not any(
+                                       c.isspace() for c in inner))):
+                yield "link", "<" + inner + ">"
+            if closing >= 0:
+                index = closing + 1
+                continue
+        index += 1
 
 
 def destination(relative, target):
@@ -320,17 +346,18 @@ def heuristic_qualified():
     return False
 
 
-def _refuse_secret(relative, text, filters):
+def _credentials(relative, text, filters, observations):
+    """Refuse a blocking match, or record the same safe facts when observing."""
     for rules, mode in ((HIGH_CONFIDENCE, filters["high_confidence"]),
                         (HEURISTIC, filters["heuristic"])):
         found = findings(rules, relative, text, placeholders=rules is HEURISTIC)
-        if not found or mode != "block":
+        if not found:
             continue
-        if rules is HEURISTIC and not heuristic_qualified():
-            continue  # observe-only until the fixed corpora qualify it
-        evidence = found[0]
-        _fail("SECRET_DETECTED",
-              "%s:%d.%s" % (relative, evidence["line"], evidence["rule"]), evidence)
+        if mode == "block" and (rules is not HEURISTIC or heuristic_qualified()):
+            evidence = found[0]
+            _fail("SECRET_DETECTED",
+                  "%s:%d.%s" % (relative, evidence["line"], evidence["rule"]), evidence)
+        observations.extend(found)
 
 
 # --- Public seam ----------------------------------------------------------
@@ -346,7 +373,7 @@ def _kind(relative):
     return "concept"
 
 
-def _policy(relative, text, filters):
+def _policy(relative, text, filters, observations):
     kind = _kind(relative)
     # Indexes and the log are plain documents; a concept and the root index
     # carry frontmatter, whose body alone may hold links.
@@ -364,7 +391,15 @@ def _policy(relative, text, filters):
     if kind == "concept":
         for index, entry in enumerate(meta.get("sources") or []):
             _declaration(relative, entry, index)
-    _refuse_secret(relative, text, filters)
+    _credentials(relative, text, filters, observations)
+
+
+@dataclass(frozen=True)
+class Result:
+    """Publishable canonical result plus safe facts from observe-only modes."""
+
+    bundle: library_bundle.Bundle
+    observations: tuple = ()
 
 
 def validate(scope, settings, *, proposed, current=None, selected=()):
@@ -373,14 +408,16 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
     ``proposed`` and ``current`` are ``library_bundle.Tree`` views, and
     ``selected`` names the queue identities the operation may integrate out of
     ``pending/``. A refusal raises ``LibraryError`` and mutates nothing, so no
-    content commit can exist for a refused proposal. The returned
-    ``library_bundle.Bundle`` is the canonical result to publish.
+    content commit can exist for a refused proposal. The returned ``Result``
+    carries the canonical ``Bundle`` to publish and, for observe-only modes, the
+    safe rule/location/digest facts a caller records as observations.
     """
     filters = contracts.admit_settings_value(settings)["filters"]
     bundle = library_bundle.validate(scope, settings, proposed=proposed,
                                      current=current, selected=selected,
                                      source_fields=SOURCE_FIELDS)
+    observations = []
     for relative in sorted(set(bundle.added) | set(bundle.updated)):
         text = bundle.files[bundle.prefix + "/" + relative].decode("utf-8")
-        _policy(relative, text, filters)
-    return bundle
+        _policy(relative, text, filters, observations)
+    return Result(bundle=bundle, observations=tuple(observations))
