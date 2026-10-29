@@ -1226,7 +1226,7 @@ class BundleValidationTests(unittest.TestCase):
         del proposed[prefix + "/" + location]
         proposed[prefix + "/pending/index.md"] = b"# Pending\n"
         self.refused(scope, settings, proposed, current=files, selected=(queue_id,),
-                     code="NOT_A_PENDING_DRAFT")
+                     code="INCOHERENT_STATUS")
         fresh = dict(files)
         fresh[prefix + "/" + location] = concept("decision", "Queued", "draft").encode("utf-8")
         fresh[prefix + "/pending/index.md"] = (
@@ -1393,6 +1393,60 @@ class BundleValidationTests(unittest.TestCase):
             "# Research\n\n* [Sourced](/research/sourced.md) - short.\n").encode("utf-8")
         self.refused(scope, settings, researched, current=current,
                      code="UNSUPPORTED_FIELD")
+
+    def test_existing_state_and_nested_metadata_are_preserved_with_bounded_parsing(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, initial = self.initial(scope)
+        conflicting = dict(initial)
+        conflicting[prefix + "/index.md"] = root_index(
+            scope.project_path, "github.com:OTHER-ID").encode("utf-8")
+        self.refused(scope, settings, initial, current=conflicting,
+                     code="MISSING_SOURCE_IDENTITY")
+        malformed = dict(initial)
+        malformed[prefix + "/context/index.md"] = b"no heading\n"
+        self.refused(scope, settings, initial, current=malformed, code="INVALID_INDEX")
+
+        _, current = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable", fields=("custom: {flag: false}",)))
+        retyped = dict(current)
+        path = prefix + "/context/pick-sqlite.md"
+        retyped[path] = current[path].replace(b"flag: false", b'flag: "false"')
+        self.refused(scope, settings, retyped, current=current,
+                     code="EXISTING_FIELD_CHANGED")
+        _, sourced = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable",
+            fields=("sources:", "  - resource: https://example.com/a",
+                    "    author: LegacyAuthor")))
+        dropped = dict(sourced)
+        dropped[path] = sourced[path].replace(b"    author: LegacyAuthor\n", b"")
+        self.refused(scope, settings, dropped, current=sourced,
+                     code="EXISTING_FIELD_CHANGED")
+
+        nested = "".join(" " * depth + "k:\n" for depth in range(500)) + " " * 500 + "leaf: value\n"
+        deep = self.update(scope, document_text=(
+            "---\ntype: context\ntitle: Pick SQLite\ncustom:\n"
+            + "".join("  " + line + "\n" for line in nested.splitlines())
+            + "---\n\n# Body\n"))[1]
+        self.refused(scope, self.settings(document_bytes=1 << 20, projection_bytes=1 << 20),
+                     deep, current=initial, code="INVALID_YAML")
+
+        list_title = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable",
+            fields=("sources:", "  - resource: https://example.com/a",
+                    "    title: [nested, list]")))[1]
+        self.refused(scope, settings, list_title, current=initial,
+                     code="INVALID_SOURCES")
+        long_source_title = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable",
+            fields=("sources:", "  - resource: https://example.com/a",
+                    '    title: "%s"' % ("t" * 40))))[1]
+        self.refused(scope, self.settings(title_chars=5), long_source_title,
+                     current=initial, code="TITLE_TOO_LONG")
+        trailing_dot = self.update(
+            scope, document_text="---\ntype: context\ntitle: 1.\nstatus: stable\n---\n\n# x\n",
+            index_text="# Context\n\n* [1.](/context/pick-sqlite.md)\n")[1]
+        self.refused(scope, settings, trailing_dot, current=initial,
+                     code="UNSAFE_SCALAR")
 
 if __name__ == "__main__":
     unittest.main()

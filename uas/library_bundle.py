@@ -48,7 +48,7 @@ UNSAFE_SCALARS = frozenset({"~", "null", "true", "false", "yes", "no", "on", "of
                             ".nan", ".inf", "-.inf", "+.inf"})
 INTEGER = re.compile(r"[-+]?(?:0[box][0-9a-fA-F_]+|[0-9][0-9_]*)\Z")
 SEXAGESIMAL = re.compile(r"[-+]?[0-9]+(?::[0-5]?[0-9])+\Z")
-FLOAT = re.compile(r"[-+]?(?:[0-9][0-9_]*)?\.[0-9][0-9_]*(?:[eE][-+]?[0-9]+)?\Z"
+FLOAT = re.compile(r"[-+]?(?:[0-9][0-9_]*\.[0-9_]*|\.[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)?\Z"
                    r"|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+\Z")
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt ].*)?\Z")
 # Service-stamped fidelity fields: the deterministic service owns them, so a
@@ -59,6 +59,7 @@ SERVICE_FIELDS = ("verified", "stale_after", "generated")
 MAX_EVIDENCE = 200
 MAX_PATH = 1024
 MAX_COMPONENT = 255
+MAX_YAML_DEPTH = 8
 KEY = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 HEADING = re.compile(r"#{1,6}[ \t]+\S")
@@ -302,6 +303,21 @@ def _scalar(raw, field, depth=0):
     return value
 
 
+def _same(left, right, depth=0):
+    """Deep equality that also keeps an implicit YAML kind distinct from text."""
+    if depth > MAX_YAML_DEPTH:
+        return False
+    if isinstance(left, Implicit) != isinstance(right, Implicit):
+        return False
+    if type(left) is dict:
+        return (type(right) is dict and set(left) == set(right)
+                and all(_same(left[key], right[key], depth + 1) for key in left))
+    if type(left) is list:
+        return (type(right) is list and len(left) == len(right)
+                and all(_same(a, b, depth + 1) for a, b in zip(left, right)))
+    return left == right
+
+
 def _implicit(value):
     """True when this parsed value carries an implicit non-string YAML type."""
     if isinstance(value, Implicit):
@@ -347,7 +363,9 @@ def _lines(block, field):
     return parsed
 
 
-def _mapping(lines, index, indent, field):
+def _mapping(lines, index, indent, field, depth):
+    if depth > MAX_YAML_DEPTH:
+        _fail("INVALID_YAML", field)
     result = {}
     while index < len(lines):
         current, content = lines[index]
@@ -364,19 +382,22 @@ def _mapping(lines, index, indent, field):
         if rest:
             result[key] = _scalar(rest, field + "." + key)
         elif index < len(lines) and lines[index][0] > indent:
-            result[key], index = _block(lines, index, lines[index][0], field + "." + key)
+            result[key], index = _block(lines, index, lines[index][0],
+                                        field + "." + key, depth + 1)
         else:
             _fail("UNSAFE_SCALAR", field + "." + key)
     return result, index
 
 
-def _block(lines, index, indent, field):
+def _block(lines, index, indent, field, depth):
     if lines[index][1] == "-" or lines[index][1].startswith("- "):
-        return _sequence(lines, index, indent, field)
-    return _mapping(lines, index, indent, field)
+        return _sequence(lines, index, indent, field, depth)
+    return _mapping(lines, index, indent, field, depth)
 
 
-def _sequence(lines, index, indent, field):
+def _sequence(lines, index, indent, field, depth):
+    if depth > MAX_YAML_DEPTH:
+        _fail("INVALID_YAML", field)
     items = []
     while index < len(lines):
         current, content = lines[index]
@@ -393,7 +414,7 @@ def _sequence(lines, index, indent, field):
             while index < len(lines) and lines[index][0] > indent:
                 sub.append(lines[index])
                 index += 1
-            item, consumed = _mapping(sub, 0, indent + 2, entry)
+            item, consumed = _mapping(sub, 0, indent + 2, entry, depth + 1)
             if consumed != len(sub):
                 _fail("INVALID_YAML", entry)
             items.append(item)
@@ -415,7 +436,7 @@ def _frontmatter(text, field):
                 return {}, "\n".join(lines[index + 1:])
             if block[0][0] != 0:
                 _fail("INVALID_YAML", field)
-            value, consumed = _mapping(block, 0, 0, field)
+            value, consumed = _mapping(block, 0, 0, field, 0)
             if consumed != len(block):
                 _fail("INVALID_YAML", field)
             return value, "\n".join(lines[index + 1:])
@@ -597,8 +618,7 @@ def _concept(relative, directory, name, text, previous, selected, limits):
     for key, value in previous_meta.items():
         if key in FIELDS or key in SERVICE_FIELDS:
             continue
-        if (key not in meta or meta[key] != value
-                or isinstance(meta[key], Implicit) != isinstance(value, Implicit)):
+        if key not in meta or not _same(value, meta[key]):
             _fail("EXISTING_FIELD_CHANGED", relative + "." + key)
     return title
 
@@ -611,10 +631,11 @@ def _sources(relative, sources, limits, previous_meta, writer):
         _fail("INVALID_SOURCES", relative + ".sources")
     if len(sources) > limits["sources"]:
         _fail("TOO_MANY_SOURCES", relative + ".sources")
+    previous = [entry for entry in (previous_meta.get("sources") or [])
+                if type(entry) is dict]
     allowed = {"resource", "title"}
-    for entry in previous_meta.get("sources") or []:
-        if type(entry) is dict:
-            allowed.update(entry)
+    for entry in previous:
+        allowed.update(entry)
     for index, source in enumerate(sources):
         field = "%s.sources[%d]" % (relative, index)
         if type(source) is not dict or not isinstance(source.get("resource"), str):
@@ -626,8 +647,31 @@ def _sources(relative, sources, limits, previous_meta, writer):
         for key in source:
             if key not in allowed:
                 _fail("UNSUPPORTED_FIELD", field + "." + key)
+        if "title" in source:
+            title = source["title"]
+            if not isinstance(title, str) or "\n" in title:
+                _fail("INVALID_SOURCES", field + ".title")
+            if len(title) > limits["title_chars"]:
+                _fail("TITLE_TOO_LONG", field + ".title")
         if _implicit(source):
             _fail("UNSAFE_SCALAR", field)
+    if writer:
+        _preserved_sources(relative, previous, sources)
+
+
+def _preserved_sources(relative, previous, sources):
+    """Existing source metadata stays with its resource, value and YAML kind."""
+    for entry in previous:
+        match = next((source for source in sources
+                      if type(source) is dict
+                      and _same(entry.get("resource"), source.get("resource"))), None)
+        if match is None:
+            _fail("EXISTING_FIELD_CHANGED", relative + ".sources")
+        for key, value in entry.items():
+            if key == "resource":
+                continue
+            if key not in match or not _same(value, match[key]):
+                _fail("EXISTING_FIELD_CHANGED", relative + ".sources." + key)
 
 
 def _index(relative, text, empty):
@@ -742,6 +786,23 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
     files = _canonical_files(proposed_tree, prefix, limits, "proposed")
 
     initialization = previous_tree is None
+    # The canonical state must stay coherent too: a conflicting registration or
+    # a malformed existing bundle fails closed instead of being overwritten.
+    if not initialization:
+        _structure(previous, previous, scope, limits, set(), False)
+    removed = _structure(files, previous, scope, limits, allowed, initialization)
+    added = tuple(sorted(set(files) - set(previous)))
+    updated = tuple(sorted(relative for relative in files
+                           if relative in previous
+                           and previous[relative][1] != files[relative][1]))
+    return Bundle(prefix=prefix,
+                  files=MappingProxyType({full: text.encode("utf-8")
+                                          for full, text in files.values()}),
+                  added=added, updated=updated, removed=removed)
+
+
+def _structure(files, previous, scope, limits, allowed, initialization):
+    """Check one complete tree against its predecessor; returns removed drafts."""
     if initialization:
         extra = set(files) - set(REQUIRED)
         if extra:
@@ -789,11 +850,4 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
             title = titles.get(other)
             if title is not None and links[other] != title:
                 _fail("INDEX_TITLE_MISMATCH", relative + "." + other)
-
-    added = tuple(sorted(set(files) - set(previous)))
-    updated = tuple(sorted(relative for relative in files
-                           if relative in previous and previous[relative][1] != files[relative][1]))
-    return Bundle(prefix=prefix,
-                  files=MappingProxyType({full: text.encode("utf-8")
-                                          for full, text in files.values()}),
-                  added=added, updated=updated, removed=removed)
+    return removed
