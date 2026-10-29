@@ -87,7 +87,7 @@ SOURCES = (
     'uas/github_surface.py',
     'uas/kernel_origin.py',
     'uas/launch.py',
-    'uas/ledger.py',
+    'uas/ledger.py', 'uas/typed_json.py',
     'uas/lifecycle.py',
     'uas/participant.py', 'uas/participant_recovery.py',
     'uas/peer.py',

@@ -21,11 +21,11 @@ BUILD_TIMEOUT = 1200
 # Exact reviewed source closure. No ambient repository glob can add a runtime,
 # provider implementation, launcher script, package lock, Node/npm or Pi asset.
 ROOM_MODULES = (
-    '__init__', 'config', 'gate_policy', 'forge', 'ledger',
+    '__init__', 'config', 'gate_policy', 'forge', 'ledger', 'typed_json',
     'lifecycle', 'manager_owner', 'manager_projection', 'manager_journey', 'launch', 'docker_fixture', 'guest_fixture', 'room_fixture',
     'room_probe', 'docker_exec_api', 'kernel_origin', 'workstation_exec',
     'workstation_probe', 'forge_audit', 'git_audit', 'git_controller',
-    'git_endpoint', 'git_launcher', 'git_policy', 'git_process', 'git_provenance',
+    'git_endpoint', 'git_launcher', 'git_protocol', 'git_policy', 'git_process', 'git_provenance',
     'git_runtime', 'git_service', 'git_sources',
     'git_stream', 'git_transaction', 'git_transport', 'git_worker', 'git_worker_native')
 

@@ -6,7 +6,6 @@ selection, arbitrary SSH option or reusable SSH-agent socket is disclosed.
 """
 from dataclasses import asdict
 import hashlib
-import json
 import os
 import selectors
 import socket
@@ -21,24 +20,11 @@ from .git_sources import AdvertisedRefs
 from .git_transport import GitTransportError, SshTransport
 from .kernel_origin import HeldOrigin, OriginDenied, alive, enable, receive
 from .ledger import LedgerError, Origin, _json, _token
-from .lifecycle import _unique_object
+from .git_protocol import decode, send
 
 
-def decode(raw):
-    if type(raw) is not bytes or not 0 < len(raw) <= 65536:
-        raise OriginDenied('invalid Git control record')
-    try:
-        value = json.loads(raw, object_pairs_hook=_unique_object)
-        if type(value) is not dict: raise ValueError()
-        return value
-    except (ValueError, UnicodeError, RecursionError):
-        raise OriginDenied('invalid Git control JSON') from None
 
 
-def send(channel, value):
-    raw = _json(value).encode()
-    if len(raw) > 65536 or channel.send(raw) != len(raw):
-        raise OriginDenied('incomplete Git control record')
 
 
 def origin_from_document(value):

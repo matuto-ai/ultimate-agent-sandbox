@@ -56,7 +56,7 @@ SOURCES = (
     'uas/github_routes.py',
     'uas/github_surface.py',
     'uas/kernel_origin.py',
-    'uas/ledger.py',
+    'uas/ledger.py', 'uas/typed_json.py',
     'uas/lifecycle.py',
     'uas/peer.py',
     'uas/review_broker.py',
