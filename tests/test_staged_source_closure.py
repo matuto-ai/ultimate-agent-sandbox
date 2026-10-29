@@ -18,6 +18,11 @@ def source_list(name, variable='SOURCES'):
 OPTIONAL_LOCAL_EDGES = {
     ('uas/__main__.py', 'uas/local_cli.py'),
     ('uas/native_qualification.py', 'uas/local_runtime_plan.py'),
+    ('uas/native_run_admission.py', 'uas/local_runtime_plan.py'),
+    ('uas/native_run_admission.py', 'uas/local_successor_checkout.py'),
+    ('uas/native_run_admission.py', 'uas/local_native_stop.py'),
+    ('uas/native_completed_retirement.py', 'uas/local_runtime_plan.py'),
+    ('uas/native_completed_retirement.py', 'uas/local_native_stop.py'),
     ('uas/native_checkout_handoff.py', 'uas/local_native.py'),
     ('uas/native_checkout_handoff.py', 'uas/local_runtime_resources.py'),
     ('uas/native_git_resources.py', 'uas/local_native.py'),

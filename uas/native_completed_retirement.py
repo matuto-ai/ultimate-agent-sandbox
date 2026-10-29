@@ -22,6 +22,31 @@ class NativeCompletedRetirement:
                      reviewer.selected['participant']:reviewer.root}
         self.targets=None;self.retirements={}
 
+    @classmethod
+    def from_local_stop(cls, observations, owner, reviewer, operation_id, run_id):
+        from .local_native_stop import LocalNativeStopObservations
+        from .local_runtime_plan import LocalRuntimePlan
+        if (cls is not NativeCompletedRetirement or type(observations) is not LocalNativeStopObservations
+                or observations.owner is not owner or observations.reviewer is not reviewer
+                or observations.run_id!=run_id or type(owner.launcher.plan) is not LocalRuntimePlan):
+            raise LedgerError('LOCAL_STOP_OWNER_REQUIRED')
+        observations.require_exited()
+        if observations.adopted is not None:
+            held=observations.adopted
+            if held.operation_id!=operation_id:raise LedgerError('LOCAL_STOP_ALREADY_ADOPTED')
+            return held
+        row=observations._unchanged()
+        if row.get('control_pending') is not None or row.get('control_revision',0)!=observations.revision:
+            raise LedgerError('LOCAL_STOP_SCOPE_CHANGED')
+        held=cls(owner,reviewer,operation_id,run_id)
+        if any(held.owners.get(key) is not value for key,value in observations.held.owners.items()):
+            raise LedgerError('LOCAL_STOP_OWNER_CHANGED')
+        held.targets=deepcopy(observations.targets)
+        held.retirements=dict(observations.held.retirements)
+        held._local_stop_observations=observations
+        observations.adopted=held
+        return held
+
     def _targets(self,state):
         targets=self.owner._control_contexts(state,self.run_id)
         for target in targets:
@@ -52,6 +77,10 @@ class NativeCompletedRetirement:
                 or pending['operation_id']!=self.operation_id or pending['targets']!=self.targets
                 or self._targets(state)!=self.targets):
             raise LedgerError('NATIVE_OWNERSHIP_CHANGED')
+        self._validate_owners()
+        return True
+
+    def _validate_owners(self):
         for target in self.targets:
             participant=target['participant_id'];held=self.owners.get(participant)
             if type(held) is SupervisorAdmission:
@@ -71,6 +100,14 @@ class NativeCompletedRetirement:
 
     def stop(self,pending,human,command):
         owner=self.owner
+        observations=getattr(self,'_local_stop_observations',None)
+        if observations is not None:
+            with owner.supervisor._locked():
+                if not owner._control_authorized(pending,human,command):raise LedgerError('FORBIDDEN')
+                self.validate(owner.ledger.snapshot()['state'],pending)
+                observations.require_exited()
+                self.verify(pending)
+            return
         with owner.supervisor._locked() as capability:
             if not owner._control_authorized(pending,human,command):raise LedgerError('FORBIDDEN')
             self.validate(owner.ledger.snapshot()['state'],pending)

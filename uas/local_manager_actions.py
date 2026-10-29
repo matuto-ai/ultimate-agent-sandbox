@@ -34,7 +34,7 @@ class LocalNativeRunActions:
             raise LedgerError('LOCAL_NATIVE_STATUS_SCOPE')
         graph=getattr(self.owner,'_graph',None)
         if graph is None:return {'service':'idle'}
-        result={'service':'stopped' if graph.closed else 'running'}
+        result={'service':'stopped' if graph.closed or getattr(graph,'suspended',False) else 'running'}
         if getattr(graph,'_cleanup_unknown',False):result['service']='cleanup-unknown'
         if graph.activity is not None:
             status=graph.activity.status()

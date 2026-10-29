@@ -54,7 +54,7 @@ class LocalNativeRunSession:
                         # for context reset; no participant effect is serviced.
                         self._graph.require_retired()
                         self._transition_paused=True
-                    else:self._graph.close()
+                    else:self._graph.prepare_stop()
                     self._cleanup_confirmed=True
             elif command==b'R' and self._pause_receipt and self._cleanup_confirmed:
                 self._paused=False;self._pause_receipt=False;self._transition_paused=False

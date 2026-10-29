@@ -37,6 +37,7 @@ class LocalNativeGraph:
         host.operation_current()
         self.host=host;self.stack=ExitStack();self.admissions=[];self.closed=False
         self.activity=None;self.recruitment=None;self.git_operations=None;self.transition_retirement=None
+        self.suspended=False;self.stop_observations=None;self._stop_unknown=False
         self.gate_operations=None;self.gate_resources=None
         try:self._prepare()
         except BaseException:
@@ -128,12 +129,14 @@ class LocalNativeGraph:
             if self.activity.blocked is not None:raise LedgerError('LOCAL_RUN_RECONCILIATION_REQUIRED')
             if row['status']!='CLOSED' or row.get('outcome')!='completed':
                 raise LedgerError('LOCAL_PREVIOUS_RUN_NOT_COMPLETED')
-            if self.git_operations is not None:self.git_operations.require_successor()
+            if self.git_operations is not None:self._successor_git_ready()
             operation='local-retire-'+hashlib.sha256((request.operation_id+':'+row['run_id']).encode()).hexdigest()
             self.owner.retire_for_successor(request,grant,row['run_id'],row['generation'],
-                                            row['control_revision'],reviewer=previous)
+                                            row['control_revision'],reviewer=previous,
+                                            observations=getattr(self,'stop_observations',None))
             self.transition_retirement=self.owner._completed_retirements[operation]
             self.require_retired()
+            self._forget_retired(self.transition_retirement)
             self._close_run_effects()
         activated=self.owner.open_human(request.operation_id,request.issue_number,request.participant_id,
                                        session=request.session,attempt_id=request.attempt_id)
@@ -167,7 +170,47 @@ class LocalNativeGraph:
             git_operations=self.git_operations,gate_resources=self.gate_resources)
         self.activity=activity
         self.transition_retirement=None
+        self.suspended=False;self.stop_observations=None
         return activity.status()
+
+    def _forget_retired(self, retirement):
+        known=[]
+        from .workstation_control import SupervisorAdmission
+        for owner in retirement.owners.values():
+            known.append(owner if type(owner) is SupervisorAdmission else owner.native_admission)
+        self.admissions[:]=[item for item in self.admissions if all(item is not old for old in known)]
+
+    def prepare_stop(self):
+        """Root P revokes effects while retaining exact completed-Run exit proof."""
+        if self.closed:return self.close()
+        if self._stop_unknown:raise LedgerError('LOCAL_NATIVE_CLEANUP_UNKNOWN')
+        if self.suspended:return self.stop_observations.require_exited()
+        row=None if self.activity is None else self.activity._row()
+        if row is None or row['status']!='CLOSED' or row.get('outcome')!='completed':
+            return self.close()
+        from .local_native_stop import LocalNativeStopObservations
+        self._stop_unknown=True
+        observations=LocalNativeStopObservations(self)
+        self.stop_observations=observations
+        self.stack.callback(observations.close)
+        observations.retire(timeout=min(30,self.host.plan.operation_timeout_seconds))
+        observations.require_exited()
+        self._forget_retired(observations.held)
+        self._close_run_effects()
+        self.suspended=True;self._stop_unknown=False
+        return True
+
+    def _successor_git_ready(self):
+        # This local graph implements new PID-pinned resources after root reuse;
+        # qualification GitOperations intentionally keeps its finite refusal.
+        from .native_git_operations import NativeGitOperations
+        if (type(self.git_operations) is not NativeGitOperations
+                or self.git_operations.owner is not self.owner
+                or self.git_operations.resources is not self.git_resources
+                or self.git_operations.closed or self.checkout.closed):
+            raise LedgerError('LOCAL_SUCCESSOR_GIT_OWNER_REQUIRED')
+        self.host.plan.require_unchanged()
+        self.git_resources.profile.require_checkout('primary',self.git_resources.profile.repo)
 
     def _close_run_effects(self):
         # Revoke old per-Run writers before root-owned Workstation Stop. Keep
@@ -205,6 +248,7 @@ class LocalNativeGraph:
 
     def step(self):
         if self.closed:raise LedgerError('LOCAL_NATIVE_GRAPH_CLOSED')
+        if getattr(self,'suspended',False):return self.activity.status()
         return None if self.activity is None else self.activity.step()
 
     def close(self):
@@ -215,6 +259,9 @@ class LocalNativeGraph:
         # Mark unknown before the first effect. A second call can report the
         # original failure but cannot retry revocation or manufacture success.
         self.closed=True;self._cleanup_unknown=True
+        if getattr(self,'_stop_unknown',False):
+            self.stack.close()
+            raise LedgerError('LOCAL_NATIVE_CLEANUP_UNKNOWN')
         try:
             with admission_cleanup(self.admissions):
                 pass

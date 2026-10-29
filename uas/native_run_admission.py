@@ -201,6 +201,7 @@ class NativeRunAdmission(RunAdmission):
         if (type(launcher) is not NativeRunLauncher or not checkout_ok
                 or allocator.supervisor is not launcher.supervisor):
             raise LedgerError('ADMISSION_BINDING_MISMATCH')
+        self._local_checkout = type(checkout_client) is not NativeCheckoutClient
         self.launcher, self.checkout_client = launcher, checkout_client
         self._session = None
         self._activation_observation = None
@@ -263,7 +264,7 @@ class NativeRunAdmission(RunAdmission):
         with self.human_scope(session):
             return self._open(operation_id, issue_number, participant_id, session.human, attempt_id=attempt_id)
 
-    def retire_for_successor(self, request, grant, run_id, generation, revision, *, reviewer):
+    def retire_for_successor(self, request, grant, run_id, generation, revision, *, reviewer, observations=None):
         """Cleanup of one completed predecessor as part of this exact fresh Open.
 
         This grants no generic Stop, active-Run retirement or later authority.
@@ -295,6 +296,15 @@ class NativeRunAdmission(RunAdmission):
         operation='local-retire-'+hashlib.sha256((request.operation_id+':'+run_id).encode()).hexdigest()
         self._local_retirement_intent=(request.session,grant,operation,run_id,generation,revision)
         try:
+            if observations is not None:
+                from .local_native_stop import LocalNativeStopObservations
+                if type(observations) is not LocalNativeStopObservations:
+                    raise LedgerError('LOCAL_STOP_OWNER_REQUIRED')
+                held=observations.adopt_completed(self,reviewer,operation,run_id)
+                existing=self._completed_retirements.get(operation)
+                if existing is not None and existing is not held:raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+                if existing is None and len(self._completed_retirements)>=8:raise LedgerError('NATIVE_RETIREMENT_CAPACITY')
+                self._completed_retirements[operation]=held
             return self.retire_completed(operation,run_id,generation,revision,
                                          session=request.session,reviewer=reviewer)
         finally:self._local_retirement_intent=None
@@ -348,10 +358,9 @@ class NativeRunAdmission(RunAdmission):
         already=(type(held) is SupervisorAdmission and held.launch.native_recipe.scope['run_id']==run)
         method=(self.checkout_client.observe if already or run in getattr(self.launcher,'attempted_runs',())
                 else self.checkout_client.allocate)
-        if pending.get('preceding_run') is not None and method==self.checkout_client.allocate:
-            from .local_successor_checkout import LocalNativeCheckoutClient
-            if type(self.checkout_client) is LocalNativeCheckoutClient:
-                method=self.checkout_client.reuse_primary
+        if (self._local_checkout and pending.get('preceding_run') is not None
+                and method==self.checkout_client.allocate):
+            method=self.checkout_client.reuse_primary
         slot = method(run, pending['admission_operation'])
         if (slot['run'] != run or slot['participant'] != participant or slot['phase'] != 'ready'
                 or slot['reason'] != 'ACTIVE' or slot['observed_dirty'] is not False

@@ -89,6 +89,7 @@ class ThreeLocalRunsTests(unittest.TestCase):
         graph.host=host;graph.closed=False;graph.stack=self.stack;graph.admissions=[]
         graph.owner=c.admission;graph.launcher=c.launcher;graph.budget=c.launcher.budget
         graph.activity=graph.recruitment=graph.transition_retirement=None
+        graph.suspended=False;graph.stop_observations=None;graph._stop_unknown=False
         graph.git_broker=None
         graph.git_operations=graph.git_resources=graph.gate_operations=graph.gate_resources=graph.gate_profile=None
         graph.provenance=GitProvenance(Path(root.name)/'git.db',c.room['id'],c.room['project']['id'])
@@ -103,7 +104,9 @@ class ThreeLocalRunsTests(unittest.TestCase):
         self.primary=None
         checkout=object.__new__(LocalNativeCheckoutClient);checkout.current=host.current
         checkout.deadline=180;checkout.after_reuse=graph.refresh_after_reuse;checkout.close=Mock()
-        graph.checkout=checkout;c.admission.checkout_client=checkout
+        graph.checkout=checkout
+        from uas.native_run_admission import NativeRunAdmission
+        NativeRunAdmission.__init__(c.admission,c.launcher,c.admission.allocator,checkout)
         checkout._call=self.checkout_call
         self.services=object.__new__(LocalServices);self.services.operation_lock=threading.RLock()
         self.services._rooms={c.room['id']:{'process':host,'instance':'instance','runtime_phase':'active'}}
@@ -241,6 +244,12 @@ class ThreeLocalRunsTests(unittest.TestCase):
         self.c.seed(completion)
 
     def test_three_fresh_requests_keep_work_and_advance_native_contexts(self):
+        self.three_runs(ordinary_stop=False)
+
+    def test_completed_stop_resume_then_three_fresh_runs_no_duplicate_retirement(self):
+        self.three_runs(ordinary_stop=True)
+
+    def three_runs(self, *, ordinary_stop):
         receipts=[];sessions=[]
         for index in (1,2,3):
             operation='work-'+str(index)
@@ -273,6 +282,23 @@ class ThreeLocalRunsTests(unittest.TestCase):
                     self.host.open_human('premature-'+str(index),1,session=fresh,grant=grant)
             self.assertEqual(counts,self.events)
             self.complete(receipt['run_id'])
+            if ordinary_stop and index<3:
+                before=self.events.count('retire')
+                self.commands.append(b'P');self.host.current()
+                self.lifecycle.update(phase='stopped',desired='stopped')
+                self.assertTrue(self.host._paused)
+                self.assertIsNone(self.host.step())
+                self.assertTrue(self.graph.suspended)
+                self.assertFalse(self.graph.closed)
+                self.assertEqual(before+2,self.events.count('retire'))
+                self.assertFalse(self.graph.admissions)
+                self.assertNotIn('native_stop',self.c.ledger.snapshot()['state']['runs'][receipt['run_id']])
+                self.lifecycle.update(phase='running',desired='running')
+                self.commands.append(b'R');self.host.current()
+                self.assertFalse(self.host._paused)
+                with patch.object(self.graph.activity,'step',side_effect=AssertionError('old activity resumed')):
+                    self.assertEqual('CLOSED',self.graph.step()['status'])
+                self.assertEqual(before+2,self.events.count('retire'))
         self.assertEqual(['allocate','pi1','claude1']+
                          ['retire','retire','stop','release','reserve','start','pi2','claude2']+
                          ['retire','retire','stop','release','reserve','start','pi3','claude3'],self.events)
@@ -281,7 +307,7 @@ class ThreeLocalRunsTests(unittest.TestCase):
         self.assertEqual(2,self.events.count('stop'));self.assertEqual(2,self.events.count('start'))
         self.assertEqual(2,self.events.count('release'));self.assertEqual(2,self.events.count('reserve'))
         control=[json.loads(line) for line in self.control_receipts.getvalue().splitlines()]
-        self.assertEqual(['participants-revoked','runtime-resumed']*2,[r['status'] for r in control])
+        self.assertEqual(['participants-revoked','runtime-resumed']*(4 if ordinary_stop else 2),[r['status'] for r in control])
         self.assertIsNone(self.c.admission._session);self.assertIsNone(self.graph.recruitment._session)
 
 if __name__=='__main__':unittest.main()

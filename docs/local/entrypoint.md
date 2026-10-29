@@ -152,8 +152,13 @@ silently discarded. A process restart does not reconstruct native authority
 from a stored receipt.
 
 Normal Stop sends a fixed pause to the retained child and requires its exact
-participant-revocation receipt before stopping the Workstation. The Hub and data
-remain. Missing/uncertain receipts are reported as such, never retried blindly.
+participant-revocation receipt before stopping the Workstation. For a completed
+Run, the child retains exact native exit observations without retaining human
+authority. After Room Start, no old task is automatically resumed: the next
+explicit authenticated Open adopts those observations into canonical retirement
+and safely reuses the checkout. The Hub and data remain. An interrupted active
+Run is reported separately as stopped service/attention, not as completed; its
+explicit terminal recovery is a separate step, never an automatic new Run. Missing/uncertain receipts are reported as such, never retried blindly.
 Actual accounts, native execution, browser TLS and provider integration remain
 part of the final authorized local test, not claims established by source tests.
 
