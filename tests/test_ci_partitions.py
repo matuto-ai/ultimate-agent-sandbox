@@ -27,14 +27,24 @@ class CIPartitionTests(unittest.TestCase):
                                           'test_run_review', 'test_staged_source_closure',
                                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-        self.assertEqual(ci.INTEGRATION_MODULES, {'test_context', 'test_forge_capacity',
+        self.assertEqual(ci.INTEGRATION_MODULES, {'test_context',
             'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
             'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
             'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
             'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
             'test_manager_action_host', 'test_forge_assignment',
     'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
+        self.assertEqual(ci.ADDITIONAL_MODULES, {
+            'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
+            'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
+            'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
+            'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
+            'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
+        })
         self.assertFalse(ci.SLOW_MODULES & ci.INTEGRATION_MODULES)
+        self.assertFalse(ci.ADDITIONAL_MODULES & (ci.SLOW_MODULES | ci.INTEGRATION_MODULES))
+        for module in ci.ADDITIONAL_MODULES:
+            self.assertEqual('additional', ci.partition_for(module + '.Case.test_one'))
         for module in ci.INTEGRATION_MODULES:
             self.assertEqual('integration', ci.partition_for(module + '.Case.test_one'))
         for module in ci.SLOW_MODULES:
@@ -47,17 +57,20 @@ class CIPartitionTests(unittest.TestCase):
         slow, future = case('test_peer.Case.test_one'), case('test_future.Case.test_one')
         cases, groups = ci.partition_suite(unittest.TestSuite([unittest.TestSuite([slow]), future]))
         self.assertEqual([slow, future], cases)
-        self.assertEqual({'slow': [slow], 'integration': [], 'remainder': [future]}, groups)
+        self.assertEqual({'slow': [slow], 'integration': [], 'additional': [],
+                          'remainder': [future]}, groups)
         slow.run.assert_not_called(); future.run.assert_not_called()
 
     def test_rebalanced_modules_each_run_once_without_changing_total_inventory(self):
-        identifiers = [module + '.Case.test_one' for module in sorted(ci.SLOW_MODULES | ci.INTEGRATION_MODULES)]
+        identifiers = [module + '.Case.test_one' for module in sorted(
+            ci.SLOW_MODULES | ci.INTEGRATION_MODULES | ci.ADDITIONAL_MODULES)]
         identifiers += ['test_future.Case.test_one', 'test_ci_partitions.Case.test_one']
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
         self.assertEqual(len(groups['slow']), 15)
-        self.assertEqual(len(groups['integration']), 21)
+        self.assertEqual(len(groups['integration']), 20)
+        self.assertEqual(len(groups['additional']), 16)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
@@ -78,16 +91,20 @@ class CIPartitionTests(unittest.TestCase):
                    ({'slow': [slow], 'remainder': [rest], 'extra': []})]
         for groups in invalid:
             with self.subTest(groups=groups), self.assertRaises(ValueError):
-                ci.verify_partition_ids([slow, rest], dict(integration=[], **groups))
+                ci.verify_partition_ids([slow, rest], dict(integration=[], additional=[], **groups))
         integration = 'test_context.Case.test_one'
-        valid = {'slow': [slow], 'integration': [integration], 'remainder': [rest]}
-        ci.verify_partition_ids([slow, integration, rest], valid)
+        additional = 'test_local_native_terminal.Case.test_one'
+        valid = {'slow': [slow], 'integration': [integration],
+                 'additional': [additional], 'remainder': [rest]}
+        ci.verify_partition_ids([slow, integration, additional, rest], valid)
         for broken in ({'slow': [slow], 'remainder': [rest]},
                        dict(valid, integration=[]),
                        dict(valid, integration=[integration, integration]),
-                       dict(valid, integration=[rest], remainder=[integration])):
+                       dict(valid, integration=[rest], remainder=[integration]),
+                       dict(valid, additional=[]),
+                       dict(valid, additional=[additional, additional])):
             with self.subTest(groups=broken), self.assertRaises(ValueError):
-                ci.verify_partition_ids([slow, integration, rest], broken)
+                ci.verify_partition_ids([slow, integration, additional, rest], broken)
         with self.assertRaises(ValueError):
             list(ci.leaves([object()]))
 
@@ -95,7 +112,9 @@ class CIPartitionTests(unittest.TestCase):
         for partition in ('all', *ci.PARTITIONS):
             slow, rest = case('test_peer.Case.test_one'), case('test_future.Case.test_one')
             integration = case('test_context.Case.test_one')
-            loader = Mock(errors=[], discover=Mock(return_value=unittest.TestSuite([slow, integration, rest])))
+            additional = case('test_local_native_terminal.Case.test_one')
+            loader = Mock(errors=[], discover=Mock(return_value=unittest.TestSuite(
+                [slow, integration, additional, rest])))
             runner = Mock()
             runner.run.return_value.wasSuccessful.return_value = True
             with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
@@ -104,8 +123,11 @@ class CIPartitionTests(unittest.TestCase):
                 self.assertEqual(0, ci.main([partition]))
             loader.discover.assert_called_once_with(str(Path(__file__).resolve().parent), pattern='test*.py')
             self.assertEqual(list(runner.run.call_args.args[0]),
-                             [slow, integration, rest] if partition == 'all' else {'slow': [slow], 'integration': [integration], 'remainder': [rest]}[partition])
-            slow.run.assert_not_called(); rest.run.assert_not_called()
+                             [slow, integration, additional, rest] if partition == 'all' else {
+                                 'slow': [slow], 'integration': [integration],
+                                 'additional': [additional], 'remainder': [rest]}[partition])
+            for item in (slow, integration, additional, rest):
+                item.run.assert_not_called()
 
     def test_discovery_and_selected_test_failures_are_required_failures(self):
         loader = Mock(errors=['fixture import failure'])
@@ -116,7 +138,8 @@ class CIPartitionTests(unittest.TestCase):
         runner.assert_not_called()
         loader.errors = []
         loader.discover.return_value = unittest.TestSuite([case('test_peer.Case.test_one'),
-                                                          case('test_future.Case.test_one'), case('test_context.Case.test_one')])
+                                                          case('test_future.Case.test_one'), case('test_context.Case.test_one'),
+                                                          case('test_local_native_terminal.Case.test_one')])
         runner = Mock(); runner.run.return_value.wasSuccessful.return_value = False
         with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
                 patch.object(ci.unittest, 'TextTestRunner', return_value=runner), \

@@ -1,4 +1,4 @@
-"""Standard discovery, three complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, four complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -22,15 +22,25 @@ SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_run_review', 'test_staged_source_closure',
                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-INTEGRATION_MODULES = frozenset({'test_context', 'test_forge_capacity',
+INTEGRATION_MODULES = frozenset({'test_context',
     'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
     'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
     'test_manager_action_host', 'test_forge_assignment',
     'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
-PARTITIONS = ('slow', 'integration', 'remainder')
-assert not SLOW_MODULES & INTEGRATION_MODULES
+# Run 40958947508: remainder took 60.833s before its process smoke.
+# Move ~23s of measured remainder work and ~7.5s from integration to a sibling.
+ADDITIONAL_MODULES = frozenset({
+    'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
+    'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
+    'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
+    'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
+    'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
+})
+PARTITIONS = ('slow', 'integration', 'additional', 'remainder')
+assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES
+            or INTEGRATION_MODULES & ADDITIONAL_MODULES)
 
 
 def partition_for(identifier):
@@ -39,7 +49,9 @@ def partition_for(identifier):
     module = identifier.split('.', 1)[0]
     if module in SLOW_MODULES:
         return 'slow'
-    return 'integration' if module in INTEGRATION_MODULES else 'remainder'
+    if module in INTEGRATION_MODULES:
+        return 'integration'
+    return 'additional' if module in ADDITIONAL_MODULES else 'remainder'
 
 
 def verify_partition_ids(all_ids, groups):
@@ -95,7 +107,8 @@ def main(argv=None):
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
     print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
-          f'integration={len(groups["integration"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
+          f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
+          f'remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
     return 0 if result.wasSuccessful() else 1
