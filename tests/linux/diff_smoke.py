@@ -40,6 +40,7 @@ EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 SOURCES = (
     'uas/__main__.py',
     'uas/native_qualification.py',
+    'uas/local_host_profile.py',  # Pure shared identity policy, including fixed qualification.
     'uas/native_qualification_backend.py',
     'uas/native_session.py',
     'uas/native_session_driver.py',
@@ -172,7 +173,7 @@ SOURCES = (
 )
 # Explicit Gate closure: base138 / artifacts142 / command145 files.
 # Fixed paths only; byte budgets remain the reviewed 256KiB/file and3MiB total.
-MAX_SOURCE_FILES=145
+MAX_SOURCE_FILES=146
 MAX_SOURCE_BYTES=256<<10
 MAX_SOURCE_TOTAL=3<<20
 

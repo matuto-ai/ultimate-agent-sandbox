@@ -55,7 +55,8 @@ persistent `uas.local_hub` entrypoint. The earlier #78 image archives predate
 that entrypoint and must not be represented as containing this change.
 
 The existing Linux native profile still requires Docker Engine 29.8.2, SELinux,
-user namespace mapping `0:100000:65536`, fixed isolated host owners, and prepared
+a validated nonoverlapping 65536-ID user namespace mapping (version 1 keeps
+`0:100000:65536`), profile-derived isolated host owners, and prepared
 XFS quotas. This command does **not** reconfigure Docker, create accounts, alter
 mounts/security policy, or provision personal credentials. A plain Docker
 installation or non-Linux desktop is not an equivalent confinement profile.

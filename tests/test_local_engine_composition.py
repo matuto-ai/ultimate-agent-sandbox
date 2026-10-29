@@ -27,6 +27,8 @@ class StopAtBoundary(Exception):
 class EngineCompositionTests(unittest.TestCase):
     def test_parent_startup_reaches_idle_hub_api_on_selected_socket(self):
         config, doc = selections()
+        doc['host_profile']['mapping']['offset']=500000
+        doc['mapping']['offset']=500000
         p = LocalNativeProfile(config, doc, 'room', '/srv/uas/control')
         fixtures = service_fixtures.LocalServicesTests()
         owner, backend = fixtures.owner(), fixtures.backend()
@@ -46,14 +48,17 @@ class EngineCompositionTests(unittest.TestCase):
         stat.assert_any_call('/run/uas-engine.sock')
         self.assertFalse(any(call.args[0]=='/run/docker.sock' for call in stat.call_args_list))
         self.assertIn(55, spawn.call_args.kwargs['extra_groups'])
+        self.assertEqual(spawn.call_args.kwargs['user'],565533)
+        self.assertEqual(spawn.call_args.kwargs['group'],565533)
+        self.assertTrue({565531} <= set(spawn.call_args.kwargs['extra_groups']))
         raw = send.call_args.args[1].rstrip(b'\n')
         startup = hub.startup_document(raw)
         self.assertEqual(startup['host_profile'], doc['host_profile'])
         self.assertNotIn('runtime', startup)
         api = Mock(); api.socket_path = '/run/uas-engine.sock'
         listener, peer = Mock(), Mock()
-        with (patch.object(hub.os, 'getuid', return_value=session.HOST_UID),
-              patch.object(hub.os, 'getgid', return_value=session.HOST_UID),
+        with (patch.object(hub.os, 'getuid', return_value=565533),
+              patch.object(hub.os, 'getgid', return_value=565533),
               patch.object(hub, 'probe'), patch.object(hub.os, 'pidfd_open', return_value=42),
               patch.object(hub.os, 'close'), patch.object(hub, '_identity', return_value=(1,2)),
               patch.object(hub.socket, 'socket', side_effect=[listener,peer]),
@@ -68,13 +73,18 @@ class EngineCompositionTests(unittest.TestCase):
 
     def test_native_participant_path_uses_same_engine_before_first_endpoint_effect(self):
         config, doc = selections()
+        doc['host_profile']['mapping']['offset']=500000
+        doc['mapping']['offset']=500000
         p = LocalNativeProfile(config, doc, 'room', '/srv/uas/control')
-        plan = SimpleNamespace(native_profile=p, room=p.room, installation={}, operation_timeout_seconds=30)
+        from uas.local_runtime_plan import LocalRuntimePlan
+        plan=LocalRuntimePlan.__new__(LocalRuntimePlan)
+        plan.native_profile=p;plan.room=p.room;plan.installation={};plan.operation_timeout_seconds=30
+        plan.require_unchanged=Mock()
         host = LocalNativeRunSession.__new__(LocalNativeRunSession)
         host.plan=plan; host.supervisor=Mock()
         resources={'room_id':'room','instance':'instance','supervisor_directory':'/owned', 'peer_path':'/owned/peer'}
-        with (patch.object(session.os, 'getuid', return_value=session.HOST_UID),
-              patch.object(session.os, 'getgid', return_value=session.HOST_UID),
+        with (patch.object(session.os, 'getuid', return_value=565533),
+              patch.object(session.os, 'getgid', return_value=565533),
               patch.object(session.os, 'umask'), patch.object(session, 'probe'),
               patch.object(LocalNativeRunSession, '_require_owner'),
               patch.object(LocalNativeRunSession, 'current'),

@@ -123,8 +123,14 @@ class Supervisor:
     def __init__(self, control_root, room_id, backend, *, authorize, revoke, state_reader_gid=None):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", room_id):
             raise LifecycleError("INVALID_SPEC")
+        reader_gid=165533
+        if type(backend).__module__=='uas.local_native':
+            from .local_native import LocalNativeBackend
+            if type(backend) is LocalNativeBackend:
+                backend.profile.require_host_unchanged()
+                reader_gid=backend.profile.host_profile.owners['supervisor']
         if state_reader_gid is not None and (type(state_reader_gid) is not int
-                or state_reader_gid != 165533 or os.geteuid() != 0):
+                or state_reader_gid != reader_gid or os.geteuid() != 0):
             raise LifecycleError('INVALID_STATE_READER_POLICY')
         self._state_reader_gid = state_reader_gid
         self.root = _path(control_root)

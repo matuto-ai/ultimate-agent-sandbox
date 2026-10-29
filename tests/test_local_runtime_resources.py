@@ -77,6 +77,7 @@ class LocalRuntimeResourcesTests(unittest.TestCase):
         server=object.__new__(resources.LocalCheckoutServer)
         server.closed=False;server.child=Mock();server.child.pid=123;server.child.poll.return_value=None
         server.pidfd=9;server.identity=(1,2);server.channel=Mock();server._epoch=Mock()
+        server.resources=SimpleNamespace(plan=self.plan())
         @contextmanager
         def incoming(_channel):
             yield SimpleNamespace(credentials=(456,165533,165533),pidfd=10,data=b'{}')

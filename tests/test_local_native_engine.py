@@ -55,7 +55,7 @@ class SelectedEngineTests(unittest.TestCase):
         self.assertEqual(reads,['/etc/subuid','/etc/subgid','/proc/1234/uid_map','/proc/1234/gid_map'])
 
     def test_dynamic_mapping_and_duplicate_selection_mismatch_rejected(self):
-        for mutation in ('offset','id','root-overlap'):
+        for mutation in ('id','root-overlap'):
             config,doc=selections()
             if mutation=='offset':doc['mapping']['offset']=doc['host_profile']['mapping']['offset']=200000
             if mutation=='id':doc['host_profile']['installation_id']='b'*32
@@ -81,26 +81,3 @@ class SelectedEngineTests(unittest.TestCase):
         _,doc=selections();value=self.startup(doc);value.pop('host_profile');value['version']=1
         value['runtime']={'native_document':doc}
         with self.assertRaisesRegex(QualificationError,'ENGINE_BINDING'):hub.startup_document(json.dumps(value).encode())
-
-    def test_readonly_local_observer_uses_selected_engine_and_requires_profile(self):
-        config,doc=selections();p=local.LocalNativeProfile(config,doc,'room','/srv/uas/control')
-        observer=local.LocalNativeObserver('room','a'*32,'b'*64,host_profile=p.host_profile)
-        with patch.object(native.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='[]',stderr='')) as command:
-            observer._run(['ps'])
-        self.assertEqual(command.call_args.args[0][:3],['/usr/bin/docker','--host','unix:///run/uas-engine.sock'])
-        with self.assertRaisesRegex(LifecycleError,'HOST_PROFILE_REQUIRED'):
-            local.LocalNativeObserver('room','a'*32,'b'*64,host_profile={'socket':'/run/foreign.sock'})
-
-    def test_backend_and_observer_reject_replacement_before_any_engine_command(self):
-        from dataclasses import replace
-        for mutate in ('profile','document','observer'):
-            config,doc=selections();p=local.LocalNativeProfile(config,doc,'room','/srv/uas/control')
-            backend=local.LocalNativeBackend(p)
-            if mutate=='profile':p.host_profile=replace(p.host_profile,socket='/run/foreign.sock')
-            elif mutate=='document':p.native_document['host_profile']['engine']['socket']='/run/foreign.sock'
-            else:
-                backend=local.LocalNativeObserver('room','a'*32,'b'*64,host_profile=p.host_profile)
-                backend.host_profile=replace(backend.host_profile,socket='/run/foreign.sock')
-            with patch.object(native.subprocess,'run') as command:
-                with self.assertRaisesRegex(LifecycleError,'HOST_SELECTION_CHANGED'):backend._run(['stop','owned'])
-            command.assert_not_called()

@@ -44,8 +44,6 @@ def startup_engine(value):
         socket_path='/run/docker.sock';selected=None
     else:
         selected=LocalHostProfile.parse(value['host_profile'])
-        if (selected.offset,selected.size)!=(100000,65536):
-            raise QualificationError('LOCAL_HUB_MAPPING_INTEGRATION_REQUIRED')
         socket_path=selected.socket
     if 'runtime' in value:
         from .local_native import validate_document, selected_host
@@ -90,16 +88,22 @@ def retain(control,origin,parent_fd):
 
 
 def run(raw,parent_fd):
-    if (os.getuid(),os.getgid())!=(HOST_UID,HOST_UID):
+    if os.getuid()==0 or os.getgid()==0:
         raise QualificationError('LOCAL_HUB_FIXED_OWNER_REQUIRED')
-    document=startup_document(raw);resources=document['resources'];probe()
+    document=startup_document(raw)
+    from .local_host_profile import LocalHostProfile
+    host_profile=LocalHostProfile.parse(document['host_profile']) if document['version']==2 else None
+    owner=HOST_UID if host_profile is None else host_profile.owners['supervisor']
+    if (os.getuid(),os.getgid())!=(owner,owner):
+        raise QualificationError('LOCAL_HUB_FIXED_OWNER_REQUIRED')
+    resources=document['resources'];probe()
     with ExitStack() as stack:
         self_fd=os.pidfd_open(os.getpid(),0);stack.callback(os.close,self_fd)
         startup=metadata(document['room'],resources,_identity(self_fd),secrets.token_hex(32))
         listener=socket.socket(fileno=resources['control_fd']);stack.callback(listener.close)
         peer=socket.socket(fileno=resources['peer_fd']);stack.callback(peer.close)
         control,origin,ready,_=start_hub_channel(DockerExecAPI(startup_engine(document)),resources,
-                                               startup,listener,stack,SessionBudget(30))
+                                               startup,listener,stack,SessionBudget(30),host_profile=host_profile)
         receipt={'version':1,'status':'ready','room_id':startup['room_id'],
                  'room_instance':startup['room_instance'],'controller':ready['controller']}
         def announce(_=None):

@@ -5,8 +5,8 @@ it does not install an alternate Docker daemon, create an XFS backing image,
 change global Docker configuration, start Rooms, or authorize any host change.
 The isolated Engine/non-XFS installation path remains unfinished in #202.
 
-The existing host plan must select Docker 29.8.2, subordinate mapping
-100000:65536, SELinux enforcing, and an existing quota-enabled XFS parent.
+The existing host plan must select Docker 29.8.2, an explicitly selected nonoverlapping subordinate mapping
+of size 65536, SELinux enforcing, and an existing quota-enabled XFS parent.
 The Engine socket, data/exec roots and remap account may be explicitly selected;
 ambient Docker contexts and DOCKER_HOST are never used. Existing human trees
 are not imported.
@@ -17,11 +17,14 @@ Docker CLI checks and native Participant API. Existing `local-native-v1` input
 retains the fixed qualification defaults. Selecting another endpoint does not
 install a daemon or make two daemons' network/firewall policies independent.
 
-The mapping offset is deliberately still fixed. If a rootless Podman user or
-another subordinate-ID allocation overlaps that range, planning refuses it.
-Do not move or overwrite the existing allocation to bypass that refusal. A
-nonoverlapping dynamic mapping needs consistent runtime identity propagation
-before it can be admitted; profile parsing alone is not that implementation.
+For version 2, all host identities derive from the selected mapping offset:
+Gate +65530, Hub +65531, runtime +65532, Supervisor +65533, and Broker +65534.
+Preparation, retained owners, endpoint credentials and kernel map checks use
+that same profile. An overlapping rootless Podman or other allocation is still
+refused; never move an existing user's allocation to bypass the refusal. Select
+an existing compatible Engine with an independently allocated nonoverlapping
+range. This does not configure a new daemon or allocate a subordinate range.
+Qualification and version 1 retain offset 100000.
 
 `python -m uas.local_room_prepare plan` reads `--host-plan`, `--project`,
 `--settings`, `--workstation-output`, `--hub-output`, and `--revision`, then

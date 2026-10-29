@@ -46,7 +46,9 @@ references. Each selected Room's deployment image reference must equal the
 observed Workstation image ID from the current report; update that explicit
 selection yourself if needed, without changing agent/model choices.
 
-Create a private `host-selections.json` with exactly these fields:
+The legacy version-1 handoff uses a private `host-selections.json` with these fields.
+For selected Engine and nondefault UID ranges, use the version-2 preparation
+flow in [host preparation](host-preparation.md); do not change a version-1 offset.
 
 | Field | Value to supply |
 |---|---|

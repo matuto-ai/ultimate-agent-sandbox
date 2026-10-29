@@ -55,14 +55,15 @@ class ApplyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'selected observer'):apply(p)
                 self.assertEqual(observe.call_args.args[0],doc)
 
-    def test_unintegrated_mapping_refused_before_observer(self):
+    def test_dynamic_mapping_reaches_selected_observer(self):
         doc=profile();doc['mapping']['offset']=200000
         o=observation();o['subuid']=[doc['mapping']];o['subgid']=[doc['mapping']]
         o['engine']['docker_root']='/var/lib/docker/200000.200000'
         p=selected(p=doc,o=o)
         with patch('uas.local_host_apply.os.geteuid',return_value=0), \
-             patch('uas.local_host_apply.inspect',side_effect=AssertionError('must not observe')):
-            with self.assertRaisesRegex(HostProfileError,'PROFILE_INTEGRATION_REQUIRED'):apply(p)
+             patch('uas.local_host_apply.inspect',side_effect=RuntimeError('selected observer')) as observe:
+            with self.assertRaisesRegex(RuntimeError,'selected observer'):apply(p)
+            self.assertEqual(observe.call_args.args[0]['mapping']['offset'],200000)
 
     def test_fake_first_apply_then_confirmed_resume(self):
         evidence={'identity':[3,22],'observed_sha256':'b'*64}

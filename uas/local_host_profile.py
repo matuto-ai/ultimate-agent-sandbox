@@ -75,7 +75,7 @@ class LocalHostProfile:
         require(type(mapping['user']) is str and re.fullmatch(r'[a-z][a-z0-9-]{0,30}', mapping['user']), 'HOST_MAPPING')
         require(type(mapping['offset']) is int and type(mapping['size']) is int
                 and mapping['size'] == 65536 and mapping['offset'] >= 65536
-                and mapping['offset'] + mapping['size'] <= 2**32 - 1, 'HOST_MAPPING')
+                and mapping['offset'] + mapping['size'] <= 2**31, 'HOST_MAPPING')
         return cls(document['installation_id'], document['mode'], engine['socket'],
                    engine['data_root'], engine['exec_root'], mapping['user'],
                    mapping['offset'], mapping['size'])
@@ -124,3 +124,17 @@ class LocalHostProfile:
         require(type(identity) is list and len(identity) == 2
                 and all(type(x) is int and x >= 0 for x in identity), 'HOST_ENGINE_SOCKET_IDENTITY')
         return tuple(identity)
+
+
+def plan_owners(plan):
+    """Identity policy from a concrete validated local plan, or fixed qualifier.
+
+    A mapping-shaped object is not sufficient to select privileged identities.
+    """
+    from .native_qualification import is_local_runtime_plan
+    if is_local_runtime_plan(plan):
+        plan.require_unchanged()
+        return plan.native_profile.host_profile.owners
+    require(not hasattr(plan, 'native_profile'), 'HOST_LOCAL_PLAN_REQUIRED')
+    return {'gate':165530, 'hub':165531, 'runtime':165532,
+            'supervisor':165533, 'broker':165534}

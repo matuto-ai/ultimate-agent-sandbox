@@ -73,7 +73,8 @@ def _operations(value, identity):
             operations.append({'kind':'prepare-room-leaf','storage_root':storage,
                 'storage_identity':identity,'path':path,'project_id':selected['quota_project_id'],
                 'mcs_level':selected['mcs_level']})
-    body={'version':1,'request_id':value['request_id'],'operations':operations}
+    body={'version':1,'request_id':value['request_id'],'operations':operations,
+          'host_profile':value['host_plan']['profile']}
     return dict(body,plan_id=digest(body))
 
 

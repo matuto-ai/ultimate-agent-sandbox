@@ -269,6 +269,8 @@ def git_broker_selection(plan):
 
 def check_git_credentials(plan,selection):
     """Root metadata check only; canonical Broker reopens/rechecks before each use."""
+    from .local_host_profile import plan_owners
+    owners=plan_owners(plan)
     import stat
     from pathlib import Path
     mounted=[Path(value).resolve(strict=True) for value in plan.room['project']['roots'].values()]
@@ -280,7 +282,7 @@ def check_git_credentials(plan,selection):
         for name in ('key_path','known_hosts_path'):
             candidate=Path(row[name]);resolved=candidate.resolve(strict=True);info=candidate.lstat()
             if (candidate!=resolved or any(candidate==root or root in candidate.parents for root in mounted)
-                    or not stat.S_ISREG(info.st_mode) or info.st_uid!=165534 or info.st_nlink!=1
+                    or not stat.S_ISREG(info.st_mode) or info.st_uid!=owners['broker'] or info.st_nlink!=1
                     or info.st_mode & 0o177 or not info.st_mode & 0o400
                     or not 0<info.st_size<=1048576):
                 raise QualificationError('GIT_CREDENTIAL_UNAVAILABLE')

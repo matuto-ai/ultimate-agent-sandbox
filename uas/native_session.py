@@ -109,9 +109,13 @@ def _hub(engine, resources, plan, peer, control_listener, stack, budget):
     return start_hub_channel(engine, resources, metadata, control_listener, stack, budget)
 
 
-def start_hub_channel(engine, resources, metadata, control_listener, stack, budget):
+def start_hub_channel(engine, resources, metadata, control_listener, stack, budget, *, host_profile=None):
     """One authenticated startup; callers retain stack for the owner lifetime."""
-    control_lease = EndpointLease(resources['control_path'], owner=HOST_UID, group=HUB_UID)
+    from .local_host_profile import LocalHostProfile
+    require(host_profile is None or type(host_profile) is LocalHostProfile,'HOST_PROFILE_REQUIRED')
+    supervisor_uid=HOST_UID if host_profile is None else host_profile.owners['supervisor']
+    hub_uid=HUB_UID if host_profile is None else host_profile.owners['hub']
+    control_lease = EndpointLease(resources['control_path'], owner=supervisor_uid, group=hub_uid)
     challenge = metadata['challenge']
     room_id, instance = metadata['room_id'], metadata['room_instance']
     stream = engine.attach_hub(resources['hub_id']); stack.callback(stream.close)
@@ -123,7 +127,7 @@ def start_hub_channel(engine, resources, metadata, control_listener, stack, budg
     enable(control); control.settimeout(budget.remaining(8))
     with receive(control) as record:
         require(record.data == b'HUB1' + bytes.fromhex(challenge)
-                and record.credentials[1:] == (HUB_UID, HUB_UID), 'HUB_STARTUP_IDENTITY_MISMATCH')
+                and record.credentials[1:] == (hub_uid, hub_uid), 'HUB_STARTUP_IDENTITY_MISMATCH')
         origin = HeldOrigin(record)
     stack.callback(origin.close)
     control_lease.require()
@@ -174,6 +178,8 @@ def _gate_listener(resources, *, local_plan=None):
     """Actual Supervisor-created fixed listener; root only provisions its parent."""
     import stat
     from .artifact_helper import GateEndpointLease
+    from .local_host_profile import plan_owners
+    owners=plan_owners(local_plan)
     instance=resources.get('instance')
     require(type(instance) is str and len(instance)==32 and all(c in '0123456789abcdef' for c in instance),
             'GATE_ENDPOINT_UNAVAILABLE')
@@ -188,17 +194,17 @@ def _gate_listener(resources, *, local_plan=None):
     require(filename==expected and not os.path.lexists(filename),'GATE_ENDPOINT_UNAVAILABLE')
     parent=filename.parent;info=parent.lstat()
     require(parent.resolve()==parent and stat.S_ISDIR(info.st_mode)
-        and info.st_uid==HOST_UID and info.st_gid==165530 and stat.S_IMODE(info.st_mode)==0o710
-        and os.getuid()==HOST_UID and 165530 in os.getgroups(),'GATE_ENDPOINT_OWNER_REQUIRED')
+        and info.st_uid==owners['supervisor'] and info.st_gid==owners['gate'] and stat.S_IMODE(info.st_mode)==0o710
+        and os.getuid()==owners['supervisor'] and owners['gate'] in os.getgroups(),'GATE_ENDPOINT_OWNER_REQUIRED')
     channel=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
     try:
         enable(channel);channel.bind(str(filename))
-        os.chown(filename,HOST_UID,165530);os.chmod(filename,0o620)
+        os.chown(filename,owners['supervisor'],owners['gate']);os.chmod(filename,0o620)
         channel.listen(8)
         # Observe stock policy outcome, never install a type/domain transition.
         require(os.getxattr(filename,'security.selinux',follow_symlinks=False).rstrip(b'\0')
             == ('system_u:object_r:container_file_t:'+level).encode(),'GATE_ENDPOINT_MAC_UNAVAILABLE')
-        GateEndpointLease(filename,owner=HOST_UID,group=165530).require()
+        GateEndpointLease(filename,owner=owners['supervisor'],group=owners['gate']).require()
         return channel
     except BaseException:
         channel.close();raise
@@ -206,7 +212,9 @@ def _gate_listener(resources, *, local_plan=None):
 
 def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_request=None, next_request=None, human_actions=None, human_control=None, local_host=None):
     from .native_qualification_backend import readonly_supervisor
-    require((os.getuid(), os.getgid()) == (HOST_UID, HOST_UID), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
+    from .local_host_profile import plan_owners
+    owners=plan_owners(plan) if local_host is not None else plan_owners(None)
+    require((os.getuid(), os.getgid()) == (owners['supervisor'], owners['supervisor']), 'TRUSTED_NATIVE_SUPERVISOR_REQUIRED')
     require(type(resources) is dict and resources.get('room_id') == plan.room['id'], 'INVALID_LAUNCH_RESOURCES')
     require(('git_manifest' in plan.installation)==(git_fd is not None),'GIT_BROKER_CHANNEL_REQUIRED')
     if human_control is not None:
@@ -264,7 +272,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
     journal = Path(resources['supervisor_directory'])
     engine = DockerExecAPI(plan.native_profile.host_profile.socket
                            if local_host is not None else '/run/docker.sock')
-    peer_lease = EndpointLease(resources['peer_path'], owner=HOST_UID, group=RUNTIME_UID)
+    peer_lease = EndpointLease(resources['peer_path'], owner=owners['supervisor'], group=owners['runtime'])
     admissions = []
     with ExitStack() as stack, admission_cleanup(admissions):
         def socket_fd(fd):
@@ -284,7 +292,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
         else:
             broker_channel = socket.socket(fileno=broker_fd); stack.callback(broker_channel.close)
             broker = ReadBrokerClient(broker_channel, supervisor, binding, instance,
-                                      worker_uid=BROKER_UID, worker_gid=BROKER_UID)
+                                      worker_uid=owners['broker'], worker_gid=owners['broker'])
             stack.callback(broker.close)
         if human_control is not None:
             from .native_broker_audit import NativeBrokerAudit
@@ -297,7 +305,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
         if git_fd is not None and local_host is None:
             from .git_service import GitBrokerClient
             git_channel=socket.socket(fileno=socket_fd(git_fd));stack.callback(git_channel.close)
-            git_broker=GitBrokerClient(git_channel,binding,instance,broker_uid=BROKER_UID,broker_gid=BROKER_UID)
+            git_broker=GitBrokerClient(git_channel,binding,instance,broker_uid=owners['broker'],broker_gid=owners['broker'])
             stack.callback(git_broker.close)
         # Same database mounted into Hub. No snapshot copy and no private state.
         require(Path(resources['hub_ledger_path']).is_file(), 'CANONICAL_ROOM_LEDGER_UNAVAILABLE')
@@ -338,7 +346,7 @@ def run(plan, resources, broker_fd, checkout_fd=None, git_fd=None, *, human_requ
             selected = plan.seats[runtime]
             declared = next(s for s in metadata['seats'] if s['participant_id'] == selected['participant'])
             exec_seat = ExecSeat(room['id'], instance, selected['participant'], selected['actor'], slot,
-                resources['workstation_id'], RUNTIME_UID, RUNTIME_UID)
+                resources['workstation_id'], owners['runtime'], owners['runtime'])
             admission_seat = AdmissionSeat(room['id'], instance, selected['participant'], selected['actor'],
                 selected['profile'], tuple(declared['capabilities']), receiver)
             scope = {'room_id': room['id'], 'participant_id': selected['participant'],

@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import stat
 
-from .local_host_profile import absolute_path, canonical, digest, require
+from .local_host_profile import LocalHostProfile, absolute_path, canonical, digest, require
 from .local_host_observe import canonical_node
 from .local_host_process import run_fixed
 from .guest_fixture import project_attributes
@@ -187,7 +187,8 @@ def prepare_leaf(receipt, index):
             return fresh, attributes, label
 
         fresh, attributes, label = current()
-        final_owner = (165532, 165532)
+        profile=LocalHostProfile.parse(receipt.plan['host_profile'])
+        final_owner = (profile.owners['runtime'], profile.owners['runtime'])
         if (fresh.st_uid, fresh.st_gid) == final_owner:
             # Ownership was already handed off. Runtime may have populated data;
             # only observation is permitted, not a recursive repair/relabel.

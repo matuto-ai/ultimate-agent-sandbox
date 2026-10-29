@@ -32,7 +32,8 @@ class RoomResourceTests(unittest.TestCase):
                'project_id':1200,'disk_bytes':64*1024**2}
         leaf={'kind':'prepare-room-leaf','storage_root':str(self.storage),'storage_identity':identity,
               'path':str(self.leaf),'project_id':1200,'mcs_level':'s0:c200,c201'}
-        body={'version':1,'operations':[quota,leaf]};self.plan=dict(body,plan_id=digest(body))
+        from tests.test_local_host_plan import profile
+        body={'version':1,'operations':[quota,leaf],'host_profile':profile()};self.plan=dict(body,plan_id=digest(body))
         self.receipt=PreparationReceipt(self.receipts,self.plan,owner_uid=0)
         self.addCleanup(self.receipt.close)
 

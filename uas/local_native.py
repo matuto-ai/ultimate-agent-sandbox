@@ -70,9 +70,6 @@ def selected_host(document):
             'installation_id':document['installation_id'],'mode':'reuse',
             'engine':{'version':'29.8.2','socket':'/run/docker.sock','data_root':'/var/lib/docker','exec_root':'/run/docker'},
             'mapping':{'user':'uas-remap','offset':100000,'size':65536}})
-    # Endpoint/data-root selection is usable independently. Offset changes must
-    # not enter until broker/Gate/Hub SO_PEERCRED and ownership all consume them.
-    require(selected.offset==100000 and selected.size==65536,'LOCAL_NATIVE_MAPPING_INTEGRATION_REQUIRED')
     return selected
 
 
@@ -89,8 +86,10 @@ def validate_document(document):
     require(storage!=endpoints and storage not in endpoints.parents and endpoints not in storage.parents,
             'LOCAL_NATIVE_ROOT_OVERLAP')
     require(len(str(endpoints).encode())+len('/'+'0'*32+'/control/hub.sock')<108,'LOCAL_NATIVE_SOCKET_PATH')
-    require(document['engine_version']=='29.8.2'
-            and document['mapping']=={'offset':100000,'size':65536},'LOCAL_NATIVE_ENGINE_PROFILE')
+    require(document['engine_version']=='29.8.2' and type(document['mapping']) is dict
+            and set(document['mapping'])=={'offset','size'},'LOCAL_NATIVE_ENGINE_PROFILE')
+    if version==1:
+        require(document['mapping']=={'offset':100000,'size':65536},'LOCAL_NATIVE_ENGINE_PROFILE')
     host=selected_host(document)
     require(all(Path(root)!=Path(engine) and Path(root) not in Path(engine).parents and Path(engine) not in Path(root).parents
                 for root in (document['storage_root'],document['endpoints_root'])
@@ -200,6 +199,8 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     def level(self): return self._level
     @property
     def project_id(self): return self._project_id
+    @property
+    def owners(self): return self.host_profile.owners
     def storage_ancestors(self): return (self.storage,self.state_root.parent)
 
     def guard(self, *, require_selinux=True):
@@ -286,15 +287,15 @@ class LocalNativeBackend(native.NativeQualificationBackend):
         finally:os.close(fd)
         require(record=={**self._endpoint_record(state),'identity':native.directory_identity(root)},'ENDPOINT_OWNERSHIP')
         layout=self.layout(state)
-        selected=[(layout['peer']/'pi.sock',native.RUNTIME_UID),(layout['control']/'hub.sock',native.HUB_UID)]
+        selected=[(layout['peer']/'pi.sock',self.profile.owners['runtime']),(layout['control']/'hub.sock',self.profile.owners['hub'])]
         observed=[]
         for selected_path,group in selected:
             parent=selected_path.parent;info=parent.stat()
-            require(parent.resolve()==parent and info.st_uid==native.HOST_UID and info.st_gid==group
+            require(parent.resolve()==parent and info.st_uid==self.profile.owners['supervisor'] and info.st_gid==group
                     and stat.S_IMODE(info.st_mode)==0o710,'LOCAL_ENDPOINT_PARENT')
             if os.path.lexists(selected_path):
                 info=selected_path.lstat()
-                require(stat.S_ISSOCK(info.st_mode) and info.st_uid==native.HOST_UID
+                require(stat.S_ISSOCK(info.st_mode) and info.st_uid==self.profile.owners['supervisor']
                         and info.st_gid==group and stat.S_IMODE(info.st_mode)==0o620,'LOCAL_ENDPOINT_SOCKET')
                 observed.append((selected_path,(info.st_dev,info.st_ino)))
         # No path is removed until all ownership and stopped-state checks pass.
@@ -339,7 +340,7 @@ class LocalNativeHost:
                     profile.bind_runtime(plan)
             backend=LocalNativeBackend(profile)
             owner=Supervisor(self._root,room_id,backend,authorize=self._authorize,revoke=self._revoke,
-                             **({'state_reader_gid':native.HOST_UID} if profile.runtime_plan is not None else {}))
+                             **({'state_reader_gid':profile.owners['supervisor']} if profile.runtime_plan is not None else {}))
             self._owners[room_id]=(owner,backend)
         return self._owners[room_id]
 
