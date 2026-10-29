@@ -25,7 +25,8 @@ class NativeGateOperations:
         self.host, self.resources = host, resources
         self.closed = False
         self.targets = ArtifactTargets(resources.scratch_root, resources.journal_root,
-            host.identity.resolver, reserve_capacity=resources.reserve_capacity)
+            host.identity.resolver, reserve_capacity=resources.reserve_capacity,
+            host_profile=resources.workstation.host_profile)
         self.service = GateSupervisorService(host.sources, self.targets,
             launch_factory=self._launch, listener=resources.listener, profile=PROFILE_ID)
         self.control = NativeGateControl(host, self.service, profile=PROFILE_ID)
@@ -36,6 +37,7 @@ class NativeGateOperations:
                 or resources.supervisor is not self.host.identity.supervisor
                 or scope['room_id'] != resources.room_id
                 or scope['room_instance'] != resources.instance
+                or self.targets.host_profile is not resources.workstation.host_profile
                 or self.targets.resolver is not self.host.identity.resolver
                 or self.targets.lease(target) is not lease):
             raise ArtifactError('EXACT_NATIVE_GATE_RESOURCES_REQUIRED')

@@ -120,9 +120,19 @@ class Supervisor:
     Neither callback may be selected or replaced by untrusted client payload.
     """
 
-    def __init__(self, control_root, room_id, backend, *, authorize, revoke):
+    def __init__(self, control_root, room_id, backend, *, authorize, revoke, state_reader_gid=None):
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", room_id):
             raise LifecycleError("INVALID_SPEC")
+        reader_gid=165533
+        if type(backend).__module__=='uas.local_native':
+            from .local_native import LocalNativeBackend
+            if type(backend) is LocalNativeBackend:
+                backend.profile.require_host_unchanged()
+                reader_gid=backend.profile.host_profile.owners['supervisor']
+        if state_reader_gid is not None and (type(state_reader_gid) is not int
+                or state_reader_gid != reader_gid or os.geteuid() != 0):
+            raise LifecycleError('INVALID_STATE_READER_POLICY')
+        self._state_reader_gid = state_reader_gid
         self.root = _path(control_root)
         self.room_id, self.backend = room_id, backend
         self.authorize, self.revoke = authorize, revoke
@@ -268,6 +278,8 @@ class Supervisor:
             os.close(descriptor)
 
     def _save(self, state):
+        if self._state_reader_gid is not None and os.geteuid() != 0:
+            raise LifecycleError('INVALID_STATE_READER_POLICY')
         try:
             advance_revision(state)
         except ValueError as error:
@@ -276,6 +288,12 @@ class Supervisor:
         descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
             with os.fdopen(descriptor, "w") as output:
+                # Trusted local runtime owner projects read-only state to its
+                # fixed Supervisor helper after EVERY atomic replacement.
+                # Qualification/default owners retain their original 0600.
+                if self._state_reader_gid is not None:
+                    os.fchown(output.fileno(), 0, self._state_reader_gid)
+                    os.fchmod(output.fileno(), 0o640)
                 output.write(_canonical(state))
                 output.flush()
                 os.fsync(output.fileno())

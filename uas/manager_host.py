@@ -51,6 +51,8 @@ class RoomManagerExport:
                 or identity.room_id not in {room['id'] for room in config['rooms']}):
             raise StreamError('SOURCE_ROOM_MISMATCH')
         manager = config['deployment']['manager']
+        if manager is None:
+            raise StreamError('MANAGER_NOT_CONFIGURED')
         address = ManagerAddress.from_url(manager['url'])
         try:
             context = resolve_tls(client_credential_ref=manager['client_credential_ref'],

@@ -21,7 +21,7 @@ from .native_admission_broker import NativeAdmissionBroker
 from .native_checkout_handoff import NativeCheckoutClient
 from .native_host_forge import NativePiHostForge
 from .native_pi_recipe import NativePiRecipe
-from .native_qualification import QualificationPlan
+from .native_qualification import QualificationPlan, is_local_runtime_plan
 from .peer import FixturePeerHub, Readiness
 from .run_admission import RunAdmission
 from .workstation_control import SupervisorAdmission
@@ -70,7 +70,7 @@ class NativeRunLauncher:
                  exec_seat, admission_seat, mounts, stack, admissions, budget, git_resources=None, gate_profile=None):
         from .native_session import SessionBudget
         from .docker_exec_api import DockerExecAPI
-        if (type(plan) is not QualificationPlan or type(broker) is not NativeAdmissionBroker
+        if (not (type(plan) is QualificationPlan or is_local_runtime_plan(plan)) or type(broker) is not NativeAdmissionBroker
                 or broker.ledger is not ledger or broker.client.supervisor is not supervisor
                 or type(engine) is not DockerExecAPI or type(endpoint) is not EndpointLease
                 or type(exec_seat) is not ExecSeat or type(admission_seat) is not AdmissionSeat
@@ -192,15 +192,23 @@ class NativeRunAdmission(RunAdmission):
     """Canonical initial admission; unsupported inherited fixture effects denied."""
     def __init__(self, launcher, allocator, checkout_client):
         import json
-        if (type(launcher) is not NativeRunLauncher or type(checkout_client) is not NativeCheckoutClient
+        checkout_ok=type(checkout_client) is NativeCheckoutClient
+        if not checkout_ok:
+            from .local_successor_checkout import LocalNativeCheckoutClient
+            from .local_runtime_plan import LocalRuntimePlan
+            checkout_ok=(type(checkout_client) is LocalNativeCheckoutClient
+                         and type(getattr(launcher,'plan',None)) is LocalRuntimePlan)
+        if (type(launcher) is not NativeRunLauncher or not checkout_ok
                 or allocator.supervisor is not launcher.supervisor):
             raise LedgerError('ADMISSION_BINDING_MISMATCH')
+        self._local_checkout = type(checkout_client) is not NativeCheckoutClient
         self.launcher, self.checkout_client = launcher, checkout_client
         self._session = None
         self._activation_observation = None
         self._completed_retirements = {}
         self._pi_resets = {}
         self._retirement_owner = None
+        self._local_retirement_intent = None
         self._owner_thread = threading.get_ident()
         config = load(StringIO(launcher.plan.config_text))
         selected = launcher.plan.seats['pi']
@@ -237,12 +245,69 @@ class NativeRunAdmission(RunAdmission):
         action = ('open-run' if command.kind in {'run.human-open','run.admission-attempt','run.admission-attempt-result'}
                   else 'authorize-run-request')
         if command.kind in {'run.human-retire-completed','run.human-retire-completed-result'}:
+            intent=self._local_retirement_intent
+            if intent is not None:
+                human,grant,operation,run,generation,revision=intent
+                grant.require_current()
+                expected=(operation if command.kind=='run.human-retire-completed'
+                          else self._finish_id(operation))
+                return (session is human and origin==human.human
+                    and command.id==expected and command.target==run and command.generation==generation
+                    and command.payload==({'expected_revision':revision}
+                        if command.kind=='run.human-retire-completed' else
+                        {'operation_id':operation,'expected_revision':revision})
+                    and human.allowed('open-run') and human.allowed('authorize-run-request'))
             action='stop'
         return session is not None and origin == session.human and session.allowed(action)
 
     def open_human(self, operation_id, issue_number, participant_id, *, session, attempt_id=None):
         with self.human_scope(session):
             return self._open(operation_id, issue_number, participant_id, session.human, attempt_id=attempt_id)
+
+    def retire_for_successor(self, request, grant, run_id, generation, revision, *, reviewer, observations=None):
+        """Cleanup of one completed predecessor as part of this exact fresh Open.
+
+        This grants no generic Stop, active-Run retirement or later authority.
+        The canonical completed-retirement reducer and human-control capability
+        remain unchanged; only this exact request's retirement commands may use
+        its Open scope instead of the separate Stop action.
+        """
+        from .human_mtls import AdmittedRunGrant
+        from .local_runtime_plan import LocalRuntimePlan
+        self._require_owner()
+        if (type(self.launcher.plan) is not LocalRuntimePlan
+                or type(request) is not NativeHumanRunRequest or type(grant) is not AdmittedRunGrant
+                or self._local_retirement_intent is not None
+                or grant.operation_id!=request.operation_id or grant.issue_number!=request.issue_number
+                or grant.human!=request.session.human
+                or grant.deployment_id!=self.deployment or grant.room_id!=self.ledger.room_id
+                or grant.instance_id!=self.launcher.resources['instance']
+                or grant.manager_id!=request.session.manager_id
+                or not request.session.allowed('open-run')
+                or not request.session.allowed('authorize-run-request')):
+            raise LedgerError('LOCAL_SUCCESSOR_RETIREMENT_INTENT_REQUIRED')
+        grant.require_current()
+        row=self.ledger.snapshot()['state'].get('runs',{}).get(run_id)
+        if (not row or row['status']!='CLOSED' or row.get('outcome')!='completed'
+                or row['generation']!=generation or row.get('control_revision',0)!=revision
+                or row['participant_id']!=request.participant_id
+                or run_id==self.run_id(request.operation_id)):
+            raise LedgerError('LOCAL_SUCCESSOR_PREDECESSOR_CHANGED')
+        operation='local-retire-'+hashlib.sha256((request.operation_id+':'+run_id).encode()).hexdigest()
+        self._local_retirement_intent=(request.session,grant,operation,run_id,generation,revision)
+        try:
+            if observations is not None:
+                from .local_native_stop import LocalNativeStopObservations
+                if type(observations) is not LocalNativeStopObservations:
+                    raise LedgerError('LOCAL_STOP_OWNER_REQUIRED')
+                held=observations.adopt_completed(self,reviewer,operation,run_id)
+                existing=self._completed_retirements.get(operation)
+                if existing is not None and existing is not held:raise LedgerError('NATIVE_RETIREMENT_OWNER_REQUIRED')
+                if existing is None and len(self._completed_retirements)>=8:raise LedgerError('NATIVE_RETIREMENT_CAPACITY')
+                self._completed_retirements[operation]=held
+            return self.retire_completed(operation,run_id,generation,revision,
+                                         session=request.session,reviewer=reviewer)
+        finally:self._local_retirement_intent=None
 
     def retire_completed(self, operation_id, run_id, generation, revision, *, session, reviewer):
         from .native_completed_retirement import NativeCompletedRetirement
@@ -293,6 +358,9 @@ class NativeRunAdmission(RunAdmission):
         already=(type(held) is SupervisorAdmission and held.launch.native_recipe.scope['run_id']==run)
         method=(self.checkout_client.observe if already or run in getattr(self.launcher,'attempted_runs',())
                 else self.checkout_client.allocate)
+        if (self._local_checkout and pending.get('preceding_run') is not None
+                and method==self.checkout_client.allocate):
+            method=self.checkout_client.reuse_primary
         slot = method(run, pending['admission_operation'])
         if (slot['run'] != run or slot['participant'] != participant or slot['phase'] != 'ready'
                 or slot['reason'] != 'ACTIVE' or slot['observed_dirty'] is not False
@@ -405,7 +473,8 @@ class NativeRunAdmission(RunAdmission):
             if reset is None:
                 prior=self.ledger.snapshot()['state']['runs'].get(pending['preceding_run']['run_id'])
                 stopped={} if prior is None else prior.get('native_stop') or {}
-                retirement=self._completed_retirements.get(stopped.get('operation_id')) if isinstance(stopped,dict) else None
+                from .native_completed_retirement import retirement_for
+                retirement=retirement_for(self,stopped)
                 reset=NativePiReset(self,run,pending,retirement)
                 self._pi_resets[run]=reset
             reset.request(allowed)

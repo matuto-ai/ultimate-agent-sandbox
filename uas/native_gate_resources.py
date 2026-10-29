@@ -19,7 +19,7 @@ from decimal import Decimal
 
 from .artifact_helper import GateEndpointLease, GateWorkstation
 from .artifact_protocol import ArtifactError, PROFILE_ID, RESERVATION_BYTES, canonical, validate_scope
-from .native_git_resources import _ImageReader, NativeGitResources
+from .native_git_resources import _ImageReader, NativeGitResources, endpoint_root, selected_image, local_profile, host_owners, host_profile
 from .native_pi_recipe import read_manifest
 
 HELPERS = ('/opt/uas/bin/artifact-bootstrap', '/opt/uas/bin/artifact-evaluator')
@@ -41,9 +41,11 @@ def validate_selection(value,plan):
     require(type(value) is dict and set(value) == {'version','profile','image_id','image_reference','helpers','host_materializer'}, 'MANIFEST')
     require(type(value['version']) is int and value['version'] == 1
         and value['profile'] == PROFILE_ID and 'git_manifest' in plan.installation, 'PROFILE')
-    image=next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
+    image=selected_image(plan)
     require(type(value['image_id']) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',value['image_id'])
         and value['image_reference']==image,'IMAGE_PAIRING')
+    profile=local_profile(plan)
+    if profile is not None:require(value['image_id']==profile.image_id,'IMAGE_PAIRING')
     for key, paths in (('helpers',HELPERS),('host_materializer',HOST_TOOLS)):
         require(type(value[key]) is dict and set(value[key]) == set(paths)
             and all(type(v) is str and SHA.fullmatch(v) for v in value[key].values()), 'PAYLOAD_INVENTORY')
@@ -56,7 +58,7 @@ def paths(plan, state):
     root = Path(plan.room['state_root'])/'instances'/instance/'native'
     return {'scratch_root':root/'gate-targets', 'journal_root':root/'supervisor'/'gate-target-journals',
         'launch_journal_root':root/'supervisor'/'gate-launches',
-        'endpoint_root':Path('/run/uas-native')/instance/'gate'}
+        'endpoint_root':endpoint_root(plan)/instance/'gate'}
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,7 @@ class NativeGateResources:
         self=cls();self.plan=plan;self.data=deepcopy(data);self.engine=engine;self.supervisor=supervisor
         self.git_resources=git_resources;self.review_host=review_host;self.quota_client=quota_client
         self.deadline=deadline;self.listener=listener;self._closed=False
+        self._host_owners=host_owners(plan)
         self.room_id=plan.room['id'];self.instance=data['instance'];self.container_id=data['workstation_id']
         with supervisor._locked():
             git_resources.require(self.room_id,self.instance,self.container_id)
@@ -194,25 +197,27 @@ class NativeGateResources:
         self._directory_identities={}
         for key,mode in (('scratch_root',0o711),('journal_root',0o700),('launch_journal_root',0o700)):
             path=getattr(self,key); node=path.stat(follow_symlinks=False)
-            require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==165533
-                and node.st_gid==165533 and stat.S_IMODE(node.st_mode)==mode,'RESOURCE_DIRECTORY')
+            require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==self._host_owners['supervisor']
+                and node.st_gid==self._host_owners['supervisor'] and stat.S_IMODE(node.st_mode)==mode,'RESOURCE_DIRECTORY')
             self._directory_identities[key]=(node.st_dev,node.st_ino)
         endpoint=selected['endpoint_root']/'gate.sock'
-        require(data['gate_endpoint_path']==str(endpoint) and os.getuid()==165533 and os.getgid()==165533
-            and 165530 in os.getgroups(),'SUPERVISOR_SETUP_IDENTITY')
-        self.endpoint=GateEndpointLease(endpoint,owner=165533,group=165530)
+        require(data['gate_endpoint_path']==str(endpoint) and os.getuid()==self._host_owners['supervisor'] and os.getgid()==self._host_owners['supervisor']
+            and self._host_owners['gate'] in os.getgroups(),'SUPERVISOR_SETUP_IDENTITY')
+        self.endpoint=GateEndpointLease(endpoint,owner=self._host_owners['supervisor'],group=self._host_owners['gate'])
         require(type(listener) is socket.socket and listener.family==socket.AF_UNIX
             and listener.type==socket.SOCK_SEQPACKET and listener.getsockname()==str(endpoint)
             and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)==1,'SUPERVISOR_LISTENER')
         node=os.fstat(listener.fileno());self._listener_identity=(node.st_dev,node.st_ino)
         verify_payload(engine,self.container_id,manifest,deadline)
         self.workstation=GateWorkstation(self.room_id,self.instance,self.container_id,manifest['image_id'][7:],
-            self.profile.digest,manifest['helpers'][HELPERS[0]],manifest['helpers'][HELPERS[1]],data['mapping_digest'],'native-artifacts')
+            self.profile.digest,manifest['helpers'][HELPERS[0]],manifest['helpers'][HELPERS[1]],data['mapping_digest'],'native-artifacts', host_profile=host_profile(plan))
         self.require(self.workstation)
         return self
 
     def require(self,workstation):
         require(not self._closed and workstation is self.workstation,'WORKSTATION_BINDING')
+        require(host_owners(self.plan)==self._host_owners
+            and workstation.host_profile is host_profile(self.plan),'HOST_MAPPING_CHANGED')
         require(time.monotonic()<self.deadline,'DEADLINE')
         # This entry is outside lifecycle/Room locks, before helper creation.
         with self.supervisor._locked():
@@ -228,7 +233,8 @@ class NativeGateResources:
         nano=Decimal(str(self.plan.room['resources']['cpu']))*1000000000
         require(nano==nano.to_integral_value(),'CPU_PROFILE')
         validate_native_container(state,value,image_id=self.profile.image_id,image_reference=self.profile.image_reference,
-            limits=self.plan.room['resources'],nano_cpus=int(nano),mounts=mounts)
+            limits=self.plan.room['resources'],nano_cpus=int(nano),mounts=mounts,
+            level=None if local_profile(self.plan) is None else local_profile(self.plan).level)
         require(value['State']['Running'] is True and type(value['State'].get('Pid')) is int
             and value['State']['Pid']==self.git_resources._container_pid,'WORKSTATION_PROCESS_CHANGED')
         with self.supervisor._locked():self.git_resources.require(self.room_id,self.instance,self.container_id)
@@ -240,7 +246,7 @@ class NativeGateResources:
         for key,identity in self._directory_identities.items():
             node=getattr(self,key).stat(follow_symlinks=False)
             require(stat.S_ISDIR(node.st_mode) and (node.st_dev,node.st_ino)==identity
-                and node.st_uid==165533 and node.st_gid==165533
+                and node.st_uid==self._host_owners['supervisor'] and node.st_gid==self._host_owners['supervisor']
                 and stat.S_IMODE(node.st_mode)==(0o711 if key=='scratch_root' else 0o700),'RESOURCE_REPLACED')
         return True
 

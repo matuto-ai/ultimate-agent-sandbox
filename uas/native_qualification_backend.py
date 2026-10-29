@@ -49,10 +49,13 @@ def exact(value, fields, code):
     return value
 
 
-def fixed_docker(arguments, *, timeout, missing_ok=False):
+def fixed_docker(arguments, *, timeout, missing_ok=False, socket_path="/run/docker.sock"):
     """Fixed trusted Engine endpoint; no ambient Docker context/config override."""
+    require(type(socket_path) is str and re.fullmatch(r'/[A-Za-z0-9_./-]+',socket_path)
+            and str(Path(socket_path))==socket_path and '..' not in Path(socket_path).parts
+            and socket_path!='/', 'ENGINE_SOCKET')
     try:
-        result = subprocess.run(['/usr/bin/docker','--host','unix:///run/docker.sock',*arguments],
+        result = subprocess.run(['/usr/bin/docker','--host','unix://'+socket_path,*arguments],
             capture_output=True,text=True,timeout=timeout,check=False,
             env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C','HOME':'/nonexistent',
                  'DOCKER_CONFIG':'/nonexistent'})
@@ -118,8 +121,9 @@ def parse_gate_quota(report, hard_bytes):
     return {'used_bytes':used*1024,'hard_bytes':hard_bytes}
 
 
-def validate_native_container(state,value,*,image_id,image_reference,limits,nano_cpus,mounts):
+def validate_native_container(state,value,*,image_id,image_reference,limits,nano_cpus,mounts,level=None):
     """Pure exact provider-connected declaration predicate; no admission authority."""
+    level = LEVEL if level is None else level
     try:
         config, host = value['Config'], value['HostConfig']
         require(value['Image'] == image_id and config['Image'] == image_reference
@@ -129,7 +133,7 @@ def validate_native_container(state,value,*,image_id,image_reference,limits,nano
                 and host['CapDrop'] == ['ALL'] and host['CapAdd'] in (None, [])
                 and host.get('GroupAdd') in (None,[]), 'CONFINEMENT')
         require([s.replace('no-new-privileges=true','no-new-privileges') for s in host['SecurityOpt']]
-                == ['no-new-privileges', 'label=level:' + LEVEL], 'SECURITY_OPTIONS')
+                == ['no-new-privileges', 'label=level:' + level], 'SECURITY_OPTIONS')
         require(host['NetworkMode'] == names(state)[0]
                 and set(value['NetworkSettings']['Networks']) == {names(state)[0]}, 'NETWORK_POLICY')
         require(all(host[k] == v for k, v in {'PidMode':'', 'IpcMode':'private', 'UTSMode':'',
@@ -145,8 +149,8 @@ def validate_native_container(state,value,*,image_id,image_reference,limits,nano
         require({'/proc/kcore','/proc/keys','/proc/timer_list','/sys/firmware'} <= set(host['MaskedPaths'])
                 and {'/proc/bus','/proc/fs','/proc/irq','/proc/sys','/proc/sysrq-trigger'} <=
                 set(host['ReadonlyPaths']), 'KERNEL_MASKS')
-        require(value['ProcessLabel'] == 'system_u:system_r:container_t:' + LEVEL
-                and value['MountLabel'] == 'system_u:object_r:container_file_t:' + LEVEL, 'MCS_LABELS')
+        require(value['ProcessLabel'] == 'system_u:system_r:container_t:' + level
+                and value['MountLabel'] == 'system_u:object_r:container_file_t:' + level, 'MCS_LABELS')
         actual = value['Mounts']
         require(type(actual) is list and len(actual) == len(mounts)
                 and all(m['Type'] == 'bind' and type(m['RW']) is bool and m['Propagation'] == 'rprivate'
@@ -238,34 +242,55 @@ class NativeBoundaryProfile:
             tuple(self.paths[k] for k in ('repo', 'workspace', 'reference', 'checkouts')),
             self.image_id, 'sha256:' + self.config_digest, 'sha256:' + self.digest)
 
+    @property
+    def storage(self): return STORAGE
+
+    @property
+    def level(self): return LEVEL
+
+    @property
+    def project_id(self): return PROJECT_ID
+
+    def guard(self, *, require_selinux=True):
+        guard(self.nonce, require_selinux=require_selinux)
+
+    @property
+    def owners(self):
+        return {'gate':165530,'hub':HUB_UID,'runtime':RUNTIME_UID,'supervisor':HOST_UID,'broker':BROKER_UID}
+
+    def storage_ancestors(self): return (self.storage, self.root, self.root/'state')
+
+    def storage_identity(self, path):
+        return directory_identity(path)
+
     def observe_storage(self):
-        guard(self.nonce)
-        require(directory_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
+        self.guard()
+        require(self.storage_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
         require(self.root.stat().st_uid == 0 and not self.root.stat().st_mode & 0o022, 'ROOT_OWNER')
-        for ancestor in (STORAGE,self.root,self.root/'state'):
+        for ancestor in self.storage_ancestors():
             info=ancestor.stat()
             require(info.st_uid==0 and not info.st_mode & 0o022 and info.st_mode & 0o001,
                     'PREPARED_CONTROL_TRAVERSAL')
-        require(command('stat', '-f', '-c', '%T', str(STORAGE)).strip() == 'xfs', 'XFS_REQUIRED')
-        quota = command('xfs_quota', '-x', '-c', 'state -p', str(STORAGE))
+        require(command('stat', '-f', '-c', '%T', str(self.storage)).strip() == 'xfs', 'XFS_REQUIRED')
+        quota = command('xfs_quota', '-x', '-c', 'state -p', str(self.storage))
         require('Accounting: ON' in quota and 'Enforcement: ON' in quota, 'QUOTA_REQUIRED')
-        report = command('xfs_quota', '-x', '-c', 'report -p -b -n -N', str(STORAGE))
+        report = command('xfs_quota', '-x', '-c', 'report -p -b -n -N', str(self.storage))
         rows = [line.split() for line in report.splitlines()
-                if line.split() and line.split()[0] == '#' + str(PROJECT_ID)]
+                if line.split() and line.split()[0] == '#' + str(self.project_id)]
         require(len(rows) == 1 and len(rows[0]) >= 4
                 and rows[0][3] == str(self.limits['disk_bytes'] // 1024), 'QUOTA_DRIFT')
         for key, path in self.paths.items():
-            require(directory_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
+            require(self.storage_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
             info = Path(path).stat()
-            require(info.st_dev == STORAGE.stat().st_dev, 'QUOTA_FILESYSTEM')
-            require(info.st_uid == RUNTIME_UID and info.st_gid == RUNTIME_UID, 'PATH_OWNER')
-            require(project_attributes(path) == (PROJECT_ID, True), 'PROJECT_QUOTA')
+            require(info.st_dev == self.storage.stat().st_dev, 'QUOTA_FILESYSTEM')
+            require(info.st_uid == self.owners['runtime'] and info.st_gid == self.owners['runtime'], 'PATH_OWNER')
+            require(project_attributes(path) == (self.project_id, True), 'PROJECT_QUOTA')
             label = command('stat', '-c', '%C', path).strip()
-            require(label == 'system_u:object_r:container_file_t:' + LEVEL, 'PATH_LABEL')
+            require(label == 'system_u:object_r:container_file_t:' + self.level, 'PATH_LABEL')
             output=command('xfs_quota','-x','-D','/dev/null','-P','/dev/null','-c',
-                f'project -c -p {path} {PROJECT_ID}',str(STORAGE))
-            require(output.splitlines()==[f'Checking project {PROJECT_ID} (path {path})...',
-                f'Processed 1 (/dev/null and cmdline) paths for project {PROJECT_ID} with recursion depth infinite (-1).'],
+                f'project -c -p {path} {self.project_id}',str(self.storage))
+            require(output.splitlines()==[f'Checking project {self.project_id} (path {path})...',
+                f'Processed 1 (/dev/null and cmdline) paths for project {self.project_id} with recursion depth infinite (-1).'],
                 'EXISTING_TREE_QUOTA_DRIFT')
         # The underlying namespace is root-managed; initial stat comparisons do
         # not attest SQLite/file descriptors against hostile path replacement.
@@ -301,6 +326,27 @@ class NativeQualificationBackend(DockerFixtureBackend):
         self.listeners = []
         self.instance = None
 
+    @property
+    def storage(self): return getattr(self.profile, 'storage', STORAGE)
+
+    @property
+    def endpoints(self): return getattr(self.profile, 'endpoints', ENDPOINTS)
+
+    @property
+    def level(self): return getattr(self.profile, 'level', LEVEL)
+
+    @property
+    def project_id(self): return getattr(self.profile, 'project_id', PROJECT_ID)
+
+    @property
+    def hub_command(self): return getattr(self.profile, 'hub_command', HUB_COMMAND)
+
+    def _guard(self, *, require_selinux=True):
+        guard(self.profile.nonce, require_selinux=require_selinux)
+
+    def _subnet(self): return getattr(self.profile, 'subnet', '10.90.78.0/24')
+    def _gateway(self): return getattr(self.profile, 'gateway', '10.90.78.1')
+
     def name(self, state, kind):
         require(kind in ('volume', 'container'), 'RESOURCE_KIND')
         return names(state)[0] + ('-anchor' if kind == 'volume' else '')
@@ -313,7 +359,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
         value = super().inspect(state, kind)
         if kind == 'volume' and value is None:
             require(self._network(state) is None and self._firewall(state) is None
-                    and self._hub(state) is None and not os.path.lexists(ENDPOINTS/state['instance_id']),
+                    and self._hub(state) is None and not os.path.lexists(self.endpoints/state['instance_id']),
                     'MISSING_ANCHOR_WITH_LEFTOVERS')
         return value
 
@@ -327,9 +373,9 @@ class NativeQualificationBackend(DockerFixtureBackend):
         names(state)
         root = self.profile.state_root / 'instances' / state['instance_id'] / 'native'
         result={name: root / name for name in ('supervisor', 'hub', 'broker')}
-        result.update({name:ENDPOINTS/state['instance_id']/name for name in ('peer','control')})
+        result.update({name:self.endpoints/state['instance_id']/name for name in ('peer','control')})
         if self.profile.git_manifest is not None:
-            result['git']=ENDPOINTS/state['instance_id']/'git'
+            result['git']=self.endpoints/state['instance_id']/'git'
             result['git-broker']=root/'git-broker'
         if getattr(self.profile,'gate_manifest',None) is not None:
             from .native_gate_resources import paths
@@ -340,10 +386,10 @@ class NativeQualificationBackend(DockerFixtureBackend):
 
     def _endpoint_record(self,state):
         return {'version':1,'nonce':self.profile.nonce,'instance':state['instance_id'],
-                'profile_digest':self.profile.digest,'path':str(ENDPOINTS/state['instance_id'])}
+                'profile_digest':self.profile.digest,'path':str(self.endpoints/state['instance_id'])}
 
     def _remove_endpoints(self,state):
-        root=ENDPOINTS/state['instance_id']
+        root=self.endpoints/state['instance_id']
         if not os.path.lexists(root):return
         info=root.stat()
         require(root.resolve()==root and info.st_uid==0 and not info.st_mode & 0o022,'ENDPOINT_OWNERSHIP')
@@ -392,7 +438,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
         value = self._network(state); name, bridge, _ = names(state)
         require(value is not None and value.get('Driver') == 'bridge'
                 and value.get('Internal') is False and value.get('EnableIPv6') is False
-                and value.get('IPAM', {}).get('Config') == [{'Subnet': '10.90.78.0/24', 'Gateway': '10.90.78.1'}]
+                and value.get('IPAM', {}).get('Config') == [{'Subnet': self._subnet(), 'Gateway': self._gateway()}]
                 and value.get('Options') == {'com.docker.network.bridge.name': bridge,
                     'com.docker.network.bridge.enable_ip_masquerade': 'true',
                     'com.docker.network.bridge.gateway_mode_ipv4': 'nat'}, 'NETWORK_POLICY')
@@ -404,8 +450,8 @@ class NativeQualificationBackend(DockerFixtureBackend):
         require(self._inspect_object(state, 'volume') is not None, 'OWNERSHIP_ANCHOR_REQUIRED')
         name, bridge, _ = names(state)
         if self._network(state) is None:
-            self._run(['network', 'create', '--driver', 'bridge', '--subnet', '10.90.78.0/24',
-                '--gateway', '10.90.78.1', '--opt', 'com.docker.network.bridge.name=' + bridge,
+            self._run(['network', 'create', '--driver', 'bridge', '--subnet', self._subnet(),
+                '--gateway', self._gateway(), '--opt', 'com.docker.network.bridge.name=' + bridge,
                 '--opt', 'com.docker.network.bridge.enable_ip_masquerade=true',
                 '--opt', 'com.docker.network.bridge.gateway_mode_ipv4=nat',
                 *self._label_args(state, 'network'), name])
@@ -436,7 +482,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return ['create', '--name', self.name(state, 'container'), *self._label_args(state, 'container'),
             '--user', '65532:65532', '--read-only', '--network', names(state)[0],
             '--ipc', 'private', '--cgroupns', 'private', '--cap-drop', 'ALL',
-            '--security-opt', 'no-new-privileges=true', '--security-opt', 'label=level:' + LEVEL,
+            '--security-opt', 'no-new-privileges=true', '--security-opt', 'label=level:' + self.level,
             '--memory', str(limits['memory_bytes']), '--memory-swap', str(limits['memory_bytes']),
             '--cpus', str(limits['cpu']), '--pids-limit', str(limits['pids']),
             '--log-driver', 'local', '--log-opt', 'max-size=' + str(limits['log_bytes']),
@@ -444,7 +490,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
             *mounts, '--entrypoint', '/bin/sleep', self.profile.image_reference, 'infinity']
 
     def create(self, state, kind):
-        guard(self.profile.nonce); self._binding(state); self.profile.observe_storage()
+        self._guard(); self._binding(state); self.profile.observe_storage()
         if self.inspect(state, kind) is not None: return
         if kind == 'volume':
             self._run(['volume', 'create', *self._label_args(state, kind), self.name(state, kind)])
@@ -456,40 +502,45 @@ class NativeQualificationBackend(DockerFixtureBackend):
         else:
             raise LifecycleError('NATIVE_RESOURCE_KIND')
 
+    def engine_selection(self):
+        return {'version':'29.8.2','docker_root':'/var/lib/docker/100000.100000',
+                'remap_user':'uas-remap','offset':100000,'size':65536}
+
     def admit(self, state):
-        guard(self.profile.nonce); self._binding(state); self.profile.observe_storage()
+        self._guard(); self._binding(state); self.profile.observe_storage()
         self._network_policy(state)
         value = self._inspect_object(state, 'container')
         require(value is not None, 'CONTAINER_REQUIRED')
+        selected=self.engine_selection()
         security = json.loads(self._run(['info', '--format', '{{json .SecurityOptions}}']))
-        require(self._run(['version','--format','{{.Server.Version}}']).strip()=='29.8.2','ENGINE_PROFILE')
+        require(self._run(['version','--format','{{.Server.Version}}']).strip()==selected['version'],'ENGINE_PROFILE')
         require(type(security) is list and {'name=seccomp,profile=builtin', 'name=selinux', 'name=userns'}
                 <= set(security), 'DAEMON_CONFINEMENT')
         require(self._run(['info', '--format', '{{.DockerRootDir}}']).strip() ==
-                '/var/lib/docker/100000.100000', 'USERNS_MAPPING')
+                selected['docker_root'], 'USERNS_MAPPING')
         for name in ('subuid', 'subgid'):
-            rows = [line for line in Path('/etc/' + name).read_text().splitlines() if line.startswith('uas-remap:')]
-            require(rows == ['uas-remap:100000:65536'], 'USERNS_MAPPING')
+            rows = [line for line in Path('/etc/' + name).read_text().splitlines() if line.startswith(selected['remap_user']+':')]
+            require(rows == [selected['remap_user']+':'+str(selected['offset'])+':'+str(selected['size'])], 'USERNS_MAPPING')
         self.validate_container(state, value)
         if value['State']['Running']:
             pid = value['State'].get('Pid')
             require(type(pid) is int and pid > 0, 'KERNEL_MAPPING')
             for name in ('uid_map', 'gid_map'):
                 require(Path('/proc/' + str(pid) + '/' + name).read_text().split() ==
-                        ['0', '100000', '65536'], 'KERNEL_MAPPING')
+                        ['0', str(selected['offset']), str(selected['size'])], 'KERNEL_MAPPING')
         return value
 
     def validate_container(self, state, value):
         return validate_native_container(state,value,image_id=self.profile.image_id,
             image_reference=self.profile.image_reference,limits=self.profile.limits,
-            nano_cpus=self.profile.nano_cpus,mounts=self.mounts(state))
+            nano_cpus=self.profile.nano_cpus,mounts=self.mounts(state),level=self.level)
 
     def stop(self, state):
-        guard(self.profile.nonce, require_selinux=False)
+        self._guard(require_selinux=False)
         return super().stop(state)
 
     def stop_hub(self,state):
-        guard(self.profile.nonce,require_selinux=False);self._binding(state)
+        self._guard(require_selinux=False);self._binding(state)
         hub=self._hub(state)
         if hub is None:return
         if hub['State']['Running']:self._run(['stop','--time','3',hub['Id']])
@@ -498,7 +549,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
                 'HUB_STOP_UNCERTAIN')
 
     def remove(self, state, kind):
-        guard(self.profile.nonce, require_selinux=False)
+        self._guard(require_selinux=False)
         if kind == 'volume':
             require(self.inspect(state, 'container') is None, 'WORKSTATION_REMAINS')
             hub = self._hub(state)
@@ -522,10 +573,10 @@ class NativeQualificationBackend(DockerFixtureBackend):
         os.chown(parent, 0, 0);os.chmod(parent,0o711)
         # Unix socket addresses cannot use the long canonical state path.
         # This separate short namespace is owned by the same cleanup anchor.
-        ENDPOINTS.mkdir(mode=0o755,exist_ok=True)
-        info=ENDPOINTS.stat()
-        require(ENDPOINTS.resolve()==ENDPOINTS and info.st_uid==0 and not info.st_mode & 0o022,'ENDPOINT_ROOT')
-        endpoint_root=ENDPOINTS/state['instance_id']
+        self.endpoints.mkdir(mode=0o755,exist_ok=True)
+        info=self.endpoints.stat()
+        require(self.endpoints.resolve()==self.endpoints and info.st_uid==0 and not info.st_mode & 0o022,'ENDPOINT_ROOT')
+        endpoint_root=self.endpoints/state['instance_id']
         endpoint_root.mkdir(mode=0o711);os.chmod(endpoint_root,0o711)
         record={**self._endpoint_record(state),'identity':directory_identity(endpoint_root)}
         descriptor=os.open(endpoint_root/'owner.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
@@ -534,27 +585,27 @@ class NativeQualificationBackend(DockerFixtureBackend):
             os.fsync(descriptor)
         finally:os.close(descriptor)
         for key, path in layout.items():
-            mode, uid, gid = ((0o700, HOST_UID, HOST_UID) if key == 'supervisor' else
-                (0o700, BROKER_UID, BROKER_UID) if key in ('broker','git-broker') else
-                (0o711, HOST_UID, HOST_UID) if key == 'gate-targets' else
-                (0o710, HOST_UID, 165530) if key == 'gate' else
-                (0o2770, HOST_UID, HUB_UID) if key == 'hub' else
-                (0o710, HOST_UID, RUNTIME_UID if key in ('peer','git') else HUB_UID))
+            mode, uid, gid = ((0o700, self.profile.owners['supervisor'], self.profile.owners['supervisor']) if key == 'supervisor' else
+                (0o700, self.profile.owners['broker'], self.profile.owners['broker']) if key in ('broker','git-broker') else
+                (0o711, self.profile.owners['supervisor'], self.profile.owners['supervisor']) if key == 'gate-targets' else
+                (0o710, self.profile.owners['supervisor'], self.profile.owners['gate']) if key == 'gate' else
+                (0o2770, self.profile.owners['supervisor'], self.profile.owners['hub']) if key == 'hub' else
+                (0o710, self.profile.owners['supervisor'], self.profile.owners['runtime'] if key in ('peer','git') else self.profile.owners['hub']))
             path.mkdir(mode=mode); os.chown(path, uid, gid); os.chmod(path, mode)
-            if key not in ('supervisor','broker','git-broker'): command('chcon', '-t', 'container_file_t', '-l', LEVEL, str(path))
+            if key not in ('supervisor','broker','git-broker'): command('chcon', '-t', 'container_file_t', '-l', self.level, str(path))
         if getattr(self.profile,'gate_manifest',None) is not None:
             from .native_gate_resources import paths
             selected=paths(self.profile.gate_plan,state)
             for key in ('journal_root','launch_journal_root'):
                 selected[key].mkdir(mode=0o700)
-                os.chown(selected[key],HOST_UID,HOST_UID);os.chmod(selected[key],0o700)
+                os.chown(selected[key],self.profile.owners['supervisor'],self.profile.owners['supervisor']);os.chmod(selected[key],0o700)
             # Assign only these freshly created owned trees, never Project data.
             for key in ('scratch_root','journal_root','launch_journal_root'):
                 path=selected[key]
-                require(path.stat().st_dev==STORAGE.stat().st_dev,'GATE_QUOTA_FILESYSTEM')
+                require(path.stat().st_dev==self.storage.stat().st_dev,'GATE_QUOTA_FILESYSTEM')
                 command('xfs_quota','-x','-D','/dev/null','-P','/dev/null','-c',
-                    f'project -s -p {path} {PROJECT_ID}',str(STORAGE))
-                require(project_attributes(path)==(PROJECT_ID,True),'GATE_QUOTA_PROVISION')
+                    f'project -s -p {path} {self.project_id}',str(self.storage))
+                require(project_attributes(path)==(self.project_id,True),'GATE_QUOTA_PROVISION')
             record={'version':1,'instance':state['instance_id'],'profile_digest':self.profile.digest,
                 'paths':{key:{'path':str(selected[key]),'identity':directory_identity(selected[key])}
                     for key in ('scratch_root','journal_root','launch_journal_root')}}
@@ -564,28 +615,28 @@ class NativeQualificationBackend(DockerFixtureBackend):
             finally:os.close(fd)
         # Gate socket is deliberately NOT created here: its actual creator must
         # be Supervisor UID/GID165533 so bootstrap SO_PEERCRED is truthful.
-        for path,group in ((layout['peer'] / 'pi.sock',RUNTIME_UID),(layout['control'] / 'hub.sock',HUB_UID)):
-            self.listeners.append(labeled_listener(path,group))
+        for path,group in ((layout['peer'] / 'pi.sock',self.profile.owners['runtime']),(layout['control'] / 'hub.sock',self.profile.owners['hub'])):
+            self.listeners.append(labeled_listener(path,group,level=self.level,owner=self.profile.owners['supervisor']))
         if self.profile.git_manifest is not None:
             from .native_git_resources import prepare_views
             journal=layout['supervisor']/'git-launches'
-            journal.mkdir(mode=0o700);os.chown(journal,HOST_UID,HOST_UID);os.chmod(journal,0o700)
+            journal.mkdir(mode=0o700);os.chown(journal,self.profile.owners['supervisor'],self.profile.owners['supervisor']);os.chmod(journal,0o700)
             prepare_views(self.profile.git_plan,state)
             for name in ('git-views','git-fixed','git-workspace'):
-                command('chcon','-R','-t','container_file_t','-l',LEVEL,str(endpoint_root/name))
+                command('chcon','-R','-t','container_file_t','-l',self.level,str(endpoint_root/name))
             for name in ('request.sock','worker.sock'):
-                self.listeners.append(labeled_listener(layout['git']/name,RUNTIME_UID,listen=name!='request.sock'))
+                self.listeners.append(labeled_listener(layout['git']/name,self.profile.owners['runtime'],listen=name!='request.sock',level=self.level,owner=self.profile.owners['supervisor']))
 
     def observe_gate_quota(self,state,*,deadline):
         """Fixed read-only current usage, outside lifecycle/Room locks."""
         require(type(deadline) in (int,float) and time.monotonic()<deadline,'DEADLINE')
-        guard(self.profile.nonce,require_selinux=False);self._binding(state)
+        self._guard(require_selinux=False);self._binding(state)
         require(command('getenforce',deadline=deadline).strip()=='Enforcing'
             and Path('/sys/fs/selinux/enforce').read_text().strip()=='1','SELINUX_REQUIRED')
         require(self.profile.gate_manifest is not None,'GATE_PROFILE_REQUIRED')
         from .native_gate_resources import paths
         selected=paths(self.profile.gate_plan,state)
-        fd=os.open(ENDPOINTS/state['instance_id']/'gate-scratch.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        fd=os.open(self.endpoints/state['instance_id']/'gate-scratch.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
         try:
             node=os.fstat(fd)
             require(stat.S_ISREG(node.st_mode) and node.st_uid==0 and stat.S_IMODE(node.st_mode)==0o600
@@ -597,18 +648,18 @@ class NativeQualificationBackend(DockerFixtureBackend):
             identities={}
             for key in ('scratch_root','journal_root','launch_journal_root'):
                 path=selected[key];node=path.stat(follow_symlinks=False)
-                require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==HOST_UID
-                    and node.st_gid==HOST_UID and stat.S_IMODE(node.st_mode)==(0o711 if key=='scratch_root' else 0o700)
-                    and node.st_dev==STORAGE.stat().st_dev and project_attributes(path)==(PROJECT_ID,True), 'GATE_QUOTA_RESOURCE')
+                require(path.resolve()==path and stat.S_ISDIR(node.st_mode) and node.st_uid==self.profile.owners['supervisor']
+                    and node.st_gid==self.profile.owners['supervisor'] and stat.S_IMODE(node.st_mode)==(0o711 if key=='scratch_root' else 0o700)
+                    and node.st_dev==self.storage.stat().st_dev and project_attributes(path)==(self.project_id,True), 'GATE_QUOTA_RESOURCE')
                 identities[key]={'path':str(path),'identity':[node.st_dev,node.st_ino]}
             require(record=={'version':1,'instance':state['instance_id'],'profile_digest':self.profile.digest,
                 'paths':identities},'GATE_OWNERSHIP')
             return identities
         before=observe()
-        require(command('stat','-f','-c','%T',str(STORAGE),deadline=deadline).strip()=='xfs','XFS_REQUIRED')
-        status=command('xfs_quota','-x','-c','state -p',str(STORAGE),deadline=deadline)
+        require(command('stat','-f','-c','%T',str(self.storage),deadline=deadline).strip()=='xfs','XFS_REQUIRED')
+        status=command('xfs_quota','-x','-c','state -p',str(self.storage),deadline=deadline)
         require('Accounting: ON' in status and 'Enforcement: ON' in status,'QUOTA_REQUIRED')
-        result=parse_gate_quota(command('xfs_quota','-x','-c','report -p -b -n -N',str(STORAGE),deadline=deadline),
+        result=parse_gate_quota(command('xfs_quota','-x','-c','report -p -b -n -N',str(self.storage),deadline=deadline),
             self.profile.limits['disk_bytes'])
         require(observe()==before,'GATE_QUOTA_RESOURCE_CHANGED')
         require(time.monotonic()<deadline,'DEADLINE')
@@ -628,7 +679,7 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return value
 
     def create_hub(self, state):
-        guard(self.profile.nonce); self._binding(state)
+        self._guard(); self._binding(state)
         require(self._inspect_object(state, 'volume') is not None, 'OWNERSHIP_ANCHOR_REQUIRED')
         require(self._hub(state) is None, 'HUB_ALREADY_EXISTS')
         layout = self.layout(state)
@@ -640,11 +691,11 @@ class NativeQualificationBackend(DockerFixtureBackend):
         self._run(['create','--name',names(state)[0] + '-hub',*self._label_args(state,'hub'),
             '--interactive','--user','65531:65531','--group-add','65532',
             '--read-only','--network','none','--ipc','private','--cgroupns','private',
-            '--cap-drop','ALL','--security-opt','no-new-privileges=true','--security-opt','label=level:' + LEVEL,
+            '--cap-drop','ALL','--security-opt','no-new-privileges=true','--security-opt','label=level:' + self.level,
             '--memory','268435456','--memory-swap','268435456','--cpus','0.25','--pids-limit','32',
             '--log-driver','local','--log-opt','max-size=1048576','--log-opt','max-file=1','--log-opt','compress=false',
             '--env','PYTHONPATH=/opt/uas','--env','PYTHONDONTWRITEBYTECODE=1',*args,
-            '--entrypoint',HUB_COMMAND[0],self.profile.hub['image_reference'],*HUB_COMMAND[1:]])
+            '--entrypoint',self.hub_command[0],self.profile.hub['image_reference'],*self.hub_command[1:]])
         value = self._hub(state)
         self.validate_hub(state,value)
         return value['Id']
@@ -655,15 +706,15 @@ class NativeQualificationBackend(DockerFixtureBackend):
         mounts=[(layout['peer'],'/uas/peer',False),(layout['control'],'/uas/control',False),
                 (layout['hub'],'/uas/hub',True)]
         config,host = value['Config'],value['HostConfig']
-        require(config['Image'] == self.profile.hub['image_reference'] and config['Entrypoint'] == HUB_COMMAND[:1]
-                and config['Cmd'] == HUB_COMMAND[1:] and config['User'] == '65531:65531'
+        require(config['Image'] == self.profile.hub['image_reference'] and config['Entrypoint'] == self.hub_command[:1]
+                and config['Cmd'] == self.hub_command[1:] and config['User'] == '65531:65531'
                 and config['Tty'] is False and config['OpenStdin'] is True, 'HUB_COMMAND')
         require(host['Privileged'] is False and host['ReadonlyRootfs'] is True and host['NetworkMode'] == 'none'
                 and host['CapDrop'] == ['ALL'] and host['CapAdd'] in (None,[]) and host['GroupAdd'] == ['65532'], 'HUB_BOUNDARY')
         require(all(host[k]==v for k,v in {'PidMode':'','IpcMode':'private','UTSMode':'',
                 'UsernsMode':'','CgroupnsMode':'private'}.items()),'HUB_NAMESPACES')
         require([s.replace('no-new-privileges=true','no-new-privileges') for s in host['SecurityOpt']]
-                == ['no-new-privileges','label=level:'+LEVEL],'HUB_SECURITY_OPTIONS')
+                == ['no-new-privileges','label=level:'+self.level],'HUB_SECURITY_OPTIONS')
         require(all(type(host[k]) is int and host[k]==v for k,v in {'Memory':268435456,'MemorySwap':268435456,
                 'NanoCpus':250000000,'PidsLimit':32}.items()),'HUB_LIMITS')
         require(host['LogConfig']=={'Type':'local','Config':{'max-size':'1048576','max-file':'1','compress':'false'}},
@@ -674,8 +725,8 @@ class NativeQualificationBackend(DockerFixtureBackend):
         require({'/proc/kcore','/proc/keys','/proc/timer_list','/sys/firmware'} <= set(host['MaskedPaths'])
                 and {'/proc/bus','/proc/fs','/proc/irq','/proc/sys','/proc/sysrq-trigger'} <= set(host['ReadonlyPaths']),
                 'HUB_KERNEL_MASKS')
-        require(value['ProcessLabel']=='system_u:system_r:container_t:'+LEVEL
-                and value['MountLabel']=='system_u:object_r:container_file_t:'+LEVEL,'HUB_MCS_LABELS')
+        require(value['ProcessLabel']=='system_u:system_r:container_t:'+self.level
+                and value['MountLabel']=='system_u:object_r:container_file_t:'+self.level,'HUB_MCS_LABELS')
         require(len(value['Mounts']) == 3 and {(m['Source'],m['Destination'],m['RW']) for m in value['Mounts']} ==
                 {(str(s),d,w) for s,d,w in mounts} and all(m['Type']=='bind' and type(m['RW']) is bool
                     and m['Propagation']=='rprivate' for m in value['Mounts']), 'HUB_MOUNTS')
@@ -683,14 +734,15 @@ class NativeQualificationBackend(DockerFixtureBackend):
         return True
 
 
-def labeled_listener(path, group, *, listen=True):
+def labeled_listener(path, group, *, listen=True, level=None, owner=HOST_UID):
     """Existing disposable fixed socket-context seam, not a domain transition."""
+    level = LEVEL if level is None else level
     original = Path('/proc/self/attr/current').read_text()
     require('container_t' not in original, 'ROOT_SETUP_DOMAIN')
     library = ctypes.CDLL('libselinux.so.1', use_errno=True)
     library.setsockcreatecon.argtypes = [ctypes.c_char_p]
     library.setsockcreatecon.restype = ctypes.c_int
-    require(library.setsockcreatecon(('system_u:system_r:container_t:' + LEVEL).encode()) == 0,
+    require(library.setsockcreatecon(('system_u:system_r:container_t:' + level).encode()) == 0,
             'SOCKET_LABEL_DENIED')
     listener = None
     try:
@@ -698,7 +750,7 @@ def labeled_listener(path, group, *, listen=True):
         listener.bind(str(path))
         if listen: listener.listen(4)
         listener.settimeout(3)
-        os.chown(path, HOST_UID, group); os.chmod(path, 0o620)
+        os.chown(path, owner, group); os.chmod(path, 0o620)
     except BaseException:
         if listener is not None: listener.close()
         raise
@@ -708,7 +760,7 @@ def labeled_listener(path, group, *, listen=True):
             raise LifecycleError('NATIVE_SOCKET_LABEL_RESET_FAILED')
     require(Path('/proc/self/attr/current').read_text() == original, 'ROOT_SETUP_DOMAIN')
     try:
-        command('chcon','-t','container_file_t','-l',LEVEL,str(path))
+        command('chcon','-t','container_file_t','-l',level,str(path))
         return listener
     except BaseException:
         listener.close()
@@ -805,7 +857,7 @@ def readonly_supervisor(plan, resources):
     return owner
 
 
-def copy_public_manifest(ref, target):
+def copy_public_manifest(ref, target, *, owner=HOST_UID):
     value = read_manifest(ref['path'],ref['sha256'])
     # Preserve exact bytes, not a reserialization with a different digest. Open
     # again only for public metadata; digest comparison protects this copy race.
@@ -819,7 +871,7 @@ def copy_public_manifest(ref, target):
     fd = os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400)
     try:
         with os.fdopen(fd,'wb') as stream:
-            stream.write(raw);stream.flush();os.fsync(stream.fileno());os.fchown(stream.fileno(),HOST_UID,HOST_UID)
+            stream.write(raw);stream.flush();os.fsync(stream.fileno());os.fchown(stream.fileno(),owner,owner)
     except BaseException:
         raise
     return value

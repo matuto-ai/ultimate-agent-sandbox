@@ -40,7 +40,7 @@ class GitSupervisor:
         self.room_id, self.room_instance = binding.room_id, room_instance
         worker_uid, worker_gid = 65530, 65532
         if native_resources is not None:
-            from .native_git_resources import NativeGitResources
+            from .native_git_resources import NativeGitResources, host_owners
             if type(native_resources) is not NativeGitResources:
                 raise OriginDenied('exact live native Git resources required')
             if (request_listener is not native_resources.request_listener
@@ -53,8 +53,9 @@ class GitSupervisor:
             with lifecycle_lock():
                 native_resources.require(binding.room_id, room_instance, native_resources.container_id)
             worker_uid, worker_gid = native_resources.worker_host_uid, native_resources.worker_host_gid
-            if (worker_uid, worker_gid) != (165530, 165532):
-                raise OriginDenied('fixed native Git mapping differs')
+            owners=host_owners(native_resources.plan)
+            if (worker_uid, worker_gid) != (owners['gate'], owners['runtime']):
+                raise OriginDenied('admitted native Git mapping differs')
         self.journal_dir = Path(journal_dir)
         node = self.journal_dir.lstat()
         if (not self.journal_dir.is_absolute() or self.journal_dir.resolve() != self.journal_dir

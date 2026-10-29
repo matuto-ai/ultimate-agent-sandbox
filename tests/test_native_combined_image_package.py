@@ -80,8 +80,16 @@ class NativeCombinedImagePackageTests(unittest.TestCase):
 
     def test_closure_rejects_unknown_relative_and_absolute_package_edges(self):
         base = dict.fromkeys(('__init__', 'git_launcher', 'git_worker', 'git_worker_native', 'git_transaction'), '')
-        for body in ('from ..escape import x', 'from . import x', 'from uas import x', 'import uas'):
+        for body in ('from ..escape import x', 'from . import *', 'from uas import x', 'import uas'):
             with self.assertRaises(ValueError): BUILD.source_closure({**base, 'git_worker': body})
+
+    def test_closure_follows_flat_relative_module_aliases(self):
+        source = dict.fromkeys(('__init__', 'git_launcher', 'git_worker', 'git_worker_native', 'git_transaction'), '')
+        source.update(git_worker='from . import extra as selected, leaf', extra='from .leaf import x', leaf='')
+        self.assertTrue({'extra', 'leaf'} <= set(BUILD.source_closure(source)))
+        del source['leaf']
+        with self.assertRaisesRegex(ValueError, 'source dependency missing'):
+            BUILD.source_closure(source)
 
     def test_closure_follows_flat_absolute_package_edges(self):
         source = dict.fromkeys(('__init__', 'git_launcher', 'git_worker', 'git_worker_native', 'git_transaction'), '')

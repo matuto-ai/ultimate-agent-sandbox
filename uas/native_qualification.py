@@ -28,6 +28,42 @@ def _exact(value, fields, code):
     return value
 
 
+def validate_human_mergers(value):
+    if (type(value) is not list or not 1 <= len(value) <= 32
+            or any(type(n) is not int or not 0 < n < 2**53 for n in value)
+            or len(set(value)) != len(value)):
+        raise QualificationError('EXPLICIT_HUMAN_MERGER_POLICY_REQUIRED')
+    return list(value)
+
+
+def validate_runtime_pair(config, room):
+    seats = room['seats']
+    if len(seats) != 2 or sorted(s['runtime'] for s in seats) != ['claude', 'pi']:
+        raise QualificationError('EXACT_NATIVE_PAIR_REQUIRED')
+    seats = {s['runtime']: s for s in seats}
+    providers = {p['id']: p for p in config['deployment']['providers']}
+    for runtime, seat in seats.items():
+        provider = providers[seat['provider']]
+        if 'endpoint' in provider:
+            raise QualificationError('CUSTOM_PROVIDER_NOT_QUALIFIED')
+        try:
+            require_reference(select_reference(provider, runtime), runtime)
+        except ValueError:
+            raise QualificationError('RUNTIME_AUTH_REFERENCE_REQUIRED') from None
+    return seats
+
+
+def native_review_configuration(config, seats, human_mergers):
+    selected = seats['claude']
+    actor = next(a for a in config['deployment']['actors'] if a['id'] == selected['actor'])
+    identifier = actor.get('github_user_id')
+    if type(identifier) is not int or identifier <= 0:
+        raise QualificationError('REVIEWER_GITHUB_ID_REQUIRED')
+    return {'reviewers': [{'actor_id': actor['id'], 'participant_id': selected['participant'],
+                 'github_user_id': identifier}],
+        'human_mergers': list(human_mergers)}
+
+
 class QualificationPlan:
     """Validated declarations; not an admission receipt or serializable grant."""
 
@@ -51,27 +87,12 @@ class QualificationPlan:
                 or not 1 <= selection['timeout_seconds'] <= 180
                 or type(installation_digest) is not str or not SHA.fullmatch(installation_digest)):
             raise QualificationError('INVALID_NATIVE_SELECTION')
-        if (type(selection['human_mergers']) is not list or not 1 <= len(selection['human_mergers']) <= 32
-                or any(type(n) is not int or not 0 < n < 2**53 for n in selection['human_mergers'])
-                or len(set(selection['human_mergers'])) != len(selection['human_mergers'])):
-            raise QualificationError('EXPLICIT_HUMAN_MERGER_POLICY_REQUIRED')
+        validate_human_mergers(selection['human_mergers'])
         rooms = [r for r in self.config['rooms'] if r['id'] == selection['room_id']]
         if len(rooms) != 1:
             raise QualificationError('QUALIFICATION_ROOM_UNAVAILABLE')
         self.room = rooms[0]
-        seats = self.room['seats']
-        if len(seats) != 2 or sorted(s['runtime'] for s in seats) != ['claude', 'pi']:
-            raise QualificationError('EXACT_NATIVE_PAIR_REQUIRED')
-        self.seats = {s['runtime']: s for s in seats}
-        providers = {p['id']: p for p in self.config['deployment']['providers']}
-        for runtime, seat in self.seats.items():
-            provider = providers[seat['provider']]
-            if 'endpoint' in provider:
-                raise QualificationError('CUSTOM_PROVIDER_NOT_QUALIFIED')
-            try:
-                require_reference(select_reference(provider, runtime), runtime)
-            except ValueError:
-                raise QualificationError('RUNTIME_AUTH_REFERENCE_REQUIRED') from None
+        self.seats = validate_runtime_pair(self.config, self.room)
         references=('pi', 'claude', 'boundary', 'hub', 'broker')
         if 'git_manifest' in selection:references+=('git','git_broker')
         if 'gate_manifest' in selection:references+=('gate',)
@@ -100,14 +121,7 @@ class QualificationPlan:
             raise QualificationError('QUALIFICATION_SELECTION_CHANGED')
 
     def review_configuration(self):
-        selected = self.seats['claude']
-        actor = next(a for a in self.config['deployment']['actors'] if a['id'] == selected['actor'])
-        identifier = actor.get('github_user_id')
-        if type(identifier) is not int or identifier <= 0:
-            raise QualificationError('REVIEWER_GITHUB_ID_REQUIRED')
-        return {'reviewers': [{'actor_id': actor['id'], 'participant_id': selected['participant'],
-                             'github_user_id': identifier}],
-                'human_mergers': list(self.installation['human_mergers'])}
+        return native_review_configuration(self.config, self.seats, self.installation['human_mergers'])
 
     @classmethod
     def read(cls, config_text, installation_path, installation_digest):
@@ -173,6 +187,25 @@ class QualificationPlan:
         return result
 
 
+def is_local_runtime_plan(plan):
+    """Keep the qualifier independent of optional local-host source modules.
+
+    The module-name check is only an import prefilter, never authority: the
+    concrete class identity is still required before selecting local policy.
+    """
+    if type(plan).__module__ != 'uas.local_runtime_plan':
+        return False
+    from .local_runtime_plan import LocalRuntimePlan
+    return type(plan) is LocalRuntimePlan
+
+
+def credential_excluded_roots(plan):
+    roots=list(plan.room['project']['roots'].values())+[plan.room['state_root']+'/runtime']
+    if is_local_runtime_plan(plan):
+        plan.require_unchanged();roots.append(str(plan.native_profile.endpoints))
+    return roots
+
+
 def broker_selection(plan):
     """Public Broker setup reference; never open its referenced credential file."""
     plan.require_unchanged()
@@ -189,7 +222,7 @@ def broker_selection(plan):
         path(value[name])
     if type(value['gh_sha256']) is not str or not SHA.fullmatch(value['gh_sha256']):
         raise QualificationError('INVALID_BROKER_INSTALLATION')
-    mounted = list(plan.room['project']['roots'].values()) + [plan.room['state_root'] + '/runtime']
+    mounted = credential_excluded_roots(plan)
     if any(value['credential_path'] == root or value['credential_path'].startswith(root + '/') for root in mounted):
         raise QualificationError('BROKER_CREDENTIAL_INSIDE_WORKSTATION')
     if 'mutation_actors' in value:
@@ -225,7 +258,7 @@ def git_broker_selection(plan):
                            tuple(SshActorCredential(**row) for row in rows))
     except GitTransportError:
         raise QualificationError('INVALID_GIT_BROKER_INSTALLATION') from None
-    mounted=list(plan.room['project']['roots'].values())+[plan.room['state_root']+'/runtime']
+    mounted=credential_excluded_roots(plan)
     for row in rows:
         for name in ('key_path','known_hosts_path'):
             path(row[name])
@@ -236,18 +269,20 @@ def git_broker_selection(plan):
 
 def check_git_credentials(plan,selection):
     """Root metadata check only; canonical Broker reopens/rechecks before each use."""
+    from .local_host_profile import plan_owners
+    owners=plan_owners(plan)
     import stat
     from pathlib import Path
     mounted=[Path(value).resolve(strict=True) for value in plan.room['project']['roots'].values()]
     mounted.append(Path(plan.room['state_root']+'/runtime').resolve(strict=True))
     # Every additional fixed Git/peer projection is below this root; none may
     # become a credential source even if its public-file mode were changed.
-    mounted.append(Path('/run/uas-native'))
+    mounted.append(plan.native_profile.endpoints if is_local_runtime_plan(plan) else Path('/run/uas-native'))
     for row in selection['credentials']:
         for name in ('key_path','known_hosts_path'):
             candidate=Path(row[name]);resolved=candidate.resolve(strict=True);info=candidate.lstat()
             if (candidate!=resolved or any(candidate==root or root in candidate.parents for root in mounted)
-                    or not stat.S_ISREG(info.st_mode) or info.st_uid!=165534 or info.st_nlink!=1
+                    or not stat.S_ISREG(info.st_mode) or info.st_uid!=owners['broker'] or info.st_nlink!=1
                     or info.st_mode & 0o177 or not info.st_mode & 0o400
                     or not 0<info.st_size<=1048576):
                 raise QualificationError('GIT_CREDENTIAL_UNAVAILABLE')
