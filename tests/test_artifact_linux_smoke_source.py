@@ -117,7 +117,8 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
         self.assertEqual(smoke.LIMIT_SECONDS, 40)
 
     def test_staged_sources_are_exact_bounded_readonly_ordinary_copies(self):
-        self.assertEqual(len(smoke.SOURCES), 26)
+        self.assertEqual(len(smoke.SOURCES), 27)
+        self.assertIn('uas/typed_json.py', smoke.SOURCES)
         self.assertEqual(len(set(smoke.SOURCES)), len(smoke.SOURCES))
         with tempfile.TemporaryDirectory() as directory:
             payload = smoke.stage_sources(Path(directory))
