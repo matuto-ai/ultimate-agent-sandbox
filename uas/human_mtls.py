@@ -119,6 +119,56 @@ class HumanActionBindings:
         return HumanActionConnection(self, channel)
 
 
+
+@dataclass(frozen=True, init=False)
+class AdmittedRunGrant:
+    """Revocation handle for one explicit Open, not human command authority.
+
+    Only the original authenticated frame can mint this in-memory handle. It
+    retains neither the request session nor its TLS connection. The native Run
+    owner must separately bind the committed admission, Run generation, policy,
+    Actor and exact live process owners before doing any work. This handle alone
+    cannot open a Run, authenticate a command, or reconstruct authority on restart.
+    """
+    _bindings: object
+    _fingerprint: str
+    _grant: HumanActionGrant
+    _generation: int
+    operation_id: str
+    issue_number: int
+
+    def __init__(self, *args, **kwargs):
+        raise LedgerError('AUTHENTICATED_RUN_FRAME_REQUIRED')
+
+    @property
+    def deployment_id(self): return self._grant.deployment_id
+    @property
+    def room_id(self): return self._grant.room_id
+    @property
+    def instance_id(self): return self._grant.instance_id
+    @property
+    def manager_id(self): return self._grant.manager_id
+    @property
+    def human(self): return self._grant.human
+
+    def require_current(self):
+        if type(self) is not AdmittedRunGrant or type(self._bindings) is not HumanActionBindings:
+            raise LedgerError('ADMITTED_RUN_GRANT_REQUIRED')
+        self._bindings._owner()
+        bound = self._bindings._bindings.get(self._fingerprint)
+        if (bound is None or bound[0] is not self._grant or bound[1] != self._generation
+                or not {'open-run', 'authorize-run-request'}.issubset(self._grant.actions)
+                or 'human-open-run' not in self._grant.human.capabilities):
+            raise LedgerError('ADMITTED_RUN_GRANT_REVOKED')
+        return True
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError('Admitted Run grants are not serializable')
+
+    def __copy__(self): return self
+    def __deepcopy__(self, memo): return self
+
+
 def _frame(value, grant):
     if (type(value) is not dict or set(value) != {'version', 'action', 'payload'}
             or type(value['version']) is not int or value['version'] != 1
@@ -158,6 +208,7 @@ class HumanActionConnection:
         self._bindings, self._channel, self._fingerprint = bindings, channel, fingerprint
         self._grant, self._generation = bound
         self._closed, self._active = False, None
+        self._active_session, self._active_open = None, None
         self._owner_thread = threading.get_ident()
 
     def _owner(self):
@@ -176,6 +227,32 @@ class HumanActionConnection:
         """Invalidate authentication only; the host still owns its TLS socket."""
         self._owner()
         self._closed, self._active = True, None
+        self._active_session, self._active_open = None, None
+
+    def run_admission_lease(self, session, operation_id, issue_number):
+        """Mint only for this original explicit Open and its live session.
+
+        These arguments are compared with a snapshot made before yielding the
+        frame, so a handler cannot change the received payload into another grant.
+        No transport, callback or HumanSession is retained by the result.
+        """
+        self._current()
+        if (type(session) is not HumanSession or session is not self._active_session
+                or self._active is None or self._active_open is None
+                or type(operation_id) is not str or type(issue_number) is not int
+                or not 1 <= issue_number <= 9_999_999_999
+                or self._active_open != (operation_id, issue_number)
+                or not session.allowed('open-run') or not session.allowed('authorize-run-request')
+                or 'human-open-run' not in session.human.capabilities):
+            raise LedgerError('AUTHENTICATED_RUN_FRAME_REQUIRED')
+        _token(operation_id)
+        result = object.__new__(AdmittedRunGrant)
+        for name, value in (('_bindings', self._bindings), ('_fingerprint', self._fingerprint),
+                ('_grant', self._grant), ('_generation', self._generation),
+                ('operation_id', operation_id), ('issue_number', issue_number)):
+            object.__setattr__(result, name, value)
+        result.require_current()
+        return result
 
     def _connected(self, token):
         if threading.get_ident() != self._owner_thread or self._active is not token:
@@ -219,6 +296,9 @@ class HumanActionConnection:
                 authorized=lambda current, selected: current is session and type(selected) is str
                     and selected in permitted and selected in grant.actions and self._connected(token),
                 connected=lambda: self._connected(token))
+            self._active_session = session
+            self._active_open = ((value['payload'].get('operation_id'), value['payload'].get('issue_number'))
+                                 if action == 'open-run' else None)
             yield value, session
         except BaseException:
             self.close()
@@ -227,6 +307,7 @@ class HumanActionConnection:
             # Deny-only cleanup is unconditional, even if a caller illegally
             # exits this context on another thread. A saved session cannot live on.
             self._active = None
+            self._active_session, self._active_open = None, None
             if threading.get_ident() != self._owner_thread:
                 self._closed = True
                 raise LedgerError('HUMAN_AUTHENTICATION_OWNER_REQUIRED')

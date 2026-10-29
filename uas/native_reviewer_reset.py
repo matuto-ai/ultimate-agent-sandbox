@@ -7,7 +7,7 @@ from copy import deepcopy
 import hashlib
 import time
 
-from .context import FixtureContextHub, FixtureRun
+from .context import FixtureContextHub, FixtureRun, MAX_CONTEXT_GENERATION
 from .ledger import Command, LedgerError
 from .claude_native_admission import NativeClaudeRoot
 from .native_claude_retirement import NativeClaudeRetirement
@@ -51,6 +51,9 @@ class NativeReviewerReset:
         participant=owner.selected['participant']
         row=state['fixture_context']['participants'][participant]
         preceding=row['bound_run'] or row['reserved_run']
+        if (type(row.get('context_generation')) is not int
+                or not 1 <= row['context_generation'] < MAX_CONTEXT_GENERATION):
+            raise LedgerError('CONTEXT_GENERATION_EXHAUSTED')
         if (row['status']!='READY' or not preceding or preceding['run_id']==owner._pin['run_id']
                 or root.scope['run_id']!=preceding['run_id']
                 or root.scope['generation']!=preceding['generation']

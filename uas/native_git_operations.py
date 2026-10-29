@@ -160,7 +160,17 @@ class NativeGitOperations:
         # Driver calls before retirement/allocation: existing completed evidence
         # and held owners remain intact while the projection is unavailable.
         self.owner._require_owner()
-        raise LedgerError('NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE')
+        from .local_runtime_plan import LocalRuntimePlan
+        from .local_successor_checkout import LocalNativeCheckoutClient
+        if (type(self.owner.launcher.plan) is not LocalRuntimePlan
+                or type(self.owner.checkout_client) is not LocalNativeCheckoutClient
+                or self.owner.checkout_client.closed or self.closed):
+            raise LedgerError('NATIVE_SUCCESSOR_GIT_VIEW_UNAVAILABLE')
+        self.owner.launcher.plan.require_unchanged()
+        # Preflight only. The local root handoff must actually stop the owned
+        # Workstation and reserve a clean primary before the next launch. New
+        # origins/scope require a new GitOperations instance after retirement.
+        self.resources.profile.require_checkout('primary', self.resources.profile.repo)
 
     def require_pi_restore(self, old):
         """Structural cut only: the old Pi is dead, so live _current cannot apply."""

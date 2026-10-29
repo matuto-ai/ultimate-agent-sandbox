@@ -6,6 +6,7 @@ and fixed per-session document/action owners. Serve on their common owner thread
 SQLite and live grants are deliberately not transferred to worker threads.
 """
 import json
+import html as html_encoding
 import re
 import socket
 import ssl
@@ -52,17 +53,17 @@ execute:request=>packet('execute',request), inspect:request=>packet('inspect',re
 OPEN_CLIENT = """<script>
 (function(){
 const form=document.createElement('form');form.id='native-open-run';
-form.innerHTML='<h2>Open native Run</h2><p>One bounded request: initial Run and optional preselected successor. Later separate Runs are not supported by this host epoch.</p><label>Issue number <input name="issue" type="number" min="1" max="9999999999" required></label> <label>Optional next issue <input name="nextissue" type="number" min="1" max="9999999999"></label> <button type="submit">Open Run</button> <button type="button" name="clear">New request</button><p role="status"></p>';
+form.innerHTML='<h2>Open native Run</h2><p>Open one explicit issue. Admitted work continues after this page closes.</p><label>Issue number <input name="issue" type="number" min="1" max="9999999999" required></label> <button type="submit">Open Run</button> <button type="button" name="clear">New request</button><p role="status"></p>';
 const issue=form.elements.issue,send=form.querySelector('[type=submit]'),clear=form.elements.clear,status=form.querySelector('[role=status]');
-let operation=null,selected=null,nextOperation=null,nextSelected=null,busy=false;
-clear.onclick=()=>{if(busy)return;operation=null;selected=null;nextOperation=null;nextSelected=null;issue.disabled=false;form.elements.nextissue.disabled=false;status.textContent='New request. No action sent.';};
+let operation=null,selected=null,busy=false;
+clear.onclick=()=>{if(busy)return;operation=null;selected=null;issue.disabled=false;status.textContent='New request. No action sent.';};
 form.onsubmit=async(event)=>{event.preventDefault();if(busy)return;
 const number=Number(issue.value);if(!Number.isSafeInteger(number)||number<1||number>9999999999)return;
-if(operation===null){operation=crypto.randomUUID();selected=number;const next=Number(form.elements.nextissue.value);if(form.elements.nextissue.value){if(!Number.isSafeInteger(next)||next<1||next>9999999999||next===number){operation=null;return;}nextSelected=next;nextOperation=crypto.randomUUID();}}
+if(operation===null){operation=crypto.randomUUID();selected=number;}
 if(selected!==number){status.textContent='Use New request to change the issue.';return;}
-busy=true;form.elements.nextissue.disabled=true;send.disabled=true;clear.disabled=true;issue.disabled=true;
-status.textContent='Running bounded native operation. Keep this page open. Operation '+operation;
-try{const response=await fetch('/uas/human-action/v1',{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({version:1,action:'open-run',payload:{operation_id:operation,issue_number:selected,...(nextOperation?{next_operation_id:nextOperation,next_issue_number:nextSelected}:{})}})});
+busy=true;send.disabled=true;clear.disabled=true;issue.disabled=true;
+status.textContent='Submitting explicit Run admission. Operation '+operation;
+try{const response=await fetch('/uas/human-action/v1',{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({version:1,action:'open-run',payload:{operation_id:operation,issue_number:selected}})});
 const result=await response.json();if(!response.ok)throw Error('unconfirmed');
 status.textContent='Operation '+operation+': '+result.status+'; Run '+result.run_id+'; generation '+result.generation+(result.outcome?'; outcome '+result.outcome:'');
 }catch(_){status.textContent='Outcome unconfirmed. Operation '+operation+'. No automatic retry. Inspect the Run before explicitly retrying this same request.';}
@@ -171,7 +172,11 @@ class LocalManager:
                             bindings[0].identity.room_id!=session.room_id):
                         raise LedgerError('LOCAL_MANAGER_SCOPE_MISMATCH')
                     html=document.render()
-                    if self.action_host_for is not None:
+                    if self.run_actions is not None:
+                        status=self.run_actions.status(session)
+                        notice='<p id="native-runtime-status">Native runtime: '+html_encoding.escape(_json(status))+'</p>'
+                        html=html.replace('</body>',notice+'</body>')
+                    if self.action_host_for is not None or self.run_actions is not None:
                         html=html.replace('</body>',ACTION_CLIENT+'</body>')
                     # Rendering availability is not action authority: an observe
                     # session cannot authorize open-run. The later POST must
@@ -183,7 +188,13 @@ class LocalManager:
                     result={'status':'available','html':html}
                 elif frame['action']=='open-run' and self.run_actions is not None:
                     action_attempted = True
-                    result=self.run_actions.open(payload,session)
+                    result=self.run_actions.open(payload,session,grant=connection.run_admission_lease(
+                        session,payload.get('operation_id'),payload.get('issue_number')))
+                elif self.run_actions is not None and self.action_host_for is None:
+                    connection._current()
+                    action_attempted=payload.get('kind')=='execute'
+                    result=self.run_actions.control(frame,payload,session,
+                        available_actions=tuple(connection._grant.actions))
                 elif self.action_host_for is not None:
                     host=self.action_host_for(session)
                     if type(host) is not FieldNotesActionHost:
@@ -209,11 +220,12 @@ class LocalManager:
         finally:
             if connection is not None: connection.close()
 
-    def serve(self, listener, tls_context, stopped):
+    def serve(self, listener, tls_context, stopped, *, idle=None):
         """Borrow an existing loopback listener; stop never destroys Room data."""
         self._owner()
         if (type(tls_context) is not ssl.SSLContext or tls_context.verify_mode!=ssl.CERT_REQUIRED
-                or tls_context.minimum_version<ssl.TLSVersion.TLSv1_3 or not callable(stopped)):
+                or tls_context.minimum_version<ssl.TLSVersion.TLSv1_3 or not callable(stopped)
+                or idle is not None and not callable(idle)):
             raise LedgerError('LOCAL_MANAGER_TLS_REQUIRED')
         address=listener.getsockname()
         if address[0] not in ('127.0.0.1','::1') or int(address[1])!=int(self.authority.rsplit(':',1)[1]):
@@ -221,6 +233,7 @@ class LocalManager:
         previous=listener.gettimeout();listener.settimeout(0.25)
         try:
             while not stopped():
+                if idle is not None:idle()
                 try: raw,_=listener.accept()
                 except socket.timeout: continue
                 with raw:

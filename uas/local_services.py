@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 
 from .lifecycle import LifecycleError
 from .workstation_admission import _canonical, _unique
@@ -80,7 +81,7 @@ class LocalServices:
         require(runtime_plan_for is None or callable(runtime_plan_for),'LOCAL_RUNTIME_SELECTOR_REQUIRED')
         require(manager_reference_for is None or callable(manager_reference_for),'LOCAL_MANAGER_SELECTOR_REQUIRED')
         self.runtime_plan_for=runtime_plan_for;self.manager_reference_for=manager_reference_for
-        self._lock_fd=host_lock_fd;self._rooms={}
+        self._lock_fd=host_lock_fd;self._rooms={};self.operation_lock=threading.RLock()
 
     def ensure(self,room,owner,backend,state):
         require(os.geteuid()==0,'LOCAL_SERVICE_ROOT_REQUIRED')
@@ -127,7 +128,7 @@ class LocalServices:
         if runtime_plan is not None:
             from .local_runtime_resources import LocalRuntimeResources
             runtime=LocalRuntimeResources(runtime_plan,owner,backend,state,resources,self._lock_fd)
-            row['runtime_owner']=runtime
+            row['runtime_owner']=runtime;runtime.services=self
             data,extra_fds=runtime.prepare();data['room_id']=room
             document['runtime']={'configuration':runtime_plan.config_text,'installation':runtime_plan.installation,
                 'installation_digest':runtime_plan.installation_digest,'native_document':backend.profile.native_document,

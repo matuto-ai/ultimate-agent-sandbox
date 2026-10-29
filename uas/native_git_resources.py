@@ -275,11 +275,13 @@ class NativeGitResources:
     pins the exact initially observed image, mounts and userns mapping.
     """
     @classmethod
-    def from_session(cls,plan,resource_dict,engine,*,supervisor,deadline):
+    def from_session(cls,plan,resource_dict,engine,*,supervisor,deadline,resume_local_listener=False):
         from .docker_exec_api import DockerExecAPI
         from .lifecycle import Supervisor
         from .native_qualification_backend import NativeQualificationObserver
         from .workstation_exec import EndpointLease
+        require(type(resume_local_listener) is bool and (not resume_local_listener or local_profile(plan) is not None),
+                'local retained listener resume required')
         expected=NativeQualificationObserver
         if local_profile(plan) is not None:
             from .local_native import LocalNativeObserver
@@ -337,7 +339,7 @@ class NativeGitResources:
                 listener=socket.socket(fileno=os.dup(fd) if local_profile(plan) is not None else fd);self._listeners.append(listener)
                 require(listener.family==socket.AF_UNIX and listener.type==socket.SOCK_SEQPACKET
                     and listener.getsockname()==str(endpoint)
-                    and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN)==(0 if kind=='request' else 1),'prebound listener differs')
+                    and listener.getsockopt(socket.SOL_SOCKET,socket.SO_ACCEPTCONN) in ((0,1) if kind=='request' and resume_local_listener else (0,) if kind=='request' else (1,)),'prebound listener differs')
                 setattr(self,kind+'_listener',listener);setattr(self,kind+'_endpoint',lease)
                 info=os.fstat(fd);self._socket_identities[kind]=(info.st_dev,info.st_ino)
             self.worker_host_uid=WORKER_HOST_UID;self.worker_host_gid=WORKER_HOST_GID
