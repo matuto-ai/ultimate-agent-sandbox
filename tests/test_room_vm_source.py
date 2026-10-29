@@ -30,6 +30,36 @@ finally:
 
 
 class RoomVMSourceTests(unittest.TestCase):
+    def test_checkpoints_are_bounded_diagnostics_not_qualification(self):
+        import guest_room
+        checks = {'payload': {'status': 'passed', 'secret': 'never exported'},
+                  'network': {'status': 'incomplete'}}
+        output = io.StringIO()
+        with redirect_stdout(output), patch.object(guest_room.time, 'monotonic', side_effect=[10, 12, 15]):
+            emit = guest_room.checkpoint_writer('a'*32, checks)
+            emit('rootfs', 'end'); emit('network', 'begin')
+        self.assertNotIn('secret', output.getvalue())
+        with tempfile.TemporaryDirectory() as directory:
+            serial = Path(directory)/'serial.log'
+            serial.write_text(output.getvalue())
+            got = runner.last_checkpoint(serial, 'a'*32)
+            self.assertEqual(('network', 'begin', 2, 5),
+                (got['stage'], got['event'], got['sequence'], got['elapsed_seconds']))
+            self.assertEqual(['payload'], got['completed_checks'])
+            self.assertIs(got['terminal'], False)
+            self.assertIsNone(runner.last_checkpoint(serial, 'b'*32))
+            with self.assertRaises(RuntimeError): runner.parse_report(serial.read_text(), 'a'*32)
+            good = output.getvalue()
+            for change in ({'terminal': True}, {'sequence': 41}, {'elapsed_seconds': float('nan')},
+                           {'stage': 'injected'}, {'completed_checks': ['unexpected']}, {'extra':'secret'}):
+                bad = dict(got); bad.update(change)
+                serial.write_text(good + 'UAS_ROOM_CHECKPOINT:'+'a'*32+':'+json.dumps(bad)+'\n')
+                self.assertEqual(got, runner.last_checkpoint(serial, 'a'*32))
+            serial.write_text('UAS_ROOM_CHECKPOINT:'+'a'*32+':'+('x'*2048)+'\n')
+            self.assertIsNone(runner.last_checkpoint(serial,'a'*32))
+            serial.write_text(good + 'x'*65536)
+            self.assertIsNone(runner.last_checkpoint(serial,'a'*32))
+
     def report(self):
         value = {'version': 1, 'nonce': 'a' * 32, 'profile': room_profile.PROFILE,
                  'production_enabled': False, 'checks': {key: {'status': 'passed'} for key in runner.REQUIRED}}
@@ -245,6 +275,18 @@ class RoomVMSourceTests(unittest.TestCase):
             except BaseException as caught: error = caught
         popen.assert_called_once(); stop.assert_called_once_with(process)
         return result, error, parsed, sleep, output.getvalue()
+
+    def test_outer_timeout_retains_latest_checkpoint_but_never_calls_report_parser(self):
+        value = {'version': 1, 'sequence': 20, 'stage': 'endpoint-service', 'event': 'begin',
+                 'elapsed_seconds': 150, 'completed_checks': ['confinement', 'mounts', 'payload'],
+                 'terminal': False}
+        line = 'UAS_ROOM_CHECKPOINT:'+'a'*32+':'+json.dumps(value)+'\n'
+        result, error, parsed, _, output = self.boot_case([(1201, None, {'serial.log': line})])
+        self.assertIsNone(result); self.assertIn('exceeded budget', str(error))
+        parsed.assert_not_called()
+        self.assertIn('diagnostic, not qualification', output)
+        self.assertIn('"stage": "endpoint-service"', output)
+        self.assertIn('"terminal": false', output)
 
     def test_boot_behavioral_clock_serial_exit_and_log_budget_matrix(self):
         cases = (

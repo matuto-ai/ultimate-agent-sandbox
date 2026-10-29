@@ -417,3 +417,14 @@ from the development environment's Mozilla CA package (SHA256
 `22b557a27055b33606b6559f37703928d3e4ad79f110b407d04986e1843543d1`).
 Its real SSL test proves the validation code path only; it is not the generated
 Fedora bundle and does not qualify Fedora trust or external connectivity.
+
+### Bounded stage diagnostics
+
+The guest emits at most 40 fixed-stage checkpoints (rootfs, Engine/archive/import,
+Room launch/observations/mounts, service/negatives, quota, network, recovery and
+cleanup), not periodic heartbeats. Each records elapsed time and only names of
+checks already marked passed. On host failure, a bounded 64 KiB tail parser
+retains the latest valid matching-nonce checkpoint, explicitly as diagnostics.
+These records are never accepted as a qualification report or proof that a
+begun stage completed. All existing total, idle, per-command and cleanup limits
+remain unchanged; incomplete guest cleanup stays unproved on an outer kill.

@@ -143,6 +143,46 @@ def parse_report(serial, nonce):
     return value
 
 
+
+def last_checkpoint(serial, nonce):
+    """Bounded diagnostic tail only. Never substitutes for parse_report()."""
+    marker = 'UAS_ROOM_CHECKPOINT:' + nonce + ':'
+    try:
+        with serial.open('rb') as source:
+            source.seek(0, 2)
+            source.seek(max(0, source.tell() - 65536))
+            tail = source.read(65536).decode('utf-8', errors='replace')
+    except OSError:
+        return None
+    stages = {'rootfs', 'engine', 'archive', 'image-import', 'storage', 'launch-alpha', 'launch-beta',
+        'observe-alpha', 'observe-beta', 'mounts-alpha', 'mounts-beta',
+        'endpoint-service', 'endpoint-negatives', 'quota-block', 'quota-inode',
+        'network', 'recovery', 'cleanup', 'scenario'}
+    latest = None
+    for line in tail.splitlines():
+        if marker not in line: continue
+        raw = line.partition(marker)[2]
+        if len(raw) > 1024: continue
+        try:
+            value = json.loads(raw, object_pairs_hook=_unique)
+            if (type(value) is not dict or set(value) != {'version', 'sequence', 'stage', 'event',
+                    'elapsed_seconds', 'completed_checks', 'terminal'}
+                    or type(value['version']) is not int or value['version'] != 1 or value['terminal'] is not False
+                    or type(value['sequence']) is not int or not 1 <= value['sequence'] <= 40
+                    or value['stage'] not in stages or value['event'] not in ('begin', 'end')
+                    or type(value['elapsed_seconds']) not in (int, float)
+                    or not 0 <= value['elapsed_seconds'] <= BOOT_TIMEOUT
+                    or type(value['completed_checks']) is not list
+                    or any(type(key) is not str for key in value['completed_checks'])
+                    or value['completed_checks'] != sorted(set(value['completed_checks']))
+                    or not set(value['completed_checks']) <= REQUIRED):
+                continue
+            if latest is None or value['sequence'] > latest['sequence']: latest = value
+        except (ValueError, TypeError, KeyError):
+            continue
+    return latest
+
+
 def boot(directory, values, nonce):
     started = last_activity = last_progress = time.monotonic()
     serial = directory / 'serial.log'
@@ -185,6 +225,11 @@ def boot(directory, values, nonce):
             return report, round(time.monotonic() - started, 3)
         except BaseException as error:
             failure = error
+            try:
+                print('Room VM last checkpoint (diagnostic, not qualification):',
+                      json.dumps(last_checkpoint(serial, nonce)), flush=True)
+            except (OSError, ValueError):
+                pass
             raise
         finally:
             try:

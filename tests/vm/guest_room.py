@@ -246,6 +246,35 @@ def cleanup_owned(supervisors, endpoints, children, created, image, storage, che
         'outer_disposable_vm_removal_remains_mandatory': True}
     return errors
 
+
+CHECKPOINT_STAGES = frozenset(('rootfs', 'engine', 'archive', 'image-import', 'storage',
+    'launch-alpha', 'launch-beta', 'observe-alpha', 'observe-beta',
+    'mounts-alpha', 'mounts-beta', 'endpoint-service', 'endpoint-negatives',
+    'quota-block', 'quota-inode', 'network', 'recovery', 'cleanup', 'scenario'))
+
+
+def checkpoint_writer(nonce, checks):
+    """Finite diagnostic checkpoints, never qualification or a liveness lease."""
+    started = time.monotonic()
+    sequence = 0
+    def emit(stage, event):
+        nonlocal sequence
+        require(stage in CHECKPOINT_STAGES and event in ('begin', 'end'), 'fixed checkpoint required')
+        sequence += 1
+        require(sequence <= 40, 'checkpoint budget exceeded')
+        value = {'version': 1, 'sequence': sequence, 'stage': stage, 'event': event,
+                 'elapsed_seconds': round(max(0, time.monotonic() - started), 3),
+                 'completed_checks': sorted(key for key in REQUIRED
+                     if checks.get(key, {}).get('status') == 'passed'),
+                 'terminal': False}
+        try:
+            print('UAS_ROOM_CHECKPOINT:' + nonce + ':' + json.dumps(value, sort_keys=True), flush=True)
+        except OSError:
+            # Diagnostics must not mask the primary failure or stop owned cleanup.
+            pass
+    return emit
+
+
 def scenario(nonce, manifest, boot_network, checks):
     sys.path.insert(0, str(boundary.ROOT)); sys.path.insert(0, str(boundary.ROOT / 'tests/vm'))
     from native_rootfs import build_room_rootfs
@@ -259,18 +288,28 @@ def scenario(nonce, manifest, boot_network, checks):
     image = None
     cleanup_errors = []
     active_stage = 'payload'
+    checkpoint = checkpoint_writer(nonce, checks)
     limits = RoomFixtureLimits(memory_bytes=96 * 1024**2, nano_cpus=750_000_000,
                                pids=24, disk_bytes=8 * 1024**2, inodes=128, log_bytes=524288)
     try:
         root = Path('/var/lib/uas-native-rootfs'); archive = root.with_suffix('.tar')
+        checkpoint('rootfs', 'begin')
         image_facts = build_room_rootfs(nonce, manifest, root, run=run)
+        checkpoint('rootfs', 'end')
+        checkpoint('engine', 'begin')
         boundary.start_engine()
         require(run('docker', 'version', '--format', '{{.Server.Version}}').strip() == '29.8.2', 'exact selected Engine required')
+        checkpoint('engine', 'end')
+        checkpoint('archive', 'begin')
         with tarfile.open(archive, 'x', format=tarfile.PAX_FORMAT) as target:
             for path in sorted(root.iterdir()): target.add(path, arcname=path.name, recursive=True)
+        checkpoint('archive', 'end')
+        checkpoint('image-import', 'begin')
         image = import_image(archive)
+        checkpoint('image-import', 'end')
         checks['payload'] = {'status': 'passed', 'image': image, 'rootfs': image_facts,
                              'boot_network': boot_network, 'native_pi_enabled': False}
+        checkpoint('storage', 'begin')
         device = Path('/dev/disk/by-id/virtio-uas-quota')
         require(device.exists() and run('blockdev', '--getsize64', str(device)).strip() == str(2 * 1024**3),
                 'exact owned quota disk required')
@@ -278,8 +317,10 @@ def scenario(nonce, manifest, boot_network, checks):
         run('mount', '-o', 'prjquota,nodev,nosuid', str(device), str(STORAGE)); created.add('storage')
         prepare_storage(nonce, limits={room: (limits.disk_bytes // 1024, limits.inodes) for room in ROOMS})
         attribute_control = boundary.attribute_positive_control(STORAGE)
+        checkpoint('storage', 'end')
         active_stage = 'confinement'
         for room in ROOMS:
+            checkpoint('launch-' + room, 'begin')
             endpoints[room] = endpoint(room, run)
             backend = backends[room] = RoomLaunchFixtureBackend(nonce, room, limits=limits, endpoints=(endpoints[room],))
             supervisor = supervisors[room] = Supervisor(CONTROL / 'lifecycle', room, backend,
@@ -289,6 +330,7 @@ def scenario(nonce, manifest, boot_network, checks):
             require(status['phase'] == 'running', 'actual Room launch failed: ' + json.dumps(status))
             containers[room] = status['observed']['container']['id']
             states[room] = supervisor._read()
+            checkpoint('launch-' + room, 'end')
         def probe(room, *args):
             return json.loads(run('docker', 'exec', containers[room], '/fixture', *args, timeout=8))
         def python_probe(room, mode):
@@ -299,6 +341,7 @@ def scenario(nonce, manifest, boot_network, checks):
         checks['confinement'] = {'status': 'incomplete', 'workstations': confinement}
         for room in ROOMS:
             active_stage = 'confinement'
+            checkpoint('observe-' + room, 'begin')
             actual = probe(room, 'observe'); files = actual['files']
             require(actual['uid'] == actual['gid'] == 65532, 'nonroot Workstation required')
             status = dict(line.split(':', 1) for line in files['/proc/self/status'].splitlines() if ':' in line)
@@ -331,11 +374,13 @@ def scenario(nonce, manifest, boot_network, checks):
                     and attrs['change_project'] in ('EPERM', 'EACCES', 'EINVAL')
                     and attrs['initial_project'] == attrs['after_change_project'] == ROOMS[room][0]
                     and attrs['after_clear_inherit'] is True, 'quota escape permitted')
+            checkpoint('observe-' + room, 'end')
         checks['confinement'] = {'status': 'passed', 'workstations': confinement,
             'fssetxattr_initial_userns_positive_control':attribute_control}
         active_stage = 'mounts'
         private = {}
         for room in ROOMS:
+            checkpoint('mounts-' + room, 'begin')
             for name in ('repository', 'workspace', 'checkouts'):
                 require(probe(room, 'write', str(STORAGE / room / name))['error'] == 'OK', 'admitted writable mount denied')
             require(probe(room, 'write', str(STORAGE / room / 'references'))['error'] == 'EROFS', 'readonly reference writable')
@@ -344,14 +389,18 @@ def scenario(nonce, manifest, boot_network, checks):
             require(private[room]['endpoint_unlink'] == 'EROFS'
                     and all(value in ('ENOENT','EACCES') for key,value in private[room].items() if key != 'endpoint_unlink'),
                     'private stores/Engine exposed or endpoint writable')
+            checkpoint('mounts-' + room, 'end')
         checks['mounts'] = {'status': 'passed', 'private':private,
             'actual_mounts': {room: backends[room].admit(states[room])['Mounts'] for room in ROOMS}}
         # The bootstrap receives no workload release until the actual mounted
         # service and same live Broker have both passed their checks.
         active_stage = 'endpoint_service'
         checks['endpoint_service'] = {}
+        checkpoint('endpoint-service', 'begin')
         prove_service(supervisors['alpha'], backends['alpha'], endpoints['alpha'], containers['alpha'],
                       run=run, checks=checks['endpoint_service'])
+        checkpoint('endpoint-service', 'end')
+        checkpoint('endpoint-negatives', 'begin')
         checks['endpoint_service']['status'] = 'incomplete'
         require(checks['endpoint_service']['held_bootstrap_exit_observed'] is True,
                 'held workload must exit before destructive endpoint negatives')
@@ -367,8 +416,10 @@ def scenario(nonce, manifest, boot_network, checks):
         checks['endpoint_service']['foreign_room_mcs_denied'] = prove_foreign_pathname(
             endpoints['alpha'], raw_endpoint_probe, checks['endpoint_service']['foreign_room_mcs'])
         checks['endpoint_service']['status'] = 'passed'
+        checkpoint('endpoint-negatives', 'end')
         active_stage = 'limits'
         for kind in ('block', 'inode'):
+            checkpoint('quota-' + kind, 'begin')
             result = observed_limits['exhaustion_' + kind] = probe('alpha', 'quota-' + kind, str(STORAGE / 'alpha/workspace'))
             require(result['error'] == 'ENOSPC', 'configured XFS bound not enforced')
             space = os.statvfs(STORAGE)
@@ -379,8 +430,10 @@ def scenario(nonce, manifest, boot_network, checks):
                     and path.resolve() == path, 'unsafe owned quota probe cleanup')
             require(probe('beta', 'write-new', str(STORAGE / 'beta/workspace'))['error'] == 'OK', 'sibling quota isolation failed')
             shutil.rmtree(path)
+            checkpoint('quota-' + kind, 'end')
         checks['limits'] = {'status': 'passed', 'observed': observed_limits}
         active_stage = 'network'
+        checkpoint('network', 'begin')
         # Live in-guest decoys retain the existing attributed deny controls.
         run('ip', 'netns', 'add', 'uas-public'); created.add('netns')
         run('ip', 'link', 'add', 'uas-public', 'type', 'veth', 'peer', 'name', 'uas-peer'); created.add('veth')
@@ -399,9 +452,12 @@ def scenario(nonce, manifest, boot_network, checks):
         children.append(subprocess.Popen(['python3', __file__, '--host-responder', nonce]))
         checks['network'] = {}
         prove_network(probe, python_probe, backends, states, containers, children, checks['network'])
+        checkpoint('network', 'end')
         active_stage = 'recovery'
+        checkpoint('recovery', 'begin')
         checks['recovery'] = {}
         prove_recovery(supervisors['alpha'], specs['alpha'], states['alpha'], containers['alpha'], nonce, checks['recovery'])
+        checkpoint('recovery', 'end')
     except BaseException as error:
         checks.setdefault(active_stage, {}).update(status='failed', error_type=type(error).__name__[:64])
         for entry in checks.values():
@@ -409,8 +465,11 @@ def scenario(nonce, manifest, boot_network, checks):
                 entry.update(status='blocked', reason='earlier_required_gate_failed', blocked_by=active_stage)
         raise
     finally:
+        checkpoint('cleanup', 'begin')
         cleanup_errors = cleanup_owned(supervisors, endpoints, children, created, image, STORAGE, checks)
+        checkpoint('cleanup', 'end')
     require(not cleanup_errors, 'owned guest cleanup incomplete')
+    checkpoint('scenario', 'end')
     return checks
 
 
