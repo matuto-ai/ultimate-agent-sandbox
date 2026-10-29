@@ -44,7 +44,9 @@ AUTHORITY_PHASES = frozenset(
     method + '.' + phase for method in ('bind', 'current', 'require')
     for phase in ('pre_resource', 'lineage', 'post_resource')) | {'seat.current', 'bind.cleanup'} | {
     'release.' + phase for phase in ('current', 'resources', 'broker', 'write')} | {
-    'prelaunch.' + phase for phase in ('lock', 'current', 'resources', 'admission')}
+    'prelaunch.' + phase for phase in ('lock', 'current', 'resources', 'admission')} | {
+    'final.' + phase for phase in ('lock', 'current', 'resources', 'admission',
+                                  'post_current', 'post_resources', 'broker', 'write')}
 
 
 def observe_authority_phase(checks, phase, call, *args):
@@ -662,6 +664,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
     from uas.kernel_origin import OriginDenied, _identity, alive, receive
     from uas.ledger import LedgerError, Origin
     from uas.workstation_exec import ExecLaunch, ExecSeat
+    from uas.room_probe import BOOTSTRAP_CONTROL_SECONDS, bootstrap_control_remaining
     from guest_boundary import require_process_label
     from uas.guest_fixture import ROOMS
     state = supervisor._read()
@@ -699,12 +702,16 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         # Full endpoint path, retained FD labels and live Broker stay fresh,
         # but are separate from core process-lineage observation's 50 ms clock.
         endpoint_.require(); broker.require()
+    control_deadline = None
     def control(expected):
+        if control_deadline is not None:
+            launch.channel.settimeout(bootstrap_control_remaining(control_deadline))
         with receive(launch.channel) as record:
             launch.origin.require(record)
             value = decode(record.data)
             require(value == expected if expected is not None else value.get('kind') == 'HELD_BOOTSTRAP',
                     'held bootstrap control differs')
+            if control_deadline is not None: bootstrap_control_remaining(control_deadline)
             return value
     try:
         broker = BrokerProcess(binding, instance, checks=checks.setdefault('broker', {}))
@@ -712,6 +719,7 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         seat = ExecSeat('alpha', instance, 'fixture-participant', 'fixture-actor', 'seat-a', container, 165532, 165532)
         launch = Bootstrap(DockerExecAPI('/var/run/docker.sock'), seat, endpoint_.leases[0], private / 'bootstrap.json')
         launch.launch(listener)
+        original_control_timeout = launch.channel.gettimeout()
         observation = control(None)
         require(observation['uid'] == observation['gid'] == 65532, 'bootstrap internal identity differs')
         peer_label = launch.channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERSEC, 1024).decode().rstrip('\0')
@@ -793,6 +801,10 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
             with channel:
                 require_process_label(channel.getsockopt(socket.SOL_SOCKET, socket.SO_PEERSEC, 1024).decode(), ROOMS['alpha'][3])
                 checks['stage'] = 'help_serve' if index == 0 else 'nonhelp_serve'
+                if index == 1:
+                    # Before the nonhelp response enables the child's HELP send:
+                    # conservative parent origin, never based on packet receipt.
+                    control_deadline = time.monotonic() + BOOTSTRAP_CONTROL_SECONDS
                 replies.append(serve_one(channel, service, authority, lifecycle_lock=supervisor._locked))
                 require_help_reply(replies[-1], checks, index)
         checks['stage'] = 'help_confirmation'
@@ -831,10 +843,28 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
         observed['authority_refusal_proved'] = True
         # Final actual liveness and launch-boundary observation immediately before
         # granting the synthetic workload its release, not a cached HELLO bit.
-        with supervisor._locked():
-            current(); resources(); backend.admit(state); broker.require()
-            send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})
+        checks['stage'] = 'final_workload_release'
+        def release_workload():
+            with ExitStack() as stack:
+                observe_authority_phase(checks, 'final.lock',
+                    lambda: stack.enter_context(supervisor._locked()))
+                bootstrap_control_remaining(control_deadline)
+                observe_authority_phase(checks, 'final.current', current)
+                observe_authority_phase(checks, 'final.resources', resources)
+                observe_authority_phase(checks, 'final.admission', backend.admit, state)
+                # Full admission may be slow. Never release a stale/revoked
+                # held origin, endpoint or Broker after that observation.
+                observe_authority_phase(checks, 'final.post_current', current)
+                observe_authority_phase(checks, 'final.post_resources', resources)
+                observe_authority_phase(checks, 'final.broker', broker.require)
+                def write_release():
+                    launch.channel.settimeout(bootstrap_control_remaining(control_deadline))
+                    send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})
+                observe_authority_phase(checks, 'final.write', write_release)
+        release_workload()
         control({'kind': 'WORKLOAD_STARTED'})
+        control_deadline = None
+        launch.channel.settimeout(original_control_timeout)
         checks.update(status='passed', mounted_real_help=True, non_help_refused=True, worker_starts=effects['worker'],
             same_uid_unrelated_task_refused=True,
             provider_execution_disabled=True, broker_credentials=list(broker.client.worker.credentials),
@@ -853,6 +883,13 @@ def prove_service(supervisor, backend, endpoint_, container, *, run, checks=None
     finally:
         active = False
         primary = sys.exc_info()[1]
+        # Existing retained pidfd only: no extra exec, transport drain, reaper,
+        # thread or fabricated stderr. Exit cause remains unknown without capture.
+        if launch is not None and launch.origin is not None:
+            diagnostic = {'stderr': 'NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY'}
+            try: diagnostic['alive'] = alive(launch.origin.pidfd)
+            except BaseException as error: diagnostic['error_type'] = type(error).__name__[:64]
+            checks['held_pre_cleanup'] = diagnostic
         cleanup_error = close_service_resources(checks, (
             ('authority', authority), ('launch', launch), ('provenance', provenance), ('broker', broker)), backend_fd)
         if cleanup_error is not None:

@@ -197,6 +197,7 @@ def protocol(root, jail, endpoint):
     from uas.ledger import LedgerError, Origin
     from uas.room_probe import DENIED_HELP_READY, DENIED_HELP_RELEASE, DENIED_HELP_SETUP_SECONDS
     from uas.room_probe import DENIED_HELP_STARTUP, DENIED_HELP_STARTUP_STEPS
+    from uas.room_probe import BOOTSTRAP_CONTROL_SECONDS, bootstrap_control_remaining
     from uas.workstation_exec import EndpointLease, ExecLaunch, ExecSeat
     room = load_source('room_protocol_actual_service', Path('/opt/uas/room_service.py'))
     # Explicit path relocation only. Broker confinement/handshake remain real.
@@ -228,8 +229,11 @@ def protocol(root, jail, endpoint):
         if fd in pipe_fds:
             pipe_fds.remove(fd)  # Never retry an uncertain descriptor close.
             os.close(fd)
+    control_deadline = None
     def control(expected, *, bind=False):
         nonlocal held
+        if control_deadline is not None:
+            launch.channel.settimeout(bootstrap_control_remaining(control_deadline))
         with receive(launch.channel) as record:
             launch.origin.require(record)
             value = decode(record.data)
@@ -239,6 +243,7 @@ def protocol(root, jail, endpoint):
                 with lock:
                     held = authority.bind(record)
                     held.require(record)
+            if control_deadline is not None: bootstrap_control_remaining(control_deadline)
             return value
     try:
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -252,6 +257,7 @@ def protocol(root, jail, endpoint):
         launch = Bootstrap(engine, seat, lease, private / 'bootstrap.json', timeout=5)
         checks['stage'] = 'bootstrap'
         launch.launch(listener)
+        original_control_timeout = launch.channel.gettimeout()
         observation = control(None)
         require(observation['uid'] == observation['gid'] == UID
                 and observation['peer_credentials'] == [os.getpid(), 0, 0], 'hosted peer credentials differ')
@@ -294,6 +300,9 @@ def protocol(root, jail, endpoint):
             listener.settimeout(3)
             channel, _ = listener.accept()
             with channel:
+                if index == 1:
+                    # Parent starts before the response can enable child HELP.
+                    control_deadline = time.monotonic() + BOOTSTRAP_CONTROL_SECONDS
                 reply = serve_one(channel, service, authority, lifecycle_lock=lambda: lock)
                 room.require_help_reply(reply, checks, index)
         control({'kind': 'HELP_ONLY_PROVED'}, bind=True)
@@ -356,9 +365,13 @@ def protocol(root, jail, endpoint):
         checks['unrelated_refusal'] = checks.pop('authority_failure')
         require(checks['unrelated_refusal']['phase'] == 'lineage', 'unrelated refused outside ancestry check')
         with lock:
-            current(); resources(); held.current(); broker.require()
+            bootstrap_control_remaining(control_deadline)
+            current(); resources(); held.current(); current(); resources(); broker.require()
+            launch.channel.settimeout(bootstrap_control_remaining(control_deadline))
             send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})
         control({'kind': 'WORKLOAD_STARTED'})
+        control_deadline = None
+        launch.channel.settimeout(original_control_timeout)
         checks['stage'] = 'held_exit'
         send(launch.channel, {'kind': 'EXIT'})
         poll = select.poll(); poll.register(launch.origin.pidfd, select.POLLIN)

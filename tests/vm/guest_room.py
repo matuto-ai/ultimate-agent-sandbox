@@ -440,7 +440,7 @@ def encode_report(report):
                         'status':str(cleanup.get('status','unknown'))[:32],
                         'errors':[{field:str(error.get(field,''))[:64] for field in ('owner','error_type')}
                                   for error in cleanup.get('errors',[])[:8]]}
-            # Fixed prelaunch/release gates only; no arbitrary phase names or payloads
+            # Fixed prelaunch/release/final gates only; no arbitrary phase names or payloads
             # survive overflow. Invalid/non-finite diagnostics are omitted, not
             # converted into authority or a successful compact report.
             phases = original.get('authority_phases', {})
@@ -448,7 +448,9 @@ def encode_report(report):
                 projected = {}
                 for key in ('prelaunch.lock', 'prelaunch.current', 'prelaunch.resources',
                             'prelaunch.admission', 'release.current', 'release.resources',
-                            'release.broker', 'release.write'):
+                            'release.broker', 'release.write', 'final.lock', 'final.current',
+                            'final.resources', 'final.admission', 'final.post_current',
+                            'final.post_resources', 'final.broker', 'final.write'):
                     timing = phases.get(key)
                     if not isinstance(timing, dict): continue
                     fields = {}
@@ -461,6 +463,15 @@ def encode_report(report):
                         if valid: fields[field] = value
                     if fields: projected[key] = fields
                 if projected: entry['authority_phases'] = projected
+            held = original.get('held_pre_cleanup')
+            if isinstance(held, dict):
+                diagnostic = {}
+                if type(held.get('alive')) is bool: diagnostic['alive'] = held['alive']
+                if held.get('stderr') == 'NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY':
+                    diagnostic['stderr'] = held['stderr']
+                if type(held.get('error_type')) is str:
+                    diagnostic['error_type'] = held['error_type'][:64]
+                if diagnostic: entry['held_pre_cleanup'] = diagnostic
             if 'authority_failure' in original:
                 entry['authority_failure'] = {key:str(original['authority_failure'].get(key,''))[:256]
                     for key in ('operation','phase','error_type','message')}

@@ -118,6 +118,17 @@ def private_paths():
     return result
 
 
+# Intentional fixture guard change: one absolute post-help orchestration ceiling,
+# not an aggregate guarantee that every independent operation can use its maximum.
+BOOTSTRAP_CONTROL_SECONDS = 30
+
+
+def bootstrap_control_remaining(deadline):
+    remaining = deadline - time.monotonic()
+    require(remaining > 0, 'held bootstrap control deadline')
+    return remaining
+
+
 def bootstrap():
     import ctypes
     from uas.git_endpoint import EndpointPeer
@@ -167,11 +178,19 @@ def bootstrap():
                 except Exception:
                     pass  # Preserve the first error if the diagnostic send fails.
                 raise
+            # Start before send: queued delivery can never extend this child's
+            # authoritative boundary. There is no keepalive or refreshed wait.
+            control_deadline = time.monotonic() + BOOTSTRAP_CONTROL_SECONDS
+            channel.settimeout(bootstrap_control_remaining(control_deadline))
             send(channel, {'kind': 'HELP_ONLY_PROVED'})
+            channel.settimeout(bootstrap_control_remaining(control_deadline))
             with receive(channel) as record:
                 peer.require(record)
                 require(decode(record.data) == {'kind': 'RELEASE_WORKLOAD'}, 'workload release not authorized')
+            # Authentication/decoding and late scheduling spend the same phase.
+            channel.settimeout(bootstrap_control_remaining(control_deadline))
             send(channel, {'kind': 'WORKLOAD_STARTED'})
+            channel.settimeout(12)  # Existing EXIT wait, outside orchestration.
             with receive(channel) as record:
                 peer.require(record)
                 require(decode(record.data) == {'kind': 'EXIT'}, 'unexpected fixture control')

@@ -344,3 +344,31 @@ metadata and fail-closed DNF behavior remain mandatory. No `--skip-broken`,
 used. Pure tests prove family rejection, exact command construction, ordering
 and failed-state handling, not compatibility of the installed image transaction.
 A further VM is only run within the owner's explicit remaining execution budget.
+
+
+### Held-bootstrap control orchestration guard
+
+The fixture intentionally replaces the bootstrap's post-help per-operation 12 s
+wait with one fixed absolute **30 s** orchestration ceiling. The child starts it
+before sending `HELP_ONLY_PROVED`; it includes unrelated-helper preparation,
+startup/refusal, full final admission and workload release. The parent starts
+conservatively before serving the non-help response that enables that child
+message, so it also charges that response overhead. Neither receipt lag,
+progress, malformed packets nor new operations refresh either deadline. Exactly
+30 s is expired; the child independently rejects late delivery or scheduling
+before `WORKLOAD_STARTED`. Parent confirmation must also arrive within its bound.
+This is an intentional fixture-guard change, **not** an unchanged-deadline claim,
+a sum of all independent maxima, or proof of performance on the target VM.
+Child initial/bootstrap and EXIT per-operation waits remain 12 s; the parent
+restores its original rendezvous socket timeout after confirmation. Core lineage 50 ms,
+helper startup/release/accept/collection 5 s, and VM job 30 minutes are unchanged.
+All fresh final checks and full admission remain under the lifecycle lock, with
+fresh held-origin, endpoint and Broker checks again after full admission.
+
+Fixed `final.*` timing aggregates identify final admission cost. On teardown the
+retained bootstrap pidfd supplies a bounded pre-cleanup live/exited observation;
+no new process, exec, thread or transport drain is introduced. The existing
+`ExecLaunch` has no owned bounded stderr capture facility, explicitly reported as
+`NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY`. That observation is not an exit status or
+an exit-cause diagnosis; the previous BrokenPipe cause remains unproven. Source
+and fake-clock tests do not qualify native Linux/Docker or the hosted target VM.

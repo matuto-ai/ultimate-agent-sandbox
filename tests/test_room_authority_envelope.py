@@ -365,7 +365,17 @@ class FixtureWiringTests(unittest.TestCase):
             self.assertLess(text.index('current()'), text.index('resources()'))
             self.assertLess(text.index('resources()'), text.index('backend.admit(state)'))
             self.assertLess(text.index('backend.admit(state)'), text.index('send(launch.channel'))
-        self.assertEqual(2, len(gates))
+        self.assertEqual(1, len(gates))
+        final = ast.unparse(next(n for n in ast.walk(self.prove)
+                                if isinstance(n, ast.FunctionDef) and n.name == 'release_workload'))
+        expected = ['supervisor._locked()', "'final.current'", "'final.resources'",
+                    "'final.admission'", "'final.post_current'", "'final.post_resources'",
+                    "'final.broker'", 'bootstrap_control_remaining(control_deadline)',
+                    "send(launch.channel, {'kind': 'RELEASE_WORKLOAD'})"]
+        # The first deadline check precedes the gates; the last guards the write.
+        positions = [final.index(token) if token != 'bootstrap_control_remaining(control_deadline)'
+                     else final.rindex(token) for token in expected]
+        self.assertEqual(sorted(positions), positions)
 
 
 if __name__ == '__main__': unittest.main()

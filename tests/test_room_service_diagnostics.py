@@ -629,3 +629,200 @@ class DiagnosticsTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError,'readiness deadline'):
                 guest_room.wait_decoys([])
         sleep.assert_not_called()
+
+
+class BootstrapControlTests(unittest.TestCase):
+    """Actual fixture control functions; logical time, no native effects."""
+    def child(self, elapsed=16, *, fault=None, send_cost=0, auth_cost=0):
+        import ctypes
+        from contextlib import contextmanager
+        from uas import room_probe, git_endpoint, kernel_origin, git_service, git_launcher
+        now, sends, waits, received = [0.0], [], [], []
+        channel = Mock()
+        channel.__enter__ = Mock(return_value=channel)
+        channel.__exit__ = Mock(return_value=False)
+        channel.send.return_value = 36
+        channel.getsockopt.return_value = b'fixed-label'
+        channel.settimeout.side_effect = waits.append
+        peer = Mock(credentials=(1, 0, 0), identity=(2, 3))
+        def authenticate(record):
+            if len(received) == 3:
+                now[0] += auth_cost
+                if fault == 'revocation': raise RuntimeError('peer revoked')
+        peer.require.side_effect = authenticate
+        records = [b'UAS-RELEASE-1\n', b'{"kind":"PROVE_HELP_ONLY"}',
+                   b'{"kind":"RELEASE_WORKLOAD"}', b'{"kind":"EXIT"}']
+        @contextmanager
+        def receive(_channel):
+            index = len(received); received.append(index)
+            if index == 2:
+                waited = elapsed - now[0]
+                now[0] = elapsed
+                if waited >= waits[-1]: raise TimeoutError('mock socket receive deadline')
+                if fault == 'loss': raise EOFError('lost')
+                if fault == 'malformed': records[index] = b'{"kind":"KEEPALIVE"}'
+            yield SimpleNamespace(data=records[index])
+        def send(_channel, value):
+            sends.append(value['kind'])
+            if value['kind'] == 'HELP_ONLY_PROVED': now[0] += send_cost
+        failure = None
+        with patch.object(ctypes, 'CDLL', return_value=SimpleNamespace(prctl=lambda *args: 0)), \
+             patch.object(room_probe.os, 'read', return_value=b'x' * 32), \
+             patch.object(room_probe.os, 'getuid', return_value=65532), \
+             patch.object(room_probe.os, 'getgid', return_value=65532), \
+             patch.object(room_probe.socket, 'socket', return_value=channel), \
+             patch.object(room_probe.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(git_endpoint, 'EndpointPeer', return_value=peer), \
+             patch.object(kernel_origin, 'enable'), patch.object(kernel_origin, 'receive', side_effect=receive), \
+             patch.object(git_service, 'send', side_effect=send), \
+             patch.object(git_launcher, 'main', side_effect=[0, 128]):
+            try: room_probe.bootstrap()
+            except BaseException as error: failure = error
+        peer.close.assert_called_once_with()
+        return failure, sends, waits, received
+
+    def test_actual_bootstrap_receive_allows_simulated_sixteen_seconds(self):
+        error, sends, waits, received = self.child()
+        self.assertIsNone(error)
+        self.assertEqual(['HELD_BOOTSTRAP', 'HELP_ONLY_PROVED', 'WORKLOAD_STARTED'], sends)
+        self.assertEqual([12, 30, 30, 14, 12], waits)
+        self.assertEqual([0, 1, 2, 3], received)
+
+    def test_actual_bootstrap_exact_late_auth_and_failed_control_never_release(self):
+        for elapsed, fault, auth in [(30, None, 0), (31, None, 0), (29, None, 1),
+                                     (16, 'malformed', 0), (16, 'loss', 0), (16, 'revocation', 0)]:
+            with self.subTest(elapsed=elapsed, fault=fault, auth=auth):
+                error, sends, waits, received = self.child(elapsed, fault=fault, auth_cost=auth)
+                self.assertIsNotNone(error)
+                self.assertNotIn('WORKLOAD_STARTED', sends)
+                self.assertEqual([0, 1, 2], received)
+                self.assertEqual([12, 30, 30], waits)
+
+    def test_child_send_and_delivery_cost_never_refresh_control_deadline(self):
+        error, sends, waits, _ = self.child(29, send_cost=4)
+        self.assertIsNone(error); self.assertEqual([12, 30, 26, 1, 12], waits)
+        error, sends, waits, received = self.child(16, send_cost=30)
+        self.assertIsNotNone(error); self.assertNotIn('WORKLOAD_STARTED', sends)
+        self.assertEqual([0, 1], received)
+
+    def parent(self, *, admission_cost=5, failure_phase=None, bookkeeping_cost=0):
+        from uas.room_probe import bootstrap_control_remaining
+        tree = ast.parse((VM/'room_service.py').read_text())
+        function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'release_workload')
+        now, locked, order, sent, checks = [11.0], [False], [], [], {}
+        class Lock:
+            def __enter__(inner): locked[0] = True; order.append('lock')
+            def __exit__(inner, *args): locked[0] = False; order.append('unlock')
+        counts = {'current':0, 'resources':0}
+        def gate(name):
+            self.assertTrue(locked[0]); phase = name
+            if name in counts:
+                counts[name] += 1
+                if counts[name] == 2: phase = 'post_' + name
+            order.append(phase)
+            if name == 'admission': now[0] += admission_cost
+            if phase == failure_phase: raise RuntimeError('fresh ' + phase)
+        def send(channel, packet):
+            self.assertTrue(locked[0]); sent.append((now[0], packet))
+        def observed(checks, phase, call, *args):
+            if phase == 'final.write': now[0] += bookkeeping_cost
+            return room_service.observe_authority_phase(checks, phase, call, *args)
+        env = dict(ExitStack=ExitStack, observe_authority_phase=observed, checks=checks,
+                   supervisor=SimpleNamespace(_locked=Lock), current=lambda:gate('current'),
+                   resources=lambda:gate('resources'), backend=SimpleNamespace(admit=lambda state:gate('admission')),
+                   state=object(), broker=SimpleNamespace(require=lambda:gate('broker')), send=send,
+                   launch=SimpleNamespace(channel=Mock()), control_deadline=30,
+                   bootstrap_control_remaining=bootstrap_control_remaining)
+        exec(compile(ast.Module(body=[function], type_ignores=[]), '<actual final release>', 'exec'), env)
+        error = None
+        with patch.object(room_service.time, 'monotonic', side_effect=lambda: now[0]):
+            try: env['release_workload']()
+            except BaseException as failure: error = failure
+        self.assertFalse(locked[0])
+        return error, sent, order, checks
+
+    def test_actual_final_full_admission_and_every_fresh_gate_remain_locked(self):
+        error, sent, order, checks = self.parent()
+        self.assertIsNone(error); self.assertEqual([(16, {'kind':'RELEASE_WORKLOAD'})], sent)
+        self.assertEqual(['lock','current','resources','admission','post_current','post_resources','broker','unlock'], order)
+        self.assertEqual(5, checks['authority_phases']['final.admission']['last_seconds'])
+        for phase in ('current','resources','admission','post_current','post_resources','broker'):
+            with self.subTest(phase=phase):
+                error, sent, order, checks = self.parent(failure_phase=phase)
+                self.assertIsNotNone(error); self.assertEqual([], sent)
+                self.assertEqual(1, checks['authority_phases']['final.'+phase]['failures'])
+
+    def test_parent_full_admission_and_timing_bookkeeping_at_boundary_deny(self):
+        for admission, bookkeeping in [(19,0), (20,0), (5,14)]:
+            with self.subTest(admission=admission, bookkeeping=bookkeeping):
+                error, sent, _, checks = self.parent(admission_cost=admission, bookkeeping_cost=bookkeeping)
+                self.assertIsNotNone(error); self.assertEqual([], sent)
+                self.assertEqual(1, checks['authority_phases']['final.write']['failures'])
+
+    def test_parent_origin_precedes_nonhelp_response_and_late_confirmation_denies(self):
+        from uas.room_probe import bootstrap_control_remaining
+        from contextlib import contextmanager
+        for path in (VM/'room_service.py', VM.parent/'linux/room_service_smoke.py'):
+            text = path.read_text(); tree = ast.parse(text)
+            loop = next(n for n in ast.walk(tree) if isinstance(n, ast.For)
+                        and isinstance(n.iter, ast.Call) and ast.unparse(n.iter) == 'range(2)')
+            source = ast.unparse(loop)
+            self.assertLess(source.index('control_deadline ='), source.index('serve_one('))
+            self.assertIn('if index == 1:', source)
+        tree = ast.parse((VM/'room_service.py').read_text())
+        control = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == 'control')
+        now = [0]
+        @contextmanager
+        def receive(channel):
+            now[0] = 30
+            yield SimpleNamespace(data=b'{"kind":"WORKLOAD_STARTED"}')
+        env = dict(control_deadline=30, bootstrap_control_remaining=bootstrap_control_remaining,
+                   launch=SimpleNamespace(channel=Mock(), origin=Mock()), receive=receive,
+                   decode=json.loads, require=room_service.require)
+        exec(compile(ast.Module(body=[control], type_ignores=[]), '<actual control>', 'exec'), env)
+        with patch.object(room_service.time, 'monotonic', side_effect=lambda: now[0]):
+            with self.assertRaisesRegex(RuntimeError, 'control deadline'):
+                env['control']({'kind':'WORKLOAD_STARTED'})
+
+    def test_final_diagnostics_survive_bounded_report_without_fabricating_stderr(self):
+        phases = {name:dict(calls=1, failures=0, last_seconds=5, max_seconds=5, total_seconds=5)
+                  for name in room_service.AUTHORITY_PHASES if name.startswith('final.')}
+        held = dict(alive=False, stderr='NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY')
+        report = dict(version=1, nonce='inert', profile=guest_room.PROFILE, production_enabled=False,
+                      failure=dict(error_type='PrimaryFailure'), checks=dict(endpoint_service=dict(
+                          status='failed', authority_phases=phases, held_pre_cleanup=held)))
+        self.assertEqual(report, json.loads(guest_room.encode_report(report)))
+        report['padding'] = 'x' * 65536
+        compact = json.loads(guest_room.encode_report(report))
+        self.assertEqual(phases, compact['checks']['endpoint_service']['authority_phases'])
+        self.assertEqual(held, compact['checks']['endpoint_service']['held_pre_cleanup'])
+        self.assertEqual('PrimaryFailure', compact['primary_failure']['error_type'])
+        self.assertLessEqual(len(json.dumps(compact)), 65536)
+
+
+    def test_actual_precleanup_diagnostic_failure_cannot_mask_first_error_or_cleanup(self):
+        tree = ast.parse((VM/'room_service.py').read_text())
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'prove_service')
+        final = next(n.finalbody for n in function.body if isinstance(n, ast.Try))
+        # Execute the real finalbody inside the first exception's active context.
+        code = compile(ast.Module(body=final, type_ignores=[]), '<actual service finally>', 'exec')
+        for fail_alive in (False, True):
+            checks, calls = {}, []
+            primary = RuntimeError('primary')
+            def alive(fd):
+                calls.append('alive')
+                if fail_alive: raise OSError('diagnostic')
+                return False
+            def close(*args): calls.append('cleanup'); return ValueError('cleanup')
+            env = dict(sys=sys, checks=checks, launch=SimpleNamespace(origin=SimpleNamespace(pidfd=7)),
+                       alive=alive, close_service_resources=close, authority=None, provenance=None,
+                       broker=None, backend_fd=-1)
+            with self.assertRaises(RuntimeError) as caught:
+                try: raise primary
+                finally: exec(code, env)
+            self.assertIs(primary, caught.exception)
+            self.assertEqual(['alive','cleanup'], calls)
+            self.assertEqual('failed', checks['status'])
+            self.assertEqual('NOT_CAPTURED_NO_OWNED_BOUNDED_FACILITY', checks['held_pre_cleanup']['stderr'])
+            self.assertEqual({'error_type':'OSError'} if fail_alive else {'alive':False},
+                             {k:v for k,v in checks['held_pre_cleanup'].items() if k != 'stderr'})
