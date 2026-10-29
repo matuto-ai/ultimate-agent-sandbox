@@ -15,8 +15,8 @@ class VMCITriggerTests(unittest.TestCase):
                 actual = list(map(int, re.findall(r'^    timeout-minutes: (\d+)$', text, re.MULTILINE)))
                 self.assertEqual(expected, actual)
                 if name == 'validate.yml':
-                    # All three disjoint unit roots must pass before any integration.
-                    # Never sum sibling wall-clock budgets or weaken failures.
+                    # All disjoint unit shards must pass before any integration.
+                    # The integration root has two parallel, one-minute matrix jobs.
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
@@ -50,11 +50,21 @@ class VMCITriggerTests(unittest.TestCase):
                                      .replace('./validate.sh remainder', './validate.sh PARTITION'),
                                      jobs['unit-slow'].replace('Validate measured slow unit partition', 'UNIT')
                                      .replace('./validate.sh slow', './validate.sh PARTITION'))
-                    self.assertEqual(jobs['unit-integration'].replace('Validate measured integration unit partition', 'UNIT')
-                                     .replace('./validate.sh integration', './validate.sh PARTITION'),
+                    matrix = """    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {partition: integration, name: unit-integration}
+          - {partition: additional, name: unit-additional}
+"""
+                    self.assertEqual(jobs['unit-integration'].count(matrix), 1)
+                    self.assertEqual(jobs['unit-integration'].replace(matrix, '', 1)
+                                     .replace('Validate measured integration unit partition', 'UNIT')
+                                     .replace('./validate.sh ${{ matrix.partition }}', './validate.sh PARTITION'),
                                      jobs['unit-slow'].replace('Validate measured slow unit partition', 'UNIT')
                                      .replace('./validate.sh slow', './validate.sh PARTITION'))
-                    self.assertEqual(text.count('run: ./validate.sh integration\n'), 1)
+                    self.assertEqual(text.count('run: ./validate.sh ${{ matrix.partition }}\n'), 1)
                     self.assertEqual(text.count('run: ./validate.sh remainder\n'), 1)
                     self.assertEqual(text.count('run: ./validate.sh slow\n'), 1)
                     for job in integrations:
