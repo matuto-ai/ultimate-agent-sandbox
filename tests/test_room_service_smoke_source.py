@@ -333,7 +333,7 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/validate.yml').read_text()
         job = workflow.split('  git-native-seams:\n', 1)[1].split('  gate-linux-smoke:\n', 1)[0]
         self.assertIn('timeout-minutes: 1', job)
-        self.assertIn('needs: [validate, unit-slow]', job)
+        self.assertIn('needs: [validate, unit-slow, unit-integration]', job)
         self.assertIn('persist-credentials: false', job)
         self.assertIn('timeout --signal=TERM --kill-after=2s 29s sudo -n', job)
         self.assertIn('tests/linux/room_service_smoke.py & room_protocol=$!', job)

@@ -64,7 +64,7 @@ SOURCES = (
     'uas/native_git_operations.py',
     'uas/native_git_recipe.py',
     'uas/native_git_resources.py',
-    'uas/git_service.py',
+    'uas/git_service.py', 'uas/git_protocol.py',
     'uas/git_sources.py',
     'uas/git_stream.py',
     'uas/git_transport.py',
@@ -170,9 +170,9 @@ SOURCES = (
     'runtime/workstation/diff_evaluator.c',
     'runtime/workstation/artifact_protocol.h',
 )
-# Explicit Gate closure: base136 / artifacts140 / command143 files.
+# Explicit Gate closure: base138 / artifacts142 / command145 files.
 # Fixed paths only; byte budgets remain the reviewed 256KiB/file and3MiB total.
-MAX_SOURCE_FILES=143
+MAX_SOURCE_FILES=145
 MAX_SOURCE_BYTES=256<<10
 MAX_SOURCE_TOTAL=3<<20
 

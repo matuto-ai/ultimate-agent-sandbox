@@ -92,7 +92,7 @@ class DiffBuildBarrierTests(unittest.TestCase):
     def test_workflow_barrier_failure_paths_have_no_siblings_and_wait_owner(self):
         job=WORKFLOW.read_text().split('  gate-linux-smoke:\n',1)[1].split('  gate-command-native:',1)[0]
         self.assertIn('timeout-minutes: 1',job)
-        self.assertIn('needs: [validate, unit-slow]',job)
+        self.assertIn('needs: [validate, unit-slow, unit-integration]',job)
         self.assertIn('log=$(mktemp) || exit 1',job)
         self.assertIn('deadline=$((SECONDS + 15))',job)
         self.assertIn('while (( SECONDS < deadline )); do',job)
