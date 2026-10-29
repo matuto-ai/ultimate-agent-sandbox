@@ -299,6 +299,12 @@ class LocalNativeBackend(native.NativeQualificationBackend):
         require(current is not None and current['Id']==observed['Id']
                 and current['State']['Running'] is False,'LOCAL_HUB_STOP_UNCONFIRMED')
 
+    def _prepare_layout(self,state):
+        super()._prepare_layout(state)
+        if self.profile.native_document['version']==3:
+            from .local_listener_recovery import record_layout
+            record_layout(self,state)
+
     def reopen_listeners(self,state,*,owner_lock_fd):
         """Rebind only stopped owned resources while caller retains host flock.
 
@@ -319,6 +325,9 @@ class LocalNativeBackend(native.NativeQualificationBackend):
             require(value is None or value['State']['Running'] is False,'LOCAL_RECOVERY_REQUIRES_STOPPED')
         if container is not None:self.validate_container(state,container)
         if hub is not None:self.validate_hub(state,hub)
+        if self.profile.native_document['version']==3:
+            from .local_listener_recovery import recover_layout
+            recover_layout(self,state)
         root=self.endpoints/state['instance_id'];info=root.stat()
         require(root.resolve()==root and info.st_uid==0 and not info.st_mode&0o022,'ENDPOINT_OWNERSHIP')
         fd=os.open(root/'owner.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
@@ -330,9 +339,12 @@ class LocalNativeBackend(native.NativeQualificationBackend):
         finally:os.close(fd)
         require(record=={**self._endpoint_record(state),'identity':native.directory_identity(root)},'ENDPOINT_OWNERSHIP')
         layout=self.layout(state)
-        selected=[(layout['peer']/'pi.sock',self.profile.owners['runtime']),(layout['control']/'hub.sock',self.profile.owners['hub'])]
+        selected=[(layout['peer']/'pi.sock',self.profile.owners['runtime'],True),(layout['control']/'hub.sock',self.profile.owners['hub'],True)]
+        if self.profile.git_manifest is not None:
+            selected.extend((layout['git']/name,self.profile.owners['runtime'],name!='request.sock')
+                            for name in ('request.sock','worker.sock'))
         observed=[]
-        for selected_path,group in selected:
+        for selected_path,group,listen in selected:
             parent=selected_path.parent;info=parent.stat()
             require(parent.resolve()==parent and info.st_uid==self.profile.owners['supervisor'] and info.st_gid==group
                     and stat.S_IMODE(info.st_mode)==0o710,'LOCAL_ENDPOINT_PARENT')
@@ -347,8 +359,8 @@ class LocalNativeBackend(native.NativeQualificationBackend):
             require((info.st_dev,info.st_ino)==identity,'LOCAL_ENDPOINT_CHANGED')
             selected_path.unlink()
         try:
-            for selected_path,group in selected:
-                self.listeners.append(native.labeled_listener(selected_path,group,level=self.level,owner=self.profile.owners['supervisor']))
+            for selected_path,group,listen in selected:
+                self.listeners.append(native.labeled_listener(selected_path,group,listen=listen,level=self.level,owner=self.profile.owners['supervisor']))
         except BaseException:
             for listener in self.listeners:listener.close()
             self.listeners=[]

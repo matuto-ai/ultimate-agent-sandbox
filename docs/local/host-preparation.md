@@ -92,8 +92,13 @@ does not yet close #202's general existing-machine installation acceptance.
 
 ### Remaining integration boundary
 
-This checkpoint re-admits storage and the installation endpoint root. Recovery
-of an existing Room's missing per-instance listener owner records after `/run`
-loss remains lifecycle work: stopped resource ownership must be proven before
-new listener generations can be created. A running or unproven resource is not
-adopted. Owned Engine provisioning is also not implemented by this path.
+New v3 Rooms persist a root-private listener-layout ownership manifest in their
+durable lifecycle directory. After a different boot, the existing locked startup
+can recreate only the missing volatile layout after proving the exact volume
+anchor and stopped Workstation/Hub. Durable Room trees are verified, never repaired.
+Git overlays are regenerated from the bound plan; all four Git-enabled listener
+endpoints retain their selected identities and listening modes. Per-boot intent
+and confirmation records prevent retries of uncertain partial restoration.
+Running resources, same-boot loss, foreign layouts, or missing manifests refuse
+recovery. Existing v1/v2 installations are not silently upgraded. Owned Engine
+provisioning is not implemented by this path.
