@@ -121,3 +121,58 @@ fixtures cannot replace that readback. No build, package download, compiler,
 image/VM/native process, credentials or live lifecycle is exercised by
 `python tests/run_native_combined_image_source.py`; its finite inventory installs
 process/socket/thread/native-loader/privilege guards before repository imports.
+
+## Deliberate credential-free build/readback
+
+`runtime/native/check-image.py` builds from a clean tracked Git revision in a
+separate `git archive` context. It uses an empty Docker client configuration,
+never starts a container, never reads provider accounts, and never pushes an
+image. Invoke from the reviewed clean checkout:
+
+```
+python3 runtime/native/check-image.py \
+  --selection runtime/native/image-check-selection.json \
+  --output /tmp/uas-native-image-readback
+```
+
+The output directory must not exist. The manual `native-image-readback` workflow
+uses the same entry point, outside automatic CI. It requires a deliberate
+`workflow_dispatch`, or the reviewer's `qualify-native-image` label on a same-repo
+PR. It is not triggered by ordinary commits or PR updates. Its 25-minute cap is
+not permission to run it; review and an applicable execution budget come first.
+
+The selected input manifest records these official metadata observations:
+
+- [Node 24.22.1 Bookworm slim, linux/amd64 manifest](https://hub.docker.com/layers/library/node/24.22.1-slim/images/sha256-2dd9a4f758e173b65fee15388f7706af6fb01ef50cf7a2c0538711d67a6981ae).
+- [GCC 14 Bookworm, linux/amd64 manifest](https://hub.docker.com/layers/library/gcc/14-bookworm/images/sha256-a689e29bc3adf4663ef9a141d23081252764d1319c63f591a027bd6fd676f4c1).
+- [Debian Bookworm Python](https://packages.debian.org/bookworm/python3.11),
+  `3.11.2-6+deb12u9`, expected interpreter `3.11.2`.
+- [Debian Bookworm Git](https://packages.debian.org/bookworm/git),
+  `1:2.39.5-0+deb12u3`.
+
+These are evidenced immutable image selections, not a claim that mutable tags
+still resolve to the same manifests. Registry availability and package-level
+compatibility must pass in the actual build; no mutable fallback is allowed.
+
+Readback inspects the actual local image ID and linux/amd64 platform, creates an
+owned **stopped** container, hashes every fixed Pi/Claude payload file, and invokes
+the existing production Git Engine readback verifier. It compares the separately
+exported Git payload and backend with that same final image. Separate target
+builds share their build graph/cache but cannot silently diverge: differing
+payload/backend hashes fail. Unknown create outcomes are reconciled by the
+invocation's unique name, label, image and stopped state before removal. No
+shared image/container pruning occurs.
+
+`report.json` records the exact source revision, selections, observed local image
+ID, hashes, stage, outcome and cleanup. The raw backend export is retained beside
+it, not installed on the host. A local image config ID is **not** a registry
+manifest reference: the tool does not fabricate an installation envelope or claim
+the image is published, native-qualified or account-connected. Readback proves
+packaging consistency, not the #78 real lifecycle or #62 Room boundary. Failures
+remain failures even when cleanup succeeds; cleanup failure cannot report success.
+
+A timed-out Docker client does not prove the daemon stopped its build. Such a
+result records `build_execution: unknown-daemon-outcome` and fails without retry.
+`container_cleanup` describes only the invocation's stopped readback container,
+not build/cache cleanup. A disposable hosted runner is the intended execution
+site; do not reinterpret a client timeout as permission to start another build.

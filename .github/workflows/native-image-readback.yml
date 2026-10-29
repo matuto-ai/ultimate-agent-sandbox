@@ -1,0 +1,35 @@
+name: native-image-readback-deliberate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-image-readback-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-readback:
+    # Deliberate opt-in only, never part of ordinary commit/PR CI.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.label.name == 'qualify-native-image' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build pinned combined image and read back actual stopped-container files
+        run: python3 runtime/native/check-image.py --selection runtime/native/image-check-selection.json --output "$RUNNER_TEMP/native-image-readback"
+      - name: Preserve bounded build/readback report in the run log
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/native-image-readback/report.json"; then
+            cat "$RUNNER_TEMP/native-image-readback/report.json"
+          else
+            echo 'No report: build/readback did not reach report creation.'
+          fi

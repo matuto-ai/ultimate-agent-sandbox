@@ -1,0 +1,1 @@
+{"node_image":"node:24.22.1-bookworm-slim@sha256:2dd9a4f758e173b65fee15388f7706af6fb01ef50cf7a2c0538711d67a6981ae","compiler_image":"gcc:14-bookworm@sha256:a689e29bc3adf4663ef9a141d23081252764d1319c63f591a027bd6fd676f4c1","git_packages":{"python_package":"3.11.2-6+deb12u9","git_package":"1:2.39.5-0+deb12u3","python_version":"3.11.2"}}

@@ -53,15 +53,14 @@ def selection(plan, *, filename=None):
     return value
 
 
-def validate_selection(value, plan):
-    fields={'version','profile','image_reference','image_id','artifacts','python_version',
-            'abi_artifacts','uas_tree_sha256','backend_sha256','backend_path'}
-    require(type(value) is dict and set(value)==fields and type(value['version']) is int
+PAYLOAD_FIELDS = frozenset(('version', 'profile', 'artifacts', 'python_version',
+                           'abi_artifacts', 'uas_tree_sha256', 'backend_sha256'))
+
+
+def validate_payload(value):
+    """Validate baked Git metadata without inventing installation identities."""
+    require(type(value) is dict and set(value)==PAYLOAD_FIELDS and type(value['version']) is int
         and value['version']==1 and value['profile']=='native-git-primary-v1','invalid prepared selection')
-    require(type(value['image_reference']) is str and REFERENCE.fullmatch(value['image_reference'])
-        and type(value['image_id']) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',value['image_id']), 'image identity required')
-    image=next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
-    require(value['image_reference']==image, 'prepared image differs')
     require(type(value['python_version']) is str and re.fullmatch(r'3\.11\.[0-9]{1,3}',value['python_version']), 'pinned Python required')
     artifacts=value['artifacts'];abi=value['abi_artifacts']
     require(type(artifacts) is dict and set(artifacts)==FIXED_ARTIFACTS
@@ -72,6 +71,17 @@ def validate_selection(value, plan):
         and all(type(p) is str and path(p)==p and p.startswith(('/lib/','/lib64/','/usr/lib/'))
                 and type(v) is str and SHA.fullmatch(v) for p,v in abi.items()), 'loader/library inventory required')
     require(all(type(value[k]) is str and SHA.fullmatch(value[k]) for k in ('uas_tree_sha256','backend_sha256')), 'content identity required')
+    return value
+
+
+def validate_selection(value, plan):
+    fields=PAYLOAD_FIELDS|{'image_reference','image_id','backend_path'}
+    require(type(value) is dict and set(value)==fields, 'invalid prepared selection')
+    validate_payload({key:value[key] for key in PAYLOAD_FIELDS})
+    require(type(value['image_reference']) is str and REFERENCE.fullmatch(value['image_reference'])
+        and type(value['image_id']) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',value['image_id']), 'image identity required')
+    image=next(i['reference'] for i in plan.config['deployment']['images'] if i['id']==plan.room['image'])
+    require(value['image_reference']==image, 'prepared image differs')
     require(identifier(plan.installation['nonce']) and value['backend_path']==str(STORAGE_ROOT/plan.installation['nonce']/'git-backend'), 'fixed backend path required')
     return value
 
