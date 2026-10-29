@@ -343,6 +343,54 @@ class GuestFixtureTests(unittest.TestCase):
             with patch.object(backend, '_storage'), patch.object(guest, 'command', return_value=values), self.assertRaises(LifecycleError):
                 backend._quota()
 
+    def test_quota_report_rows_fail_closed_independently_before_workload_creation(self):
+        # Synthetic xfs_quota tables: no raw target XFS output was preserved.
+        # Keep b/i observations distinct so one valid limit cannot mask the other.
+        good={'b':'#101 2 0 8192 00 [--------]\n#102 4 0 8192 00 [--------]\n',
+              'i':'#101 3 0 128 00 [--------]\n#102 5 0 128 00 [--------]\n'}
+        variants={
+            'missing':'#102 2 0 {limit} 00 [--------]\n',
+            'duplicate':'#101 2 0 {limit} 00 [--------]\n#101 2 0 {limit} 00 [--------]\n',
+            'wrong-project':'#100 2 0 {limit} 00 [--------]\n',
+            'truncated-row':'#101 2 0\n',
+            'truncated-limit':'#101 2 0 {short}\n',
+            'wrong-limit':'#101 2 0 0 00 [--------]\n',
+        }
+        for flag,limit in (('b',8192),('i',128)):
+            for name,template in variants.items():
+                with self.subTest(flag=flag,malformation=name):
+                    backend=guest.GuestBoundaryBackend(NONCE,'alpha'); calls=[]
+                    def command(*args):
+                        selector=args[3];calls.append(selector)
+                        if selector=='state -p':return 'Accounting: ON\nEnforcement: ON'
+                        selected='b' if '-b' in selector else 'i'
+                        return template.format(limit=limit,short=str(limit)[:-1]) if selected==flag else good[selected]
+                    with patch.object(guest,'guard'),patch.object(backend,'_storage'), \
+                            patch.object(guest,'command',side_effect=command), \
+                            patch.object(guest,'project_attributes') as attributes, \
+                            patch.object(backend,'_project_paths') as paths, \
+                            patch.object(backend,'_runtime') as runtime, \
+                            patch.object(backend,'_ensure_network') as network, \
+                            patch.object(DockerFixtureBackend,'create') as create:
+                        with self.assertRaises(LifecycleError) as caught:backend.create(STATE,'container')
+                    self.assertEqual('GUEST_QUOTA_DRIFT',caught.exception.code)
+                    self.assertEqual(['state -p','report -p -b -n -N']+
+                        (['report -p -i -n -N'] if flag=='i' else []),calls)
+                    attributes.assert_not_called();paths.assert_not_called();runtime.assert_not_called()
+                    network.assert_not_called();create.assert_not_called()
+
+    def test_quota_state_accounting_and_enforcement_are_both_required_before_reports(self):
+        for state in ('Accounting: OFF\nEnforcement: ON','Accounting: ON\nEnforcement: OFF',
+                      'Accounting: ON','Enforcement: ON',''):
+            with self.subTest(state=state):
+                backend=guest.GuestBoundaryBackend(NONCE,'alpha')
+                with patch.object(backend,'_storage'),patch.object(guest,'command',return_value=state) as command, \
+                        patch.object(guest,'project_attributes') as attributes:
+                    with self.assertRaises(LifecycleError) as caught:backend._quota()
+                self.assertEqual('GUEST_QUOTA_DISABLED',caught.exception.code)
+                command.assert_called_once_with('xfs_quota','-x','-c','state -p',str(guest.STORAGE))
+                attributes.assert_not_called()
+
     def test_volume_anchor_precedes_runtime_effects_and_mkdir_intent_recovers(self):
         backend = guest.GuestBoundaryBackend(NONCE, 'alpha')
         events = []

@@ -260,18 +260,19 @@ def read_admission_states(path):
         return database.execute('SELECT state FROM admissions').fetchall()
 
 
-def labeled_listener(path,group):
+def labeled_listener(path,group,*,level=LEVEL):
     """Trusted root setup selects only the same-Room socket-object context.
 
     The Supervisor process label is unchanged. Denied setsockcreatecon/connect/
     fd-use/pidfs is a failed stock-policy gate, never grounds to install policy.
     """
+    expect(level in (LEVEL,SIBLING_LEVEL),'fixed fixture Room socket level required')
     label=Path('/proc/self/attr/current').read_text()
     expect('container_t' not in label,'setup must not impersonate runtime domain')
     library=ctypes.CDLL('libselinux.so.1',use_errno=True)
     library.setsockcreatecon.argtypes=[ctypes.c_char_p]
     library.setsockcreatecon.restype=ctypes.c_int
-    context=('system_u:system_r:container_t:'+LEVEL).encode()
+    context=('system_u:system_r:container_t:'+level).encode()
     if library.setsockcreatecon(context)!=0:
         raise OSError(ctypes.get_errno(),'stock policy denied exact trusted socket creation context')
     listener=None
@@ -286,8 +287,11 @@ def labeled_listener(path,group):
         if library.setsockcreatecon(None)!=0:
             if listener is not None:listener.close()
             raise OSError(ctypes.get_errno(),'socket creation context reset failed')
-    expect(Path('/proc/self/attr/current').read_text()==label,'setup process domain changed')
-    run('chcon','-t','container_file_t','-l',LEVEL,str(path))
+    try:
+        expect(Path('/proc/self/attr/current').read_text()==label,'setup process domain changed')
+        run('chcon','-t','container_file_t','-l',level,str(path))
+    except BaseException:
+        listener.close();raise
     return listener
 
 

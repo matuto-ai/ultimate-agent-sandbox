@@ -85,7 +85,17 @@ class ReviewHostedTests(unittest.TestCase):
         self.assertIn('secret not in out and secret not in err',source)
         workflow=(ROOT/'.github/workflows/validate.yml').read_text()
         self.assertIn('30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!',workflow)
-        self.assertIn('for child in "$diff" "$broker" "$review"',workflow)
+        gates=workflow.split('  gate-linux-smoke:\n',1)[1].split('  gate-command-native:',1)[0]
+        self.assertIn('children=("$diff")',gates)
+        ready=gates.split('          if "$ready"; then\n',1)[1].split('          fi\n',1)[0]
+        success,failure=ready.split('          else\n')
+        for name,script in (('broker','gate_forge_smoke.py'),('review','review_forge_smoke.py')):
+            self.assertIn(f'{script} & {name}=$!\n            children+=("${name}")',success)
+        self.assertNotIn('sudo',failure)
+        self.assertIn('status=1',failure)
+        self.assertIn('for child in "${children[@]}"; do\n            wait "$child" || status=1\n          done',gates)
+        self.assertLess(gates.index('wait "$child"'),gates.index('cat "$log" || status=1'))
+        self.assertLess(gates.index('cat "$log" || status=1'),gates.index('exit "$status"'))
 
     def test_fixed_staged_eager_import_closure_and_exercised_lazy_owner(self):
         tree=ast.parse((ROOT/'tests/linux/review_forge_smoke.py').read_text())

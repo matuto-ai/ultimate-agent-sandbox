@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import zlib
@@ -29,6 +30,9 @@ ROOT=Path(__file__).resolve().parents[2]
 HOST_SUPERVISOR=165533
 HOST_HELPER=165530
 DEADLINE_SECONDS=30
+# Host fixture setup only: share the previous two five-second compile allowances.
+# Includes setup/hash bookkeeping; no evaluator/security or outer budget changes.
+BUILD_SECONDS=10
 CASES=('positive','wrong-root','mutated-after-exit','cleanup-identity-loss','symlink-before-launch','missing-ack')
 EXPECTED=['added.txt','changed.txt','deleted.txt','mode.txt']
 
@@ -60,7 +64,7 @@ SOURCES = (
     'uas/native_git_operations.py',
     'uas/native_git_recipe.py',
     'uas/native_git_resources.py',
-    'uas/git_service.py',
+    'uas/git_service.py', 'uas/git_protocol.py',
     'uas/git_sources.py',
     'uas/git_stream.py',
     'uas/git_transport.py',
@@ -147,7 +151,7 @@ SOURCES = (
     'uas/github_surface.py',
     'uas/kernel_origin.py',
     'uas/launch.py',
-    'uas/ledger.py',
+    'uas/ledger.py', 'uas/typed_json.py',
     'uas/lifecycle.py',
     'uas/participant.py', 'uas/participant_recovery.py',
     'uas/peer.py',
@@ -166,9 +170,9 @@ SOURCES = (
     'runtime/workstation/diff_evaluator.c',
     'runtime/workstation/artifact_protocol.h',
 )
-# Explicit Gate closure: base136 / artifacts140 / command143 files.
+# Explicit Gate closure: base138 / artifacts142 / command145 files.
 # Fixed paths only; byte budgets remain the reviewed 256KiB/file and3MiB total.
-MAX_SOURCE_FILES=143
+MAX_SOURCE_FILES=145
 MAX_SOURCE_BYTES=256<<10
 MAX_SOURCE_TOTAL=3<<20
 
@@ -455,15 +459,97 @@ def namespace_helper(rootfs,targets,endpoint):
     os.execve('/opt/uas/bin/diff-bootstrap',['/opt/uas/bin/diff-bootstrap'],{})
 
 
+def compile_fixed(argv,timeout):
+    """Diagnose this host-only build; retain its leader until group disposal.
+
+    Like the dedicated Broker owner, this single-threaded fixture is the sole
+    reaper. WNOWAIT reserves the session leader PID through the group signal.
+    Compiler diagnostics are only a bounded tail, never runtime qualification.
+    """
+    expect(signal.getsignal(signal.SIGCHLD)==signal.SIG_DFL
+           and threading.active_count()==1,'exclusive compiler child owner required')
+    started=time.monotonic();deadline=started+timeout
+    tail=bytearray();total=0;process=None;owned=False;clean=False;failure=None;cleanup_error=None
+    limit=65536
+    emit({'stage':'build-start','source':Path(argv[-3]).name,'timeout':round(timeout,6)})
+    def observe():
+        nonlocal owned
+        try:return os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+        except BaseException:
+            owned=False # ECHILD/unknown ownership is never numeric signal authority.
+            raise
+    try:
+        process=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,start_new_session=True)
+        owned=True
+        os.set_blocking(process.stdout.fileno(),False)
+        eof=False
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise subprocess.TimeoutExpired(argv,timeout)
+            if not eof and select.select([process.stdout],[],[],min(.05,remaining))[0]:
+                block=os.read(process.stdout.fileno(),8192)
+                if block:
+                    total+=len(block);tail.extend(block)
+                    if len(tail)>limit:del tail[:-limit]
+                else:eof=True
+            elif eof:time.sleep(min(.01,remaining))
+            exited=observe()
+            if eof and exited is not None:break
+    except BaseException as error:
+        failure=error
+    finally:
+        try:
+            if process is not None and owned:
+                observe() # Revalidate even if setup or a signal interrupted us.
+                try:os.killpg(process.pid,signal.SIGKILL)
+                except ProcessLookupError:pass
+                owned=False # Exactly one reap boundary; never signal afterward.
+                process.wait(timeout=2)
+                clean=True
+        except BaseException as error:
+            cleanup_error=error
+        finally:
+            close_error=None
+            try:
+                if process is not None and process.stdout is not None:process.stdout.close()
+            except BaseException as error:close_error=error
+            report={'stage':'build-result','source':Path(argv[-3]).name,
+                'seconds':round(time.monotonic()-started,6),
+                'returncode':None if process is None else process.returncode,
+                'error':None if failure is None else type(failure).__name__,
+                'cleanup_error':None if cleanup_error is None else type(cleanup_error).__name__,
+                'close_error':None if close_error is None else type(close_error).__name__,
+                'group_disposed':clean,'diagnostic_bytes':total,
+                'diagnostic_truncated':total>limit,
+                'diagnostic_tail':tail.decode(errors='replace')}
+            diagnostic_error=None
+            try:emit(report)
+            except BaseException as error:diagnostic_error=error
+    # Preserve the decisive original error even if disposal/reporting also fails.
+    for error in (failure,cleanup_error,close_error,diagnostic_error):
+        if error is not None:raise error
+    expect(clean,'compiler group cleanup unconfirmed')
+    if process.returncode:raise subprocess.CalledProcessError(process.returncode,argv)
+
+
 def build(root, *, source_root=ROOT):
+    deadline=time.monotonic()+BUILD_SECONDS
+    def remaining():
+        value=deadline-time.monotonic()
+        if value<=0:raise TimeoutError('fixed diff builds exceeded shared setup budget')
+        return value
     installed=root/'binaries';installed.mkdir(mode=0o755)
     digests={}
     for name in ('diff_bootstrap','diff_evaluator'):
         output=installed/name.replace('_','-')
-        subprocess.run(['/usr/bin/gcc','-std=c11','-Wall','-Wextra','-Werror','-O2',
+        compile_fixed(['/usr/bin/gcc','-v','-std=c11','-Wall','-Wextra','-Werror','-O2',
             '-fstack-protector-strong','-static','-Wl,-z,noexecstack','-Wl,-z,relro','-Wl,-z,now',
-            str(Path(source_root)/'runtime/workstation'/(name+'.c')),'-o',str(output)],check=True,timeout=5)
+            str(Path(source_root)/'runtime/workstation'/(name+'.c')),'-o',str(output)],remaining())
+        remaining()
         output.chmod(0o555);digests[name]=hashlib.sha256(output.read_bytes()).hexdigest()
+        remaining()
+    remaining()  # No ready marker after late final compile/hash bookkeeping.
     return installed,digests
 
 
@@ -500,6 +586,8 @@ def main():
         script=payload/'tests/linux/diff_smoke.py'
         emit({'stage':'source-staged','source_sha256':source_hashes})
         installed,digests=build(root,source_root=payload)
+        # Scheduling hint only: final exit and cleanup still determine success.
+        emit({'stage':'build-ready'})
         for index,case in enumerate(CASES):
             case_root=root/('case-'+str(index));case_root.mkdir(mode=0o755);os.chown(case_root,HOST_SUPERVISOR,HOST_SUPERVISOR)
             env={'PATH':'/usr/bin:/bin','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1'}
