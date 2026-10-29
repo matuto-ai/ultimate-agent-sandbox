@@ -1673,7 +1673,6 @@ class CommitGateTests(unittest.TestCase):
         _prefix, current = self.initial(scope)
         cases = (
             ("EXTERNAL_LINK", "[vendor](\nhttps://example.com/a)"),
-            ("RAW_HTML", "<https://example.com/a\n>"),
             ("RAW_HTML", "<div\nclass=\"notice\">"),
             ("RAW_HTML", "<!--\nhidden\n-->"),
             ("EXTERNAL_LINK", "[ref]:\nhttps://example.com/a"),
@@ -1735,6 +1734,56 @@ class CommitGateTests(unittest.TestCase):
                      "", "```", "<div>and [x](https://example.com/a)</div>", "```")))
         self.assertIn("context/pick-sqlite.md", self.validate(
             scope, settings, prose, current=current).bundle.added)
+
+    def test_commonmark_containers_and_reference_destinations_enforce_policy(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        cases = (
+            ("EXTERNAL_LINK", "> * [x](\n>   https://example.com/a)"),
+            ("EXTERNAL_LINK", "* outer\n  * [x](\n    https://example.com/a)"),
+            ("EXTERNAL_LINK", "[x][ref]\n\n> [ref]:\n> https://example.com/a"),
+            ("EXTERNAL_LINK", "[ref]: local.md\n[ref]: https://example.com/a"),
+            ("UNSAFE_LINK", r"[x](javascript\:alert\(1\))"),
+            ("UNSAFE_LINK", "[x][ref]\n\n[ref]: javascript&#58;alert(1)"),
+            ("UNSAFE_LINK", "[x](<context/other.md&#10;outside>)"),
+            ("UNSAFE_LINK", "[x](context/&#37;2e&#37;2e/outside.md)"),
+            ("IMAGE_NOT_ALLOWED", "![x][ref]\n\n[ref]: chart.png"),
+            ("RAW_HTML", "> <div\n> title='continued'>"),
+        )
+        for code, snippet in cases:
+            with self.subTest(snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current, code=code)
+
+    def test_commonmark_literal_code_and_decoded_once_links_remain_allowed(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        for snippet in (
+                "> ```\n> [x](https://example.com/a)\n> <div>\n> ```",
+                "* item\n\n      [x](https://example.com/a)\n      <div>",
+                "    [x](https://example.com/a)\n    <div>",
+                "> * [x](\n>   context/other.md)",
+                "[x](context/a&amp;colon;b.md)",
+                "[x](context/other.md \"a title\")",
+                "<https://example.com/a\n>",  # Not an autolink or HTML tag.
+                r"\![literal](context/other.md)"):
+            with self.subTest(snippet=snippet):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.assertIn("context/pick-sqlite.md", self.validate(
+                    scope, settings, proposed, current=current).bundle.added)
+
+    def test_markdown_nesting_cannot_silently_hide_policy_tokens(self):
+        scope, settings = self.scope(), self.settings()
+        _prefix, current = self.initial(scope)
+        for snippet in (
+                "> " * 40 + "[x](https://example.com/a)",
+                "\n".join("  " * n + "* item" for n in range(40))
+                + "\n" + "  " * 40 + "[x](https://example.com/a)",
+                "[" * 40 + "[x](https://example.com/a)" + "]" * 40):
+            with self.subTest(snippet=snippet[:60]):
+                _prefix, proposed = self.update(scope, body=gate_page("Pick", (snippet,)))
+                self.refused(scope, settings, proposed, current=current,
+                             code="MARKDOWN_NESTING_LIMIT")
 
     def test_escaped_metadata_cannot_smuggle_a_credential(self):
         scope, settings = self.scope(), self.settings()

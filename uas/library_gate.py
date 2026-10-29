@@ -28,10 +28,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import html
 import posixpath
 import re
-import string
+
+from markdown_it import MarkdownIt
 
 from . import library as contracts
 from . import library_bundle
@@ -53,8 +53,6 @@ COMMIT_SEGMENT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 RANGE = re.compile(r"([1-9][0-9]*)-([1-9][0-9]*)\Z")
 HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\Z")
 SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
-REFERENCE = re.compile(r" {0,3}\[([^\]\n]{1,200})\]:[ \t]*(\S.*)?\Z")
-TAG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
 # High-confidence credential shapes reject on their own: a published draft would
 # disclose a live secret. Each rule reports a name, never the matched bytes.
@@ -126,252 +124,42 @@ def notice_missing(body):
 
 # --- Markdown and links ---------------------------------------------------
 
-# A tag or autolink is short. A tag-like ``<`` whose ``>`` is not inside this
-# window is refused instead of admitted as prose, so a long attribute value
-# cannot hide a tag.
-TAG_LOOKAHEAD = 4096
-FENCE = ("```", "~~~")
-# A link reference definition, after any blockquote or list-item prefix.
-DEFINITION = re.compile(r"\[([^\]\n]{1,200})\]:[ \t]*(\S.*)?\Z")
-BLOCK_PREFIX = re.compile(r"[ \t]*(?:>[ \t]*)*"
-                          r"(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?[ \t]*")
+# Refuse before the parser's own nesting limit silently drops unparsed content.
+MAX_MARKDOWN_NESTING = 32
 # Path keywords that name an artifact revision position in a repository URL.
 PIN_KEYWORDS = ("blob", "raw", "tree", "commit", "commits", "src", "objects")
 
 
-def _tag(inner):
-    """True for an HTML tag, comment, declaration or processing instruction."""
-    if not inner:
+def scan(body, relative):
+    """Apply policy to CommonMark tokens, never rendered HTML or guessed blocks."""
+    parser = MarkdownIt("commonmark", {"maxNesting": MAX_MARKDOWN_NESTING + 8,
+                                        "inline_definitions": True})
+    # Renderer defaults hide unsafe links as text and rewrite URL spellings;
+    # admission must see every parsed destination and judge it without repair.
+    parser.validateLink = lambda value: True
+    parser.normalizeLink = lambda value: value
+
+    def nesting_guard(state, *_args):
+        if state.level >= MAX_MARKDOWN_NESTING:
+            _fail("MARKDOWN_NESTING_LIMIT", relative)
         return False
-    if inner[0] in "!/?":
-        return True
-    name = TAG_NAME.match(inner)
-    if name is None:
-        return False
-    rest = inner[name.end():name.end() + 1]
-    return rest == "" or rest == "/" or rest.isspace()
 
-
-def _tag_end(text, index):
-    """Offset of the ``>`` that ends a tag, honoring quoted attribute values."""
-    quote, position = None, index + 1
-    limit = min(len(text), index + TAG_LOOKAHEAD)
-    while position < limit:
-        character = text[position]
-        if quote is not None:
-            quote = None if character == quote else quote
-        elif character in "\"'":
-            quote = character
-        elif character == ">":
-            return position
-        position += 1
-    return None
-
-
-def _unfenced(body):
-    """Body lines with fenced code blanked out; a malformed fence is text."""
-    fence, lines = None, []
-    for line in body.split("\n"):
-        stripped = line.lstrip()
-        if not stripped.startswith(FENCE):
-            lines.append("" if fence else line)
-            continue
-        character = stripped[0]
-        run = len(stripped) - len(stripped.lstrip(character))
-        info = stripped[run:]
-        if fence is None:
-            # A backtick fence's info string may not contain a backtick, so that
-            # line is ordinary Markdown text and what follows is still scanned.
-            if character == "`" and "`" in info:
-                lines.append(line)
-                continue
-            fence = character * run
-            lines.append("")
-            continue
-        if character == fence[0] and run >= len(fence) and not info.strip():
-            fence = None
-            lines.append("")
-            continue
-        lines.append("")
-    return lines
-
-
-def _definitions(lines):
-    """Reference-definition destinations, including one on the following line."""
-    following, upcoming = [], ""
-    for line in reversed(lines):
-        following.append(upcoming)
-        if line.strip():
-            upcoming = line
-    following.reverse()
-    for number, line in enumerate(lines):
-        match = DEFINITION.match(BLOCK_PREFIX.sub("", line))
-        if match is not None:
-            yield match.group(2) or following[number]
-
-
-LIST_ITEM = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
-THEMATIC_BREAK = re.compile(r"(?:[-*_][ \t]*){3,}\Z")
-
-
-def _unquoted(line):
-    """Strip blockquote markers, which are container structure, not content."""
-    stripped = line.lstrip()
-    if not stripped.startswith(">"):
-        return line
-    while stripped.startswith(">"):
-        stripped = stripped[1:].lstrip(" \t")
-    return stripped
-
-
-def _starts_block(line):
-    """True for a line whose own content starts a new Markdown block."""
-    stripped = line.strip()
-    return (not stripped or stripped.startswith(("```", "~~~"))
-            or library_bundle.HEADING.match(stripped) is not None
-            or LIST_ITEM.match(stripped) is not None
-            or THEMATIC_BREAK.match(stripped) is not None)
-
-
-def _blocks(lines):
-    """Group body lines into Markdown blocks that inline content cannot cross.
-
-    A blockquote is its own container: a quote line after an unquoted paragraph
-    starts a new block (a blockquote interrupts a paragraph), while a quote
-    paragraph keeps its lines together and a following unquoted line is its lazy
-    continuation. A list item keeps its continuation lines, so a link
-    destination may continue on one. A heading or thematic break is a
-    single-line block, so a code span opened there never reaches the following
-    paragraph, and a blank line, a new list item or a fence always starts a new
-    block.
-    """
-    block, quoted = [], False
-
-    def flush():
-        nonlocal block, quoted
-        if block:
-            yield block
-        block, quoted = [], False
-
-    for line in lines:
-        is_quote = line.lstrip().startswith(">")
-        content = _unquoted(line)
-        if not content.strip():
-            yield from flush()
-            continue
-        if is_quote and not quoted:
-            yield from flush()
-            quoted = True
-        stripped = content.strip()
-        if (library_bundle.HEADING.match(stripped) is not None
-                or THEMATIC_BREAK.match(stripped) is not None):
-            yield from flush()
-            yield [content]
-            continue
-        if not is_quote and (LIST_ITEM.match(stripped) is not None
-                             or stripped.startswith(("```", "~~~"))):
-            yield from flush()
-        block.append(content)
-    yield from flush()
-
-
-def _code_end(text, start, run):
-    """Offset of the backtick run that closes a code span, or None.
-
-    A code span closes inside its own block with a run of exactly the same
-    length; an unmatched opening run is literal text, never a skip to the end.
-    """
-    limit, marker = len(text), "`" * run
-    position = start
-    while position < limit:
-        found = text.find(marker, position, limit)
-        if found < 0:
-            return None
-        after = text[found + run:found + run + 1]
-        if after != "`":
-            return found
-        position = found + run
-        while position < limit and text[position] == "`":
-            position += 1
-    return None
-
-
-def _inline(text):
-    """Yield ("link", destination), ("image", "") and ("html", "") events."""
-    index, length = 0, len(text)
-    while index < length:
-        character = text[index]
-        if character == "\\" and index + 1 < length:
-            # A backslash escape makes the next punctuation character literal,
-            # so an escaped backtick never opens a code span.
-            if text[index + 1] in string.punctuation:
-                index += 2
-                continue
-        if character == "`":
-            run = 1
-            while index + run < length and text[index + run] == "`":
-                run += 1
-            closing = _code_end(text, index + run, run)
-            # An unmatched opening run is literal text, never a skip ahead.
-            index = index + run if closing is None else closing + run
-            continue
-        if character == "!" and text[index + 1:index + 2] == "[":
+    parser.block.ruler.before("code", "policy_nesting", nesting_guard)
+    parser.inline.ruler.before("text", "policy_nesting", nesting_guard)
+    pending = list(reversed(parser.parse(body)))
+    while pending:
+        token = pending.pop()
+        if token.type in ("html_block", "html_inline"):
+            yield "html", ""
+        elif token.type == "image":
             yield "image", ""
-            index += 1
-            continue
-        if character == "]" and text[index + 1:index + 2] == "(":
-            closing, depth = index + 2, 1
-            while closing < length and depth:
-                depth += {"(": 1, ")": -1}.get(text[closing], 0)
-                closing += 1
-            if depth == 0:
-                yield "link", text[index + 2:closing - 1]
-                index = closing
-                continue
-        if character == "<":
-            opening = text[index + 1:index + 2]
-            if opening and (opening.isalpha() or opening in "!/?"):
-                end = _tag_end(text, index)
-                if end is None:
-                    yield "html", ""
-                    return
-                inner = text[index + 1:end]
-                if _tag(inner):
-                    yield "html", ""
-                    index = end + 1
-                    continue
-                if SCHEME.match(inner) or ("@" in inner and not any(
-                        item.isspace() for item in inner)):
-                    yield "link", "<" + inner + ">"
-                    index = end + 1
-                    continue
-            index += 1
-            continue
-        index += 1
-
-
-def scan(body):
-    """Yield ("link", destination), ("image", "") and ("html", "") outside code.
-
-    This is a structural parse of the Markdown that matters to policy, not a
-    renderer: fenced code blocks and code spans are literal text, while inline
-    links, images, raw HTML, autolinks and link reference definitions are
-    reported so policy can judge them. A link destination, an HTML tag and a
-    comment may continue after a line ending, so the scan runs over the whole
-    body instead of one line at a time, and text that only looks like the start
-    of markup is scanned through rather than skipped.
-
-    Indented (four-space) code is not distinguished from prose: telling it apart
-    from a list item's indented continuation paragraph needs a full block parser,
-    and refusing its content fails closed rather than admitting an unchecked
-    link in prose. Writer output therefore uses fenced code for literal text.
-    """
-    lines = _unfenced(body)
-    for target in _definitions(lines):
-        yield "link", target
-    for block in _blocks(lines):
-        for event in _inline("\n".join(block)):
-            yield event
+        elif token.type == "link_open":
+            yield "link", token.attrGet("href")
+        elif token.type == "definition":
+            # Include unused and duplicate definitions, not only resolved links.
+            yield "link", token.meta["url"]
+        if token.children:
+            pending.extend(reversed(token.children))
 
 
 def destination(relative, target):
@@ -381,21 +169,8 @@ def destination(relative, target):
     that does not exist yet. External and unsafe destinations are refused: an
     external reference belongs in ``sources``, not in the body.
     """
-    value = target.strip()
-    if not value:
-        _fail("INVALID_LINK", relative + ".link")
-    opener = value[0]
-    if opener in "\"'<>":
-        closing = {"\"": "\"", "'": "'", "<": ">"}[opener]
-        end = value.find(closing, 1)
-        value = value[1:end] if end > 0 else value[1:]
-    elif " " in value or "\t" in value:
-        value = value.split(None, 1)[0]
-    if not value:
-        _fail("INVALID_LINK", relative + ".link")
-    # A link destination's character references are decoded before rendering, so
-    # the policy judges the decoded value rather than its spelling.
-    value = html.unescape(value)
+    # CommonMark already separates titles and decodes escapes/entities once.
+    value = target
     if not value:
         _fail("INVALID_LINK", relative + ".link")
     if value.startswith("#"):
@@ -605,7 +380,7 @@ def _policy(relative, text, filters, observations):
     meta, body = {}, text
     if kind in ("concept", "root"):
         meta, body = library_bundle.frontmatter(text, relative)
-    for event, target in scan(body):
+    for event, target in scan(body, relative):
         if event == "image":
             _fail("IMAGE_NOT_ALLOWED", relative)
         if event == "html":
