@@ -162,7 +162,14 @@ class RoomProfileTests(unittest.TestCase):
         self.assertIn(check,source)
         self.assertLess(source.index(check),source.index('"createrepo_c"'))
         guest=(VM/'guest_room.py').read_text()
-        self.assertIn('room_profile.guest_package_install(manifest, run=run)',guest)
+        self.assertIn('prepared_room.provision(manifest, nonce, boundary, room_profile)',guest)
+        prepared=ast.parse((VM/'prepared_room.py').read_text())
+        provision=next(node for node in prepared.body if isinstance(node,ast.FunctionDef) and node.name=='provision')
+        calls=[ast.unparse(node) for node in ast.walk(provision) if isinstance(node,ast.Call)]
+        exact='boundary.install_packages(nonce, manifest, exact_roots=profile.PACKAGE_PROFILE)'
+        family='profile.guest_package_install(manifest, run=boundary.run)'
+        self.assertIn(exact,calls);self.assertIn(family,calls)
+        self.assertLess(calls.index(exact),calls.index(family))
 
     def test_distinct_rootfs_entrypoints_fail_before_common_assembly(self):
         manifest={'profile':room_profile.PROFILE,'native_runtime':{'profile':room_profile.PROFILE}}
