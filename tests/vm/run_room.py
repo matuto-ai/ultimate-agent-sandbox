@@ -34,13 +34,13 @@ LOG_FILES = ('qemu.log', 'serial.log', 'firmware.log')
 REQUIRED = {'payload', 'confinement', 'mounts', 'limits', 'endpoint_service',
             'network', 'recovery', 'guest_cleanup'}
 DENIED = {'host-private', 'host-public', 'LAN', 'metadata', 'sibling'}
-BOOTSTRAP_SOURCES = ('guest_room.py', 'guest_boundary.py', 'room_profile.py')
+BOOTSTRAP_SOURCES = ('guest_room.py', 'guest_boundary.py', 'room_profile.py', 'prepared_room.py')
 SOURCES = tuple('uas/' + name + '.py' for name in ROOM_MODULES) + (
     'tests/vm/fedora-image.json', 'tests/vm/boundary_fixture.go',
     'tests/vm/guest_boundary.py', 'tests/vm/guest_workstation.py',
     'tests/vm/native_rootfs.py', 'tests/vm/native_trust.py',
     'tests/vm/room_profile.py', 'tests/vm/room_service.py', 'tests/vm/guest_room.py',
-    'tests/vm/room_policy_diagnostics.py')
+    'tests/vm/room_policy_diagnostics.py', 'tests/vm/prepared_room.py')
 
 
 def _nonce(value):
@@ -48,8 +48,11 @@ def _nonce(value):
         raise ValueError('exact Room boot nonce required')
 
 
-def seed(directory, nonce, manifest_hash, *, payload_root):
+def seed(directory, nonce, manifest_hash, *, payload_root, mode='cold', base_key=None):
     _nonce(nonce)
+    if mode not in ('cold','prepare','warm') or (mode != 'cold' and
+            (type(base_key) is not str or re.fullmatch('[0-9a-f]{64}', base_key) is None)):
+        raise ValueError('explicit preparation mode/key required')
     if type(manifest_hash) is not str or re.fullmatch('[0-9a-f]{64}', manifest_hash) is None:
         raise ValueError('exact payload manifest digest required')
     # Seed only the already manifest-bound copied bytes, never mutable checkout
@@ -95,7 +98,8 @@ def seed(directory, nonce, manifest_hash, *, payload_root):
                 {'path': '/run/uas-vm-fixture', 'permissions': '0600', 'content': nonce},
                 {'path': str(room_profile.MARKER), 'permissions': '0600',
                  'content': json.dumps(room_profile.marker(nonce), sort_keys=True, separators=(',', ':'))}],
-        'runcmd': [['python3', '/run/guest_room.py', nonce, manifest_hash]],
+        'runcmd': [['python3', '/run/guest_room.py', nonce, manifest_hash] +
+                    ([] if mode == 'cold' else [mode, base_key])],
         'power_state': {'mode': 'poweroff', 'delay': 'now', 'timeout': 30, 'condition': True}}
     user_data, metadata, network = (directory / name for name in ('user-data', 'meta-data', 'network-config'))
     user_data.write_text('#cloud-config\n' + json.dumps(payload))
@@ -183,7 +187,7 @@ def last_checkpoint(serial, nonce):
     return latest
 
 
-def boot(directory, values, nonce):
+def boot(directory, values, nonce, *, report_parser=None):
     started = last_activity = last_progress = time.monotonic()
     serial = directory / 'serial.log'
     previous_bytes = serial.stat().st_size if serial.exists() else 0
@@ -221,7 +225,7 @@ def boot(directory, values, nonce):
                 path = directory / name
                 if path.exists() and path.stat().st_size > feasibility.LOG_LIMIT:
                     raise RuntimeError('Room VM final log budget exceeded')
-            report = parse_report(serial.read_text(errors='replace'), nonce)
+            report = (parse_report if report_parser is None else report_parser)(serial.read_text(errors='replace'), nonce)
             return report, round(time.monotonic() - started, 3)
         except BaseException as error:
             failure = error
@@ -246,6 +250,14 @@ def main():
     if (os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_OS') != 'Linux'
             or os.geteuid() == 0 or os.environ.get('UAS_ROOM_VM_PROFILE') != PROFILE):
         raise RuntimeError('explicit unprivileged hosted Room IPv4 profile required')
+    mode = os.environ.get('UAS_ROOM_EXECUTION', 'cold')
+    if mode not in ('cold','warm'):
+        raise RuntimeError('explicit cold or warm Room execution required')
+    selected_base = None
+    if mode == 'warm':
+        import prepared_room
+        selected_base = prepared_room.select(Path(os.environ.get('UAS_ROOM_PREPARED_DIR', '')),
+            os.environ.get('UAS_ROOM_PREPARED_SHA256', ''), ROOT)
     started = time.monotonic()
     directory = None
     try:
@@ -255,11 +267,22 @@ def main():
             try:
                 lock = json.loads((HERE / 'fedora-image.json').read_text())
                 print('Room VM phase: verifying pinned guest image', flush=True)
-                image = feasibility.fetch_image(lock, directory)
+                if mode == 'warm':
+                    image = Path(os.environ['UAS_ROOM_PREPARED_DIR']) / 'base.qcow2'
+                    prepared_room.standalone_info(json.loads(feasibility.command(
+                        ['qemu-img','info','--output=json',str(image)])))
+                else:
+                    image = feasibility.fetch_image(lock, directory)
                 print('Room VM phase: preparing signed offline source payload', flush=True)
-                payload = build_payload(directory, ROOT, nonce, source_paths=SOURCES, profile=PROFILE)
+                payload = build_payload(directory, ROOT, nonce, source_paths=SOURCES, profile=PROFILE,
+                    **({'prepared_directory': Path(os.environ['UAS_ROOM_PREPARED_DIR']),
+                        'prepared_sha256': os.environ['UAS_ROOM_PREPARED_SHA256']} if mode == 'warm' else {}))
                 manifest = payload.parent / 'payload/manifest.json'
                 digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+                if mode == 'warm':
+                    prepared_room.require(prepared_room.digest(prepared_room.foundation(
+                        json.loads(manifest.read_bytes()))) == selected_base['base_key'],
+                        'fresh payload preparation key differs')
                 overlay, quota = directory / 'guest.qcow2', directory / 'quota.raw'
                 feasibility.command(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2',
                                      '-b', str(image), str(overlay)])
@@ -267,12 +290,14 @@ def main():
                     output.truncate(2 * 1024**3)
                 print('Room VM phase: booting fixed IPv4 profile; no host forwarding', flush=True)
                 selected = arguments(directory, overlay, seed(directory, nonce, digest,
-                    payload_root=payload.parent / 'payload'), payload, quota)
+                    payload_root=payload.parent / 'payload', mode=mode,
+                    base_key=selected_base['base_key'] if selected_base else None), payload, quota)
                 report, seconds = boot(directory, selected, nonce)
                 print('Room VM:', json.dumps({'guest': report, 'image_sha256': lock['sha256'],
                     'payload_manifest_sha256': digest, 'boot_install_scenario_shutdown_seconds': seconds,
                     'profile': PROFILE, 'guest_ipv4_network': True, 'host_forwarding': False,
-                    'production_enabled': False}, sort_keys=True), flush=True)
+                    'production_enabled': False, 'preparation_mode': mode,
+                    'prepared_base_key': selected_base['base_key'] if selected_base else None}, sort_keys=True), flush=True)
             except BaseException:
                 for name in LOG_FILES:
                     path = directory / name

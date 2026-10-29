@@ -26,28 +26,25 @@ DECOY_TIMEOUT = 8
 DECOYS = ('93.184.216.34', '169.254.169.254', '192.168.50.1', '93.184.216.35')
 
 
-def install(nonce, digest):
-    # Separate fixed entrypoint: the old install() still excludes every NIC.
+def install(nonce, digest, *, mode='cold', base_key=None):
+    import prepared_room
+    require(mode in ('cold', 'prepare', 'warm'), 'explicit Room preparation mode required')
     observed = room_profile.guest_guard(nonce, run=run)
     require(run('getenforce').strip() == 'Enforcing', 'stock SELinux enforcing required')
     boundary.PAYLOAD.mkdir()
     run('mount', '-o', 'ro,nodev,nosuid,noexec', '/dev/disk/by-label/UAS_PAYLOAD', str(boundary.PAYLOAD))
     manifest = boundary.verify_payload(nonce, digest)
     require(manifest.get('profile') == PROFILE, 'exact fixed Room payload required')
-    boundary.install_packages(nonce, manifest, exact_roots=PACKAGE_PROFILE)
-    # Resolve the installed cloud-image SSH family as one signed exact transaction.
-    room_profile.guest_package_install(manifest, run=run)
+    if mode == 'warm':
+        prepared_room.consume_guest(manifest, base_key, boundary, room_profile)
+    else:
+        prepared_room.provision(manifest, nonce, boundary, room_profile)
     for name in ('git-core', 'openssh-clients'):
-        result = run('rpm', '-V', name)
-        require(not result.strip(), 'signed Room executable package changed')
-    shutil.copytree(boundary.PAYLOAD / 'repo', boundary.ROOT)
-    shutil.copyfile(boundary.PAYLOAD / 'fixture', boundary.ROOT / 'fixture')
-    (boundary.ROOT / 'fixture').chmod(0o555)
-    run('useradd', '--system', '--user-group', '--no-create-home', '--shell', '/usr/sbin/nologin', 'uas-remap')
-    Path('/etc/subuid').write_text('uas-remap:100000:65536\n')
-    Path('/etc/subgid').write_text('uas-remap:100000:65536\n')
-    Path('/etc/docker').mkdir(exist_ok=True)
-    Path('/etc/docker/daemon.json').write_text(json.dumps(boundary.DOCKER_CONFIGURATION))
+        require(not run('rpm', '-V', name).strip(), 'signed Room executable package changed')
+    if mode != 'prepare':
+        shutil.copytree(boundary.PAYLOAD / 'repo', boundary.ROOT)
+        shutil.copyfile(boundary.PAYLOAD / 'fixture', boundary.ROOT / 'fixture')
+        (boundary.ROOT / 'fixture').chmod(0o555)
     return manifest, observed
 
 
@@ -563,11 +560,21 @@ def main():
     if len(sys.argv) == 3 and sys.argv[1] == '--host-responder':
         require(os.getuid() == 0 and Path('/run/uas-vm-fixture').read_text().strip() == sys.argv[2], 'owned guest responder required')
         boundary.responder(); return
-    require(len(sys.argv) == 3, 'fixed nonce/manifest required')
-    nonce, digest = sys.argv[1:]
+    require(len(sys.argv) in (3, 5), 'fixed nonce/manifest and optional preparation mode required')
+    nonce, digest = sys.argv[1:3]
+    mode, base_key = ('cold', None) if len(sys.argv) == 3 else tuple(sys.argv[3:5])
+    require(mode in ('cold','prepare','warm'), 'invalid preparation mode')
+    if mode == 'prepare':
+        import prepared_room
+        manifest, _ = install(nonce, digest, mode=mode, base_key=base_key)
+        receipt = prepared_room.seal_guest(manifest, base_key, boundary, room_profile)
+        with open('/dev/ttyS0', 'w') as serial:
+            serial.write('\nUAS_ROOM_PREPARED:' + nonce + ':' + json.dumps(receipt, sort_keys=True) + '\n')
+            serial.flush()
+        return
     checks, failure = {}, None
     try:
-        manifest, network = install(nonce, digest)
+        manifest, network = install(nonce, digest) if mode == 'cold' else install(nonce, digest, mode=mode, base_key=base_key)
         scenario(nonce, manifest, network, checks)
         require(set(checks) == REQUIRED and all(value.get('status') == 'passed' for value in checks.values()), 'incomplete Room qualification')
     except BaseException as error:
