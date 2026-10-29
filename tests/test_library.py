@@ -1485,6 +1485,14 @@ class BundleValidationTests(unittest.TestCase):
             b"    author: LegacyAuthor\n", b"sources:\n  - resource: https://example.com/b\n")
         self.refused(scope, settings, unsourced, current=current,
                      code="EXISTING_FIELD_CHANGED")
+        _, ordinary = self.update(scope, document_text=concept(
+            "context", "Pick SQLite", "stable", fields=(
+                "sources:", "  - resource: https://example.com/a", "    title: Typo")))
+        optional = dict(ordinary)
+        optional[path] = ordinary[path].replace(
+            b"sources:\n  - resource: https://example.com/a\n    title: Typo\n", b"")
+        self.assertIn("context/pick-sqlite.md",
+                      self.validate(scope, settings, optional, current=ordinary).updated)
 
 if __name__ == "__main__":
     unittest.main()

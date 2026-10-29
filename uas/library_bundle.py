@@ -626,7 +626,8 @@ def _concept(relative, directory, name, text, previous, selected, limits):
 def _sources(relative, sources, limits, previous_meta, writer):
     """Structural provenance: a bounded list of entries, each naming its resource."""
     if sources is None:
-        if writer and _unknown_sources(previous_meta.get("sources")):
+        if writer and any(unknown for _entry, unknown
+                          in _unknown_sources(previous_meta.get("sources"))):
             _fail("EXISTING_FIELD_CHANGED", relative + ".sources")
         return
     if type(sources) is not list or not sources:
