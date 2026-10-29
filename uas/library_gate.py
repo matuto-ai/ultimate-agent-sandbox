@@ -210,43 +210,69 @@ def _definitions(lines):
             yield match.group(2) or following[number]
 
 
-BLOCK_START = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+LIST_ITEM = re.compile(r"(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)")
+THEMATIC_BREAK = re.compile(r"(?:[-*_][ \t]*){3,}\Z")
+
+
+def _unquoted(line):
+    """Strip blockquote markers, which are container structure, not content."""
+    stripped = line.lstrip()
+    if not stripped.startswith(">"):
+        return line
+    while stripped.startswith(">"):
+        stripped = stripped[1:].lstrip(" \t")
+    return stripped
 
 
 def _starts_block(line):
-    """True for a line that cannot continue a paragraph's inline content."""
+    """True for a line whose own content starts a new Markdown block."""
     stripped = line.strip()
-    return (not stripped or stripped.startswith(("```", "~~~", ">"))
+    return (not stripped or stripped.startswith(("```", "~~~"))
             or library_bundle.HEADING.match(stripped) is not None
-            or BLOCK_START.match(stripped) is not None
-            or re.fullmatch(r"(?:[-*_][ \t]*){3,}", stripped) is not None)
+            or LIST_ITEM.match(stripped) is not None
+            or THEMATIC_BREAK.match(stripped) is not None)
 
 
 def _blocks(lines):
     """Group body lines into Markdown blocks that inline content cannot cross.
 
-    A blank line, a heading, a list item, a blockquote, a thematic break and a
-    fence each start a new block, so a code span, link or tag opened in one
-    block never consumes content from the next one.
+    A blockquote is its own container: a quote line after an unquoted paragraph
+    starts a new block (a blockquote interrupts a paragraph), while a quote
+    paragraph keeps its lines together and a following unquoted line is its lazy
+    continuation. A list item keeps its continuation lines, so a link
+    destination may continue on one. A heading or thematic break is a
+    single-line block, so a code span opened there never reaches the following
+    paragraph, and a blank line, a new list item or a fence always starts a new
+    block.
     """
-    block = []
+    block, quoted = [], False
+
+    def flush():
+        nonlocal block, quoted
+        if block:
+            yield block
+        block, quoted = [], False
+
     for line in lines:
-        if not line.strip():
-            if block:
-                yield block
-                block = []
+        is_quote = line.lstrip().startswith(">")
+        content = _unquoted(line)
+        if not content.strip():
+            yield from flush()
             continue
-        if _starts_block(line):
-            if block:
-                yield block
-                block = []
-            # A block-start line - heading, quote, list item, break - is its own
-            # block: its inline content ends at its own line ending.
-            yield [line]
+        if is_quote and not quoted:
+            yield from flush()
+            quoted = True
+        stripped = content.strip()
+        if (library_bundle.HEADING.match(stripped) is not None
+                or THEMATIC_BREAK.match(stripped) is not None):
+            yield from flush()
+            yield [content]
             continue
-        block.append(line)
-    if block:
-        yield block
+        if not is_quote and (LIST_ITEM.match(stripped) is not None
+                             or stripped.startswith(("```", "~~~"))):
+            yield from flush()
+        block.append(content)
+    yield from flush()
 
 
 def _code_end(text, start, run):

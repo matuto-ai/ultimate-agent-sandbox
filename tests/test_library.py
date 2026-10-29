@@ -1718,8 +1718,9 @@ class CommitGateTests(unittest.TestCase):
             ("EXTERNAL_LINK", "`unmatched\n* [x](https://example.com/a)\n`"),
             ("EXTERNAL_LINK", "`unmatched\n> [x](https://example.com/a)\n`"),
             ("EXTERNAL_LINK", "# `heading\n[x](https://example.com/a) `"),
-            ("EXTERNAL_LINK", "> `heading\n> [x](https://example.com/a) `"),
-            ("EXTERNAL_LINK", "* `heading\n[x](https://example.com/a) `"),
+            ("EXTERNAL_LINK", "* [x](\n  https://example.com/a)"),
+            ("EXTERNAL_LINK", "> [x](\n> https://example.com/a)"),
+            ("EXTERNAL_LINK", "> [x](\nhttps://example.com/a)"),
             ("RAW_HTML", '<div title="' + "a" * 1100 + '">'),
         )
         for code, snippet in cases:
@@ -1729,6 +1730,8 @@ class CommitGateTests(unittest.TestCase):
         _prefix, prose = self.update(scope, body=gate_page(
             "Pick", ("An unmatched ` stays literal, \\`escaped\\` text is not code,",
                      "a `span", "over two lines` is code, and [other](context/other.md) is fine.",
+                     "", "> a quoted `span", "> over two lines` is code too.",
+                     "", "* [quoted](\n  context/other.md) stays a relative link.",
                      "", "```", "<div>and [x](https://example.com/a)</div>", "```")))
         self.assertIn("context/pick-sqlite.md", self.validate(
             scope, settings, prose, current=current).bundle.added)
