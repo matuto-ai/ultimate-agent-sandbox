@@ -621,6 +621,11 @@ def _operation(kind, scope, settings, operation_id, request_id, payload, at, que
                      queue_id=queue_id, drain_id=drain_id)
 
 
+def admit_settings_value(settings):
+    """Revalidate an already admitted settings value at a consumer's start."""
+    return _settings(settings)
+
+
 def _settings(settings):
     """Revalidate an admitted settings value and its identity at operation start.
 

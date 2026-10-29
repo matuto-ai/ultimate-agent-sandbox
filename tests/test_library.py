@@ -6,11 +6,13 @@ import json
 from pathlib import Path
 import socket
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from uas import config as deployment_config
 from uas import library
+from uas import library_bundle
 from uas.ledger import Origin
 from uas.manager_actions import HumanSession
 
@@ -769,6 +771,401 @@ class NoEffectsTests(unittest.TestCase):
             library.admit_proposal(ProposalTests().proposal([operation.queue_id]),
                                    drain_id="drain-1", queue_ids=[operation.queue_id],
                                    limits=settings["limits"])
+
+
+OKF_AT = "2026-10-29T12:00:00+00:00"
+NEW_LOG = ("# Update log\n\n## 2026-10-20\n"
+           "* **Creation**: Added [Pick SQLite](context/pick-sqlite.md).\n\n"
+           "## 2026-10-01\n* **Initialization**: Created the Project bundle.\n")
+
+
+def root_index(path, identity):
+    return ("---\nokf_version: \"0.2\"\n---\n\n# Project Library\n\n"
+            "Canonical source coordinates: %s.\nImmutable source identity: %s.\n\n"
+            "* [Context](context/index.md)\n* [Decisions](decisions/index.md)\n"
+            "* [Research](research/index.md)\n* [Pending](pending/index.md)\n"
+            % (path, identity))
+
+
+def concept(type_, title, status=None, body="# Body\n\nText.\n", fields=()):
+    lines = ["---", "type: " + type_, 'title: "%s"' % title]
+    if status is not None:
+        lines.append("status: " + status)
+    lines.extend(fields)
+    return "\n".join(lines + ["---", "", body])
+
+
+class BundleValidationTests(unittest.TestCase):
+    def settings(self, **limits):
+        value = document()
+        value["limits"].update(limits)
+        return admit(value)
+
+    def scope(self, project_id="alpha", repository="acme/alpha", source="1001"):
+        return library.participant_scope(ORIGIN, binding=binding(project_id, repository, source))
+
+    def initial(self, scope):
+        prefix = "projects/" + scope.project_path
+        files = {
+            "index.md": root_index(scope.project_path, scope.project_identity),
+            "log.md": ("# Update log\n\n## 2026-10-01\n"
+                       "* **Initialization**: Created the Project bundle.\n"),
+            "context/index.md": "# Context\n",
+            "decisions/index.md": "# Decisions\n",
+            "research/index.md": "# Research\n",
+            "pending/index.md": "# Pending\n",
+        }
+        return prefix, {prefix + "/" + name: value.encode("utf-8")
+                        for name, value in files.items()}
+
+    def update(self, scope, *, document_text=None,
+               index_text="# Context\n\n* [Pick SQLite](/context/pick-sqlite.md) - short.\n",
+               log=None, extra=(), remove=()):
+        prefix, files = self.initial(scope)
+        default = concept("context", "Pick SQLite", "stable")
+        chosen = default if document_text is None else document_text
+        files[prefix + "/context/pick-sqlite.md"] = (
+            chosen if isinstance(chosen, bytes) else chosen.encode("utf-8"))
+        files[prefix + "/context/index.md"] = index_text.encode("utf-8")
+        files[prefix + "/log.md"] = (log or NEW_LOG).encode("utf-8")
+        for name, data in extra:
+            files[prefix + "/" + name] = data if isinstance(data, bytes) else data.encode("utf-8")
+        for name in remove:
+            del files[prefix + "/" + name]
+        return prefix, files
+
+    def validate(self, scope, settings, proposed, current=None, selected=()):
+        return library_bundle.validate(
+            scope, settings,
+            current=None if current is None else library_bundle.Tree(files=current),
+            proposed=library_bundle.Tree(files=proposed), selected=selected)
+
+    def refused(self, scope, settings, proposed, current=None, selected=(), code=None):
+        with self.assertRaises(library.LibraryError) as raised:
+            self.validate(scope, settings, proposed, current=current, selected=selected)
+        if code is not None:
+            self.assertEqual(code, raised.exception.code, raised.exception.field)
+        return raised.exception
+
+    def test_initialization_accepts_exactly_the_six_file_skeleton(self):
+        scope = self.scope()
+        prefix, files = self.initial(scope)
+        settings = self.settings()
+        result = self.validate(scope, settings, files)
+        self.assertEqual(prefix, result.prefix)
+        self.assertEqual(files, result.files)
+        self.assertEqual(tuple(sorted(library_bundle.REQUIRED)), result.added)
+        self.assertEqual((), result.updated)
+        self.assertEqual((), result.removed)
+        with self.assertRaises(TypeError):
+            library_bundle.validate(scope, settings, proposed=library_bundle.Tree(files=files),
+                                    prefix="projects/github.com/acme/sibling")
+
+    def test_initialization_refuses_partial_extra_and_incoherent_skeletons(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+        cases = []
+        cases.append((dict(files, **{}), None, None))
+        without_log = dict(files)
+        del without_log[prefix + "/log.md"]
+        cases = [(without_log, None, "MISSING_REQUIRED_FILE")]
+        extra = dict(files)
+        extra[prefix + "/context/early.md"] = concept("context", "Early").encode("utf-8")
+        cases.append((extra, None, "INITIALIZATION_NOT_EMPTY"))
+        linked = dict(files)
+        linked[prefix + "/context/index.md"] = b"# Context\n\n* [x](context/x.md)\n"
+        cases.append((linked, None, "INITIALIZATION_NOT_EMPTY"))
+        wrong_version = dict(files)
+        wrong_version[prefix + "/index.md"] = root_index(
+            scope.project_path, scope.project_identity).replace('"0.2"', '"0.1"').encode("utf-8")
+        cases.append((wrong_version, None, "INVALID_OKF_VERSION"))
+        root_with_extra = dict(files)
+        root_with_extra[prefix + "/index.md"] = b"---\nokf_version: \"0.2\"\ntitle: x\n---\n\n# x\n"
+        cases.append((root_with_extra, None, "INVALID_OKF_VERSION"))
+        no_identity = dict(files)
+        no_identity[prefix + "/index.md"] = (
+            b"---\nokf_version: \"0.2\"\n---\n\n# x\n\n"
+            b"* [Context](context/index.md)\n* [Decisions](decisions/index.md)\n"
+            b"* [Research](research/index.md)\n* [Pending](pending/index.md)\n")
+        cases.append((no_identity, None, "MISSING_SOURCE_IDENTITY"))
+        for proposed, current, code in cases:
+            with self.subTest(code=code):
+                self.refused(scope, settings, proposed, current=current, code=code)
+
+    def test_authority_derives_the_only_bundle_prefix_and_refuses_siblings(self):
+        settings = self.settings()
+        alpha, beta = self.scope(), self.scope("beta", "acme/beta", "1002")
+        _prefix, alpha_files = self.initial(alpha)
+        _prefix, beta_files = self.initial(beta)
+        self.validate(beta, settings, beta_files)
+        self.refused(beta, settings, alpha_files, code="FOREIGN_PROJECT")
+        mixed = dict(beta_files)
+        mixed.update(alpha_files)
+        self.refused(beta, settings, mixed, code="FOREIGN_PROJECT")
+        operator = library.installation_scope(
+            Origin("operator", "seat-o", "inc-o", "epoch-o", ("library-settings",)))
+        self.refused(operator, settings, beta_files, code="FORBIDDEN")
+        self.refused(None, settings, beta_files, code="LIBRARY_AUTHENTICATION_REQUIRED")
+
+    def test_canonical_text_and_yaml_safety_reject_before_any_structure(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        cases = {
+            "MALFORMED_UTF8": b"---\ntype: context\ntitle: \xff\n---\n",
+            "CR_LINE_ENDING": concept("context", "Pick SQLite").replace(
+                "\n", "\r\n").encode("utf-8"),
+            "DISALLOWED_CONTROL": concept("context", "Pick\x00 SQLite").encode("utf-8"),
+            "NON_CANONICAL_TEXT": concept("context", "Cafe\u0301").encode("utf-8"),
+            "DUPLICATE_YAML_KEY": b"---\ntype: context\ntitle: a\ntitle: b\n---\n\n# x\n",
+            "UNSAFE_YAML": b"---\ntype: context\ntitle: !!str x\n---\n\n# x\n",
+            "UNSAFE_SCALAR": b"---\ntype: context\ntitle: yes\n---\n\n# x\n",
+            "MISSING_FRONTMATTER": b"# no frontmatter\n",
+        }
+        for code, value in cases.items():
+            with self.subTest(code=code):
+                _prefix, files = self.update(scope)
+                files[prefix + "/context/pick-sqlite.md"] = value
+                self.refused(scope, settings, files, current=current, code=code)
+
+    def test_paths_symlinks_collisions_and_repository_metadata_are_refused(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+        variants = {
+            "UNSAFE_PATH": prefix + "/context/bad\\name.md",
+            "REPOSITORY_METADATA": prefix + "/.git/config",
+            "FOREIGN_PROJECT": "projects/github.com/acme/sibling/index.md",
+        }
+        for code, path in variants.items():
+            with self.subTest(code=code):
+                self.refused(scope, settings, dict(files, **{path: b"x"}), code=code)
+        traversal = dict(files)
+        traversal[prefix + "/../escape.md"] = b"x"
+        self.refused(scope, settings, traversal, code="UNSAFE_PATH")
+        absolute = dict(files)
+        absolute["/etc/passwd.md"] = b"x"
+        self.refused(scope, settings, absolute, code="UNSAFE_PATH")
+        collision = dict(files)
+        collision[prefix + "/context/Pick.md"] = concept("context", "One").encode("utf-8")
+        collision[prefix + "/context/pick.md"] = concept("context", "Two").encode("utf-8")
+        self.refused(scope, settings, collision, code="PATH_COLLISION")
+        with self.assertRaises(library.LibraryError) as raised:
+            library_bundle.validate(scope, settings, proposed=library_bundle.Tree(
+                files=files, symlinks=(prefix + "/context/pick.md",)))
+        self.assertEqual("SYMLINK_NOT_ALLOWED", raised.exception.code)
+
+    def test_update_preserves_unknown_existing_material_and_broken_targets(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, files = self.initial(scope)
+        legacy = ("---\ntype: BigQuery Table\ntitle: Legacy\nstatus: stable\n"
+                  "usage_count: 5000\n---\n\n# Legacy\n\nAuthored material.\n")
+        files[prefix + "/context/legacy.md"] = legacy.encode("utf-8")
+        files[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Legacy](/context/legacy.md) - tolerated.\n").encode("utf-8")
+        proposed = dict(files)
+        proposed[prefix + "/context/pick-sqlite.md"] = concept(
+            "context", "Pick SQLite", "stable",
+            body="# Pick\n\nSee [missing](/context/missing.md).\n").encode("utf-8")
+        proposed[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Legacy](/context/legacy.md) - tolerated.\n"
+            "* [Pick SQLite](/context/pick-sqlite.md) - short.\n").encode("utf-8")
+        proposed[prefix + "/log.md"] = NEW_LOG.encode("utf-8")
+        result = self.validate(scope, settings, proposed, current=files)
+        self.assertIn("context/pick-sqlite.md", result.added)
+        self.assertIn("context/index.md", result.updated)
+        self.assertEqual(legacy.encode("utf-8"), result.files[prefix + "/context/legacy.md"])
+
+        preserved = dict(proposed)
+        preserved[prefix + "/context/legacy.md"] = legacy.replace(
+            "Authored material.", "Authored material, edited.").encode("utf-8")
+        self.assertIn("context/legacy.md",
+                      self.validate(scope, settings, preserved, current=files).updated)
+
+        foreign_key = dict(proposed)
+        foreign_key[prefix + "/context/legacy.md"] = legacy.replace(
+            "status: stable", "status: stable\nauthor: someone").encode("utf-8")
+        self.refused(scope, settings, foreign_key, current=files, code="UNSUPPORTED_FIELD")
+
+        new_unknown = dict(proposed)
+        new_unknown[prefix + "/context/fresh.md"] = concept(
+            "context", "Fresh", "stable", fields=("author: someone",)).encode("utf-8")
+        new_unknown[prefix + "/context/index.md"] = (
+            "# Context\n\n* [Legacy](/context/legacy.md) - tolerated.\n"
+            "* [Pick SQLite](/context/pick-sqlite.md) - short.\n"
+            "* [Fresh](/context/fresh.md) - new.\n").encode("utf-8")
+        self.refused(scope, settings, new_unknown, current=files, code="UNSUPPORTED_FIELD")
+
+    def test_mutations_refuse_accepted_deletion_rename_and_unselected_pending(self):
+        scope, settings = self.scope(), self.settings()
+        operation = capture(settings)
+        queue_id = operation.queue_id
+        pending = "pending/" + queue_id + ".md"
+        prefix, files = self.initial(scope)
+        files[prefix + "/" + pending] = concept("decision", "Queued", "draft").encode("utf-8")
+        files[prefix + "/pending/index.md"] = (
+            "# Pending\n\n* [Queued](/%s) - DRAFT.\n" % pending).encode("utf-8")
+        current = dict(files)
+        _prefix, proposed = self.update(
+            scope,
+            index_text="# Context\n\n* [Pick SQLite](/context/pick-sqlite.md) - short.\n",
+            log=NEW_LOG)
+        proposed[prefix + "/" + pending] = files[prefix + "/" + pending]
+        proposed[prefix + "/pending/index.md"] = files[prefix + "/pending/index.md"]
+
+        integrated = dict(proposed)
+        del integrated[prefix + "/" + pending]
+        integrated[prefix + "/pending/index.md"] = b"# Pending\n"
+        result = self.validate(scope, settings, integrated, current=current,
+                              selected=(queue_id,))
+        self.assertEqual((pending,), result.removed)
+
+        unselected = dict(proposed)
+        del unselected[prefix + "/" + pending]
+        self.refused(scope, settings, unselected, current=current, selected=(),
+                     code="UNSELECTED_PENDING_REMOVAL")
+        _prefix, accepted_before = self.update(scope)
+        deleted = dict(accepted_before)
+        del deleted[prefix + "/context/pick-sqlite.md"]
+        deleted[prefix + "/context/index.md"] = b"# Context\n"
+        self.refused(scope, settings, deleted, current=accepted_before,
+                     code="EXISTING_DATA_DELETION")
+        renamed = dict(deleted)
+        renamed[prefix + "/context/pick-sqlite-renamed.md"] = concept(
+            "context", "Pick SQLite", "stable").encode("utf-8")
+        self.refused(scope, settings, renamed, current=accepted_before,
+                     code="EXISTING_DATA_DELETION")
+        self.refused(scope, settings, proposed, current=current, selected=("short",),
+                     code="INVALID_DIGEST")
+
+    def test_index_log_and_required_relationships_stay_coherent(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        _prefix, files = self.update(scope)
+        cases = {
+            "MISSING_INDEX_ENTRY": dict(files, **{prefix + "/context/index.md": b"# Context\n"}),
+            "UNEXPECTED_FRONTMATTER": dict(
+                files, **{prefix + "/context/index.md":
+                          b"---\ntype: context\n---\n\n# Context\n",
+                          }),
+            "INVALID_INDEX": dict(files, **{prefix + "/context/index.md": b"plain text\n"}),
+            "MISSING_LOG_ENTRY": dict(files, **{prefix + "/log.md": b"# Update log\n"}),
+            "INVALID_LOG_DATE": dict(
+                files, **{prefix + "/log.md": b"# Update log\n\n## 2026-02-30\n* entry\n"}),
+            "LOG_HISTORY_REWRITTEN": dict(
+                files, **{prefix + "/log.md":
+                          b"# Update log\n\n## 2026-10-01\n* **Initialization**: edited.\n"}),
+            "MISSING_INDEX_LINK": dict(
+                files, **{prefix + "/index.md": root_index(
+                    scope.project_path, scope.project_identity).replace(
+                        "* [Pending](pending/index.md)\n", "").encode("utf-8")}),
+        }
+        for code, value in cases.items():
+            with self.subTest(code=code):
+                self.refused(scope, settings, value, current=current, code=code)
+        malformed = dict(current)
+        del malformed[prefix + "/research/index.md"]
+        self.refused(scope, settings, files, current=malformed,
+                     code="MALFORMED_EXISTING_BUNDLE")
+        self.refused(scope, settings, dict(files, **{prefix + "/log.md": b"# Update log\n"}),
+                     current=current, code="MISSING_LOG_ENTRY")
+
+    def test_writer_output_stays_inside_supported_v1_types_and_fields(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        variants = {
+            "INCOHERENT_STATUS": (concept("context", "Pick", "draft"), "context/pick-sqlite.md"),
+            "TYPE_MISMATCH": (concept("decision", "Pick", "stable"), "context/pick-sqlite.md"),
+            "MISSING_TYPE": (b"---\ntitle: Pick\nstatus: stable\n---\n\n# Pick\n",
+                             "context/pick-sqlite.md"),
+            "MISSING_FIELD": (b"---\ntype: context\nstatus: stable\n---\n\n# Pick\n",
+                              "context/pick-sqlite.md"),
+            "INVALID_SOURCES": (concept("context", "Pick", "stable",
+                                        fields=("sources:", "  - title: no resource")),
+                                "context/pick-sqlite.md"),
+            "PENDING_PATH_NOT_QUEUE_DERIVED": (concept("decision", "Queued", "draft"),
+                                               "pending/not-a-queue-id.md"),
+            "INCOHERENT_STATUS2": (concept("decision", "Queued", "stable"),
+                                   "pending/" + "a" * 64 + ".md"),
+        }
+        for code, (text, name) in variants.items():
+            with self.subTest(code=code):
+                data = text if isinstance(text, bytes) else text.encode("utf-8")
+                _prefix, files = self.update(scope, extra=((name, data),))
+                expected = code.rstrip("2")
+                self.refused(scope, settings, files, current=current, code=expected)
+
+    def test_configured_bounds_bound_the_complete_result(self):
+        scope = self.scope()
+        prefix, files = self.initial(scope)
+        default = self.settings()
+        size = max(len(data) for data in files.values())
+        per_document = self.settings(document_bytes=size)
+        _prefix, files = self.update(
+            scope, document_text=concept("context", "Pick SQLite", "stable",
+                                          body="# Body\n\n" + "x" * (size * 2) + "\n"))
+        self.refused(scope, per_document, files, current=self.initial(scope)[1],
+                     code="DOCUMENT_TOO_LARGE")
+        _prefix, files = self.initial(scope)
+        limited = self.settings(scan_documents=6)
+        _prefix, added = self.update(scope, extra=(("context/more.md",
+                                                    concept("context", "More", "stable")),))
+        self.refused(scope, limited, added, current=files, code="TOO_MANY_DOCUMENTS")
+        _prefix, files = self.update(scope)
+        budget = self.settings(projection_bytes=sum(len(data)
+                                                    for data in self.initial(scope)[1].values()))
+        self.refused(scope, budget, files, current=self.initial(scope)[1],
+                     code="BUNDLE_TOO_LARGE")
+        self.validate(scope, default, files, current=self.initial(scope)[1])
+
+    def test_rejection_is_safe_evidence_and_mutates_nothing(self):
+        scope, settings = self.scope(), self.settings()
+        prefix, current = self.initial(scope)
+        _prefix, files = self.update(
+            scope, document_text=b"---\ntype: context\ntitle: a\ntitle: SECRET-MARKER\n---\n")
+        proposed = {path: data for path, data in files.items()}
+        snapshot = dict(proposed)
+        current_snapshot = dict(current)
+        with tempfile.TemporaryDirectory() as root:
+            projection = Path(root) / "library.snapshot.json"
+            projection.write_text('{"commit_sha": null}', encoding="utf-8")
+            with patch("builtins.open", side_effect=AssertionError("file access")), \
+                    patch.object(socket, "socket", side_effect=AssertionError("socket")), \
+                    patch.object(subprocess, "run", side_effect=AssertionError("process")):
+                error = self.refused(scope, settings, proposed, current=current,
+                                     code="DUPLICATE_YAML_KEY")
+            self.assertEqual('{"commit_sha": null}', projection.read_text(encoding="utf-8"))
+        self.assertNotIn("SECRET-MARKER", str(error))
+        self.assertNotIn("SECRET-MARKER", error.field)
+        self.assertEqual("context/pick-sqlite.md.title", error.field)
+        self.assertEqual(snapshot, proposed)
+        self.assertEqual(current_snapshot, current)
+
+    def test_integration_uses_the_capture_queue_identity_and_bundle_path_contract(self):
+        scope, settings = self.scope(), self.settings()
+        operation = capture(settings, scope)
+        queue_id = operation.queue_id
+        pending = library.queue_path(scope.project_path, queue_id)
+        self.assertTrue(pending.startswith("projects/" + scope.project_path + "/pending/"))
+        location = pending[len("projects/" + scope.project_path + "/"):]
+        _prefix, current = self.initial(scope)
+        current["projects/" + scope.project_path + "/" + location] = concept(
+            "decision", "Pick SQLite", "draft").encode("utf-8")
+        current["projects/" + scope.project_path + "/pending/index.md"] = (
+            "# Pending\n\n* [Pick SQLite](/%s) - DRAFT.\n" % location).encode("utf-8")
+        base = "projects/" + scope.project_path
+        _prefix, proposed = self.initial(scope)
+        proposed[base + "/decisions/pick-sqlite.md"] = concept(
+            "decision", "Pick SQLite", "stable").encode("utf-8")
+        proposed[base + "/decisions/index.md"] = (
+            b"# Decisions\n\n* [Pick SQLite](/decisions/pick-sqlite.md) - short.\n")
+        proposed[base + "/pending/index.md"] = b"# Pending\n"
+        proposed[base + "/log.md"] = (
+            "# Update log\n\n## 2026-10-20\n"
+            "* **Creation**: Added [Pick SQLite](/decisions/pick-sqlite.md).\n\n"
+            "## 2026-10-01\n* **Initialization**: Created the Project bundle.\n").encode("utf-8")
+        result = self.validate(scope, settings, proposed, current=current,
+                              selected=(queue_id,))
+        self.assertEqual((location,), result.removed)
+        self.assertEqual(operation.queue_id, queue_id)
 
 
 if __name__ == "__main__":
