@@ -160,6 +160,25 @@ client=ReadBrokerClient(socket.socket(fileno=int(sys.argv[1])),supervisor,ForgeB
 origin=Origin('actor-a','alice','inc-1','epoch-1',('forge-read','forge-write'))
 allow=True;deny_late=False
 
+# Hosted-only real private Broker protocol. The fixed Supervisor fixture is the
+# explicitly controlled human authority; this is not human TLS/login evidence.
+from uas.manager_actions import HumanSession
+from uas.native_broker_audit import NativeBrokerAudit
+human=Origin('human','human','fixture-human','fixture-policy',('human-control-run',))
+human_session=HumanSession('deployment','alpha','instance-1','fixture-manager',human,
+ lambda session,action:action in {'observe','request-changes'},lambda:True)
+native_audit=NativeBrokerAudit(client,human_session)
+def audit_state(operation):
+ value={'version':1,'operation_id':operation,'action':'request-changes','deployment_id':'deployment',
+  'room_id':'alpha','instance_id':'instance-1','run_id':'fixture-run','generation':1,
+  'object_id':'fixture-submission','observed_version':'a'*64,'payload':{'body':'not posted'}}
+ scope=native_audit.bind(value,human_session)
+ with scope.prepare_manager_guard():
+  assert client.lock.locked()
+  with scope.manager_action_guard('alpha','owner/repo') as state:pass
+ assert not client.lock.locked()
+ return state
+
 def authority():return allow and not (deny_late and Path(LATE_PATH).read_text()=='1')
 def envelope(operation,argv,body=None):
  value={'id':operation,'kind':'forge-write','argv':['gh',*argv]}
@@ -178,6 +197,7 @@ lost_argv=['issue','edit','1','--body-file','-']
 lost_body='lost-after-contact:'+('x'*(512*1024-len('lost-after-contact:')))
 if PHASE=='restart':
  unknown=status(invoke('lost',lost_argv,lost_body),'UNKNOWN_OUTCOME',[])
+ assert audit_state('audit-restart')['blocked'] is True
  try:invoke('fenced-after-restart',['issue','edit','1','--title','must-not-execute'])
  except LedgerError as error:assert error.code=='FORGE_RECONCILIATION_REQUIRED',error
  else:raise AssertionError('restart bypassed unknown write fence')
@@ -195,6 +215,7 @@ def reconcile(operation,original,receipt):
 
 if PHASE=='reconcile':
  unknown=status(invoke('lost',lost_argv,lost_body),'UNKNOWN_OUTCOME',[])
+ assert audit_state('audit-before-reconcile')['blocked'] is True
  reconcile('resolve-original',envelope('lost',lost_argv,lost_body),unknown)
  status(invoke('shrink-one',['issue','edit','1','--body','bounded-after-recovery']),'OK')
  status(invoke('shrink-seven',['issue','edit','7','--body','bounded-after-quota-test']),'OK')
@@ -301,6 +322,7 @@ deny_late=False
 status(invoke('late',late_argv),'OK',['title'])  # Exact committed receipt, no second PATCH.
 unknown=status(invoke('lost',lost_argv,lost_body),'UNKNOWN_OUTCOME',[])
 assert invoke('lost',lost_argv,lost_body)==unknown
+assert audit_state('audit-original-unknown')['blocked'] is True
 try:invoke('fenced',['issue','edit','1','--title','must-not-execute'])
 except LedgerError as error:assert error.code=='FORGE_RECONCILIATION_REQUIRED',error
 else:raise AssertionError('new operation ID bypassed unknown write fence')

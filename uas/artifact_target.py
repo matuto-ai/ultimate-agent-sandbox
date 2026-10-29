@@ -138,108 +138,127 @@ class ArtifactSourceResolver:
         self.manifest = Path(allocator.manifest)
 
     def resolve(self, run_id, participant_id, room_instance):
+        # Preserve the public owner/fixture contract; this path acquires its lock.
         try:
-            # Existing trusted control-store lock only; no allocator _locked().
             with self.supervisor._locked():
-                lifecycle = self.supervisor._read()
-                if (lifecycle is None or lifecycle['phase'] != 'running'
-                        or lifecycle['instance_id'] != room_instance
-                        or lifecycle['spec']['project_id'] != self.room['project']['id']
-                        or not {str(self.repo), str(self.root)} <= set(lifecycle['spec']['project_paths'])):
-                    _fail('ARTIFACT_ROOM_UNAVAILABLE')
-                with ExitStack() as stack:
-                    def hold(path):
-                        fd = _open_dir(path); stack.callback(os.close, fd); return fd
-                    repo, root = hold(self.repo), hold(self.root)
-                    common = os.open('.git', _DIR, dir_fd=repo); stack.callback(os.close, common)
-                    control = hold(self.manifest.parent)
-                    encoded, _ = _read_at(control, self.manifest.name)
-                    state = json.loads(encoded, object_pairs_hook=_unique)
-                    binding = {'version': 1, 'room_id': self.room['id'],
-                        'instance_id': room_instance, 'project_id': self.room['project']['id'],
-                        'repo': str(self.repo), 'root': str(self.root), 'common': str(self.repo / '.git'),
-                        'filesystem': {'repo': _identity(os.fstat(repo)), 'root': _identity(os.fstat(root)),
-                                       'common': _identity(os.fstat(common))}}
-                    required = set(binding) | {'slots'}
-                    if (type(state) is not dict or not required <= state.keys()
-                            or set(state) - required - REVISION_FIELDS - CHECKOUT_OBSERVATION_FIELDS
-                            or any(state[k] != v for k, v in binding.items())
-                            or type(state['slots']) is not dict or len(state['slots']) > 1000):
-                        _fail('INVALID_ARTIFACT_OWNERSHIP')
+                return self._resolve_owned(run_id, participant_id, room_instance)
+        except ArtifactError:
+            raise
+        except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
+            raise ArtifactError('ARTIFACT_SOURCE_UNVERIFIABLE') from error
+
+    def resolve_locked(self, scope, run_id, participant_id, room_instance):
+        """Resolve under a genuine held Supervisor scope, without reacquiring.
+
+        Returns the same complete source, including head_sha. Consumers must
+        compare the full captured source while retaining this lock through their
+        consuming transaction; current() intentionally permits head movement.
+        """
+        from .lifecycle import Supervisor
+        Supervisor._require_lifecycle_scope(self.supervisor, scope)
+        return self._resolve_owned(run_id, participant_id, room_instance)
+
+    def _resolve_owned(self, run_id, participant_id, room_instance):
+        try:
+            lifecycle = self.supervisor._read()
+            if (lifecycle is None or lifecycle['phase'] != 'running'
+                    or lifecycle['instance_id'] != room_instance
+                    or lifecycle['spec']['project_id'] != self.room['project']['id']
+                    or not {str(self.repo), str(self.root)} <= set(lifecycle['spec']['project_paths'])):
+                _fail('ARTIFACT_ROOM_UNAVAILABLE')
+            with ExitStack() as stack:
+                def hold(path):
+                    fd = _open_dir(path); stack.callback(os.close, fd); return fd
+                repo, root = hold(self.repo), hold(self.root)
+                common = os.open('.git', _DIR, dir_fd=repo); stack.callback(os.close, common)
+                control = hold(self.manifest.parent)
+                encoded, _ = _read_at(control, self.manifest.name)
+                state = json.loads(encoded, object_pairs_hook=_unique)
+                binding = {'version': 1, 'room_id': self.room['id'],
+                    'instance_id': room_instance, 'project_id': self.room['project']['id'],
+                    'repo': str(self.repo), 'root': str(self.root), 'common': str(self.repo / '.git'),
+                    'filesystem': {'repo': _identity(os.fstat(repo)), 'root': _identity(os.fstat(root)),
+                                   'common': _identity(os.fstat(common))}}
+                required = set(binding) | {'slots'}
+                if (type(state) is not dict or not required <= state.keys()
+                        or set(state) - required - REVISION_FIELDS - CHECKOUT_OBSERVATION_FIELDS
+                        or any(state[k] != v for k, v in binding.items())
+                        or type(state['slots']) is not dict or len(state['slots']) > 1000):
+                    _fail('INVALID_ARTIFACT_OWNERSHIP')
+                try:
+                    validate_revision(state)
+                    validate_checkout_observations(state)
+                except ValueError:
+                    _fail('INVALID_ARTIFACT_OWNERSHIP')
+                matches = [(key, slot) for key, slot in state['slots'].items()
+                           if type(slot) is dict and slot.get('active') is True
+                           and slot.get('run') == run_id]
+                if len(matches) != 1:
+                    _fail('ARTIFACT_SLOT_NOT_OWNED')
+                key, slot = matches[0]
+                fields = {'path', 'branch', 'base', 'run', 'participant', 'active', 'phase', 'identity'}
+                if (set(slot) not in (fields, fields | {'writer_scope'})
+                        or ('writer_scope' in slot and not valid_writer_scope(slot['writer_scope'], room_instance))
+                        or slot['participant'] != participant_id or slot['phase'] != 'ready'
+                        or (key != 'primary' and not re.fullmatch(r'[0-9a-f]{32}', key))
+                        or not isinstance(slot['branch'], str) or not _BRANCH.fullmatch(slot['branch'])
+                        or len(slot['branch']) > 512
+                        or (key != 'primary' and slot['branch'] != 'refs/heads/uas-slot/' + key)):
+                    _fail('ARTIFACT_SLOT_NOT_OWNED')
+                path = self.repo if key == 'primary' else self.root / key
+                if slot['path'] != str(path):
+                    _fail('ARTIFACT_SLOT_NOT_OWNED')
+                slotfd = hold(path)
+                metadata = os.stat('.git', dir_fd=slotfd, follow_symlinks=False)
+                expected = {'directory': _identity(os.fstat(slotfd)), 'git_metadata': _identity(metadata)}
+                if slot['identity'] != expected:
+                    _fail('ARTIFACT_SLOT_IDENTITY_CHANGED')
+                extra = {}
+                admin = common
+                if key != 'primary':
+                    raw, _ = _read_at(slotfd, '.git', 4096)
                     try:
-                        validate_revision(state)
-                        validate_checkout_observations(state)
-                    except ValueError:
-                        _fail('INVALID_ARTIFACT_OWNERSHIP')
-                    matches = [(key, slot) for key, slot in state['slots'].items()
-                               if type(slot) is dict and slot.get('active') is True
-                               and slot.get('run') == run_id]
-                    if len(matches) != 1:
-                        _fail('ARTIFACT_SLOT_NOT_OWNED')
-                    key, slot = matches[0]
-                    fields = {'path', 'branch', 'base', 'run', 'participant', 'active', 'phase', 'identity'}
-                    if (set(slot) not in (fields, fields | {'writer_scope'})
-                            or ('writer_scope' in slot and not valid_writer_scope(slot['writer_scope'], room_instance))
-                            or slot['participant'] != participant_id or slot['phase'] != 'ready'
-                            or (key != 'primary' and not re.fullmatch(r'[0-9a-f]{32}', key))
-                            or not isinstance(slot['branch'], str) or not _BRANCH.fullmatch(slot['branch'])
-                            or len(slot['branch']) > 512
-                            or (key != 'primary' and slot['branch'] != 'refs/heads/uas-slot/' + key)):
-                        _fail('ARTIFACT_SLOT_NOT_OWNED')
-                    path = self.repo if key == 'primary' else self.root / key
-                    if slot['path'] != str(path):
-                        _fail('ARTIFACT_SLOT_NOT_OWNED')
-                    slotfd = hold(path)
-                    metadata = os.stat('.git', dir_fd=slotfd, follow_symlinks=False)
-                    expected = {'directory': _identity(os.fstat(slotfd)), 'git_metadata': _identity(metadata)}
-                    if slot['identity'] != expected:
-                        _fail('ARTIFACT_SLOT_IDENTITY_CHANGED')
-                    extra = {}
-                    admin = common
-                    if key != 'primary':
-                        raw, _ = _read_at(slotfd, '.git', 4096)
-                        try:
-                            text = raw.decode('utf-8')
-                        except UnicodeError:
-                            _fail('INVALID_ARTIFACT_ADMIN')
-                        prefix = 'gitdir: ' + str(self.repo / '.git' / 'worktrees') + '/'
-                        if not text.startswith(prefix) or not text.endswith('\n'):
-                            _fail('INVALID_ARTIFACT_ADMIN')
-                        admin_name = text[len(prefix):-1]
-                        if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', admin_name):
-                            _fail('INVALID_ARTIFACT_ADMIN')
-                        wt = os.open('worktrees', _DIR, dir_fd=common); stack.callback(os.close, wt)
-                        admin = os.open(admin_name, _DIR, dir_fd=wt); stack.callback(os.close, admin)
-                        commontext, _ = _read_at(admin, 'commondir', 4096)
-                        reciprocal, _ = _read_at(admin, 'gitdir', 4096)
-                        if commontext != b'../..\n' or reciprocal != (str(path / '.git') + '\n').encode():
-                            _fail('INVALID_ARTIFACT_ADMIN')
-                        extra = {'admin': _identity(os.fstat(admin)), 'gitdir': text,
-                                 'reciprocal': reciprocal.decode(), 'commondir': '../..'}
-                    elif not stat.S_ISDIR(metadata.st_mode) or _identity(metadata) != _identity(os.fstat(common)):
+                        text = raw.decode('utf-8')
+                    except UnicodeError:
                         _fail('INVALID_ARTIFACT_ADMIN')
-                    head, _ = _read_at(admin, 'HEAD', 1024)
-                    if head != ('ref: ' + slot['branch'] + '\n').encode('ascii'):
-                        _fail('ARTIFACT_HEAD_BINDING_CHANGED')
-                    oid = self._ref(common, slot['branch'])
-                    result = {'room_instance': room_instance, 'project_id': self.room['project']['id'],
-                        'repository': self.room['project']['repository'], 'run_id': run_id,
-                        'participant_id': participant_id, 'slot_id': key, 'branch': slot['branch'], 'head_sha': oid}
-                    result['source_digest'] = hashlib.sha256(canonical({'binding': binding,
-                        'slot': slot, 'admin': extra})).hexdigest()
-                    validate_source(result)
-                    for current_path, held in ((self.repo, repo), (self.root, root),
-                            (self.repo / '.git', common), (path, slotfd)):
-                        fresh = _open_dir(current_path)
-                        try:
-                            if _identity(os.fstat(fresh)) != _identity(os.fstat(held)):
-                                _fail('ARTIFACT_SOURCE_CHANGED')
-                        finally:
-                            os.close(fresh)
-                    if (_read_at(admin, 'HEAD', 1024)[0] != head
-                            or self._ref(common, slot['branch']) != oid):
-                        _fail('ARTIFACT_SOURCE_CHANGED')
-                    return result
+                    prefix = 'gitdir: ' + str(self.repo / '.git' / 'worktrees') + '/'
+                    if not text.startswith(prefix) or not text.endswith('\n'):
+                        _fail('INVALID_ARTIFACT_ADMIN')
+                    admin_name = text[len(prefix):-1]
+                    if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', admin_name):
+                        _fail('INVALID_ARTIFACT_ADMIN')
+                    wt = os.open('worktrees', _DIR, dir_fd=common); stack.callback(os.close, wt)
+                    admin = os.open(admin_name, _DIR, dir_fd=wt); stack.callback(os.close, admin)
+                    commontext, _ = _read_at(admin, 'commondir', 4096)
+                    reciprocal, _ = _read_at(admin, 'gitdir', 4096)
+                    if commontext != b'../..\n' or reciprocal != (str(path / '.git') + '\n').encode():
+                        _fail('INVALID_ARTIFACT_ADMIN')
+                    extra = {'admin': _identity(os.fstat(admin)), 'gitdir': text,
+                             'reciprocal': reciprocal.decode(), 'commondir': '../..'}
+                elif not stat.S_ISDIR(metadata.st_mode) or _identity(metadata) != _identity(os.fstat(common)):
+                    _fail('INVALID_ARTIFACT_ADMIN')
+                head, _ = _read_at(admin, 'HEAD', 1024)
+                if head != ('ref: ' + slot['branch'] + '\n').encode('ascii'):
+                    _fail('ARTIFACT_HEAD_BINDING_CHANGED')
+                oid = self._ref(common, slot['branch'])
+                result = {'room_instance': room_instance, 'project_id': self.room['project']['id'],
+                    'repository': self.room['project']['repository'], 'run_id': run_id,
+                    'participant_id': participant_id, 'slot_id': key, 'branch': slot['branch'], 'head_sha': oid}
+                result['source_digest'] = hashlib.sha256(canonical({'binding': binding,
+                    'slot': slot, 'admin': extra})).hexdigest()
+                validate_source(result)
+                for current_path, held in ((self.repo, repo), (self.root, root),
+                        (self.repo / '.git', common), (path, slotfd)):
+                    fresh = _open_dir(current_path)
+                    try:
+                        if _identity(os.fstat(fresh)) != _identity(os.fstat(held)):
+                            _fail('ARTIFACT_SOURCE_CHANGED')
+                    finally:
+                        os.close(fresh)
+                if (_read_at(admin, 'HEAD', 1024)[0] != head
+                        or self._ref(common, slot['branch']) != oid):
+                    _fail('ARTIFACT_SOURCE_CHANGED')
+                return result
         except ArtifactError:
             raise
         except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:

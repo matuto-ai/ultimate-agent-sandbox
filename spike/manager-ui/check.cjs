@@ -113,6 +113,10 @@ async function ownershipContract(){
   assert.deepEqual(trace,['Browser.close','remove /owned']);
   const stuck=fake(22),stuckState=trackChild(stuck,()=>{}),signals=[];stuck.kill=signal=>signals.push(signal);
   await assert.rejects(closeOwnedBrowser(stuck,stuckState,async()=>{throw Error('broken pipe');},'/owned',{wait:async()=>{},remove:()=>{throw Error('must not remove live profile');}}),/close unconfirmed/);assert.deepEqual(signals,['SIGTERM','SIGKILL']);
+  const exited=fake(23),openPipes=trackChild(exited,()=>{});exited.kill=()=>{throw Error('must not signal exited PID');};
+  exited.emit('exit',0,null);
+  await assert.rejects(closeOwnedBrowser(exited,openPipes,()=>{throw Error('must not command exited browser');},'/owned',
+    {wait:async()=>{},remove:()=>{throw Error('must retain profile while pipes remain open');}}),/close unconfirmed/);
   await assert.rejects(closeOwnedBrowser(null,null,null,'/owned',{remove:()=>{throw Error('ENOTEMPTY');}}),/ENOTEMPTY/);
 
 }
@@ -173,50 +177,287 @@ async function actionContract(){
 
 // Only the first read-only startup probe receives the cold-start allowance.
 // Injected timers keep this contract testable without a browser or real waits.
-function commandTimer({first,method,reject,onTimeout,set=setTimeout,clear=clearTimeout}){
+function commandTimer({first,method,id=null,reject,onTimeout,set=setTimeout,clear=clearTimeout}){
   const milliseconds=first&&method==='Browser.getVersion'?10000:5000;
-  const timer=set(()=>{onTimeout();reject(Error('CDP timeout: '+method));},milliseconds);
+  const timer=set(()=>{onTimeout();reject(Object.assign(Error('CDP timeout: '+method),{code:'CDP_COMMAND_TIMEOUT',method,commandId:id,first}));},milliseconds);
   return {milliseconds,cancel:()=>clear(timer)};
 }
 function timerContract(){
   for(const [first,method,expected] of [[true,'Browser.getVersion',10000],[false,'Browser.getVersion',5000],[true,'Target.createTarget',5000],[false,'Runtime.evaluate',5000]]){
     let callback,delay,cleared=false,timedOut=false,error;
-    const timer=commandTimer({first,method,reject:value=>{error=value;},onTimeout:()=>{timedOut=true;},set:(fn,ms)=>{callback=fn;delay=ms;return 7;},clear:id=>{assert.equal(id,7);cleared=true;}});
+    const timer=commandTimer({first,method,id:1,reject:value=>{error=value;},onTimeout:()=>{timedOut=true;},set:(fn,ms)=>{callback=fn;delay=ms;return 7;},clear:id=>{assert.equal(id,7);cleared=true;}});
     assert.equal(delay,expected);assert.equal(timer.milliseconds,expected);callback();assert(timedOut&&error.message==='CDP timeout: '+method);timer.cancel();assert(cleared);
+    assert.equal(error.code,'CDP_COMMAND_TIMEOUT');assert.equal(error.commandId,1);assert.equal(error.method,method);assert.equal(error.first,first);
   }
+}
+
+// Bounded, observational only: never probes an executable, environment or pipe.
+// Keep the failure-time snapshot distinct from exit/close caused by cleanup.
+function browserDiagnostics(executable,nodeVersion,now=Date.now){
+  const began=now(),events=[];let dropped=0,phase='spawn',phaseBegan=began,received=0,version=null,exit=null,close=null;
+  const elapsed=()=>Math.max(0,now()-began),text=value=>typeof value==='string'?value.slice(0,160):null;
+  const facts=value=>Object.fromEntries(Object.entries(value).filter(([_,v])=>v===null||typeof v==='boolean'||typeof v==='string'||Number.isSafeInteger(v)).map(([k,v])=>[k,typeof v==='string'?text(v):v]));
+  const record=(event,value={})=>{if(events.length<32)events.push({event,elapsed_ms:elapsed(),...facts(value)});else dropped++;};
+  return {
+    record,
+    phase(value){phase=text(value);phaseBegan=now();record('phase',{phase});},
+    received(bytes){received=Math.min(Number.MAX_SAFE_INTEGER,received+bytes);},
+    version(value){version={product:text(value?.product),protocolVersion:text(value?.protocolVersion),jsVersion:text(value?.jsVersion)};record('browser-version-observed');},
+    exit(code,signal){exit={code:Number.isSafeInteger(code)?code:null,signal:text(signal),elapsed_ms:elapsed()};record('child-exit',exit);},
+    close(code,signal){close={code:Number.isSafeInteger(code)?code:null,signal:text(signal),elapsed_ms:elapsed()};record('child-close',close);},
+    snapshot(){return JSON.parse(JSON.stringify({executable:text(executable),node_version:text(nodeVersion),browser_version:version,phase,elapsed_ms:elapsed(),phase_elapsed_ms:Math.max(0,now()-phaseBegan),received_bytes:received,exit,close,events,dropped_events:dropped}));}
+  };
+}
+function writeDiagnosticPipe(pipe,wire,id,diagnostics){
+  diagnostics.record('pipe-write',{id,bytes:Buffer.byteLength(wire)});
+  try{
+    const accepted=pipe.write(wire,error=>diagnostics.record('pipe-write-complete',{id,error:error?.message||null,code:error?.code||null}));
+    diagnostics.record('pipe-write-return',{id,accepted});
+  }catch(error){diagnostics.record('pipe-write-threw',{id,error:error.message,code:error.code||null});throw error;}
+}
+function diagnosticsContract(){
+  let time=100;const details=browserDiagnostics('/usr/bin/google-chrome','v24.22.1',()=>time);
+  assert.equal(details.snapshot().browser_version,null);assert.equal(details.snapshot().received_bytes,0);
+  time=105;details.record('spawn',{pid:17});details.phase('Browser.getVersion');
+  details.record('pipe-write',{id:1,bytes:42});details.record('pipe-write-return',{id:1,accepted:true});
+  time=108;details.record('pipe-write-complete',{id:1,error:null});details.received(7);details.received(11);
+  time=111;const before=details.snapshot();assert.equal(before.phase_elapsed_ms,6);assert.equal(before.elapsed_ms,11);assert.equal(before.received_bytes,18);assert.equal(before.exit,null);
+  time=120;details.exit(0,null);details.close(0,null);details.version({product:'Chrome/test',protocolVersion:'1.3',jsVersion:'test',unwanted:'not stored'});
+  assert.equal(before.exit,null,'failure snapshot must not acquire cleanup exit');
+  const after=details.snapshot();assert.equal(after.exit.elapsed_ms,20);assert.equal(after.close.code,0);assert.equal(after.browser_version.product,'Chrome/test');assert(!('unwanted' in after.browser_version));
+  details.record('pipe-error',{error:'x'.repeat(1000),code:'EPIPE'});
+  assert.equal(details.snapshot().events.at(-1).error.length,160);
+  for(let n=0;n<100;n++)details.record('extra');assert.equal(details.snapshot().events.length,32);assert(details.snapshot().dropped_events>0);
+  before.events.push({event:'tampered'});assert(!details.snapshot().events.some(event=>event.event==='tampered'));
+  const writes=browserDiagnostics('/usr/bin/chromium','test',()=>time);let finish;
+  writeDiagnosticPipe({write(wire,callback){assert.equal(wire,'opaque-payload');finish=callback;return false;}},'opaque-payload',1,writes);
+  assert.deepEqual(writes.snapshot().events.map(e=>e.event),['pipe-write','pipe-write-return']);
+  assert.equal(writes.snapshot().events[1].accepted,false);finish();assert.equal(writes.snapshot().events.at(-1).error,null);
+  writeDiagnosticPipe({write(_,callback){callback(Object.assign(Error('closed'),{code:'EPIPE'}));return false;}},'opaque-payload',2,writes);
+  assert(writes.snapshot().events.some(e=>e.event==='pipe-write-complete'&&e.code==='EPIPE'));
+  assert.throws(()=>writeDiagnosticPipe({write(){throw Error('sync write failed');}},'opaque-payload',3,writes),/sync write failed/);
+  assert.equal(writes.snapshot().events.at(-1).event,'pipe-write-threw');
+  assert(!JSON.stringify(writes.snapshot()).includes('opaque-payload'),'never record CDP payload');
+}
+
+// Use the installed browser ELF, not the distribution shell wrapper. Chromium's
+// wrapper starts stdout/stderr cat children which can inherit the CDP pipes.
+// Puppeteer's system stable-channel path is the same fixed executable. This
+// removes wrapper lifetime ambiguity; it does not diagnose every startup stall.
+function chromeExecutable(io=fs){
+  const executable='/opt/google/chrome/chrome';
+  let fd;
+  try{
+    fd=io.openSync(executable,io.constants.O_RDONLY|io.constants.O_NOFOLLOW|io.constants.O_NONBLOCK);
+    const stat=io.fstatSync(fd),header=Buffer.alloc(4);
+    if(!stat.isFile()||(stat.mode&0o111)===0||io.readSync(fd,header,0,4,0)!==4||!header.equals(Buffer.from([0x7f,0x45,0x4c,0x46])))
+      throw Error('Preinstalled Chrome must be an executable regular ELF; wrapper fallback forbidden');
+    return executable;
+  }finally{if(fd!==undefined)io.closeSync(fd);}
+}
+function executableContract(){
+  const expected='/opt/google/chrome/chrome';
+  for(const scenario of ['elf','script','short','nonregular','nonexecutable','missing','symlink']){
+    let opens=0,closes=0,reads=0;
+    const io={constants:{O_RDONLY:0,O_NOFOLLOW:1,O_NONBLOCK:2},
+      openSync(file,flags){opens++;assert.equal(file,expected);assert.equal(flags,3);
+        if(scenario==='missing'||scenario==='symlink')throw Error(scenario);return 19;},
+      fstatSync(fd){assert.equal(fd,19);return {isFile:()=>scenario!=='nonregular',mode:scenario==='nonexecutable'?0o644:0o755};},
+      readSync(fd,buffer,offset,length,position){reads++;assert.deepEqual([fd,offset,length,position],[19,0,4,0]);
+        Buffer.from(scenario==='script'?'#!/b':'\x7fELF','binary').copy(buffer);return scenario==='short'?3:4;},
+      closeSync(fd){assert.equal(fd,19);closes++;}};
+    if(scenario==='elf')assert.equal(chromeExecutable(io),expected);
+    else assert.throws(()=>chromeExecutable(io));
+    assert.equal(opens,1);assert.equal(closes,['missing','symlink'].includes(scenario)?0:1);
+    if(['missing','symlink','nonregular','nonexecutable'].includes(scenario))assert.equal(reads,0);
+  }
+}
+
+// One absolute budget for both startup attempts and all UI work. Cleanup may
+// still reclaim the owned child after expiry, but expiry can never yield proof.
+function browserBudget(onExpire,{now=Date.now,set=setTimeout,clear=clearTimeout}={}){
+  const end=now()+35000;let expired=false;
+  const error=()=>Object.assign(Error('Browser proof deadline exceeded'),{code:'BROWSER_DEADLINE'});
+  const timer=set(()=>{expired=true;onExpire(error());},35000);
+  return {check(){if(expired||now()>=end)throw error();},remaining:()=>Math.max(0,end-now()),cancel:()=>clear(timer)};
+}
+function recoverableStartup(number,error,serial,snapshot){
+  if(number!==0||serial!==1||error.code!=='CDP_COMMAND_TIMEOUT'||error.method!=='Browser.getVersion'||error.commandId!==1||error.first!==true)return false;
+  if(snapshot.phase!=='Browser.getVersion'||snapshot.received_bytes!==0||snapshot.browser_version!==null||snapshot.exit!==null||snapshot.close!==null||snapshot.dropped_events!==0)return false;
+  const events=snapshot.events,spawn=events.find(event=>event.event==='spawn-return');
+  if(!Number.isSafeInteger(spawn?.pid)||spawn.pid<=0||!events.some(event=>event.event==='spawn-event'&&event.pid===spawn.pid))return false;
+  if(events.some(event=>['child-error','write-pipe-error','read-pipe-error','pipe-write-threw','protocol-error'].includes(event.event)||event.event==='pipe-write-complete'&&(event.error!==null||event.code!==null)))return false;
+  return events.some(event=>event.event==='pipe-write-complete'&&event.id===1&&event.error===null&&event.code===null);
+}
+// The coordinator knows no browser flags or UI operations. Only the initial
+// read-only probe can be replaced, after the exact attempt's cleanup confirms.
+async function startOwnedBrowser(create,budget,attempts){
+  for(let number=0;number<2;number++){
+    budget.check();
+    const attempt=create(number);attempts.push(attempt);
+    try{
+      await attempt.open();
+      const version=await attempt.command('Browser.getVersion');attempt.check();budget.check();
+      attempt.diagnostics.version(version);
+      return {attempt,version};
+    }catch(error){
+      const before=attempt.captureFailure(error);
+      if(!recoverableStartup(number,error,attempt.serial,before.diagnostics))throw error;
+      try{
+        const cleanup=await attempt.close();
+        if(cleanup.status!=='confirmed'||!cleanup.child_closed||!cleanup.profile_removed)throw Error('Startup cleanup unconfirmed');
+      }
+      catch(cleanupError){throw new Error(error.message+'; cleanup: '+cleanupError.message,{cause:error});}
+      // Never reuse a profile, child, or pending map; keep the original deadline.
+      // A cleanup-caused pipe reset cannot rewrite the failure-time classification.
+      attempt.check();budget.check();
+      if(budget.remaining()<=10000)throw Error('Insufficient browser startup budget after cleanup');
+    }
+  }
+  throw Error('Browser startup attempts exhausted');
+}
+function ownedBrowserAttempt(chrome,number,budget,spawn,temporaryDirectory){
+  const diagnostics=browserDiagnostics(chrome,process.version),pending=new Map();
+  let profile=null,child=null,lifetime=null,serial=0,buffer='',errors='',failure=null,closing=null,protocolFailure=null;
+  let cleanup={status:'not-started',child_closed:false,profile_removed:false};
+  const rejectPending=error=>{for(const item of pending.values()){item.timer.cancel();item.reject(error);}pending.clear();};
+  const check=()=>{budget.check();if(protocolFailure)throw protocolFailure;};
+  const captureFailure=error=>{
+    if(!failure)failure={error:error.message.slice(0,4096),diagnostics:diagnostics.snapshot()};
+    return failure;
+  };
+  const command=(method,params={},sessionId)=>new Promise((resolve,reject)=>{
+    check();
+    if(!lifetime||lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));
+    const first=serial===0,id=++serial;diagnostics.phase(method);
+    const timer=commandTimer({first,method,id,reject,onTimeout:()=>pending.delete(id)});
+    pending.set(id,{resolve,reject,timer});
+    const wire=JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0';
+    writeDiagnosticPipe(child.stdio[3],wire,id,diagnostics);
+  });
+  return {
+    diagnostics,command,check,captureFailure,get serial(){return serial;},
+    async open(){
+      budget.check();
+      profile=fs.mkdtempSync(path.join(temporaryDirectory,'uas-manager-chrome-'));
+      child=spawn(chrome,['--headless=new','--remote-debugging-pipe','--disable-background-networking','--disable-component-update','--disable-default-apps','--disable-sync','--no-first-run','--no-default-browser-check','--metrics-recording-only','--password-store=basic','--use-mock-keychain',`--user-data-dir=${profile}`,'about:blank'],{stdio:['ignore','ignore','pipe','pipe','pipe'],shell:false});
+      diagnostics.record('spawn-return',{pid:child.pid||null});
+      child.once('spawn',()=>diagnostics.record('spawn-event',{pid:child.pid||null}));
+      child.once('exit',(code,signal)=>diagnostics.exit(code,signal));
+      child.once('close',(code,signal)=>diagnostics.close(code,signal));
+      child.on('error',error=>diagnostics.record('child-error',{code:error.code||null,error:error.message}));
+      lifetime=trackChild(child,rejectPending);
+      if(!child.pid){await lifetime.stopped;throw Error('Chrome spawn failed before acquiring a process');}
+      child.stderr.on('data',chunk=>{errors=(errors+chunk).slice(-8192);});
+      child.stdio[3].on('error',error=>{diagnostics.record('write-pipe-error',{code:error.code||null,error:error.message});rejectPending(error);});
+      child.stdio[4].on('error',error=>{diagnostics.record('read-pipe-error',{code:error.code||null,error:error.message});rejectPending(error);});
+      child.stdio[4].on('data',chunk=>{
+        diagnostics.received(chunk.length);buffer+=chunk.toString();
+        if(buffer.length>16*1024*1024){child.kill('SIGKILL');return;}
+        let boundary;
+        while((boundary=buffer.indexOf('\0'))>=0){
+          const raw=buffer.slice(0,boundary);buffer=buffer.slice(boundary+1);if(!raw)continue;
+          let message;
+          try{message=JSON.parse(raw);}
+          catch(_){
+            protocolFailure=Object.assign(Error('Malformed CDP response'),{code:'CDP_PROTOCOL_ERROR'});
+            diagnostics.record('protocol-error',{error:protocolFailure.message});captureFailure(protocolFailure);rejectPending(protocolFailure);return;
+          }
+          const item=pending.get(message?.id);
+          if(item){pending.delete(message.id);item.timer.cancel();message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}
+        }
+      });
+    },
+    abort(error){
+      rejectPending(error);
+      if(child&&lifetime&&!lifetime.ended){try{child.kill('SIGKILL');}catch(killError){diagnostics.record('deadline-kill-error',{error:killError.message});}}
+    },
+    close(){
+      if(!closing)closing=(async()=>{
+        cleanup={status:'pending',child_closed:false,profile_removed:false};
+        try{
+          await closeOwnedBrowser(child,lifetime,()=>command('Browser.close'),profile,{remove:ownedProfile=>{
+            fs.rmSync(ownedProfile,{recursive:true,force:true,maxRetries:3,retryDelay:100});cleanup.profile_removed=true;
+          }});
+          cleanup.status='confirmed';
+        }catch(error){cleanup.status='failed';cleanup.error=error.message;throw error;}
+        finally{cleanup.child_closed=lifetime?.closed===true;rejectPending(Error('Browser session closed'));}
+        return {...cleanup};
+      })();
+      return closing;
+    },
+    receipt(){return {attempt:number,status:failure||cleanup.status!=='confirmed'?'failed':'passed',failure,stderr:errors,cleanup:{...cleanup},diagnostics:diagnostics.snapshot()};}
+  };
+}
+async function startupRecoveryContract(){
+  const timeout=()=>Object.assign(Error('CDP timeout: Browser.getVersion'),{code:'CDP_COMMAND_TIMEOUT',method:'Browser.getVersion',commandId:1,first:true});
+  const snapshot=()=>({phase:'Browser.getVersion',received_bytes:0,browser_version:null,exit:null,close:null,dropped_events:0,
+    events:[{event:'spawn-return',pid:17},{event:'spawn-event',pid:17},{event:'pipe-write-complete',id:1,error:null,code:null}]});
+  assert(recoverableStartup(0,timeout(),1,snapshot()));
+  for(const [number,serial,error] of [[1,1,timeout()],[0,2,timeout()],[0,1,Error('CDP timeout: Browser.getVersion')],
+    ...[{code:'OTHER'},{method:'Runtime.evaluate'},{commandId:2},{first:false}].map(change=>[0,1,Object.assign(timeout(),change)])])assert(!recoverableStartup(number,error,serial,snapshot()));
+  for(const change of [{phase:'Runtime.evaluate'},{received_bytes:1},{browser_version:{}},{exit:{}},{close:{}},{dropped_events:1}])assert(!recoverableStartup(0,timeout(),1,{...snapshot(),...change}));
+  for(const event of ['child-error','write-pipe-error','read-pipe-error','pipe-write-threw','protocol-error']){
+    const observed=snapshot();observed.events.push({event});assert(!recoverableStartup(0,timeout(),1,observed));
+  }
+  for(const mode of ['no-spawn','wrong-pid','no-write-complete','write-error']){
+    const observed=snapshot();
+    if(mode==='no-spawn')observed.events.splice(1,1);
+    if(mode==='wrong-pid')observed.events[1].pid=18;
+    if(mode==='no-write-complete')observed.events.pop();
+    if(mode==='write-error')observed.events.at(-1).code='EPIPE';
+    assert(!recoverableStartup(0,timeout(),1,observed));
+  }
+  async function scenario(mode){
+    let time=0,scheduled=0,cleared=0,expired=0,fire;const trace=[],attempts=[];
+    const budget=browserBudget(()=>{expired++;},{now:()=>time,set:(fn,ms)=>{assert.equal(ms,35000);scheduled++;fire=fn;return 19;},clear:id=>{assert.equal(id,19);cleared++;}});
+    const create=number=>{
+      const observed=snapshot();let failure=null;
+      return {serial:1,check:()=>budget.check(),diagnostics:{version(){trace.push('version '+number);}},
+        open(){trace.push('open '+number);if(mode==='spawn-error')throw Error('spawn failed');},
+        async command(method){assert.equal(method,'Browser.getVersion');trace.push('probe '+number);time+=number?850:10000;
+          if(number===0||mode==='second-timeout')throw timeout();return {product:'Chrome/test'};},
+        captureFailure(error){failure={error:error.message,diagnostics:structuredClone(observed)};return failure;},
+        async close(){trace.push('close '+number);time+=1500;observed.events.push({event:'write-pipe-error',code:'ECONNRESET'});
+          if(mode==='cleanup-throws')throw Error('profile retained');
+          if(mode==='budget-expired'){time=35000;fire();}
+          if(mode==='budget-short')time=25000;
+          return {status:mode==='cleanup-pending'?'pending':'confirmed',child_closed:mode!=='no-close',profile_removed:mode!=='no-removal'};},
+        get failure(){return failure;}};
+    };
+    let result,caught;
+    try{result=await startOwnedBrowser(create,budget,attempts);}
+    catch(error){caught=error;}
+    finally{budget.cancel();assert.equal(scheduled,1,'one original deadline only');assert.equal(cleared,1);}
+    if(mode==='success'){
+      assert.ifError(caught);assert.equal(result.version.product,'Chrome/test');assert.equal(attempts.length,2);
+      assert.deepEqual(trace,['open 0','probe 0','close 0','open 1','probe 1','version 1']);
+      assert.equal(budget.remaining(),22650);assert(!attempts[0].failure.diagnostics.events.some(event=>event.event==='write-pipe-error'));
+      // UI/protocol failures after the returned probe are not inside the coordinator.
+      await assert.rejects(Promise.reject(Error('UI assertion failed')),/UI assertion/);assert.equal(attempts.length,2);
+    }else{
+      assert(caught,'negative startup scenario must fail');
+      assert.equal(attempts.length,mode==='second-timeout'?2:1);
+      assert(!trace.includes('version 1'));assert.equal(expired,mode==='budget-expired'?1:0);
+    }
+  }
+  for(const mode of ['success','second-timeout','spawn-error','cleanup-throws','cleanup-pending','no-close','no-removal','budget-expired','budget-short'])await scenario(mode);
 }
 
 async function browserCheck(){
   if(process.env.GITHUB_ACTIONS!=='true'||process.env.RUNNER_OS!=='Linux'||process.env.UAS_MANAGER_BROWSER_TEST!=='1')throw Error('Explicit hosted Linux browser guard required');
   const os=require('node:os'),{spawn}=require('node:child_process');
-  const chrome=['/usr/bin/google-chrome','/usr/bin/chromium'].find(file=>fs.existsSync(file));
-  if(!chrome)throw Error('Preinstalled Chrome unavailable; download and sandbox bypass forbidden');
-  const output=path.join(root,'browser-proof'),pending=new Map();
-  const started=Date.now();let phase='spawn',failurePhase=null,failureElapsed=null;
-  let profile=null,child=null,lifetime=null,deadline=null,proof=null,serial=0,buffer='',errors='',graceful=null,failure=null;
-  const rejectPending=error=>{for(const item of pending.values()){item.timer.cancel();item.reject(error);}pending.clear();};
+  const chrome=chromeExecutable();
+  const output=path.join(root,'browser-proof'),attempts=[];
+  const started=Date.now();let current=null,proof=null,failure=null,failurePhase=null,failureElapsed=null,failureDiagnostics=null,expired=null;
+  const budget=browserBudget(error=>{expired=error;current?.abort(error);});
   try{
     fs.mkdirSync(output);
-    profile=fs.mkdtempSync(path.join(os.tmpdir(),'uas-manager-chrome-'));
-    child=spawn(chrome,['--headless=new','--remote-debugging-pipe','--disable-background-networking','--disable-component-update','--disable-default-apps','--disable-sync','--no-first-run','--no-default-browser-check','--metrics-recording-only','--password-store=basic','--use-mock-keychain',`--user-data-dir=${profile}`,'about:blank'],{stdio:['ignore','ignore','pipe','pipe','pipe'],shell:false});
-    lifetime=trackChild(child,rejectPending);
-    if(!child.pid){await lifetime.stopped;throw Error('Chrome spawn failed before acquiring a process');}
-    deadline=setTimeout(()=>{if(!lifetime.ended)child.kill('SIGKILL');},35000);
-  child.stderr.on('data',chunk=>{errors=(errors+chunk).slice(-8192);});
-  child.stdio[3].on('error',rejectPending);
-  child.stdio[4].on('error',rejectPending);
-  child.stdio[4].on('data',chunk=>{
-    buffer+=chunk.toString();if(buffer.length>16*1024*1024){child.kill('SIGKILL');return;}
-    let boundary;while((boundary=buffer.indexOf('\0'))>=0){const raw=buffer.slice(0,boundary);buffer=buffer.slice(boundary+1);if(!raw)continue;
-      const message=JSON.parse(raw),item=pending.get(message.id);if(item){pending.delete(message.id);item.timer.cancel();message.error?item.reject(Error(JSON.stringify(message.error))):item.resolve(message.result);}}
-  });
-  const command=(method,params={},sessionId)=>new Promise((resolve,reject)=>{
-    if(lifetime.ended)return reject(Error('Chrome stopped: '+errors.slice(-2000)));const first=serial===0,id=++serial;phase=method;
-    const timer=commandTimer({first,method,reject,onTimeout:()=>pending.delete(id)});
-    pending.set(id,{resolve,reject,timer});child.stdio[3].write(JSON.stringify({id,method,params,...(sessionId?{sessionId}:{})})+'\0');
-  });
-    graceful=()=>command('Browser.close');
-    const version=await command('Browser.getVersion'),target=await command('Target.createTarget',{url:'about:blank'});
+    const opened=await startOwnedBrowser(number=>{
+      current=ownedBrowserAttempt(chrome,number,budget,spawn,os.tmpdir());return current;
+    },budget,attempts);
+    const {version}=opened,command=current.command;
+    const target=await command('Target.createTarget',{url:'about:blank'});
     const {sessionId}=await command('Target.attachToTarget',{targetId:target.targetId,flatten:true});
     const send=(method,params)=>command(method,params,sessionId);
     const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value;};
@@ -263,24 +504,29 @@ async function browserCheck(){
     await evaluate(`installActionHost(${JSON.stringify(project)},null)`);
     proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
-    failure=error;failurePhase=phase;failureElapsed=Math.max(0,Date.now()-started);
+    failure=error;failureElapsed=Math.max(0,Date.now()-started);
+    const observed=current?.captureFailure(error);
+    failureDiagnostics=observed?.diagnostics||null;failurePhase=failureDiagnostics?.phase||'spawn';
   }finally{
-    clearTimeout(deadline);
-    try { await closeOwnedBrowser(child,lifetime,graceful,profile); }
+    try { await current?.close(); }
     catch(cleanupError){
-      if(failure)failure=new Error(failure.message+'; cleanup: '+cleanupError.message,{cause:failure});
-      else failure=cleanupError;
+      if(failure&&!failure.message.includes(cleanupError.message))failure=new Error(failure.message+'; cleanup: '+cleanupError.message,{cause:failure});
+      else if(!failure)failure=cleanupError;
     }
-    rejectPending(Error('Browser session closed'));
-    for(const item of pending.values())item.timer.cancel();
+    if(!failure){try{current?.check();budget.check();}catch(error){failure=error;}}
+    budget.cancel();
   }
-  if(failure){
-    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',phase:failurePhase||'cleanup',elapsed_ms:failureElapsed===null?Math.max(0,Date.now()-started):failureElapsed,error:failure.message.slice(0,4096),stderr:errors},null,2));
+  const records=attempts.map(attempt=>attempt.receipt()),last=records.at(-1);
+  if(failure||expired){
+    failure=failure||expired;
+    if(fs.existsSync(output))fs.writeFileSync(path.join(output,'failure.json'),JSON.stringify({status:'failed',phase:failurePhase||'cleanup',elapsed_ms:failureElapsed===null?Math.max(0,Date.now()-started):failureElapsed,error:failure.message.slice(0,4096),stderr:last?.stderr||'',diagnostics:{at_failure:failureDiagnostics,after_cleanup:last?.diagnostics||null},attempts:records},null,2));
     throw failure;
   }
   // Never publish a success receipt before actual child termination/cleanup.
-  fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed'},null,2));
+  fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({...proof,lifecycle:'terminated-and-profile-removed',diagnostics:last.diagnostics,startup_recoveries:records.length-1,attempts:records},null,2));
   console.log(`manager real-browser proof: ${proof.routes.length} routes; ${proof.browser.product}; ${output}/receipt.json`);
 }
+executableContract();
 timerContract();
-ownershipContract().then(actionContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
+diagnosticsContract();
+ownershipContract().then(startupRecoveryContract).then(()=>require('./test-startup-recovery.cjs')()).then(actionContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});

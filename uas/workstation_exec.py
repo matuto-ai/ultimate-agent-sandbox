@@ -87,14 +87,21 @@ class ExecLaunch:
     The one-use challenge correlates the trusted fixed bootstrap's exec stdin
     to a kernel record; it is not a badge or post-launch bearer credential.
     """
-    def __init__(self, engine, seat, endpoint, journal, *, timeout=10):
+    def __init__(self, engine, seat, endpoint, journal, *, timeout=10, native_recipe=None):
         if type(seat) is not ExecSeat or not 0 < timeout <= 10:
             raise ExecUnavailable('invalid launch')
+        if native_recipe is not None:
+            from .native_pi_recipe import NativePiRecipe
+            if (type(self) is not ExecLaunch or type(native_recipe) is not NativePiRecipe
+                    or native_recipe.seat != seat or native_recipe.endpoint != str(endpoint.path)):
+                raise ExecUnavailable('native recipe must match canonical launch seat/endpoint')
+        self.native_recipe = native_recipe
         self.engine, self.seat, self.endpoint = engine, seat, endpoint
         self.journal = Path(journal)
         self.timeout = timeout
         self.exec_id = None
         self.origin = self.channel = self.transport = None
+        self.forge_channel = None
         self.state = 'new'
         self._owns_journal = False
         self.incarnation = uuid.uuid4().hex
@@ -104,13 +111,19 @@ class ExecLaunch:
         self.native_receiver = None
         self.admission = None
 
-    def _save(self, *, first=False):
+    def _journal_document(self):
         document = {'version': 1, 'room_id': self.seat.room_id,
                     'room_instance': self.seat.room_instance,
                     'participant_id': self.seat.participant_id, 'actor_id': self.seat.actor_id,
                     'container_id': self.seat.container_id, 'exec_id': self.exec_id,
                     'incarnation': self.incarnation, 'state': self.state,
                     'native_readiness': self._native_readiness, 'admission': self.admission}
+        if getattr(self, 'native_recipe', None) is not None:
+            document['native_recipe'] = self.native_recipe.identity
+        return document
+
+    def _save(self, *, first=False):
+        document = self._journal_document()
         # No challenge, credential or replayable process authority is persisted.
         data = json.dumps(document, sort_keys=True, allow_nan=False).encode()
         if len(data) > 16384 or (self.admission is not None and type(self.admission) is not dict):
@@ -169,24 +182,42 @@ class ExecLaunch:
         self._remaining()
 
     def _create_spec(self):
-        """Fixed Pi recipe; only trusted fixed helper subclasses may differ."""
+        """Fixture default; explicit native recipe only on canonical ExecLaunch."""
+        if getattr(self, 'native_recipe', None) is not None:
+            return self.native_recipe.exec_spec()
         return {'AttachStdin': True, 'AttachStdout': True, 'AttachStderr': True,
                 'Tty': False, 'Privileged': False, 'User': '65532:65532',
                 'WorkingDir': '/uas/workspace', 'Cmd': [CONNECTOR, self.seat.slot], 'Env': []}
 
-    def launch(self, listener):
+    def launch(self, listener, *, authorize=None):
+        # Optional deny-only fence for a canonical Run owner. It cannot replace
+        # native image/endpoint/kernel authority or hold a lock across Engine I/O.
+        if authorize is not None and not callable(authorize):
+            raise ExecUnavailable('invalid launch authorization fence')
+        def recheck():
+            if authorize is not None and authorize() is not True:
+                raise ExecUnavailable('launch authorization revoked')
         if self.state != 'new':
             raise ExecUnavailable('launch is one-shot; reconcile before replacement')
         # No engine mutation before actual platform and endpoint checks.
+        if getattr(self, 'native_recipe', None) is not None:
+            self.native_recipe.validate_container(self.engine)
+            self.native_recipe.require_provider_auth()
         probe(); self.endpoint.require(); enable(listener)
+        recheck()
         self.state = 'creating'
         self._save(first=True)
         self.deadline = time.monotonic() + self.timeout
         try:
+            if getattr(self, 'native_recipe', None) is not None:
+                self.native_recipe.validate_container(self.engine)
+                self._remaining()
+            recheck()
             self.exec_id = self.engine.create(self.seat.container_id, self._create_spec())
             if type(self.exec_id) is not str or not ID.fullmatch(self.exec_id):
                 raise ExecUnavailable('invalid exec-create result')
             self.state = 'starting'; self._save()
+            recheck()
             self.transport = self.engine.start(self.exec_id)
             self.challenge = secrets.token_bytes(32)
             self.transport.write(self.challenge, timeout=self._remaining())
@@ -205,9 +236,13 @@ class ExecLaunch:
             self.endpoint.require()
             self.state = 'bound'; self._save()
             self._inspect(self.origin.credentials[0])
+            recheck()
             if self.channel.send(RELEASE) != len(RELEASE):
                 raise ExecUnavailable('incomplete release')
             self.state = 'released'; self._save()
+            if self.native_recipe is not None:
+                self._receive_native_forge(listener)
+            recheck()
             return self
         except BaseException:
             self.challenge = None
@@ -219,6 +254,28 @@ class ExecLaunch:
             except (OSError, ExecUnavailable, ValueError):
                 pass  # Existing creating/starting marker still blocks retry.
             self.close_transport()
+            raise
+
+    def _receive_native_forge(self, listener):
+        """Native-only second connection, authenticated as the exact Pi task."""
+        if self.native_recipe is None or self.state != 'released' or self.forge_channel is not None:
+            raise OriginDenied('native Pi direct Forge binding unavailable')
+        self.endpoint.require()
+        listener.settimeout(self._remaining())
+        channel, _ = listener.accept()
+        try:
+            enable(channel); channel.settimeout(self._remaining())
+            with receive(channel) as record:
+                self.origin.require(record)
+                if record.data != b'UAS-PI-FORGE-1\n':
+                    raise OriginDenied('invalid fixed Pi Forge hello')
+            self.forge_channel = channel
+            release = b'UAS-FORGE-RELEASE-1\n'
+            if channel.send(release) != len(release):
+                raise OriginDenied('partial Pi Forge release')
+        except BaseException:
+            channel.close()
+            self.forge_channel = None
             raise
 
     def require_record(self, record, *, room_id, participant_id):
@@ -258,7 +315,7 @@ class ExecLaunch:
         return None if self._native_readiness is None else json.loads(json.dumps(self._native_readiness))
 
     def attach_native(self, *, journal, scope, profile_digest, timeout=8, startup_observer=None,
-                      initial_state_timeout=None):
+                      initial_state_timeout=None, preceding_runtime_id=None):
         """Supervisor-only concrete fresh-native proof over exact Engine RPC.
 
         profile_digest identifies trusted immutable payload admission; this
@@ -281,20 +338,34 @@ class ExecLaunch:
                     or scope.get('participant_id') != self.seat.participant_id):
                 raise ExecUnavailable('trusted native scope/profile required')
             scope = dict(scope)
+            if getattr(self, 'native_recipe', None) is not None:
+                if (scope != self.native_recipe.scope
+                        or profile_digest != self.native_recipe.manifest_digest):
+                    raise ExecUnavailable('native recipe scope/payload mismatch')
+                self.native_recipe.validate_container(self.engine)
+                self._inspect(self.origin.credentials[0])
+            resume = getattr(getattr(self, 'native_recipe', None), 'resume', None)
+            if (resume is None) != (preceding_runtime_id is None):
+                raise ExecUnavailable('exact prior runtime required only for native resume')
             receiver = FixturePiRpcReceiver.attach_workstation(self, journal=journal,
                 scope=scope, timeout=timeout, startup_observer=startup_observer,
-                initial_state_timeout=initial_state_timeout)
+                initial_state_timeout=initial_state_timeout,
+                **({} if resume is None else {'require_existing_journal': True}))
             self.native_receiver = receiver
             if (receiver.incarnation_id != self.incarnation or receiver.scope != scope
                     or receiver.runtime_version != '1.4.0'):
                 raise ExecUnavailable('native attachment binding mismatch')
-            proof = receiver.prove_fresh_context()
-            prefix = '/uas/runtime/' + self.seat.slot + '/sessions/'
+            proof = (receiver.prove_fresh_context() if resume is None else
+                     receiver.prove_resumed_context(session_id=resume.session_id,
+                         session_file=resume.session_file, preceding_runtime_id=preceding_runtime_id))
+            prefix = (self.native_recipe.sessions + '/' if getattr(self, 'native_recipe', None) is not None
+                      else '/uas/runtime/' + self.seat.slot + '/sessions/')
             if (type(proof) is not dict
                     or set(proof) != {'runtime_id', 'session_id', 'session_file', 'source'}
                     or any(type(proof[k]) is not str or not 0 < len(proof[k]) <= 1024
                            for k in proof)
-                    or proof['source'] != 'native-empty-session-and-no-pending-messages'
+                    or proof['source'] != ('native-empty-session-and-no-pending-messages' if resume is None
+                                          else 'native-existing-session-and-no-pending-messages')
                     or any(ord(c) < 32 or ord(c) == 127 for c in proof['session_file'])
                     or not proof['session_file'].startswith(prefix)
                     or str(Path(proof['session_file'])) != proof['session_file']
@@ -342,8 +413,8 @@ class ExecLaunch:
     def close_transport(self):
         # No numeric-PID kill, whole-container kill, broad cleanup or respawn.
         # Transport closure does not assert actual task exit.
-        resources = (self.channel, self.transport)
-        self.channel = self.transport = None
+        resources = (self.channel, self.transport, getattr(self, 'forge_channel', None))
+        self.channel = self.transport = self.forge_channel = None
         error = None
         for resource in resources:
             if resource is not None:

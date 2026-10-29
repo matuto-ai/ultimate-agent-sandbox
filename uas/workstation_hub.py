@@ -14,16 +14,19 @@ from .workstation_peer import AdmittedPeerDispatcher
 
 
 class AdmittedHubLoop:
-    def __init__(self, admissions, dispatcher, control, *, context_generations):
+    def __init__(self, admissions, dispatcher, control, *, context_generations, canonical_context_generations=False):
         if (type(admissions) is not HubAdmission or type(dispatcher) is not AdmittedPeerDispatcher
                 or dispatcher.admissions is not admissions
+                or type(canonical_context_generations) is not bool
                 or type(context_generations) is not dict
                 or set(context_generations) != set(admissions.seats)
                 or any(type(value) is not int or not 0 < value < 2**53
                        for value in context_generations.values())):
             raise OriginDenied('trusted Hub control/context configuration required')
         self.admissions, self.dispatcher, self.control = admissions, dispatcher, control
+        admissions.bind_control(control)
         self.context_generations = MappingProxyType(dict(context_generations))
+        self.canonical_context_generations=canonical_context_generations
         self._owner = threading.get_ident()
         self._selector = selectors.DefaultSelector()
         self._registered = {}
@@ -44,17 +47,25 @@ class AdmittedHubLoop:
     def _attach(self, operation):
         binding = self.admissions.binding(operation)
         self.dispatcher.attach_current(operation,
-            context_generation=self.context_generations[binding.seat.participant_id])
+            context_generation=(None if self.canonical_context_generations else
+                                self.context_generations[binding.seat.participant_id]))
 
     def _sync(self):
         # Descriptor integers are selector readiness handles only; attribution
         # always rechecks the held kernel object and immutable binding.
         with self.admissions._lock:
             wanted = {}
-            for operation, (offer, _) in self.admissions._active.items():
-                offer.channel.setblocking(False)
-                wanted[('peer', operation)] = offer.channel
+            for operation, (offer, binding) in self.admissions._active.items():
+                if binding.native_payload_digest is None:
+                    offer.channel.setblocking(False)
+                    wanted[('peer', operation)] = offer.channel
                 wanted[('task', operation)] = offer.origin.pidfd
+                if offer.host_origin is not None:
+                    wanted[('host-task', operation)] = offer.host_origin.pidfd
+            for operation, offer in self.admissions._helpers.items():
+                offer.channel.setblocking(False)
+                wanted[('helper', operation)] = offer.channel
+                wanted[('helper-task', operation)] = offer.origin.pidfd
         for key, (resource, number) in tuple(self._registered.items()):
             if key not in wanted or wanted[key] != resource:
                 self._selector.unregister(number)
@@ -90,9 +101,12 @@ class AdmittedHubLoop:
                         if not select.select([self.control], [], [], 0)[0]:
                             break
                         self.admissions.serve_once(self.control, on_admitted=self._attach,
-                                                   on_delivery=self.dispatcher.delivery)
+                                                   on_delivery=self.dispatcher.delivery,
+                                                   on_forge_reserve=self.dispatcher.reserve_host_forge)
                     control_pending = bool(select.select([self.control], [], [], 0)[0])
-                elif kind == 'task':
+                elif kind == 'helper-task':
+                    self.admissions.revoke_helper(operation)
+                elif kind in ('task','host-task'):
                     self.admissions.revoke(operation)
             self._sync()
             if control_pending:
@@ -102,6 +116,8 @@ class AdmittedHubLoop:
                 kind, operation = key.data
                 if kind == 'peer' and ('peer', operation) in self._registered:
                     results.append(self.dispatcher.receive(operation))
+                elif kind == 'helper' and ('helper', operation) in self._registered:
+                    results.append(self.dispatcher.receive_helper(operation))
             self._sync()
             return results
         except BaseException:

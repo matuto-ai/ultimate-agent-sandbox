@@ -146,6 +146,49 @@ class ArtifactGateHub:
         self.ledger, self.binding, self.control = ledger, binding, control
         self.authorize = authorize
         self._owner = threading.get_ident()
+        self._native_workflow = None
+
+    def _receipt_native(self, command, origin, *, authorize):
+        workflow = self._native_workflow
+        if workflow is None:
+            return self.ledger.exact_receipt(command, origin, authorize=authorize)
+        from .native_gate_workflow import NativeGateWorkflow
+        if type(workflow) is not NativeGateWorkflow:
+            raise LedgerError('EXACT_NATIVE_GATE_WORKFLOW_REQUIRED')
+        with workflow.commit(self):
+            def checked(actor, value):
+                workflow.check_state(self.ledger.snapshot()['state'])
+                return authorize(actor, value) is True
+            return self.ledger.exact_receipt(command, origin, authorize=checked)
+
+    def _apply_native(self, command, origin, *, authorize, decide, error_sink=None):
+        """Native success consumes a local fence; error recording never grants it."""
+        workflow = self._native_workflow
+        if workflow is None:
+            return self.ledger.apply(command, origin, authorize=authorize, decide=decide)
+        from .native_gate_workflow import NativeGateWorkflow
+        if type(workflow) is not NativeGateWorkflow:
+            raise LedgerError('EXACT_NATIVE_GATE_WORKFLOW_REQUIRED')
+        manager = workflow.commit(self)
+        entered = False
+        try:
+            try:
+                manager.__enter__(); entered = True
+            except Exception as error:
+                if error_sink is None: raise
+                error_sink(self._error_code(error))
+            def consume(state, origin):
+                if entered:
+                    try: workflow.check_state(state)
+                    except Exception as error:
+                        if error_sink is None: raise
+                        error_sink(self._error_code(error))
+                return decide(state, origin)
+            return self.ledger.apply(command, origin, authorize=authorize, decide=consume)
+        finally:
+            if entered:
+                import sys
+                manager.__exit__(*sys.exc_info())
 
     def _require_owner(self):
         if threading.get_ident() != self._owner:
@@ -266,7 +309,7 @@ class ArtifactGateHub:
         """Evaluate once; exact retries read the original attempt, never relaunch."""
         self._require_owner()
         command = self._command(operation_id, run_id, generation, gate_id)
-        receipt = self.ledger.exact_receipt(command, origin, authorize=self.authorize)
+        receipt = self._receipt_native(command, origin, authorize=self.authorize)
         if receipt is not None:
             return self._view(self._row(receipt['result']['evaluation_id']))
         run, policy, gate = self._definition(self.ledger.snapshot()['state'], command)
@@ -324,7 +367,7 @@ class ArtifactGateHub:
             return Transition(state, (Event('gate.started', {k: row[k] for k in
                 ('evaluation_id', 'scope', 'source', 'checkout_digest', 'items', 'evaluator', 'config', 'declaration', 'started')}),),
                 {'evaluation_id': scope['evaluation_id']})
-        receipt = self.ledger.apply(command, origin, authorize=self.authorize, decide=reserve)
+        receipt = self._apply_native(command, origin, authorize=self.authorize, decide=reserve)
         if not created:
             return self._view(self._row(receipt['result']['evaluation_id']))
         return self._execute(scope['evaluation_id'], command, origin)
@@ -493,6 +536,7 @@ class ArtifactGateHub:
 
     def _complete(self, evaluation_id, command, origin, observations, cleanup, fresh, reason):
         terminal = Command('gate-terminal-' + evaluation_id, 'gate.completed', evaluation_id, None, {})
+        native_denied = False
         def decide(state, _):
             row = state['gate_evaluations'][evaluation_id]
             if row['result'] is not None:
@@ -503,12 +547,13 @@ class ArtifactGateHub:
                                   or cleanup['cleanup'] is not True
                                   or cleanup['launch_state'] != 'exited'):
                 error = 'GATE_TERMINAL_PROOF_MISMATCH'
-            try:
-                authorized = self.authorize(origin, command) is True
-            except Exception:
-                authorized = False
-            if not authorized:
-                error = 'GATE_AUTHORITY_REVOKED'
+            if not native_denied:
+                try:
+                    authorized = self.authorize(origin, command) is True
+                except Exception:
+                    authorized = False
+                if not authorized:
+                    error = 'GATE_AUTHORITY_REVOKED'
             try:
                 run, policy, gate = self._definition(state, command)
                 current_scope = self._scope(command, run, policy, gate)
@@ -550,7 +595,11 @@ class ArtifactGateHub:
                 row['reservation']['scratch_bytes'] = 0
             _capacity(state)
             return Transition(state, (Event('gate.completed', result),), {'evaluation_id': evaluation_id})
-        self.ledger.apply(terminal, _CONTROL, authorize=lambda *_: True, decide=decide)
+        def native_error(code):
+            nonlocal reason, native_denied
+            native_denied = True
+            reason = reason or code
+        self._apply_native(terminal, _CONTROL, authorize=lambda *_: True, decide=decide, error_sink=native_error)
         return self._view(self._row(evaluation_id))
 
     @staticmethod

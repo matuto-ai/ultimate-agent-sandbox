@@ -156,7 +156,16 @@ class AdmittedPeerTests(unittest.TestCase):
         binding = self.admissions.binding(operation)
         self.assertEqual(binding.seat.actor_id, 'actor-a')
         connection = hub.connect('attach', 'alice', binding.incarnation, object())
-        dispatcher = AdmittedPeerDispatcher(self.admissions, hub)
+        # A dispatcher owns one admission controller. Use a separate real
+        # admission fixture for the intentionally mismatched local Hub.
+        admissions = HubAdmission(self.root/'mismatched-admissions.db', seats=self.seats,
+                                  supervisor=self.supervisor, endpoint=Endpoint())
+        self.addCleanup(admissions.close)
+        send_admit(self.sender, launch=self.launches[0], seat=self.seats[0],
+                   operation_id=operation, epoch=1, readiness_digest='c'*64)
+        admissions.admit(self.control)
+        self.assertEqual(admissions.binding(operation), binding)
+        dispatcher = AdmittedPeerDispatcher(admissions, hub)
         before = ledger.snapshot()
         with self.assertRaisesRegex(OriginDenied, 'Hub Actor'):
             dispatcher.attach(operation, connection)
@@ -196,6 +205,12 @@ class AdmittedPeerTests(unittest.TestCase):
         self.assertEqual(self.exchange(0, packet)['error'], 'FORGE_UNAVAILABLE')
         self.assertEqual(self.ledger.snapshot()['room_seq'], sequence)
 
+    def assert_only_lost_since(self, sequence, participant='alice'):
+        events=self.ledger.replay(sequence)
+        self.assertEqual([event['kind'] for event in events],['peer.observed'])
+        self.assertEqual(events[0]['payload']['participant_id'],participant)
+        self.assertEqual(events[0]['payload']['readiness'],'lost')
+
     def test_other_live_child_record_cannot_use_alice_admission(self):
         self.children[1].send(self.packet(1))
         with receive(self.admissions.peer_channel(self.operations[1])) as wrong_record:
@@ -203,7 +218,7 @@ class AdmittedPeerTests(unittest.TestCase):
             with patch('uas.workstation_peer.receive', return_value=wrong_record):
                 result = self.dispatcher.receive(self.operations[0])
             self.assertEqual(result['error'], 'AUTHORITY_REVOKED')
-            self.assertEqual(self.ledger.snapshot()['room_seq'], sequence)
+            self.assert_only_lost_since(sequence)
             self.assertTrue(self.admissions.status(self.operations[1])['installed'])
 
     def test_late_revoke_after_receive_prevents_ledger_mutation(self):
@@ -216,7 +231,7 @@ class AdmittedPeerTests(unittest.TestCase):
         sequence = self.ledger.snapshot()['room_seq']
         with patch('uas.workstation_peer.receive', side_effect=late_revoke):
             self.assertEqual(self.dispatcher.receive(self.operations[0])['error'], 'AUTHORITY_REVOKED')
-        self.assertEqual(self.ledger.snapshot()['room_seq'], sequence)
+        self.assert_only_lost_since(sequence)
 
     def test_exit_after_ledger_begin_is_pure_recheck_then_fence_after_rollback(self):
         original = self.ledger.apply
@@ -233,7 +248,7 @@ class AdmittedPeerTests(unittest.TestCase):
         with patch.object(self.ledger, 'apply', side_effect=apply):
             result = self.dispatcher.receive(self.operations[0])
         self.assertEqual(result['error'], 'AUTHORITY_REVOKED')
-        self.assertEqual(self.ledger.snapshot()['room_seq'], sequence)
+        self.assert_only_lost_since(sequence)
         self.assertTrue(authority_sql)
         self.assertFalse(any(in_transaction for _, in_transaction in authority_sql))
         self.assertTrue(self.admissions.status(self.operations[1])['installed'])

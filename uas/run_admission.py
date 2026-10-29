@@ -7,6 +7,7 @@ never rewrites Run truth. No completion, automatic intake or recovery scheduler
 exists here. Explicit repeats reconcile the same durable intent and owned checkout;
 they never consume another human grant. Explicit authenticated Run Requests reuse this exact admission transaction.
 """
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 import os
@@ -50,7 +51,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
             profile = next((p for p in self.room['profiles']
                             if configured is not None and p['id'] == configured['profile']), None)
             if (configured is None or configured['actor'] != seat.actor_id
-                    or configured['runtime'] != 'pi' or seat.runtime != 'pi-fixture'
+                    or not self._runtime_binding(configured, seat)
                     or profile is None or seat.profile_id != profile['id']
                     or 'implement' not in profile['capabilities'] or 'implement' not in seat.capabilities
                     or set(seat.capabilities) - {'peer-traffic'} - set(profile['capabilities'])
@@ -69,6 +70,10 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         self.broker, self.allocator = broker, allocator
         self.install, self.runtime_root = install, Path(runtime_root)
         self.authorize_human = authorize_human
+
+    @staticmethod
+    def _runtime_binding(configured, seat):
+        return configured['runtime'] == 'pi' and seat.runtime == 'pi-fixture'
 
     @staticmethod
     def run_id(operation_id):
@@ -219,7 +224,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         actor_id = self.actors[seat.actor_id].get('github_user_id')
         policy = next(p for p in self.room['policies'] if p['id'] == self.room['default_policy'])
         with self.supervisor._locked():
-            self.controller._room()
+            self._room()
             def prepare(state, _):
                 if actor_id is None:
                     raise LedgerError('GITHUB_ACTOR_ID_UNKNOWN')
@@ -259,11 +264,8 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                     if context['reset'] and context['reset']['status'] != 'SUCCEEDED':
                         raise LedgerError('CONTEXT_UNAVAILABLE')
                     preceding = deepcopy(assigned)
-                elif (context['context_generation'] != 1 or context['bound_run'] is not None
-                        or context['reset'] is not None or participant in peer['connections']
-                        or participant in self.controller._read()['seats']
-                        or any(participant == t['sender'] or participant in t['recipients']
-                               for t in peer['traffic'].values())):
+                elif not self.hub.contexts.unused_initial(state, participant,
+                        native_started=self._participant_started(participant)):
                     raise LedgerError('UNUSED_NATIVE_CONTEXT_REQUIRED')
                 if peer['definition']['participants'][participant]['actor_id'] != seat.actor_id:
                     raise LedgerError('ADMISSION_BINDING_MISMATCH')
@@ -292,13 +294,36 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 state['fixture_context']['runs'][run] = {
                     'generation': 1, 'status': 'OPEN', 'terminal_fact': None}
                 if preceding is None:
-                    context['reserved_run'] = {'run_id': run, 'generation': 1}
+                    self.hub.contexts.reserve_unused_initial(state, participant, FixtureRun(run))
                 FixturePeerHub._reserve_capacity(state)
                 return Transition(state, (Event('run.admission-reserved', {
                     'run_id': run, 'issue_number': number, 'participant_id': participant}),),
                     {'run_id': run, 'authorization_consumed': False})
             self._apply(command, human, prepare, authorize=authorize)
         return run, command
+
+    def _room(self):
+        return self.controller._room()
+
+    def _participant_started(self, participant):
+        return participant in self.controller._read()['seats']
+
+    def _observe_handle(self, handle):
+        self.hub.observe(handle.connection, handle.connection.receiver.observe())
+
+    def _activation_scope(self, handle):
+        return nullcontext()
+
+    def _safe_handle(self, handle):
+        return handle.connection.receiver.observe() is Readiness.SAFE
+
+    def _current_context(self, state, handle, run, pending):
+        if not self.hub._current(handle.connection, safe=True):
+            raise LedgerError('NATIVE_NOT_SAFE')
+        scope = self.hub.contexts.scope(pending['participant_id'])
+        if (scope != handle.connection.receiver.scope or scope['run_id'] != run
+                or scope['context_generation'] != pending.get('context_generation', 1)):
+            raise LedgerError('CONTEXT_MISMATCH')
 
     def _authority(self, handle):
         # Trusted supervisor examination of its exact owned child, not a client
@@ -318,13 +343,16 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
             raise LedgerError('CHECKOUT_OBSERVATION_LIMIT')
         return slot
 
+    def _handle_origin(self, handle):
+        return handle.badge.origin()
+
     def _fresh_read(self, run, number, handle, attempt_id):
         # Stable ID within one explicit attempt: interrupted contact is reconciled,
         # never repeated. A NEW human refresh attempt gets a new observation.
         envelope = {'id': 'admit-read-' + hashlib.sha256(attempt_id.encode()).hexdigest(), 'kind': 'forge-read',
                     'argv': ['issue', 'view', str(number)]}
         with self.supervisor._locked():
-            intent = self.broker.prepare(envelope, origin=handle.badge.origin(),
+            intent = self.broker.prepare(envelope, origin=self._handle_origin(handle),
                 authorize=lambda: self._authority(handle), admission=True, admission_reservation=run)
         outcome = self.broker.perform(intent)
         try:
@@ -475,7 +503,7 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 or self._seat_binding(participant_id) != pending['seat_binding']):
             raise LedgerError('ACTOR_BINDING_CHANGED')
         with self.supervisor._locked():
-            self.controller._room()
+            self._room()
             if not authorize(human, command):
                 raise LedgerError('FORBIDDEN')
         def stage_authorized():
@@ -527,7 +555,17 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
                 reset = self.hub.contexts._row(participant_id).get('reset')
                 self.controller._save_pi_checkpoint(participant_id, recipe,
                     reset['id'] if reset is not None and reset['status'] == 'SUCCEEDED' else None, native_proof)
-        self.hub.observe(handle.connection, native.observe())
+        return self._observe_and_activate(run, command, pending, attempt_id, terminal,
+            issue_number, participant_id, human, authorize, handle, slot)
+
+    def _observe_and_activate(self, run, command, pending, attempt_id, terminal,
+                              issue_number, participant_id, human, authorize, handle, slot):
+        """Shared canonical eligibility/activation; only concrete native seams vary."""
+        def stage_authorized():
+            if not authorize(human, command) or self._pending(run)['status'] != 'PREPARING':
+                raise LedgerError('ADMISSION_REVOKED')
+            return True
+        self._observe_handle(handle)
         receipt, fresh = self._fresh_read(run, issue_number, handle, attempt_id)
         observed = time.monotonic()
         if not fresh:
@@ -563,63 +601,60 @@ class RunAdmission(RunRequests, RunControl, RunCoordination):
         assignment_audit = (assignment_service._key(assignment_operation)
             if assignment_service is not None and assignment_service.audit.get(
                 assignment_service._key(assignment_operation)) is not None else None)
-        with self.supervisor._locked():
-            self._authority(handle)
-            if native.observe() is not Readiness.SAFE:
-                raise LedgerError('NATIVE_NOT_SAFE')
-            def activate(state, _):
-                if time.monotonic() - observed > 5:
-                    raise LedgerError('FORGE_FACTS_EXPIRED')
-                current = state['run_admissions'][run]
-                if (current['status'] != 'PREPARING'
-                        or current.get('admission_origin', current['human_origin']) != human.canonical()):
-                    raise LedgerError('ADMISSION_CONFLICT')
-                if not self.hub._current(handle.connection, safe=True):
+        with self._activation_scope(handle):
+            with self.supervisor._locked():
+                self._authority(handle)
+                if not self._safe_handle(handle):
                     raise LedgerError('NATIVE_NOT_SAFE')
-                scope = self.hub.contexts.scope(participant_id)
-                if scope != native.scope or scope['run_id'] != run or scope['context_generation'] != pending.get('context_generation', 1):
-                    raise LedgerError('CONTEXT_MISMATCH')
-                # Refresh configured policy at activation, not at an earlier held attempt.
-                policy = next(p for p in self.room['policies'] if p['id'] == self.room['default_policy'])
-                request_id = 'implementation-' + run
-                request_text = self._request_text(issue_number, policy, slot['path'])
-                _text(request_text)
-                record = {'id': request_id, 'kind': 'peer.work-request', 'sender': 'run-hub',
-                    'actor_id': human.actor_id, 'run_id': run, 'generation': 1,
-                    'recipients': [participant_id], 'text': request_text, 'parent_id': None,
-                    'correlation_id': request_id, 'submitted_at': _now(),
-                    'submitted_seq': self.ledger.snapshot()['room_seq'] + 1,
-                    'deliveries': {}, 'status': 'QUEUED', 'response_started_at': None,
-                    'reason': None, 'attention': None}
-                row = {'run_id': run, 'generation': 1, 'status': 'ACTIVE', 'outcome': None,
-                    'issue_number': issue_number, 'issue_id': receipt['observation']['issue']['id'],
-                    'repository': self.broker.binding.repository, 'project_id': self.broker.binding.project_id,
-                    'participant_id': participant_id, 'actor_id': current['actor_id'],
-                    'github_user_id': current['github_user_id'], 'delivery_class': delivery_class,
-                    'policy': deepcopy(policy), 'checkout': deepcopy(slot),
-                    'context_generation': pending.get('context_generation', 1), 'implementation_request': request_id,
-                    'forge_observation': receipt['operation_id'], 'human_operation': current['human_operation'],
-                    'admission_operation': command.id, 'admission_origin': human.canonical(),
-                    'authorization_consumed': True, 'control_revision': 0, 'control_reason': None,
-                    'projection': 'pending',
-                    'assignment_audit': assignment_audit}
-                grant_id = current.get('request_id')
-                if grant_id is not None:
-                    grant = state['run_requests'][grant_id]
-                    if grant['status'] != 'UNUSED' or grant['reserved_run'] != run:
-                        raise LedgerError('FORBIDDEN_RUN_REQUEST')
-                    grant.update(status='CONSUMED', consumed_run=run)
-                    row['run_request'] = grant_id
-                current['policy'] = deepcopy(policy)
-                current.pop('reservation')
-                current.update(status='ACTIVE', authorization_consumed=True, attention=None)
-                state['runs'][run] = row
-                state['peer_traffic']['traffic'][request_id] = record
-                projection = enqueue_run_projection(state, self.ledger.room_id, run)
-                FixturePeerHub._reserve_capacity(state)
-                return Transition(state, (Event('run.activated', row),
-                    Event('peer.submitted', {'traffic_id': request_id, 'recipients': [participant_id]}), projection), row)
-            result = self._apply(terminal, human, activate, authorize=authorize)
+                def activate(state, _):
+                    if time.monotonic() - observed > 5:
+                        raise LedgerError('FORGE_FACTS_EXPIRED')
+                    current = state['run_admissions'][run]
+                    if (current['status'] != 'PREPARING'
+                            or current.get('admission_origin', current['human_origin']) != human.canonical()):
+                        raise LedgerError('ADMISSION_CONFLICT')
+                    self._current_context(state, handle, run, pending)
+                    # Refresh configured policy at activation, not at an earlier held attempt.
+                    policy = next(p for p in self.room['policies'] if p['id'] == self.room['default_policy'])
+                    request_id = 'implementation-' + run
+                    request_text = self._request_text(issue_number, policy, slot['path'])
+                    _text(request_text)
+                    record = {'id': request_id, 'kind': 'peer.work-request', 'sender': 'run-hub',
+                        'actor_id': human.actor_id, 'run_id': run, 'generation': 1,
+                        'recipients': [participant_id], 'text': request_text, 'parent_id': None,
+                        'correlation_id': request_id, 'submitted_at': _now(),
+                        'submitted_seq': self.ledger.snapshot()['room_seq'] + 1,
+                        'deliveries': {}, 'status': 'QUEUED', 'response_started_at': None,
+                        'reason': None, 'attention': None}
+                    row = {'run_id': run, 'generation': 1, 'status': 'ACTIVE', 'outcome': None,
+                        'issue_number': issue_number, 'issue_id': receipt['observation']['issue']['id'],
+                        'repository': self.broker.binding.repository, 'project_id': self.broker.binding.project_id,
+                        'participant_id': participant_id, 'actor_id': current['actor_id'],
+                        'github_user_id': current['github_user_id'], 'delivery_class': delivery_class,
+                        'policy': deepcopy(policy), 'checkout': deepcopy(slot),
+                        'context_generation': pending.get('context_generation', 1), 'implementation_request': request_id,
+                        'forge_observation': receipt['operation_id'], 'human_operation': current['human_operation'],
+                        'admission_operation': command.id, 'admission_origin': human.canonical(),
+                        'authorization_consumed': True, 'control_revision': 0, 'control_reason': None,
+                        'projection': 'pending',
+                        'assignment_audit': assignment_audit}
+                    grant_id = current.get('request_id')
+                    if grant_id is not None:
+                        grant = state['run_requests'][grant_id]
+                        if grant['status'] != 'UNUSED' or grant['reserved_run'] != run:
+                            raise LedgerError('FORBIDDEN_RUN_REQUEST')
+                        grant.update(status='CONSUMED', consumed_run=run)
+                        row['run_request'] = grant_id
+                    current['policy'] = deepcopy(policy)
+                    current.pop('reservation')
+                    current.update(status='ACTIVE', authorization_consumed=True, attention=None)
+                    state['runs'][run] = row
+                    state['peer_traffic']['traffic'][request_id] = record
+                    projection = enqueue_run_projection(state, self.ledger.room_id, run)
+                    FixturePeerHub._reserve_capacity(state)
+                    return Transition(state, (Event('run.activated', row),
+                        Event('peer.submitted', {'traffic_id': request_id, 'recipients': [participant_id]}), projection), row)
+                result = self._apply(terminal, human, activate, authorize=authorize)
         if result['result'].get('status') == 'HELD':
             raise LedgerError(result['result']['reason'])
         return result['result']
