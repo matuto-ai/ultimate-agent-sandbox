@@ -21,7 +21,7 @@ def case(identifier):
 
 class CIPartitionTests(unittest.TestCase):
     def test_fixed_measured_modules_and_every_future_module_default_to_remainder(self):
-        self.assertEqual(ci.SLOW_MODULES, {'test_library_dispatch', 'test_peer', 'test_checkouts',
+        self.assertEqual(ci.SLOW_MODULES, {'test_library_import', 'test_library_dispatch', 'test_peer', 'test_checkouts',
                                           'test_gate_evaluation', 'test_forge_mutations',
                                           'test_artifact_manual_source',
                                           'test_run_review', 'test_staged_source_closure',
@@ -34,7 +34,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
             'test_manager_action_host', 'test_forge_assignment',
     'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
-        self.assertEqual(ci.ADDITIONAL_MODULES, {
+        self.assertEqual(ci.ADDITIONAL_MODULES, {'test_library_observations', 
             'test_library_hub',
             'test_library_enqueue',
             'test_local_three_runs',
@@ -45,7 +45,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
             'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
         })
-        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_inspection'})
+        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_attempts', 'test_library_inspection'})
         self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_library_retention', 'test_library_records', 'test_git_payload'})
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly', 'test_library_registration'})
@@ -78,10 +78,10 @@ class CIPartitionTests(unittest.TestCase):
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
-        self.assertEqual(len(groups['slow']), 16)
+        self.assertEqual(len(groups['slow']), 17)
         self.assertEqual(len(groups['integration']), 20)
-        self.assertEqual(len(groups['additional']), 20)
-        self.assertEqual(len(groups['synthesis']), 4)
+        self.assertEqual(len(groups['additional']), 21)
+        self.assertEqual(len(groups['synthesis']), 2)
         self.assertEqual(len(groups['scheduler']), 3)
         self.assertEqual(len(groups['operator']), 4)
         self.assertEqual(len(groups['remainder']), 2)

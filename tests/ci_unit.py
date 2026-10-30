@@ -19,7 +19,7 @@ import unittest
 # Keep module ownership stable; new modules default to remainder, never disappear.
 # #168 dispatch real-process/Git suite measured9.4s locally; remainder timed
 # out at61s. Existing slow lane43s hosted has headroom; no excluded tests.
-SLOW_MODULES = frozenset({'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
+SLOW_MODULES = frozenset({'test_library_import', 'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_forge_mutations', 'test_artifact_manual_source',
                           'test_run_review', 'test_staged_source_closure',
                           'test_claude_permission_policy', 'test_artifact_native_source',
@@ -51,7 +51,7 @@ INTEGRATION_MODULES = frozenset({'test_library_service', 'test_context',
 # #165 moved the measured enqueue module to this parallel lane.
 # #168 follow-up: slow lane hit60s; move existing Hub (~5.7shosted)
 # to additional lane (46s) without changing total inventory/limits.
-ADDITIONAL_MODULES = frozenset({
+ADDITIONAL_MODULES = frozenset({'test_library_observations', 
     'test_library_hub',
     'test_library_enqueue',
     'test_local_three_runs',
@@ -69,7 +69,10 @@ ADDITIONAL_MODULES = frozenset({
 # #178 hosted inspection46cases22.7s nearly fills remainder53.8s. Move it
 # to synthesis30.5s and relocation4.8s back to remainder: ~48/36s; retain
 # every ID, seven lanes, one-minute job ceilings and aggregate dependency graph.
-SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_inspection'})
+# Postmerge #178 synthesis117 tests passed64.044s and55.701s but exceeded
+# unchanged job budget with setup. Move measured observations8.9s to additional
+# (29.7s), import6.6s to slow(35.3s): worst synthesis~48.5s, no exclusions.
+SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_inspection'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 # #177 second hosted run: integration60.174s/remainder49.460s hit job budget.
