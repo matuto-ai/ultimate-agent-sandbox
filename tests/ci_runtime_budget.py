@@ -14,7 +14,8 @@ GROWTH_PERCENT = 10
 BASELINE_SAMPLES = 5
 UNIT_JOBS = frozenset(('validate', 'unit-slow', 'unit-integration', 'unit-additional',
                        'unit-synthesis', 'unit-scheduler', 'unit-operator', 'unit-inspection',
-                       'unit-lifecycle', 'unit-disposition', 'unit-maintenance', 'unit-archive'))
+                       'unit-lifecycle', 'unit-disposition', 'unit-maintenance', 'unit-archive',
+                       'unit-requeue'))
 SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle',
                        'git-native-seams', 'gate-linux-smoke', 'gate-command-native',
                        'gate-artifact-native', 'room-control-plane', 'manager-mtls',
