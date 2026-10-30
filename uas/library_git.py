@@ -713,6 +713,9 @@ class LibraryGit:
         if kind == "enqueue" and queue_id is not None:
             candidates += [sha for sha in self._search("Library-Queue: " + queue_id)
                            if sha not in candidates]
+        if kind == "import-publication":
+            candidates += [sha for sha in self._search("Library-Request: " + request_id)
+                           if sha not in candidates]
         for sha in candidates:
             code, shown, _ = self._git("show", "-s", "--format=%P%n%B", sha)
             if code != 0:
@@ -726,7 +729,8 @@ class LibraryGit:
                 continue
             if (values["Library-Operation"] != operation_id
                     and not (kind == "enqueue" and queue_id is not None
-                             and values["Library-Queue"] == queue_id)):
+                             and values["Library-Queue"] == queue_id)
+                    and kind != "import-publication"):
                 continue
             previous = parent.split()[0] if parent.split() else None
             input_sha = values["Library-Input"]

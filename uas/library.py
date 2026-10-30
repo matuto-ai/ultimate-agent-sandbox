@@ -52,8 +52,8 @@ INITIAL_FILTERS = {"high_confidence": "block", "heuristic": "observe"}
 # else reaches the service, so a caller cannot assert a commit, outcome or path.
 HUMAN_PAYLOADS = {
     "register": ((), ()),
-    "import-preview": (("source_commit", "paths"), ()),
-    "import-confirm": (("preview_id", "source_commit", "paths", "observed_version"), ()),
+    "import-preview": (("source_commit", "paths"), ("types",)),
+    "import-confirm": (("preview_id", "source_commit", "paths", "observed_version"), ("types",)),
     "inspect": (("queue_id", "observed_version"), ("drain_id",)),
     "drain": (("observed_version",), ()),
     "retry": (("drain_id", "observed_version"), ()),
@@ -771,6 +771,10 @@ def _human_payload(kind, payload, limits):
                     or ".." in path.split("/") or posixpath.normpath(path) != path
                     or any(ord(c) < 32 or ord(c) == 127 for c in path)):
                 _fail("UNSAFE_PATH", field)
+    if "types" in payload:
+        types = _array(payload["types"], "payload.types", limits["scan_documents"], nonempty=True)
+        if len(types) != len(payload["paths"]) or any(item not in CAPTURE_TYPES for item in types):
+            _fail("INVALID_IMPORT_TYPES", "payload.types")
     if "queue_ids" in payload:
         for index, queue_id in enumerate(_array(payload["queue_ids"], "payload.queue_ids",
                                                 limits["batch_drafts"], nonempty=True)):
