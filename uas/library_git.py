@@ -501,6 +501,28 @@ class LibraryGit:
 
     # --- publication ------------------------------------------------------
 
+    def publication_for(self, operation, *, current):
+        """Reconcile one already-recorded operation under fresh service authority.
+
+        Return canonical historical publication or None only after a successful
+        fetch. Absence is not inferred from transport failure. This read creates
+        no commit and does not acknowledge a receipt on the caller's behalf.
+        """
+        if not self._started:
+            raise LibraryError('NOT_READY', 'lease')
+        if type(operation) is not Operation or not callable(current):
+            raise LibraryError('INVALID_OPERATION', 'operation')
+        with self._lock:
+            current()
+            with self._records() as records:
+                records.begin(operation)  # exact identity/current Project fence
+            self._fetch()
+            current()
+            result = self._locate(operation.operation_id, operation.request_id,
+                                  operation.kind, operation.queue_id)
+            self._reset_local()
+            return result
+
     def publish(self, operation, bundle, *, input_sha, current=None):
         """Publish one validated complete Project bundle as one fast-forward commit.
 
