@@ -161,10 +161,11 @@ class LocalLibraryWiringTests(unittest.TestCase):
 
     def host(self, driver, *, stop_rooms=()):
         """The real ``run_host`` with a controlled native backend, Hub and Manager."""
-        native = self.backend()
+        native = self.backend_native = self.backend()
         services = Mock()
         services.rooms = ()
         services.close.return_value = True
+        self.services = services
 
         def serve(_installation, controller, **_):
             driver(controller)
@@ -305,6 +306,8 @@ class LocalLibraryWiringTests(unittest.TestCase):
         self.selected()
         observed = {}
 
+        shutdown = []
+
         def driver(controller):
             for room in ('alpha', 'beta'):
                 self.register(room)
@@ -317,6 +320,12 @@ class LocalLibraryWiringTests(unittest.TestCase):
                 Path(self.install.root) / 'library' / 'operator',
                 {'version': 1, 'action': 'observe', 'project_id': 'beta',
                  'for_action': 'drain'})
+            self.backend_native.stop.side_effect = (
+                lambda room: shutdown.append(('room', room)) or
+                {'infrastructure': {'phase': 'stopped', 'leftovers': [],
+                                    'observed': {'container': {'running': False}}}})
+            real_stop = self.deployment.stop
+            self.deployment.stop = lambda: shutdown.append(('library',)) or real_stop()
 
         native = self.host(driver, stop_rooms=('alpha', 'beta'))
         self.assertEqual(observed['bound'], [])
@@ -324,6 +333,46 @@ class LocalLibraryWiringTests(unittest.TestCase):
         self.assertEqual(sorted(call.args[0] for call in native.stop.call_args_list),
                          ['alpha', 'alpha', 'beta', 'beta'])
         self.assertFalse(self.deployment.running)
+        self.assertEqual([event[0] for event in shutdown], ['room', 'room', 'library'])
+
+    def test_failed_room_stop_releases_the_projection_and_keeps_the_error(self):
+        self.selected()
+        observed = {}
+
+        def driver(controller):
+            self.register('alpha')
+            controller.handle(self.packet('start', 'alpha'))
+            observed['bound'] = self.deployment.bound('alpha')
+            self.backend_native.stop.side_effect = OSError('native stop failed')
+            with self.assertRaises(OSError):
+                controller.handle(self.packet('stop', 'alpha'))
+            observed['bound_after_failure'] = self.deployment.bound('alpha')
+            observed['running'] = self.deployment.running
+            observed['canonical'] = self.deployment.publisher.head()
+
+        self.host(driver)
+        self.assertTrue(observed['bound'])
+        self.assertFalse(observed['bound_after_failure'])
+        self.assertTrue(observed['running'])
+        self.assertTrue(observed['canonical'])
+
+    def test_failed_hub_service_start_releases_a_rebound_projection(self):
+        self.selected()
+        observed = {}
+
+        def driver(controller):
+            self.register('alpha')
+            controller.handle(self.packet('start', 'alpha'))
+            controller.handle(self.packet('stop', 'alpha'))
+            self.services.ensure.side_effect = OSError('hub service failed')
+            with self.assertRaises(OSError):
+                controller.handle(self.packet('start', 'alpha'))
+            observed['bound'] = self.deployment.bound('alpha')
+            observed['head'] = self.deployment.publisher.head()
+
+        self.host(driver)
+        self.assertFalse(observed['bound'])
+        self.assertTrue(observed['head'])
 
     def test_explicit_null_operator_disables_the_host_local_path_only(self):
         observed = {}
@@ -350,6 +399,8 @@ class LocalLibraryWiringTests(unittest.TestCase):
             self.host(served.append)
         self.assertEqual(raised.exception.code, 'LIBRARY_CREDENTIAL_UNAVAILABLE')
         self.assertEqual(served, [])
+        # A refused selection still runs the host's shutdown accounting.
+        self.services.close.assert_called_once()
 
     def test_unqualified_target_stops_the_host_before_any_clone(self):
         qualification = self.library_document()['qualification']

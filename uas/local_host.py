@@ -103,13 +103,15 @@ class LocalController:
                        self.manager.ensure(room, owner, backend, state) if self.manager else {'status':'not-configured'})
             return {**result, 'services': service, 'manager':manager}
         if action == 'stop':
-            result = self.native.stop(room)
-            # Room Stop releases only this projection; canonical data and the
-            # Library singleton keep running.
-            if self.library is not None:
-                self.library.stop_room(room)
-            self._ledgers.pop(room, None)
-            return result
+            try:
+                return self.native.stop(room)
+            finally:
+                # A Stop whose native outcome is unknown must not keep publishing
+                # that Room, so the projection is released either way; canonical
+                # content and the Library singleton keep running.
+                if self.library is not None:
+                    self.library.stop_room(room)
+                self._ledgers.pop(room, None)
         return {**self.native.status(room), 'services': self.services.status(room),
                 'manager':self.manager.status() if self.manager else {'status':'not-configured'}}
 

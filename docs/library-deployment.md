@@ -133,14 +133,16 @@ The selected document is version 1 with these fields:
   Start whose projection an earlier Stop released binds it again before the
   Room's container starts, and if that start or its Hub service fails the
   binding is released again; releasing a binding removes no content.
-- Room Stop calls `stop_room` after the native stop, which releases only that
-  projection; canonical content and the singleton keep running.
+- Room Stop releases only that Room's projection, including when the native stop
+  fails or is unconfirmed, so a Room whose outcome is unknown is never left
+  publishing a projection. Canonical content and the singleton keep running, and
+  the caller still receives the native error.
 - The T22 operator endpoint in `<installation root>/library/operator` serves the
   authenticated installation owner with no Hub and no bound Room, including
   after a Room stopped.
-- Host shutdown stops the remaining Rooms, then the Library singleton, then the
-  Hub service owner. A refused Library selection runs the same shutdown
-  accounting, so a failed start cannot skip it.
+- Host shutdown stops the Rooms it still owned, then the Library singleton, then
+  the Hub service owner, and the proof records that order. A refused Library
+  selection runs the same shutdown accounting, so a failed start cannot skip it.
 
 The supervisor mints `scope_for` from an installation-authority origin over the
 exact approved binding. That origin is used only inside the host service for
@@ -177,6 +179,9 @@ controlled fixtures. It covers:
 - a missing referenced credential variable refusing to serve at all;
 - false qualification evidence stopping the host before any clone exists;
 - a Room restart after Stop republishing the same canonical generation;
+- a failed native Stop releasing the projection while keeping the error and the
+  running singleton, and a failed Hub service start releasing a rebound
+  projection;
 - an unsafe, group-writable service-state directory stopping the host before any
   clone exists;
 - host shutdown stopping the Rooms it still owned, then the singleton, with the
