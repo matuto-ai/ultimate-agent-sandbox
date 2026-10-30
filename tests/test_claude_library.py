@@ -83,7 +83,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class NativeSession:
     def __init__(self,test,project,service,capability=True):
         self.test=test;self.project=project;self.service=service
-        self.root=test.root/(project+'-'+uuid.uuid4().hex[:8]);self.root.mkdir();self.home=self.root/'home';self.home.mkdir()
+        self.root=test.root/(project+'-'+uuid.uuid4().hex[:8]);self.root.mkdir(mode=0o700);self.home=self.root/'home';self.home.mkdir(mode=0o700)
         self.listener=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);enable(self.listener)
         self.endpoint=self.root/'peer';self.listener.bind(str(self.endpoint));self.listener.listen(1)
         self.gateway=Gateway(('127.0.0.1',0),Handler);self.gateway.key='fixture-only-'+uuid.uuid4().hex
@@ -233,7 +233,10 @@ class ClaudeLibraryNativeTests(unittest.TestCase):
         self.assertNotEqual(recovered['command_id'],lost_result['command_id'])
         large=support.value(body='L'*70000)
         large_result=alpha.invoke('large',large)
-        self.assertEqual(large_result['outcome'],'DURABLY_QUEUED')
+        # Default Library policy caps body at16KiB: native transport must
+        # preserve the70k payload and expose the real policy refusal unchanged.
+        self.assertEqual((large_result['outcome'],large_result['reason']),
+            ('REJECTED','CAPTURE_TOO_LARGE'))
         self.assertEqual(alpha.observed[-1]['value'],large)
         alpha.dispatcher.library=None
         outage=alpha.invoke('outage',capture);self.assertEqual(outage['status'],'HUB_REFUSED')

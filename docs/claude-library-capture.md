@@ -42,7 +42,9 @@ success/failure evidence. The shared authenticated Library framing can carry cap
 native event-frame bound and 128 KiB send bound. This slice does not qualify
 arbitrary 1 MiB native tool calls or raise those guards. Oversized native
 frames fail closed; no truncation or success is invented. Unrelated native
-tools retain their single-record guard.
+tools retain their single-record guard. The 70k fixture body proves exact fragmented
+transport to the Hub and the default Library policy rejection (`CAPTURE_TOO_LARGE`),
+not permission to exceed the configured content limits.
 
 ## Qualification evidence and limits
 
