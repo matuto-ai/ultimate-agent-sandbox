@@ -35,11 +35,13 @@ foreign owner or writable child is refused before any clone work), the credentia
 reference, target qualification, every Room binding, reference-mount ownership
 and real-path disjointness, and every model runner's Project/target binding. Only
 then does `Service.startup()` take the host-local lease and reconstruct the
-working clone. Every new capture also revalidates qualification, the credential
-reference and current settings; the service loop rechecks them at least twice a
-second and fails closed, and operator controls run the same guard, so revoked
-qualification or an unavailable settings store blocks drain/retry/observe writes
-instead of continuing on the startup values.
+working clone. Every new capture also revalidates qualification, the credential reference and
+current settings at the endpoint's admission and publication authority
+callbacks; the service loop rechecks them and fails closed,
+operator controls run the same guard, and each composed runner and dispatcher is
+bound to that live reader so the existing admission and publication fences refuse
+a revoked qualification or an unavailable settings store even mid-attempt. An
+in-flight attempt still pins its starting limits and filter versions.
 A second instance is refused by that lease before it reads or writes the clone.
 Configuration is never silently repaired and no fallback target, credential or
 Room binding exists.
@@ -92,8 +94,12 @@ before clone work, qualification revocation blocking capture and stopping writes
 a current durable settings owner applying a validated update to the next
 operation and refusing an unavailable store, an operator observation for a
 stopped Room with no Hub, service reports reaching only the reporting Room's
-ledger, and a stop while a live model attempt is in flight (lease retained,
-second instance refused, restart recovers and reports resume).
+ledger, a stop while a live model attempt is in flight (lease retained, second
+instance refused, restart recovers and reports resume), revocation or loss of the
+active settings store after the model returned but before publication (no
+canonical commit), and recovery after a forcibly killed composed service process
+(lease released, projection republished, stale operator socket replaced and
+observation served).
 The model runner is a deterministic fixture adapter; no live provider, installed
 daemon, actual target qualification, split-process Room Hub transport, VM,
 account, backup or deployment evidence is claimed here.
