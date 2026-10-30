@@ -28,6 +28,7 @@ class AdmittedPeerDispatcher:
         self.contributions = contributions
         self.reviews = None
         self.read_service = None
+        self.library = None
         self.host_forge_binding = None
         self.admissions, self.hub = admissions, hub
         self._connections = {}
@@ -124,6 +125,46 @@ class AdmittedPeerDispatcher:
                 or state['spec']['project_id'] != client.binding.project_id):
             raise LedgerError('ROOM_NOT_RUNNING')
         return True
+
+    def attach_library(self, owner):
+        """Supervisor supplies the fixed Room/Project route, never payloads."""
+        from .library_hub import LibraryHub
+        if (type(owner) is not LibraryHub or owner.ledger is not self.hub.ledger
+                or owner.room_id != self.hub.ledger.room_id or self.library is not None):
+            raise OriginDenied('one canonical same-Room Library owner required')
+        self.library = owner
+
+    def _library(self, operation, record, envelope, *, helper=None):
+        owner = self.library
+        if owner is None:
+            raise LedgerError('LIBRARY_UNAVAILABLE')
+        with self._authorize(operation, record, helper=helper) as binding:
+            root_operation = binding.operation_id
+            connection = self._connections.get(root_operation)
+            if (binding.seat.room_id != owner.room_id or connection is None
+                    or not self.hub._current(connection)):
+                raise LedgerError('STALE_CONNECTION')
+            origin = self._origin(binding)
+            def transaction_guard():
+                return (self._recheck(root_operation, record, helper=helper)
+                        and self.hub._current(connection))
+            def current():
+                try:
+                    with self._authorize(root_operation, record, helper=helper) as fresh:
+                        return (fresh == binding and self._origin(fresh) == origin
+                                and transaction_guard())
+                except (OriginDenied, OriginUnavailable):
+                    return False
+            row = self.hub.ledger.snapshot()['state'].get('fixture_context', {}).get(
+                'participants', {}).get(origin.participant_id, {})
+            assigned = row.get('bound_run') or row.get('reserved_run')
+            run_id = assigned.get('run_id') if type(assigned) is dict else None
+            prepared = owner.prepare(envelope, origin, authorize=transaction_guard, run_id=run_id)
+        result = owner.perform(prepared, current=current)
+        with self._authorize(root_operation, record, helper=helper) as fresh:
+            if fresh != binding or self._origin(fresh) != origin:
+                raise LedgerError('FORBIDDEN')
+            return owner.finish(prepared, result, authorize=transaction_guard)
 
     def attach_reviews(self, owner):
         """Trusted host composition after constructing the admitted identity."""
@@ -397,6 +438,8 @@ class AdmittedPeerDispatcher:
                 envelope = frame['envelope']
                 if envelope.get('kind') in {'forge-read','forge-write','forge-reconcile'}:
                     receipt = self._forge(operation, record, envelope, helper=helper)
+                elif envelope.get('kind') == 'library.enqueue':
+                    receipt = self._library(operation, record, envelope, helper=helper)
                 else:
                     with self._authorize(operation, record, helper=helper) as binding:
                         receipt = self._submit(binding.operation_id, record, binding,

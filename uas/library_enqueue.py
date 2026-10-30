@@ -4,7 +4,7 @@ The trusted service supplies current Participant authority and optional originat
 Run from its authenticated request context. No caller path, frontmatter, lifecycle
 hook, transcript scanner, model invocation or alternate content queue exists here.
 """
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import json
 import re
 
@@ -13,17 +13,7 @@ from .library_records import LibraryRecords
 from .library_registration import project_state
 
 
-@dataclass(frozen=True)
-class CaptureResult:
-    outcome: str
-    request_id: str | None
-    reason: str | None
-    retryable: bool
-    queue_id: str | None = None
-    path: str | None = None  # bundle-relative; never a caller-selected path
-    published_sha: str | None = None
-    projection_sha: str | None = None
-    visible: bool = False
+from .library import CaptureResult
 
 
 def _label(value):
@@ -237,3 +227,25 @@ class Enqueuer:
                              'pending/' + operation.queue_id + '.md' if publication else None,
                              publication['commit_sha'] if publication else None,
                              projection['commit_sha'], projection['visible'])
+
+
+class EnqueueEndpoint:
+    """External service-side composition for an authenticated Hub client.
+
+    Transport authentication/provisioning must already bind this endpoint to the
+    trusted Hub. Participant payloads cannot call it or supply scope/current.
+    The service retains clone/settings ownership; the Hub receives only contact.
+    """
+    def __init__(self, publisher, *, settings, projection=None):
+        if not callable(settings):
+            raise library.LibraryError('INVALID_SETTINGS', 'settings')
+        self.publisher, self.settings, self.projection = publisher, settings, projection
+
+    def contact(self, *, scope, current, operation_id, request_id, value, at, run_id):
+        def fresh():
+            if current() is not True:
+                raise library.LibraryError('LIBRARY_AUTHENTICATION_REQUIRED', 'scope')
+            return scope
+        return Enqueuer(self.publisher, current_scope=fresh, current_run=lambda: run_id,
+                        projection=self.projection).enqueue(self.settings(), operation_id=operation_id,
+                        request_id=request_id, value=value, at=at)

@@ -410,6 +410,20 @@ def egress_approval(settings, project_id):
     _fail("EGRESS_NOT_AUTHORIZED", "project_id")
 
 
+@dataclass(frozen=True)
+class CaptureResult:
+    outcome: str
+    request_id: str | None
+    reason: str | None
+    retryable: bool
+    queue_id: str | None = None
+    path: str | None = None  # bundle-relative; never a caller-selected path
+    published_sha: str | None = None
+    projection_sha: str | None = None
+    visible: bool = False
+
+
+
 # --- Trusted scope ---------------------------------------------------------
 
 _SCOPE_SEAL = object()
