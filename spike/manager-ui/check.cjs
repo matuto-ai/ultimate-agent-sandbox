@@ -145,6 +145,51 @@ async function ownershipContract(){
 
 }
 
+// Pipe-only fixture bridge to the real Python Manager -> Hub -> SettingsOwner.
+function settingsOwner(directory,packet,scenario='normal') {
+  const {spawnSync}=require('node:child_process');
+  const result=spawnSync('python3',[path.resolve('tests/manager_settings_fixture.py'),directory],{input:JSON.stringify({packet,scenario}),encoding:'utf8',timeout:2000,maxBuffer:65536,env:{...process.env,PYTHONPATH:'.:tests',PYTHONDONTWRITEBYTECODE:'1'}});
+  assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout);
+}
+async function settingsContract(){
+  const directory=fs.mkdtempSync(path.join(require('node:os').tmpdir(),'manager-settings-'));
+  try {
+    const ui=boot('C','library-settings');let n=0,scenario='normal',calls=0;
+    ui.context.crypto={randomUUID:()=>`settings-${++n}`};
+    ui.context.installLibrarySettingsHost({deployment:'installation',handle:async packet=>{calls++;return settingsOwner(directory,packet,scenario);}});
+    await ui.context.refreshLibrarySettings();assert(ui.get('app').innerHTML.includes('Current owner configuration'));
+    vm.runInContext('settingsDraft.limits.coalesce_seconds++',ui.context);
+    scenario='lost-after';await ui.context.saveLibrarySettings();assert(ui.get('app').innerHTML.includes('Outcome unknown'));
+    const before=calls;await ui.context.saveLibrarySettings();assert.equal(calls,before,'unknown cannot issue second write');
+    scenario='revoked';await ui.context.reconcileLibrarySettings();assert(ui.get('app').innerHTML.includes('Outcome unknown'));
+    scenario='normal';await ui.context.reconcileLibrarySettings();assert(ui.get('app').innerHTML.includes('Saved durably as configuration version 2'));
+    await ui.context.refreshLibrarySettings();vm.runInContext('settingsDraft.limits.coalesce_seconds=0',ui.context);
+    await ui.context.saveLibrarySettings();assert(ui.get('app').innerHTML.includes('Rejected'));
+    await ui.context.refreshLibrarySettings();vm.runInContext('settingsDraft.limits.coalesce_seconds++',ui.context);
+    scenario='stale';await ui.context.saveLibrarySettings();assert(ui.get('app').innerHTML.includes('STALE_SETTINGS'));
+    scenario='project-only';await ui.context.refreshLibrarySettings();assert(ui.get('app').innerHTML.includes('Configuration unavailable'));
+    scenario='normal';await ui.context.refreshLibrarySettings();vm.runInContext('settingsDraft.limits.coalesce_seconds++',ui.context);
+    scenario='lost-before';await ui.context.saveLibrarySettings();scenario='normal';await ui.context.reconcileLibrarySettings();
+    assert(ui.get('app').innerHTML.includes('Outcome unknown'));
+    // Detach while an update is in flight: late replies cannot cross sessions.
+    const late=boot('D','library-settings');let reply,packet;
+    late.context.crypto={randomUUID:()=>`late-${++n}`};
+    late.context.installLibrarySettingsHost({deployment:'installation',handle:async value=>settingsOwner(directory,value)});
+    await late.context.refreshLibrarySettings();
+    vm.runInContext('settingsDraft.limits.coalesce_seconds++',late.context);
+    late.context.installLibrarySettingsHost({deployment:'installation',handle:async value=>settingsOwner(directory,value)});
+    await late.context.refreshLibrarySettings();vm.runInContext('settingsDraft.limits.coalesce_seconds++',late.context);
+    vm.runInContext('settingsHost.handle = value => new Promise(resolve => {globalThis.heldPacket=value;globalThis.heldReply=resolve;})',late.context);
+    const waiting=late.context.saveLibrarySettings();packet=late.context.heldPacket;
+    late.context.installLibrarySettingsHost(null);
+    late.context.heldReply(settingsOwner(directory,packet));await waiting;
+    assert(!late.get('app').innerHTML.includes('Saved durably'));
+    late.context.installLibrarySettingsHost({deployment:'installation',handle:async value=>settingsOwner(directory,value)});
+    await late.context.reconcileLibrarySettings();assert(late.get('app').innerHTML.includes('Saved durably'));
+    console.log('manager settings actual-owner VM proof: configured, revoked, stale, invalid, Project-only, lost-before/after, receipt-only recovery');
+  } finally {fs.rmSync(directory,{recursive:true,force:true});}
+}
+
 async function actionContract(){
   const ui=boot('C','run'), sent=[];
   const current={run_id:run,generation:1,observed_version:'a'.repeat(64)};
@@ -547,7 +592,51 @@ async function browserCheck(){
     const libraryMobile=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library-mobile.png'),Buffer.from(libraryMobile.data,'base64'));screenshots.push('D-library-mobile.png');
     await showLibrary('[data-library-actions]');
     const libraryAttachments=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library-attachments-mobile.png'),Buffer.from(libraryAttachments.data,'base64'));screenshots.push('D-library-attachments-mobile.png');
-    proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
+    // Browser uses the exact production installation attachment and durable owner.
+    // Only the pipe carrier and explicit fixture fault/grant inputs are test code.
+    const settingsDirectory=fs.mkdtempSync(path.join(os.tmpdir(),'manager-settings-browser-'));
+    const settingsEvidence=[];
+    try {
+      await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+      await evaluate(`history.pushState({},'', '?variant=C&page=library-settings');render();globalThis.settingsPackets=[];installLibrarySettingsHost({deployment:'installation',handle:packet=>new Promise(resolve=>{settingsPackets.push(packet);globalThis.settingsReply=resolve;})})`);
+      const settingsStep=async(selector,scenario='normal')=>{
+        await evaluate(`document.querySelector(${JSON.stringify(selector)}).click();true`);
+        const packet=await evaluate(`settingsPackets.shift()`);assert(packet,'settings click must reach typed host');
+        const result=settingsOwner(settingsDirectory,packet,scenario);
+        await evaluate(`settingsReply(${JSON.stringify(result)});new Promise(resolve=>requestAnimationFrame(resolve))`);
+        const message=await evaluate(`document.getElementById('settings-message').textContent`);
+        settingsEvidence.push({action:packet.request.action,mode:packet.mode,scenario,outcome:result.outcome,message});return message;
+      };
+      const change=async value=>evaluate(`{const input=document.getElementById('setting-coalesce_seconds');input.value=${value===null?'Number(input.value)+1':JSON.stringify(value)};input.dispatchEvent(new Event('input',{bubbles:true}));}`);
+      assert((await settingsStep('[data-settings-refresh]')).includes('Current owner configuration'));
+      for(const [theme,width,height,mobile] of [['C',1440,1100,false],['D',390,844,true]]){
+        await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
+        await evaluate(`{const url=new URL(location.href);url.searchParams.set('variant',${JSON.stringify(theme)});history.replaceState({},'',url);render();scrollTo(0,0);}`);
+        assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'settings page overflow');
+        const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}),name=`${theme}-library-settings.png`;
+        fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
+      }
+      await change(null);
+      const draftBefore=await evaluate(`document.getElementById('setting-coalesce_seconds').value`);
+      await evaluate(`installDocument(${JSON.stringify(dataFor(documents.reconnected))})`);
+      assert.equal(await evaluate(`document.getElementById('setting-coalesce_seconds').value`),draftBefore,'Project snapshot must not clobber typed settings');
+      assert((await settingsStep('[data-settings-save]','lost-after')).includes('Outcome unknown'));
+      assert(await evaluate(`document.querySelector('[data-settings-save]').disabled&&document.querySelector('[data-settings-refresh]').disabled`));
+      assert((await settingsStep('[data-settings-reconcile]','revoked')).includes('Outcome unknown'));
+      assert((await settingsStep('[data-settings-reconcile]')).includes('Saved durably as configuration version 2'));
+      await settingsStep('[data-settings-refresh]');await change(0);assert((await settingsStep('[data-settings-save]')).includes('Rejected'));
+      assert(await evaluate(`!document.querySelector('[data-settings-save]')`),'rejection must require refresh');
+      await settingsStep('[data-settings-refresh]');await change(null);assert((await settingsStep('[data-settings-save]','stale')).includes('STALE_SETTINGS'));
+      assert((await settingsStep('[data-settings-refresh]','project-only')).includes('Configuration unavailable'));
+      assert(await evaluate(`!document.querySelector('[data-settings-save]')`));
+      await settingsStep('[data-settings-refresh]');await change(null);await settingsStep('[data-settings-save]','lost-before');
+      assert((await settingsStep('[data-settings-reconcile]')).includes('Outcome unknown'));
+      await evaluate(`scrollTo(0,0)`);
+      const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}),name='D-library-settings-unknown.png';
+      fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
+    } finally {fs.rmSync(settingsDirectory,{recursive:true,force:true});}
+
+    proof={settings_evidence:settingsEvidence,settings_path:'real Python FieldNotesLibrarySettingsHost -> ManagerLibrarySettingsHub -> SettingsOwner over test-only pipes',status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
     failure=error;failureElapsed=Math.max(0,Date.now()-started);
     const observed=current?.captureFailure(error);
@@ -574,4 +663,4 @@ async function browserCheck(){
 executableContract();
 timerContract();
 diagnosticsContract();
-ownershipContract().then(startupRecoveryContract).then(()=>require('./test-startup-recovery.cjs')()).then(actionContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
+ownershipContract().then(startupRecoveryContract).then(()=>require('./test-startup-recovery.cjs')()).then(actionContract).then(settingsContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
