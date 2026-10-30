@@ -320,6 +320,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual({result.commit_sha for result in outcomes}, {self.head()})
         self.assertEqual(self.count(), 1)
 
+    def test_confirmation_failure_after_push_preserves_pending_recovery(self):
+        snapshot = self.publisher.project_snapshot
+        calls = []
+        def confirmation_fails(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise library.LibraryError('UNSUPPORTED_PROJECT_ENTRY')
+            return snapshot(*args, **kwargs)
+        with patch.object(self.publisher, 'project_snapshot', side_effect=confirmation_fails):
+            with self.assertRaises(library.LibraryError): self.register()
+        sha = self.head()
+        with LibraryRecords(self.records, 'deployment-1') as records:
+            self.assertIsNone(records.record('op-1', project_identity=self.scope.project_identity)['receipt'])
+        self.assertEqual(self.register().commit_sha, sha)
+        self.assertEqual(self.count(), 1)
+
     def test_target_mismatch_rejected(self):
         self.register()
         self.publisher.target = '/elsewhere'

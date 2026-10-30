@@ -103,6 +103,7 @@ class Registrar:
             if prior['receipt'] is not None and prior['receipt']['outcome'] != 'COMMITTED':
                 raise library.LibraryError(prior['receipt']['reason'], 'registration')
             publication_started = [False]
+            publication_returned = [False]
 
             def execute():
                 head, tree = self.publisher.project_snapshot(operation.scope, admitted, current=current, registration=True)
@@ -119,6 +120,7 @@ class Registrar:
                     current()
                     publication_started[0] = True
                     result = self.publisher.publish(operation, checked.bundle, input_sha=None, current=current)
+                    publication_returned[0] = True
                     created, sha = result.created, result.resulting_sha
                     # A historical recovered operation is not proof that its
                     # bundle still exists in the current canonical tree.
@@ -146,7 +148,7 @@ class Registrar:
                 definitely_refused = (not publication_started[0] or error.code in (
                     'INCOMPATIBLE_HEAD', 'UNSUPPORTED_PROJECT_ENTRY',
                     'PROJECT_COORDINATE_CONFLICT'))
-                if (definitely_refused and existing is None
+                if (definitely_refused and not publication_returned[0] and existing is None
                         and error.code not in ('PUBLICATION_UNAVAILABLE', 'GIT_UNAVAILABLE', 'GIT_FAILED')
                         and prior['receipt'] is None):
                     refused = library.receipt(operation, 'REFUSED', at=operation.at,

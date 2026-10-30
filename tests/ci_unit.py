@@ -22,7 +22,10 @@ SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_run_review', 'test_staged_source_closure',
                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-INTEGRATION_MODULES = frozenset({'test_context',
+# #155 hosted remainder reached its one-minute job boundary despite passing
+# tests (49s + setup/smoke). Move the ~7s registration module to the measured
+# 24s integration partition; no exclusions, new jobs or enlarged timeouts.
+INTEGRATION_MODULES = frozenset({'test_context', 'test_library_registration',
     'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
