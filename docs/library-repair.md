@@ -34,7 +34,7 @@ concept, or history changes. Damaged logs still fail the normal complete gate.
 
 Execution shares the non-preemptive scheduler turn and synthesis locks, yields
 to older eligible Projects, persists least-recently-served accounting, and runs
-under a 30-second cooperative budget propagated through canonical Git/record
+under a cooperative budget of min(30 seconds, configured attempt_seconds), propagated through canonical Git/record
 operations. Existing file/byte limits remain in effect. Current human authority,
 settings, service lifecycle, archive state, and input versions are checked before
 publication. A changed Project input requires reconciliation and a fresh human
