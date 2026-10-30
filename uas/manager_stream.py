@@ -65,7 +65,8 @@ def validate_projection(value, room_id):
             'captured_at', 'sections'} or type(value['schema_version']) is not int
             or value['schema_version'] not in {1, SCHEMA_VERSION} or value['room_id'] != room_id
             or type(value['sections']) is not dict
-            or set(value['sections']) != SECTION_NAMES | ({'journey'} if value['schema_version'] == 2 else set())):
+            or set(value['sections']) not in (SECTION_NAMES | ({'journey'} if value['schema_version'] == 2 else set()),
+                    (SECTION_NAMES - {'library'}) | ({'journey'} if value['schema_version'] == 2 else set()))):
         raise StreamError('INVALID_PROJECTION')
     sequence(value['room_seq']); timestamp(value['captured_at'])
     for section, fact in value['sections'].items():
@@ -89,6 +90,8 @@ def validate_projection(value, room_id):
             if fact['observed_version'] is None or type(fact['value']) is not dict:
                 raise StreamError('KNOWN_FACT_WITHOUT_SOURCE')
             validate_section_value(section, fact['value'])
+            if section == 'library' and any(row['window_end'] != fact['observed_at'] for row in fact['value'].values()):
+                raise StreamError('LIBRARY_SAMPLE_TIME_MISMATCH')
         elif fact['value'] is not None:
             raise StreamError('UNKNOWN_FACT_HAS_VALUE')
     journey = value['sections'].get('journey')
@@ -332,6 +335,7 @@ class ManagerReadModel:
                 raise StreamError('HUB_SNAPSHOT_CONFLICT')
         key = (identity.deployment_id, identity.room_id)
         for section in EXTERNAL_FIELDS:
+            if section not in projection['sections']: continue
             new = projection['sections'][section]
             version = new['observed_version']
             old = self._db.execute('SELECT version,fact FROM manager_sources WHERE deployment=? '
@@ -412,6 +416,7 @@ class ManagerReadModel:
                 if previous['schema_version'] == 2 and previous['sections']['journey'] != projection['sections'].get('journey'):
                     raise StreamError('HUB_SNAPSHOT_CONFLICT')
             for section in EXTERNAL_FIELDS:
+                if section not in projection['sections']: continue
                 fact = projection['sections'][section]
                 version = fact['observed_version']
                 old = self._db.execute('SELECT version,fact FROM manager_sources WHERE deployment=? '
@@ -444,6 +449,12 @@ class ManagerReadModel:
         projection = json.loads(row['projection'])
         current_time = datetime.now(timezone.utc) if now is None else datetime.fromisoformat(timestamp(now))
         age = (current_time - datetime.fromisoformat(projection['captured_at'])).total_seconds()
+        library_fact = projection['sections'].get('library')
+        if library_fact and library_fact['status'] == 'known':
+            observed = library_fact['observed_at']
+            source_age = None if observed is None else (current_time - datetime.fromisoformat(observed)).total_seconds()
+            if not connected or pending is not None or source_age is None or source_age < 0 or source_age > self.stale_after_seconds:
+                library_fact['freshness'] = 'stale'
         return {'identity': identity.document(), 'status': 'connected' if connected else 'disconnected',
                 'catching_up': pending is not None,
                 'projection_stale': not connected or pending is not None or age > self.stale_after_seconds or age < 0,

@@ -186,7 +186,7 @@ def _identity(operation):
     _origin(operation.scope)  # validate the authenticated origin fields
     _safe(identity, "identity")
     if operation.manifest is not None:
-        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park"):
+        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation"):
             raise LibraryError("INVALID_RECORD", "manifest")
         identity["manifest"] = operation_manifest(operation.kind, operation.manifest)
         expected = identity["manifest"] if operation.kind in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(identity["manifest"])}
@@ -465,6 +465,24 @@ class LibraryRecords:
             if not rows: return
             for cursor, record in rows: yield record
 
+    def latest_observation(self, project_identity):
+        _token(project_identity, 'project_identity')
+        def read(db):
+            row = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? AND json_extract(identity, '$.kind')='library-observation' ORDER BY rowid DESC LIMIT 1",
+                (project_identity,)).fetchone()
+            return self._attempt(db, row['operation_id']) if row else None
+        return self._read(read)
+
+    def project_history(self, project_identity, *, limit):
+        """Bounded owner metadata snapshot; truncation must remain explicit."""
+        _token(project_identity, 'project_identity')
+        if type(limit) is not int or not 1 <= limit <= 10000: raise LibraryError('INVALID_RECORD')
+        def read(db):
+            rows = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? ORDER BY rowid DESC LIMIT ?",
+                (project_identity, limit + 1)).fetchall()
+            return [self._attempt(db, row['operation_id']) for row in rows[:limit]], len(rows) <= limit
+        return self._read(read)
+
     def iter_pending(self):
         """Startup inventory in bounded pages; outages do not impose a lifetime cap."""
         cursor = 0
@@ -600,7 +618,7 @@ def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
     result = {key: value[key] for key in _ATTEMPT_KEYS}
     if "manifest" in value:
-        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park"): raise LibraryError("INVALID_RECORD")
+        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation"): raise LibraryError("INVALID_RECORD")
         result["manifest"] = operation_manifest(value["kind"], value["manifest"])
         expected = result["manifest"] if value["kind"] in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(result["manifest"])}
         if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")
