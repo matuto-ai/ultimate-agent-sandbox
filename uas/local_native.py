@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import uuid
 
 from .docker_fixture import DockerFixtureBackend
 from .lifecycle import Supervisor, LifecycleError, BackendUnknown
@@ -56,19 +57,66 @@ def image(value, *, hub=False):
     if hub: require(value['entrypoint']==LOCAL_HUB_COMMAND,'LOCAL_NATIVE_HUB_COMMAND')
 
 
+def selected_host(document):
+    """Resolve versioned endpoint selection; never use ambient Docker context."""
+    from .local_host_profile import LocalHostProfile
+    if document.get('version') in (2,3):
+        selected=LocalHostProfile.parse(document['host_profile'])
+        require(selected.installation_id==document['installation_id']
+                and selected.engine_version==document['engine_version']
+                and {'offset':selected.offset,'size':selected.size}==document['mapping'],
+                'LOCAL_NATIVE_HOST_BINDING')
+    else:
+        selected=LocalHostProfile.parse({'version':1,'profile':'local-host-v1',
+            'installation_id':document['installation_id'],'mode':'reuse',
+            'engine':{'version':'29.8.2','socket':'/run/docker.sock','data_root':'/var/lib/docker','exec_root':'/run/docker'},
+            'mapping':{'user':'uas-remap','offset':100000,'size':65536}})
+    return selected
+
+
+def owned_xfs_selection(value):
+    """Version-three owned image policy, not evidence of a mounted filesystem."""
+    require(type(value) is dict and set(value)=={'receipt_root','plan_id','image_identity','uuid'},
+            'LOCAL_NATIVE_OWNED_XFS')
+    path(value['receipt_root'])
+    require(type(value['plan_id']) is str and re.fullmatch(r'[0-9a-f]{64}',value['plan_id']),
+            'LOCAL_NATIVE_OWNED_XFS')
+    identity(value['image_identity'])
+    require(value['image_identity'][1]>0,'LOCAL_NATIVE_OWNED_XFS')
+    try:
+        require(type(value['uuid']) is str and str(uuid.UUID(value['uuid']))==value['uuid'],
+                'LOCAL_NATIVE_OWNED_XFS')
+    except (ValueError,AttributeError):raise LifecycleError('LOCAL_NATIVE_OWNED_XFS') from None
+    return deepcopy(value)
+
+
 def validate_document(document):
     """Pure shape/policy validation, never a claim about the selected machine."""
-    require(type(document) is dict and set(document)==FIELDS,'LOCAL_NATIVE_PROFILE')
-    require(type(document['version']) is int and document['version']==1
-            and document['profile']=='local-native-v1','LOCAL_NATIVE_PROFILE')
+    require(type(document) is dict,'LOCAL_NATIVE_PROFILE')
+    version=document.get('version')
+    require(type(version) is int and version in (1,2,3) and
+            set(document)==(FIELDS | ({'host_profile'} if version>=2 else set())
+                             | ({'owned_xfs'} if version==3 else set()))
+            and document['profile']=='local-native-v'+str(version),'LOCAL_NATIVE_PROFILE')
     require(type(document['installation_id']) is str
             and re.fullmatch(r'[0-9a-f]{32}',document['installation_id']),'LOCAL_NATIVE_INSTALLATION')
     storage,endpoints=path(document['storage_root']),path(document['endpoints_root'])
     require(storage!=endpoints and storage not in endpoints.parents and endpoints not in storage.parents,
             'LOCAL_NATIVE_ROOT_OVERLAP')
     require(len(str(endpoints).encode())+len('/'+'0'*32+'/control/hub.sock')<108,'LOCAL_NATIVE_SOCKET_PATH')
-    require(document['engine_version']=='29.8.2'
-            and document['mapping']=={'offset':100000,'size':65536},'LOCAL_NATIVE_ENGINE_PROFILE')
+    require(document['engine_version']=='29.8.2' and type(document['mapping']) is dict
+            and set(document['mapping'])=={'offset','size'},'LOCAL_NATIVE_ENGINE_PROFILE')
+    if version==1:
+        require(document['mapping']=={'offset':100000,'size':65536},'LOCAL_NATIVE_ENGINE_PROFILE')
+    host=selected_host(document)
+    require(all(Path(root)!=Path(engine) and Path(root) not in Path(engine).parents and Path(engine) not in Path(root).parents
+                for root in (document['storage_root'],document['endpoints_root'])
+                for engine in (host.socket,host.data_root,host.exec_root)), 'LOCAL_NATIVE_ENGINE_PATH_OVERLAP')
+    if version==3:
+        selection=owned_xfs_selection(document['owned_xfs'])
+        receipt=path(selection['receipt_root'])
+        require(all(receipt!=root and receipt not in root.parents and root not in receipt.parents
+                    for root in (storage,endpoints)), 'LOCAL_NATIVE_OWNED_XFS_OVERLAP')
     rooms=document['rooms']; require(type(rooms) is dict and 1<=len(rooms)<=64,'LOCAL_NATIVE_ROOMS')
     quotas=set();levels=set();networks=[];all_paths=[]
     for room_id,row in rooms.items():
@@ -87,11 +135,15 @@ def validate_document(document):
                 and gateway==network.network_address+1 and all(not network.overlaps(n) for n in networks),
                 'LOCAL_NATIVE_NETWORK')
         networks.append(network);identity(row['root_identity'])
+        if version==3:
+            require(row['root_identity'][0]==0 and row['root_identity'][1]>0,'LOCAL_NATIVE_STABLE_IDENTITY')
         require(type(row['paths']) is dict and set(row['paths'])=={'repo','workspace','reference','checkouts','runtime'},
                 'LOCAL_NATIVE_PROJECT_PATHS')
         for record in row['paths'].values():
             require(type(record) is dict and set(record)=={'path','identity'},'LOCAL_NATIVE_PROJECT_PATH')
             selected=path(record['path']);identity(record['identity'])
+            if version==3:
+                require(record['identity'][0]==0 and record['identity'][1]>0,'LOCAL_NATIVE_STABLE_IDENTITY')
             require(storage in selected.parents and all(selected!=p and selected not in p.parents and p not in selected.parents
                     for p in all_paths),'LOCAL_NATIVE_PROJECT_OVERLAP')
             all_paths.append(selected)
@@ -104,6 +156,8 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     def __init__(self, config, document, room_id, control_root):
         document=validate_document(document)
         self.native_document=deepcopy(document)
+        self.host_profile=selected_host(document)
+        self._host_binding=canonical({'document':self.native_document,'host':self.host_profile.document()})
         require(type(config) is dict and type(config.get('rooms')) is list,'LOCAL_NATIVE_CONFIG')
         selected=[r for r in config['rooms'] if r['id']==room_id]
         require(len(selected)==1 and room_id in document['rooms'],'LOCAL_NATIVE_ROOM')
@@ -134,6 +188,10 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
         # No credential bindings or optional Gate/Git resources are fabricated.
         self.git_manifest=self.git_plan=self.gate_manifest=self.gate_plan=None
         self.runtime_plan=None
+
+    def require_host_unchanged(self):
+        require(canonical({'document':self.native_document,'host':self.host_profile.document()})==self._host_binding,
+                'LOCAL_NATIVE_HOST_SELECTION_CHANGED')
 
     def bind_runtime(self,plan):
         from .local_runtime_plan import LocalRuntimePlan
@@ -168,9 +226,28 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
     def level(self): return self._level
     @property
     def project_id(self): return self._project_id
+    @property
+    def owners(self): return self.host_profile.owners
     def storage_ancestors(self): return (self.storage,self.state_root.parent)
 
+    def storage_identity(self, selected_path):
+        self.require_host_unchanged()
+        if self.native_document['version']!=3:
+            return super().storage_identity(selected_path)
+        from .local_xfs_storage import verify_owned_mount
+        selected_path=path(str(selected_path))
+        require(selected_path==self.storage or self.storage in selected_path.parents,
+                'LOCAL_NATIVE_STORAGE_PATH')
+        selection=self.native_document['owned_xfs']
+        observed=verify_owned_mount(selection,self.storage)
+        require(observed['image_identity']==selection['image_identity'],'LOCAL_NATIVE_STORAGE_IMAGE')
+        require(observed['identity'][1]==self.boundary['root_identity'][1], 'ROOT_IDENTITY')
+        current=native.directory_identity(selected_path)
+        require(current[0]==observed['identity'][0], 'LOCAL_NATIVE_STORAGE_FILESYSTEM')
+        return [0,current[1]]
+
     def guard(self, *, require_selinux=True):
+        self.require_host_unchanged()
         require(os.geteuid()==0,'LOCAL_NATIVE_OPERATOR_ROOT_REQUIRED')
         if require_selinux:
             require(native.command('getenforce').strip()=='Enforcing'
@@ -187,6 +264,16 @@ class LocalNativeBackend(native.NativeQualificationBackend):
 
     def _guard(self, *, require_selinux=True):
         self.profile.guard(require_selinux=require_selinux)
+
+    def _run(self,arguments,*,missing_ok=False):
+        self.profile.require_host_unchanged()
+        return native.fixed_docker(arguments,timeout=self.timeout,missing_ok=missing_ok,
+                                   socket_path=self.profile.host_profile.socket)
+
+    def engine_selection(self):
+        host=self.profile.host_profile
+        return {'version':host.engine_version,'docker_root':host.docker_root,
+                'remap_user':host.remap_user,'offset':host.offset,'size':host.size}
 
     def ensure_hub(self,state):
         self._guard();self._binding(state)
@@ -212,6 +299,12 @@ class LocalNativeBackend(native.NativeQualificationBackend):
         require(current is not None and current['Id']==observed['Id']
                 and current['State']['Running'] is False,'LOCAL_HUB_STOP_UNCONFIRMED')
 
+    def _prepare_layout(self,state):
+        super()._prepare_layout(state)
+        if self.profile.native_document['version']==3:
+            from .local_listener_recovery import record_layout
+            record_layout(self,state)
+
     def reopen_listeners(self,state,*,owner_lock_fd):
         """Rebind only stopped owned resources while caller retains host flock.
 
@@ -232,6 +325,9 @@ class LocalNativeBackend(native.NativeQualificationBackend):
             require(value is None or value['State']['Running'] is False,'LOCAL_RECOVERY_REQUIRES_STOPPED')
         if container is not None:self.validate_container(state,container)
         if hub is not None:self.validate_hub(state,hub)
+        if self.profile.native_document['version']==3:
+            from .local_listener_recovery import recover_layout
+            recover_layout(self,state)
         root=self.endpoints/state['instance_id'];info=root.stat()
         require(root.resolve()==root and info.st_uid==0 and not info.st_mode&0o022,'ENDPOINT_OWNERSHIP')
         fd=os.open(root/'owner.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
@@ -243,15 +339,18 @@ class LocalNativeBackend(native.NativeQualificationBackend):
         finally:os.close(fd)
         require(record=={**self._endpoint_record(state),'identity':native.directory_identity(root)},'ENDPOINT_OWNERSHIP')
         layout=self.layout(state)
-        selected=[(layout['peer']/'pi.sock',native.RUNTIME_UID),(layout['control']/'hub.sock',native.HUB_UID)]
+        selected=[(layout['peer']/'pi.sock',self.profile.owners['runtime'],True),(layout['control']/'hub.sock',self.profile.owners['hub'],True)]
+        if self.profile.git_manifest is not None:
+            selected.extend((layout['git']/name,self.profile.owners['runtime'],name!='request.sock')
+                            for name in ('request.sock','worker.sock'))
         observed=[]
-        for selected_path,group in selected:
+        for selected_path,group,listen in selected:
             parent=selected_path.parent;info=parent.stat()
-            require(parent.resolve()==parent and info.st_uid==native.HOST_UID and info.st_gid==group
+            require(parent.resolve()==parent and info.st_uid==self.profile.owners['supervisor'] and info.st_gid==group
                     and stat.S_IMODE(info.st_mode)==0o710,'LOCAL_ENDPOINT_PARENT')
             if os.path.lexists(selected_path):
                 info=selected_path.lstat()
-                require(stat.S_ISSOCK(info.st_mode) and info.st_uid==native.HOST_UID
+                require(stat.S_ISSOCK(info.st_mode) and info.st_uid==self.profile.owners['supervisor']
                         and info.st_gid==group and stat.S_IMODE(info.st_mode)==0o620,'LOCAL_ENDPOINT_SOCKET')
                 observed.append((selected_path,(info.st_dev,info.st_ino)))
         # No path is removed until all ownership and stopped-state checks pass.
@@ -260,8 +359,8 @@ class LocalNativeBackend(native.NativeQualificationBackend):
             require((info.st_dev,info.st_ino)==identity,'LOCAL_ENDPOINT_CHANGED')
             selected_path.unlink()
         try:
-            for selected_path,group in selected:
-                self.listeners.append(native.labeled_listener(selected_path,group,level=self.level))
+            for selected_path,group,listen in selected:
+                self.listeners.append(native.labeled_listener(selected_path,group,listen=listen,level=self.level,owner=self.profile.owners['supervisor']))
         except BaseException:
             for listener in self.listeners:listener.close()
             self.listeners=[]
@@ -296,7 +395,7 @@ class LocalNativeHost:
                     profile.bind_runtime(plan)
             backend=LocalNativeBackend(profile)
             owner=Supervisor(self._root,room_id,backend,authorize=self._authorize,revoke=self._revoke,
-                             **({'state_reader_gid':native.HOST_UID} if profile.runtime_plan is not None else {}))
+                             **({'state_reader_gid':profile.owners['supervisor']} if profile.runtime_plan is not None else {}))
             self._owners[room_id]=(owner,backend)
         return self._owners[room_id]
 
@@ -349,13 +448,26 @@ class LocalNativeObserver(native.NativeQualificationObserver):
     LABEL = LocalNativeBackend.LABEL
     name = LocalNativeBackend.name
 
+    def __init__(self,room_id,instance,config_digest,*,host_profile):
+        from .local_host_profile import LocalHostProfile
+        require(type(host_profile) is LocalHostProfile,'LOCAL_NATIVE_HOST_PROFILE_REQUIRED')
+        super().__init__(room_id,instance,config_digest)
+        self.host_profile=host_profile
+        self._host_binding=canonical(host_profile.document())
+
+    def _run(self,arguments,*,missing_ok=False):
+        require(canonical(self.host_profile.document())==self._host_binding,'LOCAL_NATIVE_HOST_SELECTION_CHANGED')
+        return native.fixed_docker(arguments,timeout=self.timeout,missing_ok=missing_ok,
+                                   socket_path=self.host_profile.socket)
+
 
 def readonly_local_supervisor(plan, resources):
     from .local_runtime_plan import LocalRuntimePlan
     require(type(plan) is LocalRuntimePlan, 'LOCAL_RUNTIME_PLAN_REQUIRED')
     plan.require_unchanged()
     require(resources['room_id']==plan.room['id'], 'OBSERVER_BINDING')
-    backend=LocalNativeObserver(plan.room['id'],resources['instance'],plan.config_digest)
+    backend=LocalNativeObserver(plan.room['id'],resources['instance'],plan.config_digest,
+                                host_profile=plan.native_profile.host_profile)
     owner=Supervisor(Path(plan.config['deployment']['state_root']),plan.room['id'],backend,
                      authorize=lambda *_:False,revoke=lambda *_:False)
     with owner._locked():

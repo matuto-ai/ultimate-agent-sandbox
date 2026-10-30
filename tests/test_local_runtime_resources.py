@@ -52,23 +52,23 @@ class LocalRuntimeResourcesTests(unittest.TestCase):
     def test_local_handoff_does_not_override_finite_handlers(self):
         from uas.native_checkout_handoff import RootCheckoutHandoff,MAX_REQUESTS
         self.assertIs(resources.LocalRootCheckoutHandoff.serve_one,RootCheckoutHandoff.serve_one)
-        self.assertIs(resources.LocalRootCheckoutHandoff.operation,RootCheckoutHandoff.operation)
+        self.assertIsNot(resources.LocalRootCheckoutHandoff.operation,RootCheckoutHandoff.operation)
         self.assertEqual(MAX_REQUESTS,8)
     def test_epoch_reuses_existing_handler_not_deadline_reset(self):
         server=object.__new__(resources.LocalCheckoutServer)
         handler=Mock();server.epochs={'run-abc':handler};server._state=lambda:{}
-        with patch('uas.native_checkout_handoff.request_value'):
+        with patch('uas.local_successor_checkout.local_request'):
             self.assertIs(server._epoch({'kind':'OBSERVE','run_id':'run-abc'}),handler)
     def test_successor_epoch_requires_previous_verified_completion(self):
         server=object.__new__(resources.LocalCheckoutServer)
         server.epochs={'run-before':Mock()};server._state=lambda:{'runs':{'run-before':{'status':'OPEN'}}}
-        with patch('uas.native_checkout_handoff.request_value'):
+        with patch('uas.local_successor_checkout.local_request'):
             with self.assertRaisesRegex(QualificationError,'PREVIOUS_EPOCH_UNRESOLVED'):
                 server._epoch({'kind':'ALLOCATE','run_id':'run-next'})
     def test_gate_requires_existing_canonical_epoch(self):
         server=object.__new__(resources.LocalCheckoutServer);server.epochs={}
         server._state=lambda:{'gate_evaluations':{'evaluation':{'scope':{'run_id':'run'}}}}
-        with patch('uas.native_checkout_handoff.request_value'):
+        with patch('uas.local_successor_checkout.local_request'):
             with self.assertRaisesRegex(QualificationError,'EPOCH_REQUIRED'):
                 server._epoch({'kind':'GATE_QUOTA','evaluation_id':'evaluation'})
     def test_checkout_rejects_other_kernel_sender_before_dispatch(self):
@@ -77,6 +77,7 @@ class LocalRuntimeResourcesTests(unittest.TestCase):
         server=object.__new__(resources.LocalCheckoutServer)
         server.closed=False;server.child=Mock();server.child.pid=123;server.child.poll.return_value=None
         server.pidfd=9;server.identity=(1,2);server.channel=Mock();server._epoch=Mock()
+        server.resources=SimpleNamespace(plan=self.plan())
         @contextmanager
         def incoming(_channel):
             yield SimpleNamespace(credentials=(456,165533,165533),pidfd=10,data=b'{}')

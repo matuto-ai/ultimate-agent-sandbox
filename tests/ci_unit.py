@@ -1,4 +1,4 @@
-"""Standard discovery, three complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, twelve complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -11,35 +11,133 @@ import sys
 import unittest
 
 
-# Hosted 6c97 elapsed intervals: approximately 35.8 / 32.2 / 34.6 seconds.
-# Hosted 46f2154 remainder moved 3.624 + 3.314 + 2.929 seconds to integration.
-# Hosted 3678efe remainder overflow: move measured 17.581s / 11.223s into
-# existing parallel jobs (19.815s / 27.673s), not new jobs or larger limits.
-# Estimates become 37.396 / 38.896 / 43.763s; timings vary, not a guarantee.
-# Keep module ownership stable; new modules default to remainder, never disappear.
-SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
-                          'test_forge_mutations', 'test_artifact_manual_source',
-                          'test_run_review', 'test_staged_source_closure',
-                          'test_claude_permission_policy', 'test_artifact_native_source',
-                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-INTEGRATION_MODULES = frozenset({'test_context', 'test_forge_capacity',
-    'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
-    'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
-    'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
-    'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
-    'test_manager_action_host', 'test_forge_assignment',
-    'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
-PARTITIONS = ('slow', 'integration', 'remainder')
-assert not SLOW_MODULES & INTEGRATION_MODULES
+# #241: postmerge41047585809 passed311 integration tests60.074s and84
+# synthesis tests52.524s, then hit unchanged60s jobs. Eight suites total351s;
+# nine average39s before setup. Ten lanes target32–38s measured headroom.
+# Full module timings and planning bounds: docs/testing/ci-partition-headroom.md.
+# These are partitions, not exclusions. Every future module defaults to remainder.
+SLOW_MODULES = frozenset({'test_artifact_manual_source',
+ 'test_artifact_native_source',
+ 'test_checkouts',
+ 'test_claude_permission_policy',
+ 'test_forge_mutations',
+ 'test_gate_evaluation',
+ 'test_library_dispatch',
+ 'test_library_import',
+ 'test_participant_pi_launch',
+ 'test_peer',
+ 'test_peer_delivery_phases',
+ 'test_review_hosted',
+ 'test_room_control_plane',
+ 'test_run_review',
+ 'test_workstation_control',
+ 'test_workstation_peer'})
+
+INTEGRATION_MODULES = frozenset({'test_command_native_source',
+ 'test_diff_native',
+ 'test_forge_assignment',
+ 'test_forge_projections',
+ 'test_forge_read_process',
+ 'test_gate_forge_hub',
+ 'test_ledger',
+ 'test_library_enqueue',
+ 'test_library_registration',
+ 'test_manager_action_host',
+ 'test_native_completed_reviewer_reset',
+ 'test_native_gate_completion',
+ 'test_native_reviewer_recruitment_adversarial',
+ 'test_native_reviewer_reset_adversarial',
+ 'test_native_session_driver',
+ 'test_native_session_human_actions',
+ 'test_native_trust',
+ 'test_participant',
+ 'test_run_admission'})
+
+ADDITIONAL_MODULES = frozenset({'test_artifact_connected',
+ 'test_exec_state',
+ 'test_forge_capacity',
+ 'test_forge_mutation_audit',
+ 'test_forge_reconciliation',
+ 'test_gate_diff_hub',
+ 'test_library_git',
+ 'test_library_observations',
+ 'test_library_projection',
+ 'test_library_settings',
+ 'test_lifecycle',
+ 'test_local_room_prepare',
+ 'test_local_three_runs',
+ 'test_manager_read_model',
+ 'test_native_broker_audit_source',
+ 'test_native_claude_checks',
+ 'test_native_combined_image_package',
+ 'test_native_git_operations',
+ 'test_room_cli_diagnostics',
+ 'test_workstation_delivery'})
+
+SYNTHESIS_MODULES = frozenset({'test_context',
+ 'test_library_attempts',
+ 'test_native_pi_reset_adversarial',
+ 'test_staged_source_closure'})
+
+SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'})
+
+OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
+
+# #182 measured repair+native+retention ~23s; keep setup/variance margin.
+MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair',
+ 'test_library_repair_native', 'test_library_deployment'})
+
+INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
+
+# #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
+# leaves margin in the existing60s lane, without changing discovery or limits.
+# Deployment's 9.6s hosted suite uses maintenance headroom instead of this critical lane.
+LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
+ 'test_library_service', 'test_manager_library_transport'})
+
+DISPOSITION_MODULES = frozenset({'test_library_adjudication',
+ 'test_library_adjudication_native',
+ 'test_library_adjudication_recovery',
+ 'test_library_disposition',
+ 'test_library_disposition_native'})
+
+# Run 41129393214: disposition recovery took 16.7s; archive's 30s job has room.
+ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration',
+ 'test_library_archive_native', 'test_library_disposition_recovery'})
+
+PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
+              'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
+MODULE_GROUPS = (ARCHIVE_MODULES, MAINTENANCE_MODULES, LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
+                OPERATOR_MODULES, SLOW_MODULES, INTEGRATION_MODULES,
+                ADDITIONAL_MODULES, SYNTHESIS_MODULES, SCHEDULER_MODULES)
+assert sum(map(len, MODULE_GROUPS)) == len(set().union(*MODULE_GROUPS))
 
 
 def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in ARCHIVE_MODULES:
+        return 'archive'
+    if module in MAINTENANCE_MODULES:
+        return 'maintenance'
+    if module in LIFECYCLE_MODULES:
+        return 'lifecycle'
+    if module in DISPOSITION_MODULES:
+        return 'disposition'
+    if module in INSPECTION_MODULES:
+        return 'inspection'
+    if module in OPERATOR_MODULES:
+        return 'operator'
+    if module in SCHEDULER_MODULES:
+        return 'scheduler'
+    if module in SYNTHESIS_MODULES:
+        return 'synthesis'
     if module in SLOW_MODULES:
         return 'slow'
-    return 'integration' if module in INTEGRATION_MODULES else 'remainder'
+    if module in INTEGRATION_MODULES:
+        return 'integration'
+    return 'additional' if module in ADDITIONAL_MODULES else 'remainder'
 
 
 def verify_partition_ids(all_ids, groups):
@@ -94,8 +192,9 @@ def main(argv=None):
         raise ValueError('empty discovered unit partition')
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
-    print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
-          f'integration={len(groups["integration"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
+    print(f'Unit inventory: total={len(cases)} maintenance={len(groups["maintenance"])} lifecycle={len(groups["lifecycle"])} disposition={len(groups["disposition"])} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
+          f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
+          f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
     return 0 if result.wasSuccessful() else 1

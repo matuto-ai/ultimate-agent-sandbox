@@ -1,5 +1,12 @@
 # Prepared-host handoff (local test installation)
 
+New users should begin with [guided inspection/proposal](host-preparation.md#guided-first-installation),
+which does not require image reports or a hand-written Project. The explicit
+producer inputs below remain supported for existing integrations. Current
+verified Workstation and persistent Hub images are required only at plan/bind;
+Git checkout and credentials are separate later prerequisites. Runtime
+selection must precede the first Room start.
+
 This is the reproducible handoff **after** an operator has prepared the native
 host. It does not install Fedora, configure Docker/userns, create users, change
 SELinux/XFS quotas, issue TLS grants, or provision credentials. Those are separate
@@ -46,7 +53,11 @@ references. Each selected Room's deployment image reference must equal the
 observed Workstation image ID from the current report; update that explicit
 selection yourself if needed, without changing agent/model choices.
 
-Create a private `host-selections.json` with exactly these fields:
+The legacy version-1 handoff uses a private `host-selections.json` with these fields.
+For selected Engine and nondefault UID ranges, use the version-2 preparation
+flow in [host preparation](host-preparation.md); do not change a version-1 offset.
+The owned-XFS image path upgrades the generated handoff to version 3 after
+verified preparation; do not invent its image inode or UUID fields yourself.
 
 | Field | Value to supply |
 |---|---|
@@ -107,6 +118,29 @@ configuration.
 
 ## 4. Attach runtime and Manager bindings when available
 
+Create the pinned runtime descriptor from the generated handoff and **existing
+public Broker metadata**, before creating any Room lifecycle:
+
+```sh
+python -m uas.local_setup runtime-descriptor --prepared "$HANDOFF" \
+  --room "$ROOM" --broker-manifest /absolute/protected/broker.json \
+  --human-merger "$APPROVED_GITHUB_USER_ID"
+python -m uas local --root "$INSTALL" select-runtime --room "$ROOM" \
+  "$HANDOFF/runtime-$ROOM/runtime-reference.json"
+```
+
+Repeat `--human-merger` for additional explicitly approved identities. With a
+single Room, `--room` is optional on the descriptor producer. For Git/Gate-enabled
+Runs include the already-prepared `--git-manifest`, `--git-broker-manifest` and
+`--gate-manifest` paths; Git and Git Broker must be paired, and Gate requires them.
+These are public metadata files, **not credential files**. The helper binds their
+actual bytes, validates the existing Runtime/Git/Gate contracts and writes a new
+private descriptor/reference directory. It never reads credential contents,
+creates accounts/grants, clones Git, starts a Room or admits work. Missing
+metadata must be supplied through its existing owner; do not substitute fake
+paths. Existing output is not overwritten.
+
+
 Before the first Room start, select the `local-runtime-v1` record described in
 [the local entrypoint guide](entrypoint.md#enable-the-native-run-path). It contains
 `version: 1`, `profile: local-runtime-v1`, the actual `room_id`, the same
@@ -135,7 +169,7 @@ execution. This handoff does not create those rights or certificates.
 Use `select-manager` with its digest reference, restart the host, then start the
 Room. Status exposes the Manager URL only when its actual listener is ready.
 Missing credentials are reported, not synthesized. Daily commands and the
-bounded initial-Run/optional-successor limitation remain in the entrypoint guide.
+persistent Run ownership and stop/restart semantics remain in the entrypoint guide.
 
 ## Evidence and remaining validation
 

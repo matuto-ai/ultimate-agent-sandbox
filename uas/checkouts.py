@@ -364,14 +364,14 @@ class CheckoutAllocator:
         return self._allocate(run, participant, 'allocate', authorize=authorize,
                               retained_predecessor=retained_predecessor)
 
-    def reserve(self, run, participant):
+    def reserve(self, run, participant, *, authorize=None):
         """Reserve while stopped; Start never reuses a released slot implicitly.
 
         The whole-Workstation guard deliberately refuses reuse while *any*
         current Workstation writer can touch shared Project paths. A trusted
         supervisor stops, reserves, then starts; no agent badge grants this API.
         """
-        return self._allocate(run, participant, 'reserve')
+        return self._allocate(run, participant, 'reserve', authorize=authorize)
 
     def _allocate(self, run, participant, action, *, authorize=None, retained_predecessor=None):
         if not _identifier(run) or not _identifier(participant):

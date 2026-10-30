@@ -4,7 +4,10 @@ No Engine, launch/RPC object, workflow reducer or Broker is owned here. Trusted
 orchestration must attach an existing current Hub connection for each admission.
 """
 from dataclasses import asdict
+import base64
 import hashlib
+import select
+import time
 import json
 import re
 
@@ -28,6 +31,7 @@ class AdmittedPeerDispatcher:
         self.contributions = contributions
         self.reviews = None
         self.read_service = None
+        self.library = None
         self.host_forge_binding = None
         self.admissions, self.hub = admissions, hub
         self._connections = {}
@@ -124,6 +128,46 @@ class AdmittedPeerDispatcher:
                 or state['spec']['project_id'] != client.binding.project_id):
             raise LedgerError('ROOM_NOT_RUNNING')
         return True
+
+    def attach_library(self, owner):
+        """Supervisor supplies the fixed Room/Project route, never payloads."""
+        from .library_hub import LibraryHub
+        if (type(owner) is not LibraryHub or owner.ledger is not self.hub.ledger
+                or owner.room_id != self.hub.ledger.room_id or self.library is not None):
+            raise OriginDenied('one canonical same-Room Library owner required')
+        self.library = owner
+
+    def _library(self, operation, record, envelope, *, helper=None):
+        owner = self.library
+        if owner is None:
+            raise LedgerError('LIBRARY_UNAVAILABLE')
+        with self._authorize(operation, record, helper=helper) as binding:
+            root_operation = binding.operation_id
+            connection = self._connections.get(root_operation)
+            if (binding.seat.room_id != owner.room_id or connection is None
+                    or not self.hub._current(connection)):
+                raise LedgerError('STALE_CONNECTION')
+            origin = self._origin(binding)
+            def transaction_guard():
+                return (self._recheck(root_operation, record, helper=helper)
+                        and self.hub._current(connection))
+            def current():
+                try:
+                    with self._authorize(root_operation, record, helper=helper) as fresh:
+                        return (fresh == binding and self._origin(fresh) == origin
+                                and transaction_guard())
+                except (OriginDenied, OriginUnavailable):
+                    return False
+            row = self.hub.ledger.snapshot()['state'].get('fixture_context', {}).get(
+                'participants', {}).get(origin.participant_id, {})
+            assigned = row.get('bound_run') or row.get('reserved_run')
+            run_id = assigned.get('run_id') if type(assigned) is dict else None
+            prepared = owner.prepare(envelope, origin, authorize=transaction_guard, run_id=run_id)
+        result = owner.perform(prepared, current=current)
+        with self._authorize(root_operation, record, helper=helper) as fresh:
+            if fresh != binding or self._origin(fresh) != origin:
+                raise LedgerError('FORBIDDEN')
+            return owner.finish(prepared, result, authorize=transaction_guard)
 
     def attach_reviews(self, owner):
         """Trusted host composition after constructing the admitted identity."""
@@ -238,10 +282,10 @@ class AdmittedPeerDispatcher:
             raise LedgerError('INVALID_DELIVERY_COMMAND')
 
     @staticmethod
-    def _decode(data):
-        # Native admission accepts one bounded request record only. Fragmented
-        # writes are rejected before reservation/effects, not reassembled here.
-        if type(data) is not bytes or len(data) > MAX_PACKET:
+    def _decode(data, *, limit=MAX_PACKET):
+        # Ordinary native records stay bounded; only the authenticated Library
+        # assembler may pass its fixed larger aggregate bound.
+        if type(data) is not bytes or len(data) > limit:
             raise LedgerError('INVALID_NATIVE_FRAME')
         try:
             value = json.loads(data.decode('utf-8'), object_pairs_hook=_unique_object)
@@ -377,6 +421,56 @@ class AdmittedPeerDispatcher:
                 raise LedgerError('FORBIDDEN')
         return receipt
 
+    def _library_frame(self, operation, first, channel, *, helper=None):
+        """Bounded transient assembly; authenticate every record, never persist bytes."""
+        try:
+            initial = json.loads(first.data.decode('utf-8'), object_pairs_hook=_unique_object)
+        except (ValueError, UnicodeError, RecursionError):
+            return self._decode(first.data)
+        if type(initial) is not dict or initial.get('kind') != 'library.enqueue':
+            return self._decode(first.data)
+        chunks, total, deadline = [], 0, time.monotonic() + 5
+        scope = None
+        def consume(frame):
+            nonlocal scope, total
+            if (type(frame) is not dict or set(frame) != {'kind','request_id','index','count','sha256','data'}
+                    or frame['kind'] != 'library.enqueue' or type(frame['request_id']) is not str
+                    or not REQUEST.fullmatch(frame['request_id']) or type(frame['index']) is not int
+                    or frame['index'] != len(chunks) or type(frame['count']) is not int
+                    or not 2 <= frame['count'] <= 28 or type(frame['sha256']) is not str
+                    or not re.fullmatch('[0-9a-f]{64}',frame['sha256']) or type(frame['data']) is not str):
+                raise LedgerError('INVALID_NATIVE_FRAME')
+            current = (frame['request_id'],frame['count'],frame['sha256'])
+            if scope is not None and current != scope: raise LedgerError('INVALID_NATIVE_FRAME')
+            scope = current
+            try: part = base64.b64decode(frame['data'],validate=True)
+            except (ValueError, TypeError): raise LedgerError('INVALID_NATIVE_FRAME') from None
+            if len(part) > 40000 or (frame['index']+1 < frame['count'] and len(part)!=40000):
+                raise LedgerError('INVALID_NATIVE_FRAME')
+            total += len(part)
+            if total > 1114112: raise LedgerError('INVALID_NATIVE_FRAME')
+            chunks.append(part)
+        consume(initial)
+        while len(chunks) < scope[1]:
+            remaining = deadline - time.monotonic()
+            try:
+                ready = remaining > 0 and select.select([channel],[],[],remaining)[0]
+            except ValueError:
+                raise OriginDenied('capture channel revoked during assembly') from None
+            if not ready: raise LedgerError('INVALID_NATIVE_FRAME')
+            with receive(channel) as record:
+                with self._authorize(operation,record,helper=helper):
+                    if record.credentials != first.credentials: raise OriginDenied('changed frame sender')
+                    try: frame = json.loads(record.data.decode('utf-8'),object_pairs_hook=_unique_object)
+                    except (ValueError,UnicodeError,RecursionError): raise LedgerError('INVALID_NATIVE_FRAME') from None
+                    consume(frame)
+        joined = b''.join(chunks)
+        if hashlib.sha256(joined).hexdigest()!=scope[2]: raise LedgerError('INVALID_NATIVE_FRAME')
+        frame = self._decode(joined, limit=1114112)
+        if frame['request_id']!=scope[0] or frame['envelope'].get('kind')!='library.enqueue':
+            raise LedgerError('INVALID_NATIVE_FRAME')
+        return frame
+
     def receive(self, operation):
         return self._receive(operation, self.admissions.peer_channel(operation))
 
@@ -392,11 +486,14 @@ class AdmittedPeerDispatcher:
             # Keep the received kernel pidfd alive through all Broker rechecks.
             with receive(channel) as record:
                 with self._authorize(operation, record, helper=helper):
-                    frame = self._decode(record.data)
-                    request_id = frame['request_id']
+                    pass  # Authenticate first record before transient assembly.
+                frame = self._library_frame(operation, record, channel, helper=helper)
+                request_id = frame['request_id']
                 envelope = frame['envelope']
                 if envelope.get('kind') in {'forge-read','forge-write','forge-reconcile'}:
                     receipt = self._forge(operation, record, envelope, helper=helper)
+                elif envelope.get('kind') == 'library.enqueue':
+                    receipt = self._library(operation, record, envelope, helper=helper)
                 else:
                     with self._authorize(operation, record, helper=helper) as binding:
                         receipt = self._submit(binding.operation_id, record, binding,

@@ -124,13 +124,57 @@ class LocalNativeTests(unittest.TestCase):
         stack.enter_context(patch.object(Path,'resolve',lambda p:p))
         def info(p):
             if p==root:return N(st_uid=0,st_mode=stat.S_IFDIR|0o711)
-            return N(st_uid=local.native.HOST_UID,st_gid=local.native.RUNTIME_UID if p.name=='peer' else local.native.HUB_UID,st_mode=stat.S_IFDIR|0o710)
+            return N(st_uid=backend.profile.owners['supervisor'],st_gid=backend.profile.owners['runtime'] if p.name in ('peer','git') else backend.profile.owners['hub'],st_mode=stat.S_IFDIR|0o710)
         stack.enter_context(patch.object(Path,'stat',info));stack.enter_context(patch.object(local.os.path,'lexists',return_value=existing))
         stack.enter_context(patch.object(Path,'lstat',return_value=N(st_uid=0 if foreign else local.native.HOST_UID,
             st_gid=local.native.RUNTIME_UID,st_mode=stat.S_IFSOCK|0o620,st_dev=1,st_ino=2)))
         unlink=stack.enter_context(patch.object(Path,'unlink'))
         listener=stack.enter_context(patch.object(local.native,'labeled_listener',side_effect=[Mock(),Mock()]))
         return backend,state,listener,unlink
+    def test_recovery_uses_selected_supervisor_not_qualification_default(self):
+        from tests.test_local_native_engine import selections
+        self.config,self.doc=selections()
+        self.doc['mapping']['offset']=500000
+        self.doc['host_profile']['mapping']['offset']=500000
+        with ExitStack() as stack:
+            backend,state,listener,unlink=self.recovery(stack)
+            backend.reopen_listeners(state,owner_lock_fd=4)
+            self.assertEqual([c.kwargs['owner'] for c in listener.call_args_list],[565533,565533])
+            self.assertEqual([c.args[1] for c in listener.call_args_list],[565532,565531])
+
+    def test_v3_recovery_is_mandatory_and_after_stopped_ownership_checks(self):
+        from uas import local_listener_recovery as recovery
+        for running in (False,True):
+            with self.subTest(running=running),ExitStack() as stack:
+                backend,state,listener,unlink=self.recovery(stack,running=running)
+                backend.profile.native_document['version']=3
+                restore=stack.enter_context(patch.object(recovery,'recover_layout',side_effect=LifecycleError('unconfirmed generation')))
+                with self.assertRaises(LifecycleError):backend.reopen_listeners(state,owner_lock_fd=4)
+                if running:restore.assert_not_called()
+                else:restore.assert_called_once_with(backend,state)
+                listener.assert_not_called();unlink.assert_not_called()
+
+    def test_v3_initial_record_only_after_base_layout_success(self):
+        from uas import local_listener_recovery as recovery
+        backend=local.LocalNativeBackend(self.profile());backend.profile.native_document['version']=3
+        state={'instance_id':'owned'}
+        with patch.object(local.native.NativeQualificationBackend,'_prepare_layout') as prepare,patch.object(recovery,'record_layout') as record:
+            backend._prepare_layout(state)
+            prepare.assert_called_once_with(state);record.assert_called_once_with(backend,state)
+            record.reset_mock();prepare.side_effect=OSError('partial layout')
+            with self.assertRaises(OSError):backend._prepare_layout(state)
+            record.assert_not_called()
+
+    def test_recovery_rebinds_git_pair_with_distinct_listening_modes(self):
+        with ExitStack() as stack:
+            backend,state,listener,unlink=self.recovery(stack)
+            backend.profile.git_manifest={'selected':True}
+            listener.side_effect=[Mock() for _ in range(4)]
+            backend.reopen_listeners(state,owner_lock_fd=4)
+            self.assertEqual([c.args[0].name for c in listener.call_args_list],['pi.sock','hub.sock','request.sock','worker.sock'])
+            self.assertEqual([c.kwargs['listen'] for c in listener.call_args_list],[True,True,False,True])
+            self.assertEqual([c.args[1] for c in listener.call_args_list][-2:],[backend.profile.owners['runtime']]*2)
+
     def test_explicit_recovery_requires_stopped_exact_owned_resources(self):
         with ExitStack() as stack:
             backend,state,listener,unlink=self.recovery(stack)

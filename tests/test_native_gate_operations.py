@@ -24,6 +24,7 @@ class NativeGateOperationsTests(unittest.TestCase):
         r.scratch_root=Path('/owned/scratch');r.journal_root=Path('/owned/targets');r.launch_journal_root=Path('/owned/launches')
         r.listener=Mock();r.endpoint=object.__new__(GateEndpointLease);r.reserve_capacity=Mock()
         self.targets=Mock();self.targets.resolver=self.host.identity.resolver
+        self.targets.host_profile=r.workstation.host_profile
         self.lease=Mock();self.lease.document.return_value=fixture.fixture.TARGET
         self.targets.lease.return_value=self.lease
         self.constructor=patch.object(operations,'ArtifactTargets',return_value=self.targets).start()
@@ -32,7 +33,7 @@ class NativeGateOperationsTests(unittest.TestCase):
     def test_assembly_binds_real_service_fixed_launch_and_canonical_target_resolver(self):
         owner=operations.NativeGateOperations(self.host,self.resources)
         self.constructor.assert_called_once_with(self.resources.scratch_root,self.resources.journal_root,
-            self.host.identity.resolver,reserve_capacity=self.resources.reserve_capacity)
+            self.host.identity.resolver,reserve_capacity=self.resources.reserve_capacity,host_profile=None)
         self.assertIs(owner.service.resolver,self.host.sources)
         self.assertIs(owner.service.targets,self.targets);self.assertIs(owner.service.listener,self.resources.listener)
         self.assertIs(type(owner.control),NativeGateControl)

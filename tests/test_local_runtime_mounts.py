@@ -97,11 +97,11 @@ class LocalRuntimeMountTests(unittest.TestCase):
         from unittest.mock import Mock
         from uas import native_qualification_backend as backend
         plan,state,_=self.local();owner=gate.NativeGateResources()
-        owner._closed=False;owner.deadline=100;owner.workstation=object()
+        owner._closed=False;owner.deadline=100;owner.workstation=SimpleNamespace(host_profile=plan.native_profile.host_profile)
         owner.room_id=plan.room['id'];owner.instance=state['instance_id'];owner.container_id='c'*64
         owner.supervisor=SimpleNamespace(_locked=lambda:nullcontext(),_read=lambda:state)
         owner.git_resources=Mock();owner.git_resources.profile.mount_tuples.return_value=()
-        owner.plan=plan;owner.data={'peer_path':str(plan.native_profile.endpoints/state['instance_id']/'peer/pi.sock')}
+        owner.plan=plan;owner._host_owners=plan.native_profile.host_profile.owners;owner.data={'peer_path':str(plan.native_profile.endpoints/state['instance_id']/'peer/pi.sock')}
         owner.profile=SimpleNamespace(image_id=plan.native_profile.image_id,image_reference=plan.native_profile.image_reference,mount_tuples=lambda:())
         owner.engine=Mock();owner.engine.inspect_container.return_value={}
         with patch.object(gate.time,'monotonic',return_value=1),patch.object(backend,'validate_native_container',side_effect=RuntimeError('stop before effects')) as validate:

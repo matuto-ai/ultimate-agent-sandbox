@@ -235,3 +235,41 @@ class ManagerSelectionTests(unittest.TestCase):
                 fd,identity=local._held_tls('/secure/key',private=True,stack=stack)
                 self.assertEqual(fd,12);self.assertEqual(identity,local._tls_identity(info))
             self.assertTrue(opened.call_args.args[1]&local.os.O_NOFOLLOW)
+
+class TerminalRequestScopeTests(unittest.TestCase):
+    def test_terminal_frame_does_not_inherit_open_or_observe_authority(self):
+        grant=human.HumanActionGrant('deployment','room','instance','manager',
+            Origin('operator','human','session','epoch',('human-control-run',)),
+            ('observe','open-run','authorize-run-request','terminal-stop'))
+        bindings=human.HumanActionBindings({hashlib.sha256(b'test-client').hexdigest():grant})
+        with patch.object(human.ssl,'SSLSocket',TLS):
+            connection=bindings.accept(TLS())
+            with connection.request({'version':1,'action':'open-run','payload':{}}) as (_,opened):
+                self.assertFalse(opened.allowed('terminal-stop'))
+            with connection.request({'version':1,'action':'terminal-stop','payload':{}}) as (_,terminal):
+                self.assertTrue(terminal.allowed('terminal-stop'))
+                self.assertFalse(terminal.allowed('open-run'))
+                self.assertFalse(terminal.allowed('observe'))
+            self.assertFalse(terminal.allowed('terminal-stop'))
+            bindings.revoke(hashlib.sha256(b'test-client').hexdigest())
+            with self.assertRaises(LedgerError):
+                with connection.request({'version':1,'action':'terminal-stop','payload':{}}):pass
+
+    def test_terminal_http_unknown_is_not_retried_and_open_only_grant_denies(self):
+        grant=human.HumanActionGrant('deployment','room','instance','manager',
+            Origin('operator','human','session','epoch',('human-control-run',)),('terminal-stop',))
+        fingerprint=hashlib.sha256(b'test-client').hexdigest()
+        bindings=human.HumanActionBindings({fingerprint:grant})
+        from uas.local_manager_actions import LocalNativeRunActions
+        actions=object.__new__(LocalNativeRunActions)
+        actions.terminal=Mock(side_effect=OSError('private failure'))
+        manager=local.LocalManager(bindings,lambda _:None,authority='localhost:8765',run_actions=actions)
+        request={'version':1,'action':'terminal-stop','payload':{'operation_id':'stop-once'}}
+        with patch.object(human.ssl,'SSLSocket',TLS):
+            channel=TLS(wire(request));manager.handle(channel)
+            self.assertIn(b'503',channel.output);self.assertIn(b'unknown',channel.output)
+            self.assertNotIn(b'private failure',channel.output);actions.terminal.assert_called_once()
+            bindings.bind(fingerprint,human.HumanActionGrant('deployment','room','instance','manager',
+                grant.human,('open-run','authorize-run-request')))
+            channel=TLS(wire(request));manager.handle(channel)
+            self.assertIn(b'403',channel.output);actions.terminal.assert_called_once()

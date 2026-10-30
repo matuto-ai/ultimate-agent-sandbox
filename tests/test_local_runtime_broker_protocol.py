@@ -90,7 +90,7 @@ class LocalRuntimeBrokerProtocolTests(unittest.TestCase):
             owner.plan=SimpleNamespace(room={'id':'alpha','project':{'id':'project','repository':'owner/repo'}})
             owner.resources={'instance':'instance'};owner.supervisor=SimpleNamespace(room_id='alpha')
             owner._thread=threading.get_ident();owner._broker_attempted=False
-            owner._broker=owner._git_broker=None;owner.broker_fd=7;owner.git_fd=None
+            owner._broker=owner._git_broker=None;owner.broker_fd=7;owner.git_fd=None;owner._graph=None
             with patch.object(wire,'enable'),patch.object(wire,'HeldOrigin',KernelOrigin),\
                  patch.object(wire,'receive',side_effect=lambda channel:channel.receive()),\
                  patch.object(wire.uuid,'uuid4',side_effect=identities),\

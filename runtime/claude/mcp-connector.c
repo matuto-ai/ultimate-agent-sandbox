@@ -11,7 +11,7 @@
 #include <stdlib.h>
 static void fail(void) { _exit(125); }
 int main(int argc,char **argv) {
-    if (argc != 2 || argv[1][0] != '/' || strlen(argv[1]) >= sizeof(((struct sockaddr_un *)0)->sun_path)) fail();
+    if ((argc != 2 && argc != 3) || (argc == 3 && strcmp(argv[2],"library-capture-v1")) || argv[1][0] != '/' || strlen(argv[1]) >= sizeof(((struct sockaddr_un *)0)->sun_path)) fail();
     if (prctl(PR_SET_DUMPABLE,0) || prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)) fail();
     alarm(15);
     int peer=socket(AF_UNIX,SOCK_SEQPACKET|SOCK_CLOEXEC,0);
@@ -37,6 +37,6 @@ int main(int argc,char **argv) {
     if (peer != 3 && dup2(peer,3) != 3) fail();
     if (fcntl(3,F_SETFD,0) || fcntl(3,F_SETFL,O_NONBLOCK) || close_range(5,~0U,0)) fail();
     char *env[]={"PATH=/opt/uas/node/bin:/usr/bin:/bin","LANG=C.UTF-8",NULL};
-    char *args[]={"/opt/uas/node/bin/node","/opt/uas/runtime/claude/mcp-server.mjs",NULL};
+    char *args[]={"/opt/uas/node/bin/node","/opt/uas/runtime/claude/mcp-server.mjs",argc == 3 ? argv[2] : NULL,NULL};
     alarm(0); execve(args[0],args,env); fail();
 }

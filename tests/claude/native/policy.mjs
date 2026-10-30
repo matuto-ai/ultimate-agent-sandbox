@@ -43,3 +43,38 @@ assert.equal(refused,true); assert.equal(contacted,false);
 const authenticated=nativeOptions({binary:'/opt/uas/claude/claude',cwd:'/project',home:'/runtime',model:'claude-sonnet-4-6',sessionId:session,helper:'/opt/uas/bin/claude-mcp-connector',endpoint:'/transport/peer',providerToken:'fixture-token-not-real-123'});
 assert.equal(authenticated.env.CLAUDE_CODE_OAUTH_TOKEN,'fixture-token-not-real-123');
 assert.equal(authenticated.mcpServers.uas.env.CLAUDE_CODE_OAUTH_TOKEN,undefined);
+
+// Narrow Library profile does not grow the default native or tool-less profiles.
+const {LIBRARY_TOOL_NAMES,profileTools}=await import('../../../runtime/claude/native-policy.mjs');
+const {toolsForProfile,invokeProfile}=await import('../../../runtime/claude/mcp-tools.mjs');
+const libraryOptions=nativeOptions({binary:'/opt/uas/claude/claude',cwd:'/project',home:'/runtime',model:'claude-sonnet-4-6',sessionId:session,helper:'/opt/uas/bin/claude-mcp-connector',endpoint:'/transport/peer',profile:'library-capture-v1'});
+assert.deepEqual(libraryOptions.allowedTools,['mcp__uas__library_enqueue']);
+assert.deepEqual(libraryOptions.tools,[]);
+assert.deepEqual(libraryOptions.mcpServers.uas.args,['/transport/peer','library-capture-v1']);
+assert.deepEqual(TOOL_NAMES,['mcp__uas__uas_peer','mcp__uas__uas_review','mcp__uas__gh']);
+assert.throws(()=>profileTools('unqualified'));
+assert.deepEqual(toolsForProfile('library-capture-v1').map(x=>x.name),['library_enqueue']);
+await assert.rejects(()=>invokeProfile({},'gh',{},'library-capture-v1'));
+await assert.rejects(()=>invokeProfile({},'library_enqueue',{},'native-v1'));
+const init={type:'system',subtype:'init',session_id:session,claude_code_version:'2.1.310',tools:[...LIBRARY_TOOL_NAMES],mcp_servers:[{name:'uas',status:'connected'}]};
+const libraryState=new NativeToolState(session,'library-capture-v1');libraryState.event(init);
+assert.equal(libraryState.initialized,true);assert.equal(libraryState.fenced,null);
+for(const tools of [[],[...TOOL_NAMES],[...LIBRARY_TOOL_NAMES,'Bash'],[...LIBRARY_TOOL_NAMES,...LIBRARY_TOOL_NAMES]]){
+  const denied=new NativeToolState(session,'library-capture-v1');denied.event({...init,tools});
+  assert.equal(denied.fenced,'unsupported-native-profile');
+}
+const requests=[];
+const capture={type:'context',title:'Exact_title',body:'Explicit **body**',sources:[]};
+const channel={request:async envelope=>{requests.push(envelope);return {ok:true,receipt:{request_id:envelope.request_id,outcome:'NOT_DURABLE',reason:'TRANSPORT_UNCERTAIN',retryable:true,queue_id:null,path:null,published_sha:null,projection_sha:null,visible:false}};}};
+for(let i=0;i<2;i++){
+ const response=await invokeProfile(channel,'library_enqueue',{request_id:'stable-request',capture},'library-capture-v1');
+ const data=JSON.parse(response.content[0].text);assert.equal(data.outcome,'NOT_DURABLE');assert.equal(response.isError,true);
+}
+assert.notEqual(requests[0].id,requests[1].id);assert.equal(requests[0].request_id,requests[1].request_id);
+assert.deepEqual(requests[0].capture,capture);assert.deepEqual(requests[1].capture,capture);
+const absent=JSON.parse((await invokeProfile(null,'library_enqueue',{request_id:'stable-request',capture},'library-capture-v1')).content[0].text);
+assert.equal(absent.status,'TRANSPORT_UNAVAILABLE');assert.equal(Object.hasOwn(absent,'outcome'),false);
+const noPath=JSON.parse((await invokeProfile(channel,'library_enqueue',{request_id:'stable-request',capture,project:'/elsewhere'},'library-capture-v1')).content[0].text);
+assert.equal(noPath.status,'ADAPTER_REJECTED');assert.equal(requests.length,2);
+
+await import('./library-read-policy.mjs');

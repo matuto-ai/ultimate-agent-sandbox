@@ -2,7 +2,8 @@
 
 Inputs come from the held root-supervised child startup, never from browser data.
 No installation-file copy or credential provisioning. Each action remains within
-one synchronous authenticated request and the existing finite native budget.
+one authenticated command. Admitted native work is stepped by the retained
+owner after the opening HTTP request has ended, under its revocation lease.
 """
 from contextlib import ExitStack
 import hashlib
@@ -59,5 +60,5 @@ def serve_runtime_manager(plan, resources, session_owner, manager_reference, *, 
         manager = selection.manager(document_for,run_actions=actions,current=current)
         if on_ready is not None:
             on_ready({'status':'ready','url':'https://'+selection.authority+'/',
-                'mode':'bounded-native-run','room_id':room['id'],'instance_id':identity.stream_id})
-        manager.serve(listener,context,stopped)
+                'mode':'persistent-native-run','room_id':room['id'],'instance_id':identity.stream_id})
+        manager.serve(listener,context,stopped,idle=session_owner.step)

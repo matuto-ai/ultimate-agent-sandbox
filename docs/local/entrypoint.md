@@ -17,6 +17,14 @@ without that grant it stays unavailable, not anonymously authenticated.
 
 ## Prepare once
 
+For a new installation, start with the [guided host inspection and proposal](host-preparation.md#guided-first-installation).
+It generates Project/settings files without hand-authoring security IDs. The
+manual JSON below is an advanced input path, not a prerequisite for inspection.
+Select runtime bindings **before the first Room start**, even if credentials
+will be supplied later. An already-started idle lifecycle cannot be silently
+upgraded by adding a runtime selection.
+
+
 Run the source with Python 3.11 or later. Select an existing validated Project
 JSON and record its absolute canonical path and SHA-256. The installation
 selection contains references only, never credential values:
@@ -47,7 +55,7 @@ a separate operation; this entrypoint does not turn an unprepared machine into a
 
 ## Native prerequisites
 
-Native startup consumes the `local-native-v1` descriptor validated by
+Native startup consumes the `local-native-v1` (or selected-profile v2 / owned-XFS v3) descriptor validated by
 `uas.local_native.validate_document`. It records exact imported image IDs,
 prepared per-Room storage identities, XFS project quotas, MCS categories,
 endpoint root and private network selection. Its images must include the
@@ -55,7 +63,8 @@ persistent `uas.local_hub` entrypoint. The earlier #78 image archives predate
 that entrypoint and must not be represented as containing this change.
 
 The existing Linux native profile still requires Docker Engine 29.8.2, SELinux,
-user namespace mapping `0:100000:65536`, fixed isolated host owners, and prepared
+a validated nonoverlapping 65536-ID user namespace mapping (version 1 keeps
+`0:100000:65536`), profile-derived isolated host owners, and prepared
 XFS quotas. This command does **not** reconfigure Docker, create accounts, alter
 mounts/security policy, or provision personal credentials. A plain Docker
 installation or non-Linux desktop is not an equivalent confinement profile.
@@ -130,21 +139,44 @@ instance without starting brokers or models. Stop the host, select the existing
 Manager grant for that instance, then restart. The Manager's Issue form uses one
 operation ID and does not automatically retry an uncertain operation.
 
-Each explicit native operation retains its original authenticated HTTP request
-through admission, reviewer recruitment and the existing native session driver.
-The operation budget is at most 180 seconds (the host itself has no such expiry).
-A returned `finished` receipt is paired with `completed`, `attention`, `unknown`
-or `inconclusive`; `finished` alone never means the issue was completed. No
-request-scoped human session survives the response. The form supports one initial Run and an optional **preselected next issue**
-within that same authenticated request and operation budget. The existing
-retirement/reset path runs only after verified completion of the first Run. If
-the remaining budget is insufficient, the successor is not started and the
-receipt is inconclusive. A later separate Issue click is explicitly refused;
-this is not an indefinitely reusable background authority.
+Each Issue click authenticates a new explicit command. Open returns an `ACTIVE`
+admission receipt with the canonical Run ID and generation after native owners
+have been established; it does not wait for the Run to finish. The request's
+human session ends with that response. The retained owner services that one Run
+using a narrow, revocable grant tied to the admitted operation and original
+binding generation, not a saved HTTP session or permission to issue new commands.
+Closing the browser does not revoke admitted work. Revoking/replacing the human
+binding, losing ownership, changed canonical scope or uncertain native effects
+fences further service. Status comes from the Room ledger; errors do not silently
+restart an operation.
+
+The at-most-180-second budget bounds admission; each subsequent effect has its
+own bounded deadline. It is not a maximum Run lifetime. The qualification runner
+remains finite and unchanged. The form no longer preselects a second issue.
+Repeated Open with the same operation and exact identity returns the original
+admission receipt; a different operation cannot interrupt an active Run. A later
+Run additionally requires verified predecessor retirement and safe root-owned
+checkout reuse; uncertain custody or dirty workspace remains blocked, never
+silently discarded. A process restart does not reconstruct native authority
+from a stored receipt.
 
 Normal Stop sends a fixed pause to the retained child and requires its exact
-participant-revocation receipt before stopping the Workstation. The Hub and data
-remain. Missing/uncertain receipts are reported as such, never retried blindly.
+participant-revocation receipt before stopping the Workstation. For a completed
+Run, the child retains exact native exit observations without retaining human
+authority. After Room Start, no old task is automatically resumed: the next
+explicit authenticated Open adopts those observations into canonical retirement
+and safely reuses the checkout. The Hub and data remain. An interrupted active
+Run is reported separately as stopped service/attention, not as completed; its
+after Room Start, a fresh explicit `terminal-stop` command can end that interrupted
+Run while retaining files. The Manager shows **End interrupted Run (keep files)**
+only for an existing `terminal-stop` grant; the command additionally requires
+`human-control-run`. Open/observe grants do not imply cancellation permission.
+The request pins the Run, generation and control revision. Verified native exits
+produce canonical `CLOSED/stopped` with a generation fence, not successful
+completion. A later, separately authenticated Open resets native contexts and
+reuses only a clean, quiescent checkout. Dirty files remain untouched and block
+reuse until explicitly resolved. No grant is installed by this implementation.
+Missing/uncertain receipts remain fenced, never retried blindly.
 Actual accounts, native execution, browser TLS and provider integration remain
 part of the final authorized local test, not claims established by source tests.
 

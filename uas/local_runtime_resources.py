@@ -13,6 +13,7 @@ import sys
 import time
 
 from .kernel_origin import enable
+from .local_host_profile import plan_owners
 from .native_image_package import canonical
 from .native_qualification import (broker_selection, git_broker_selection,
     check_git_credentials, write_startup, QualificationError)
@@ -22,35 +23,38 @@ def require(ok,code):
     if not ok:raise QualificationError(code)
 
 
-def private_directory(path):
+def private_directory(path, *, owner=165534):
     path=Path(path);info=path.lstat()
     require(path.resolve()==path and stat.S_ISDIR(info.st_mode)
-            and info.st_uid==165534 and stat.S_IMODE(info.st_mode)==0o700,
+            and info.st_uid==owner and stat.S_IMODE(info.st_mode)==0o700,
             'LOCAL_BROKER_PRIVATE_DIRECTORY_UNAVAILABLE')
     return path
 
 
 def forge_configuration(plan,instance,private,selection):
+    owners=plan_owners(plan)
     value={'room_id':plan.room['id'],'room_instance':instance,
            'project_id':plan.room['project']['id'],'repository':plan.room['project']['repository'],
            'deployment_id':plan.config['deployment']['id'],'audit_path':str(private/'audit.db'),
-           'result_root':str(private/'results'),'supervisor_uid':165533,'supervisor_gid':165533,
+           'result_root':str(private/'results'),'supervisor_uid':owners['supervisor'],'supervisor_gid':owners['supervisor'],
            **{k:v for k,v in selection.items() if k!='version'}}
     require(len(canonical(value))+1<=16384,'BROKER_STARTUP_TOO_LARGE')
     return value
 
 
 def git_configuration(plan,instance,private,selection):
+    owners=plan_owners(plan)
     value={'binding':{'room_id':plan.room['id'],'project_id':plan.room['project']['id'],
                      'repository':plan.room['project']['repository'],'host':'github.com'},
            'room_instance':instance,'deployment_id':plan.config['deployment']['id'],
-           'audit_path':str(private/'audit.db'),'supervisor_uid':165533,'supervisor_gid':165533,
+           'audit_path':str(private/'audit.db'),'supervisor_uid':owners['supervisor'],'supervisor_gid':owners['supervisor'],
            **{k:v for k,v in selection.items() if k!='version'}}
     require(len(canonical(value))+1<=16384,'GIT_BROKER_STARTUP_TOO_LARGE')
     return value
 
 
 def missing_bindings(plan):
+    owners=plan_owners(plan)
     """Only absent protected files are unavailable bindings, never malformed ones."""
     plan.require_unchanged()
     forge=broker_selection(plan)
@@ -64,7 +68,7 @@ def missing_bindings(plan):
         try:info=filename.lstat()
         except FileNotFoundError:missing.append(name);continue
         require(filename.resolve()==filename and stat.S_ISREG(info.st_mode)
-                and info.st_uid==165534 and info.st_nlink==1 and not info.st_mode&0o077,
+                and info.st_uid==owners['broker'] and info.st_nlink==1 and not info.st_mode&0o077,
                 'PROTECTED_BROKER_CREDENTIAL_INVALID')
     if not missing and git is not None:check_git_credentials(plan,git)
     return sorted(set(missing))
@@ -75,6 +79,7 @@ class LocalRuntimeBrokers:
     def __init__(self,plan,instance,layout,host_lock_fd):
         require(type(host_lock_fd) is int and host_lock_fd>=3,'LOCAL_HOST_LOCK_REQUIRED')
         self.plan,self.instance,self.layout=plan,instance,layout
+        self.owners=plan_owners(plan)
         self.lock_fd=host_lock_fd;self.attempted=False;self.records={};self.allocation=None
 
     def start(self):
@@ -85,16 +90,16 @@ class LocalRuntimeBrokers:
         forge=broker_selection(self.plan)
         credential=Path(forge['credential_path']);info=credential.lstat()
         require(credential.resolve()==credential and stat.S_ISREG(info.st_mode)
-                and info.st_uid==165534 and not info.st_mode&0o077 and info.st_nlink==1,
+                and info.st_uid==self.owners['broker'] and not info.st_mode&0o077 and info.st_nlink==1,
                 'PROTECTED_BROKER_CREDENTIAL_UNAVAILABLE')
-        private=private_directory(self.layout['broker']);results=private/'results'
+        private=private_directory(self.layout['broker'],owner=self.owners['broker']);results=private/'results'
         if not os.path.lexists(results):
-            results.mkdir(mode=0o700);os.chown(results,165534,165534)
-        private_directory(results)
+            results.mkdir(mode=0o700);os.chown(results,self.owners['broker'],self.owners['broker'])
+        private_directory(results,owner=self.owners['broker'])
         configurations=[('forge','uas.forge_read_service',forge_configuration(self.plan,self.instance,private,forge))]
         if 'git_manifest' in self.plan.installation:
             selected=git_broker_selection(self.plan);check_git_credentials(self.plan,selected)
-            git_private=private_directory(self.layout['git-broker'])
+            git_private=private_directory(self.layout['git-broker'],owner=self.owners['broker'])
             configurations.append(('git','uas.git_service',git_configuration(self.plan,self.instance,git_private,selected)))
         deadline=time.monotonic()+30
         for key,module,configuration in configurations:
@@ -110,7 +115,7 @@ class LocalRuntimeBrokers:
         row={'host':host,'service':service,'process':None,'expected':True};self.records[key]=row
         process=subprocess.Popen([sys.executable,'-m',module,str(service.fileno())],
             stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-            user=165534,group=165534,extra_groups=[],pass_fds=(service.fileno(),self.lock_fd),cwd='/',
+            user=self.owners['broker'],group=self.owners['broker'],extra_groups=[],pass_fds=(service.fileno(),self.lock_fd),cwd='/',
             env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(Path(__file__).resolve().parents[1]),
                  'PYTHONDONTWRITEBYTECODE':'1','HOME':'/nonexistent'})
         row['process']=process
@@ -182,17 +187,33 @@ Initial admission and first successor remain the canonical supported scope.
                                            'instance':state['instance_id']},owner)
         self._initialize(plan,resources,child,channel,deadline=deadline)
 
+    def _authorized(self, request, *, initial):
+        from .local_successor_checkout import authorize_local
+        return authorize_local(self, request, initial=initial)
 
-def retained_manifest(ref,target):
+    def operation(self, request):
+        from .local_successor_checkout import reuse_primary
+        if request['kind'] == 'REUSE_PRIMARY':
+            return reuse_primary(self, request)
+        if request['kind'] == 'OBSERVE' and getattr(self, 'reused_primary', None) == request['run_id']:
+            from .native_checkout_handoff import ready_slot
+            with self.allocator._locked('status') as state:
+                self._authorized(request, initial=False)
+                slot = self.allocator._observe(state, 'primary')
+            return ready_slot(slot, request['run_id'], self.pin[1])
+        return super().operation(request)
+
+
+def retained_manifest(ref,target, *, owner=165533):
     """Create once; a restart verifies exact public bytes instead of replacing."""
     from .native_qualification_backend import copy_public_manifest
     import hashlib
     target=Path(target)
-    if not os.path.lexists(target):return copy_public_manifest(ref,target)
+    if not os.path.lexists(target):return copy_public_manifest(ref,target,owner=owner)
     fd=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK)
     try:
         info=os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==165533
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid==owner
                 and stat.S_IMODE(info.st_mode)==0o400 and 0<info.st_size<=16384,
                 'LOCAL_PUBLIC_MANIFEST_CHANGED')
         raw=os.read(fd,16385)
@@ -221,7 +242,7 @@ def prepare_supervisor_access(owner,profile,state):
             try:
                 info=os.fstat(fd)
                 require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1,'CONTROL_OWNER')
-                os.fchown(fd,0,165533);os.fchmod(fd,mode)
+                os.fchown(fd,0,profile.host_profile.owners['supervisor']);os.fchmod(fd,mode)
             finally:os.close(fd)
 
 
@@ -240,7 +261,7 @@ class LocalRuntimeResources:
         self.plan,self.owner,self.backend,self.state=plan,owner,backend,deepcopy(state)
         self.data=deepcopy(base_resources);self.lock_fd=host_lock_fd
         self.layout=backend.layout(state);self.brokers=LocalRuntimeBrokers(plan,state['instance_id'],self.layout,host_lock_fd)
-        self.extra_fds=[];self.prepared=False;self.child=None;self.handoff=None
+        self.extra_fds=[];self.prepared=False;self.child=None;self.handoff=None;self.services=None
 
     def prepare(self):
         require(not self.prepared,'LOCAL_RUNTIME_PREPARE_ALREADY_ATTEMPTED');self.prepared=True
@@ -254,14 +275,14 @@ class LocalRuntimeResources:
                          peer_path=str(self.layout['peer']/'pi.sock'),observer_profile='local-native-v1')
         for runtime in ('pi','claude'):
             target=self.layout['supervisor']/(runtime+'-manifest.json')
-            retained_manifest(self.plan.installation[runtime+'_manifest'],target)
+            retained_manifest(self.plan.installation[runtime+'_manifest'],target,owner=plan_owners(self.plan)['supervisor'])
             self.data[runtime+'_manifest_path']=str(target)
         if 'git_manifest' in self.plan.installation:
             from .native_git_resources import seal_backend
             require(self.backend.profile.git_manifest is not None and len(self.backend.listeners)>=4,
                     'LOCAL_GIT_NATIVE_RESOURCES_UNAVAILABLE')
             target=self.layout['supervisor']/'git-manifest.json'
-            retained_manifest(self.plan.installation['git_manifest'],target)
+            retained_manifest(self.plan.installation['git_manifest'],target,owner=plan_owners(self.plan)['supervisor'])
             fd=seal_backend(self.backend.profile.git_manifest);self.extra_fds.append(fd)
             self.data.update(git_manifest_path=str(target),git_backend_fd=fd,
                 git_request_path=str(self.layout['git']/'request.sock'),git_worker_path=str(self.layout['git']/'worker.sock'),
@@ -272,7 +293,7 @@ class LocalRuntimeResources:
             from .native_gate_resources import paths
             require(self.backend.profile.gate_manifest is not None,'LOCAL_GATE_NATIVE_RESOURCES_UNAVAILABLE')
             selected=paths(self.plan,self.state);target=self.layout['supervisor']/'gate-manifest.json'
-            retained_manifest(self.plan.installation['gate_manifest'],target)
+            retained_manifest(self.plan.installation['gate_manifest'],target,owner=plan_owners(self.plan)['supervisor'])
             self.data.update(gate_manifest_path=str(target),gate_endpoint_path=str(selected['endpoint_root']/'gate.sock'),
                             **{'gate_'+key:str(selected[key]) for key in ('scratch_root','journal_root','launch_journal_root')})
         descriptors=self.brokers.start()
@@ -347,8 +368,8 @@ class LocalCheckoutServer:
         return result
 
     def _epoch(self,request):
-        from .native_checkout_handoff import request_value
-        request_value(request)
+        from .local_successor_checkout import local_request
+        local_request(request)
         state=self._state()
         if request['kind']=='GATE_QUOTA':
             evaluation=state.get('gate_evaluations',{}).get(request['evaluation_id'],{})
@@ -357,7 +378,7 @@ class LocalCheckoutServer:
             return self.epochs[run]
         run=request['run_id']
         if run in self.epochs:return self.epochs[run]
-        require(len(self.epochs)<2,'LOCAL_CHECKOUT_SUPPORTED_EPOCH_LIMIT')
+        require(len(self.epochs)<1024,'LOCAL_CHECKOUT_SUPPORTED_EPOCH_LIMIT')
         for previous in self.epochs:
             row=state.get('runs',{}).get(previous,{})
             require(row.get('status')=='CLOSED' and row.get('native_stop',{}).get('status')=='VERIFIED',
@@ -369,8 +390,9 @@ class LocalCheckoutServer:
         try:
             # No effect before canonical PREPARING/seat/Human reservation proof.
             with resource.owner._locked(deadline=deadline):
-                epoch._authorized(request,initial=request['kind']=='ALLOCATE')
+                epoch._authorized(request,initial=request['kind'] in ('ALLOCATE','REUSE_PRIMARY'))
         except BaseException:epoch.close();raise
+        epoch.local_resources=resource
         self.epochs[run]=epoch
         return epoch
 
@@ -385,12 +407,19 @@ class LocalCheckoutServer:
                 'LOCAL_CHECKOUT_CHILD_EXITED')
         self.channel.settimeout(5)
         with receive(self.channel) as record:
-            require(record.credentials==(self.child.pid,165533,165533) and alive(record.pidfd)
+            require(record.credentials==(self.child.pid,plan_owners(self.resources.plan)['supervisor'],plan_owners(self.resources.plan)['supervisor']) and alive(record.pidfd)
                     and _identity(record.pidfd)==self.identity and len(record.data)<=MAX_REQUEST,
                     'LOCAL_CHECKOUT_HOST_MISMATCH')
-            request=request_value(json.loads(record.data,object_pairs_hook=_unique))
+            from .local_successor_checkout import local_request
+            request=local_request(json.loads(record.data,object_pairs_hook=_unique))
         try:
-            epoch=self._epoch(request);epoch._held();epoch.count+=1
+            epoch=self._epoch(request)
+            # Each authenticated packet has a bounded I/O budget. Retained pins
+            # and one-effect attempts survive; elapsed Run time grants no retry.
+            epoch.deadline=time.monotonic()+self.resources.plan.operation_timeout_seconds
+            epoch.allocator.deadline=epoch.deadline
+            epoch._held()
+            if request['kind'] != 'GATE_QUOTA': epoch.count+=1
             require(epoch.count<=MAX_REQUESTS,'CHECKOUT_REQUEST_LIMIT')
             result=epoch.operation(request)
             reply={**request,'status':'OK','quota' if request['kind']=='GATE_QUOTA' else 'slot':result}

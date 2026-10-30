@@ -170,8 +170,10 @@ class NativeReviewerRecruitment:
     def _launch(self,operation_id,run_id,generation):
         launch=self.launcher;plan=launch.plan;room=self.owner.room;selected=self.selected
         resources=launch.resources;instance=resources['instance'];journal=Path(resources['supervisor_directory'])
+        from .native_git_resources import host_owners
+        owners=host_owners(plan)
         seat=ExecSeat(room['id'],instance,selected['participant'],selected['actor'],'seat-b',
-            resources['workstation_id'],165532,165532)
+            resources['workstation_id'],owners['runtime'],owners['runtime'])
         admitted=AdmissionSeat(room['id'],instance,selected['participant'],selected['actor'],selected['profile'],
             tuple(sorted(set(self.profile['capabilities'])|{'peer-traffic'})),launch.admission_seat.receiver)
         scope={'room_id':room['id'],'participant_id':selected['participant'],'run_id':run_id,
