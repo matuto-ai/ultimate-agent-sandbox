@@ -90,6 +90,37 @@ class Publication:
     created: bool
 
 
+class PublicationSubscription:
+    """Bounded latest-value mailbox, never a callback on a publication path.
+
+    Only metadata crosses this seam. Slow or failed consumers coalesce events;
+    they reconcile current canonical state rather than replaying stale trees.
+    """
+    def __init__(self, project_identity, project_path):
+        self.project_identity, self.project_path = project_identity, project_path
+        self._condition = threading.Condition()
+        self._version, self._publication = 1, None  # initial reconciliation
+        self._closed = False
+
+    def signal(self, publication=None):
+        with self._condition:
+            if not self._closed:
+                self._version += 1
+                self._publication = publication
+                self._condition.notify_all()
+
+    def wait(self, after=0, timeout=None):
+        with self._condition:
+            self._condition.wait_for(lambda: self._closed or self._version > after,
+                                     timeout=timeout)
+            return self._version, self._publication, self._closed
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+
 @dataclass(frozen=True)
 class Recovery:
     """Startup reconstruction: canonical head, settled publications, absent identities.
@@ -189,6 +220,8 @@ class LibraryGit:
         self.registration_lock = threading.Lock()
         self._head = None
         self._started = False
+        self._subscriptions = set()
+        self._subscriptions_lock = threading.Lock()
 
     def _records(self):
         """One store per call: the T02 owner binds its connection to one thread."""
@@ -243,6 +276,7 @@ class LibraryGit:
             self.close()
             raise
         self._started = True
+        self._notify()
         return Recovery(self.target, self.branch, self._head,
                         tuple(settled), tuple(absent))
 
@@ -273,6 +307,42 @@ class LibraryGit:
             raise LibraryError("NOT_READY", "lease")
         return self._head
 
+    def subscribe(self, scope):
+        """Trusted supervisor subscribes one already-bound Project, no paths in payloads."""
+        project_prefix(scope)
+        subscription = PublicationSubscription(scope.project_identity, scope.project_path)
+        with self._subscriptions_lock:
+            if len(self._subscriptions) >= 1024:
+                raise LibraryError('TOO_MANY_SUBSCRIBERS', 'projection')
+            self._subscriptions.add(subscription)
+        return subscription
+
+    def unsubscribe(self, subscription):
+        with self._subscriptions_lock:
+            self._subscriptions.discard(subscription)
+        subscription.close()
+
+    def _notify(self, scope=None, publication=None):
+        # Fixed in-memory mailboxes only: no consumer code, file IO or network.
+        with self._subscriptions_lock:
+            for subscription in self._subscriptions:
+                if scope is None or (subscription.project_identity == scope.project_identity
+                                     and subscription.project_path == scope.project_path):
+                    subscription.signal(publication)
+
+    def reconnect(self):
+        """Reconcile after transport restoration; projection work stays asynchronous."""
+        if not self._started:
+            raise LibraryError('NOT_READY', 'lease')
+        with self._lock:
+            self._fetch()
+            settled, absent = self._settle()
+            self._reset_local()
+            result = Recovery(self.target, self.branch, self._head,
+                              tuple(settled), tuple(absent))
+        self._notify()
+        return result
+
     def project_snapshot(self, scope, settings, *, current, registration=False):
         """Fetch one bounded, regular-file Project tree at one canonical SHA.
 
@@ -293,39 +363,67 @@ class LibraryGit:
                 return None, Tree({})
             if registration:
                 self._registration_identity(scope, current)
-            # A file/gitlink at a parent coordinate must not be silently
-            # displaced by update-index while creating the Project directory.
-            for index in range(1, len(prefix.split('/')) + 1):
-                ancestor = '/'.join(prefix.split('/')[:index])
-                node = self._bounded_read(['ls-tree', '-z', head, '--', ancestor], 1400, current)
-                if node and not node.startswith(b'040000 tree '):
-                    raise LibraryError('UNSUPPORTED_PROJECT_ENTRY', 'project')
-            listing = self._bounded_read(
-                ["ls-tree", "-r", "-l", "-z", head, "--", prefix],
-                (limits["scan_documents"] + 1) * 1200, current)
-            rows = listing.split(b"\0")[:-1]
-            if len(rows) > limits["scan_documents"]:
-                raise LibraryError("TOO_MANY_DOCUMENTS", "project")
-            files, total = {}, 0
-            for row in rows:
-                header, tab, path = row.partition(b"\t")
-                parts = header.split()
-                if (not tab or len(parts) != 4 or parts[0] not in (b"100644", b"100755")
-                        or parts[1] != b"blob"):
-                    raise LibraryError("UNSUPPORTED_PROJECT_ENTRY", "project")
-                try:
-                    name, oid, size = path.decode("utf-8"), parts[2].decode("ascii"), int(parts[3])
-                except (ValueError, UnicodeError):
-                    raise LibraryError("INVALID_PROJECT_TREE", "project") from None
-                if not name.startswith(prefix + "/") or not library.COMMIT.fullmatch(oid):
-                    raise LibraryError("INVALID_PROJECT_TREE", "project")
-                total += size
-                if size > limits["document_bytes"] or total > limits["projection_bytes"]:
-                    raise LibraryError("BUNDLE_TOO_LARGE", "project")
-                files[name] = self._bounded_read(["cat-file", "blob", oid], size, current)
-                if len(files[name]) != size:
-                    raise LibraryError("INVALID_PROJECT_TREE", "project")
-            return head, Tree(files)
+            return self._project_tree(scope, limits, current, head)
+
+    def projection_snapshot(self, scope, settings, *, current):
+        """Read canonical immutable objects without taking the publisher lock.
+
+        A source-only exact-SHA fetch has no ref destination and never changes
+        the publisher's head or FETCH_HEAD. Git object installation is atomic;
+        the clone is not pruned while the singleton is running. A moving or
+        unavailable remote fails this refresh, not the canonical write path.
+        """
+        if not self._started:
+            raise LibraryError('NOT_READY', 'lease')
+        project_prefix(scope)
+        limits = library.admit_settings_value(settings)['limits']
+        current()
+        head = self._remote_head()
+        if head is None:
+            return None, Tree({})
+        library._commit(head, 'canonical')
+        code, _, _ = self._git('-c', 'gc.auto=0', 'fetch', '--no-write-fetch-head',
+                                '--no-tags', '--quiet', 'origin', head)
+        if code != 0:
+            raise LibraryError('PUBLICATION_UNAVAILABLE', 'project')
+        current()
+        return self._project_tree(scope, limits, current, head)
+
+    def _project_tree(self, scope, limits, current, head):
+        prefix = project_prefix(scope)
+        # A file/gitlink at a parent coordinate must not be silently
+        # displaced by update-index while creating the Project directory.
+        for index in range(1, len(prefix.split('/')) + 1):
+            ancestor = '/'.join(prefix.split('/')[:index])
+            node = self._bounded_read(['ls-tree', '-z', head, '--', ancestor], 1400, current)
+            if node and not node.startswith(b'040000 tree '):
+                raise LibraryError('UNSUPPORTED_PROJECT_ENTRY', 'project')
+        listing = self._bounded_read(
+            ["ls-tree", "-r", "-l", "-z", head, "--", prefix],
+            (limits["scan_documents"] + 1) * 1200, current)
+        rows = listing.split(b"\0")[:-1]
+        if len(rows) > limits["scan_documents"]:
+            raise LibraryError("TOO_MANY_DOCUMENTS", "project")
+        files, total = {}, 0
+        for row in rows:
+            header, tab, path = row.partition(b"\t")
+            parts = header.split()
+            if (not tab or len(parts) != 4 or parts[0] not in (b"100644", b"100755")
+                    or parts[1] != b"blob"):
+                raise LibraryError("UNSUPPORTED_PROJECT_ENTRY", "project")
+            try:
+                name, oid, size = path.decode("utf-8"), parts[2].decode("ascii"), int(parts[3])
+            except (ValueError, UnicodeError):
+                raise LibraryError("INVALID_PROJECT_TREE", "project") from None
+            if not name.startswith(prefix + "/") or not library.COMMIT.fullmatch(oid):
+                raise LibraryError("INVALID_PROJECT_TREE", "project")
+            total += size
+            if size > limits["document_bytes"] or total > limits["projection_bytes"]:
+                raise LibraryError("BUNDLE_TOO_LARGE", "project")
+            files[name] = self._bounded_read(["cat-file", "blob", oid], size, current)
+            if len(files[name]) != size:
+                raise LibraryError("INVALID_PROJECT_TREE", "project")
+        return head, Tree(files)
 
     def _registration_identity(self, scope, current):
         """Bounded service-only root identity catalog; no source/concept scan.
@@ -451,8 +549,11 @@ class LibraryGit:
                 records.begin(operation)
             if located is not None:
                 self._reset_local()
-                return located
-            return self._publish(operation, prefix, files, input_sha, current=current)
+                result = located
+            else:
+                result = self._publish(operation, prefix, files, input_sha, current=current)
+        self._notify(operation.scope, result)
+        return result
 
     def _publish(self, operation, prefix, files, input_sha, current=None):
         previous = self._head
