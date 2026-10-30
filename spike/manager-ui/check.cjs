@@ -535,11 +535,18 @@ async function browserCheck(){
       const expected=name==='library-current'?'current':['library-stale','disconnected','library-stale-reconnected'].includes(name)?'stale':'unknown';
       assert(library.text.includes('data '+expected),name+': Library freshness after refresh');
     }
-    await evaluate(`document.querySelector('.library-operations').scrollIntoView()`);
+    const showLibrary=async selector=>{
+      await evaluate(`{const target=document.querySelector(${JSON.stringify(selector)});window.scrollTo(0,window.scrollY+target.getBoundingClientRect().top-110);}new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+      assert(await evaluate(`{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();r.top>=90&&r.top<innerHeight-40}`),'Library evidence target must be visible below sticky navigation');
+    };
+    await showLibrary('.library-operations');
     const libraryShot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library.png'),Buffer.from(libraryShot.data,'base64'));screenshots.push('D-library.png');
     await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
     assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'mobile Library overflow');
+    await showLibrary('.library-operations');
     const libraryMobile=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library-mobile.png'),Buffer.from(libraryMobile.data,'base64'));screenshots.push('D-library-mobile.png');
+    await showLibrary('[data-library-actions]');
+    const libraryAttachments=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library-attachments-mobile.png'),Buffer.from(libraryAttachments.data,'base64'));screenshots.push('D-library-attachments-mobile.png');
     proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
     failure=error;failureElapsed=Math.max(0,Date.now()-started);
