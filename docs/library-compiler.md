@@ -90,3 +90,9 @@ collisions, updates/deprecation, exact verification preservation, unknown reader
 keys, source provenance, multi-draft integration/parking, all-or-nothing failures,
 limits and untrusted output rejection. Normal aggregate discovery includes it;
 no provider, VM, target repository or user credentials are used.
+
+The escaped-title prerequisite corrects the structural reader's comparison of
+backslash-escaped Markdown labels without relaxing title equality. Real enqueue
+coverage includes underscores, brackets, backslashes, emphasis and code labels.
+The measured enqueue module moves to the existing additional CI partition after
+the remainder exceeded its one-minute budget; no tests or timeouts are removed.

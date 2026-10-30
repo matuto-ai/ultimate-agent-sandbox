@@ -198,6 +198,10 @@ class CompilerTests(unittest.TestCase):
         p['outcomes'].reverse()
         self.assertEqual(first.tree.files, self.compile(p).tree.files)
 
+    def test_surrogate_fields_fail_with_safe_contract_error(self):
+        for field in ('title', 'description', 'body'):
+            p=self.proposal();p['operations'][0][field]='bad\ud800';self.refuse(p,'MALFORMED_UTF8')
+
     def test_model_cannot_set_owned_fields_paths_or_sources(self):
         for field in ('verified','stale_after','status','generated','path','sources','timestamp','actor'):
             p = self.proposal()
@@ -286,6 +290,24 @@ class CompilerTests(unittest.TestCase):
         files[self.prefix+'/decisions/index.md']=files[self.prefix+'/decisions/index.md'].replace(
             b'* [Use SQLite](use-sqlite.md)',b'Authored prose [Use SQLite](use-sqlite.md)')
         self.current=bundle.Tree(files);self.refuse(p,'INDEX_ENTRY_NOT_REPRODUCIBLE')
+
+    def test_broken_preexisting_index_link_resolves_without_raw_exception(self):
+        files=dict(self.current.files);key=self.prefix+'/decisions/index.md'
+        files[key]+=b'* [Use SQLite](use-sqlite.md)\n';self.current=bundle.Tree(files)
+        result=self.compile()
+        self.assertEqual(result.tree.files[key].count(b'](use-sqlite.md)'),1)
+        files[key]+=b'* [Use SQLite](use-sqlite.md) - preserve my prose\n'
+        self.current=bundle.Tree(files);self.refuse(self.proposal(),'INDEX_ENTRY_NOT_REPRODUCIBLE')
+
+    def test_authored_index_suffix_is_not_silently_rewritten(self):
+        p,path=self.accepted();p['operations'][0]['body']='Changed content.'
+        files=dict(self.current.files)
+        key=self.prefix+'/decisions/index.md'
+        lines=files[key].decode().splitlines()
+        lines=[('* [Use SQLite](use-sqlite.md) - Human rationale that must survive.'
+                if line.startswith('* [Use SQLite]') else line) for line in lines]
+        files[key]=('\n'.join(lines)+'\n').encode();self.current=bundle.Tree(files)
+        self.refuse(p,'INDEX_ENTRY_NOT_REPRODUCIBLE')
 
     def test_authored_fenced_and_indented_index_examples_preserved(self):
         p,path=self.accepted()

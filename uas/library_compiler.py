@@ -113,7 +113,11 @@ def _admit(value, *, drain_id, attempt, selected, concepts, limits):
         _fail('PROPOSAL_BATCH_MISMATCH', 'proposal.drain_id')
     if type(value['attempt']) is not int or value['attempt'] != attempt:
         _fail('PROPOSAL_BATCH_MISMATCH', 'proposal.attempt')
-    if library._size(value) > limits['payload_bytes']:
+    try:
+        size = library._size(value)
+    except UnicodeError:
+        _fail('MALFORMED_UTF8', 'proposal')
+    if size > limits['payload_bytes']:
         _fail('PROPOSAL_TOO_LARGE', 'proposal')
     operations = library._array(value['operations'], 'operations', library.MAX_PROPOSAL_OPERATIONS)
     result, targets = {}, set()
@@ -302,7 +306,7 @@ def _render(operation, before, body_before, raw_before, sources, *, at, drain_id
             + '\n'.join(provenance) + '\n').encode('utf-8')
 
 
-def _index(data, directory, changed, files, prefix, parked):
+def _index(data, directory, changed, files, prefix, parked, previous):
     """Replace only recognizable single-entry lines; preserve other authored data.
 
     A nonstandard authored entry to an affected concept is ambiguous: fail the
@@ -321,7 +325,25 @@ def _index(data, directory, changed, files, prefix, parked):
         links = [(label, bundle._target(target, directory + '/index.md'))
                  for label, target in bundle._scan(line)]
         if any(path in changed for _, path in links):
-            if (len(links) != 1 or not re.match(r'^\s*[-*+] \[.*\]\([^)]*\)(?:\s*-.*)?\s*$', line)):
+            match = re.fullmatch(r'\s*[-*+] \[.*\]\([^)]*\)(.*)', line)
+            if len(links) != 1 or match is None:
+                _fail('INDEX_ENTRY_NOT_REPRODUCIBLE', directory + '/index.md')
+            relative = links[0][1]
+            tail = match.group(1).strip()
+            old_data = previous.get(prefix + '/' + relative)
+            if old_data is None:
+                if tail:
+                    _fail('INDEX_ENTRY_NOT_REPRODUCIBLE', directory + '/index.md')
+                continue
+            old_meta, _ = _document(old_data, relative)
+            expected = ('- ' + _label(old_meta['type']) + '; '
+                        + old_meta.get('status', 'unknown') + '; '
+                        + _label(old_meta.get('description', ''))).strip()
+            parked_tail = (r'- ' + re.escape(_label(old_meta['type']))
+                + r'; DRAFT PARKED: [A-Za-z0-9][A-Za-z0-9._:/-]{0,127}; '
+                + re.escape(_label(old_meta.get('description', ''))))
+            if (tail not in ('', '- DRAFT.', expected)
+                    and not re.fullmatch(parked_tail, match.group(1).lstrip())):
                 _fail('INDEX_ENTRY_NOT_REPRODUCIBLE', directory + '/index.md')
             continue
         lines.append(line)
@@ -382,7 +404,7 @@ def compile_proposal(scope, settings, *, current, selected, input_sha, drain_id,
     for directory in bundle.DIRECTORIES + ('pending',):
         if any(path.startswith(directory + '/') for path in changed):
             index = prefix + '/' + directory + '/index.md'
-            files[index] = _index(files[index], directory, changed, files, prefix, parked)
+            files[index] = _index(files[index], directory, changed, files, prefix, parked, current.files)
     # The root notice is deterministic, but other reader text is not replaced.
     root = prefix + '/index.md'
     if gate.notice_missing(_document(files[root], 'index.md')[1]):
