@@ -27,6 +27,11 @@ export default async function (pi) {
     faux.setResponses([...inputs.map(input => fauxAssistantMessage(
       fauxToolCall('gh', input), { stopReason: 'toolUse' })), response]);
   } });
+  pi.registerCommand('fixture-library-tools', {description:'Script explicit account-free capture calls',handler:async args=>{
+    const inputs=JSON.parse(Buffer.from(args,'base64url'));
+    if (!Array.isArray(inputs) || inputs.length>16) throw Error('invalid fixture calls');
+    faux.setResponses([...inputs.map(input=>fauxAssistantMessage(fauxToolCall('library_enqueue',input),{stopReason:'toolUse'})),response]);
+  }});
   if (process.env.UAS_PI_PEER_FD) pi.registerCommand('fixture-peer-probe', {
     description: 'Test-only inherited descriptor attack', handler: async (args, ctx) => {
       const request = JSON.parse(Buffer.from(args, 'base64url').toString('utf8'));

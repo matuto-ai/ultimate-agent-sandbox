@@ -14,6 +14,12 @@ class BrokerReadProvider:
         self.project, self.transport, self.log_transport = project, transport, log_transport
         self.surface = GitHubSurfaceProvider(project, transport)
 
+    def read_admission(self, number):
+        """Canonical bounded eligibility facts, not the generic display surface."""
+        from .github_read import GitHubReadProvider, validate_observation
+        return validate_observation(GitHubReadProvider(self.project, self.transport.get).read_issue(
+            number, admission=True))
+
     def read(self, route):
         if route.kind != 'job-log': return self.surface.read(route)
         if route.repository.lower() != self.project.repository.lower():

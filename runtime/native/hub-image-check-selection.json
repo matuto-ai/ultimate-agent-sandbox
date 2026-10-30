@@ -1,0 +1,6 @@
+{
+  "base_image": "node:24.22.1-bookworm-slim@sha256:2dd9a4f758e173b65fee15388f7706af6fb01ef50cf7a2c0538711d67a6981ae",
+  "python_package": "3.11.2-6+deb12u9",
+  "python_version": "3.11.2",
+  "tini_package": "0.19.0-1+b3"
+}

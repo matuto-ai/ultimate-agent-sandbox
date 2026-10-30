@@ -26,9 +26,9 @@ export function seqpacketChannel(fd, { timeoutMs = 2000, maxQueued = 4 } = {}) {
     check(deadline, signal);
     const requestId = randomUUID().replaceAll('-', '');
     const packet = Buffer.from(JSON.stringify({ request_id: requestId, envelope }));
-    if (packet.length > MAX_REQUEST || (packet.length > MAX_PACKET && !['forge-write','forge-reconcile'].includes(envelope.kind))) throw Error('fixture peer packet too large');
+    if (packet.length > MAX_REQUEST || (packet.length > MAX_PACKET && !['forge-write','forge-reconcile','library.enqueue'].includes(envelope.kind))) throw Error('fixture peer packet too large');
     const packets = packet.length <= MAX_PACKET ? [packet] : Array.from({ length: Math.ceil(packet.length / 40000) }, (_, index) =>
-      Buffer.from(JSON.stringify({ request_id: requestId, index, count: Math.ceil(packet.length / 40000),
+      Buffer.from(JSON.stringify({ ...(envelope.kind==='library.enqueue'?{kind:'library.enqueue'}:{}), request_id: requestId, index, count: Math.ceil(packet.length / 40000),
         sha256: createHash('sha256').update(packet).digest('hex'), data: packet.subarray(index * 40000, (index + 1) * 40000).toString('base64') })));
     for (const frame of packets) for (;;) {
       check(deadline, signal);

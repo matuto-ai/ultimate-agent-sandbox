@@ -12,6 +12,10 @@ STAGES = ('tests/linux/diff_smoke.py', 'tests/linux/artifact_smoke.py',
           'tests/linux/review_forge_smoke.py', 'tests/vm/run_boundary.py',
           'tests/vm/run_workstation.py', 'tests/vm/run_artifacts.py')
 CONSUMERS = {'uas/lifecycle.py', 'uas/participant.py', 'uas/checkouts.py'}
+HOSTED_HUMAN_DEPENDENCIES = {
+    'uas/human_mtls.py', 'uas/manager_stream.py', 'uas/manager_transport.py',
+    'uas/native_human_control.py', 'uas/native_human_launch.py', 'uas/native_human_entry.py',
+}
 
 
 def selected_sources(relative):
@@ -62,18 +66,22 @@ class ManagerSourceClosureTests(unittest.TestCase):
                 selected = selected_sources(relative)
                 self.assertTrue(CONSUMERS & selected)
                 self.assertLessEqual(dependencies, selected)
-                self.assertNotIn('uas/manager_stream.py', selected)
-                self.assertNotIn('uas/manager_transport.py', selected)
+                # Only the explicit native-host diff profile stages this closure;
+                # unrelated passive owner stages must not acquire these routes.
+                self.assertEqual(selected & HOSTED_HUMAN_DEPENDENCIES,
+                                 HOSTED_HUMAN_DEPENDENCIES if relative == 'tests/linux/diff_smoke.py' else set())
                 for path in dependencies:
                     self.assertTrue((ROOT / path).is_file())
 
     def test_any_missing_dependency_is_detected_without_importing_staged_code(self):
         dependencies = passive_dependencies()
         for relative in STAGES:
-            for missing in dependencies:
+            required = dependencies | (HOSTED_HUMAN_DEPENDENCIES
+                                       if relative == 'tests/linux/diff_smoke.py' else set())
+            for missing in required:
                 with self.subTest(stage=relative, missing=missing):
                     selected = selected_sources(relative) - {missing}
-                    self.assertEqual(dependencies - selected, {missing})
+                    self.assertEqual(required - selected, {missing})
 
 
 if __name__ == '__main__':

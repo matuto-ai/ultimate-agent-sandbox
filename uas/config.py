@@ -19,6 +19,7 @@ ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}\Z")
 IMAGE_PATH = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*\Z")
 CAPABILITIES = {
+    "library:enqueue": "hub",
     "implement": "hub", "review": "hub", "can-open-requested-run": "hub",
     "forge-read": "broker", "forge-write": "broker", "git-read": "broker", "git-push": "broker",
 }
@@ -165,6 +166,8 @@ def _image(value, field):
     are not part of the initial input surface. This never resolves or pulls.
     """
     _text(value, field, 340)
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        return  # Exact locally imported image config ID; never a tag.
     name, separator, digest = value.partition("@")
     if not separator or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest) or len(name) > 255:
         raise ConfigError(field, "expected image pinned by SHA-256 digest")
@@ -239,13 +242,15 @@ def load(source: TextIO, *, available_credentials=()) -> dict:
 def _normalize(config, available_credentials):
     _object(config, "$", ("version", "deployment", "rooms"))
     _version(config["version"], "$.version")
-    d = _object(config["deployment"], "$.deployment", ("id", "state_root", "manager", "credentials", "actors", "images", "providers", "audit"))
+    d = _object(config["deployment"], "$.deployment", ("id", "state_root", "manager", "credentials", "actors", "images", "providers", "audit"), ("mode",))
+    if d.get("mode", "remote") not in ("remote", "local"):
+        raise ConfigError("$.deployment.mode", "expected local or remote")
     did = _id(d["id"], "$.deployment.id")
     state = _path(d["state_root"], "$.deployment.state_root")
     creds = _named(d["credentials"], "$.deployment.credentials")
     for c, p in creds.values():
         _object(c, p, ("id", "kind"))
-        if c["kind"] not in ("git", "forge", "manager-client", "manager-trust"):
+        if c["kind"] not in ("git", "forge", "manager-client", "manager-trust", "runtime-provider"):
             raise ConfigError(p + ".kind", "unsupported credential kind")
     available = set()
     for i, name in enumerate(available_credentials):
@@ -256,10 +261,14 @@ def _normalize(config, available_credentials):
         if creds[name][0]["kind"] != kind:
             raise ConfigError(field, "credential kind mismatch")
 
-    manager = _object(d["manager"], "$.deployment.manager", ("url", "client_credential_ref", "server_trust_ref"))
-    _url(manager["url"], "$.deployment.manager.url")
-    credential(manager["client_credential_ref"], "$.deployment.manager.client_credential_ref", "manager-client")
-    credential(manager["server_trust_ref"], "$.deployment.manager.server_trust_ref", "manager-trust")
+    if d["manager"] is None:
+        if d.get("mode") != "local":
+            raise ConfigError("$.deployment.manager", "Manager may be absent only in explicit local mode")
+    else:
+        manager = _object(d["manager"], "$.deployment.manager", ("url", "client_credential_ref", "server_trust_ref"))
+        _url(manager["url"], "$.deployment.manager.url")
+        credential(manager["client_credential_ref"], "$.deployment.manager.client_credential_ref", "manager-client")
+        credential(manager["server_trust_ref"], "$.deployment.manager.server_trust_ref", "manager-trust")
     actors = _named(d["actors"], "$.deployment.actors")
     for a, p in actors.values():
         _object(a, p, ("id",), ("git_credential_ref", "forge_credential_ref", "github_user_id", "git_identity"))
@@ -292,9 +301,15 @@ def _normalize(config, available_credentials):
         _image(image["reference"], p + ".reference")
     providers = _named(d["providers"], "$.deployment.providers")
     for provider, p in providers.values():
-        _object(provider, p, ("id", "runtime"), ("model", "endpoint"))
+        _object(provider, p, ("id", "runtime"), ("model", "endpoint", "auth"))
         if provider["runtime"] not in ("pi", "claude"):
             raise ConfigError(p + ".runtime", "unsupported Runtime")
+        if "auth" in provider:
+            auth = _object(provider["auth"], p + ".auth", ("credential_ref", "method"))
+            credential(auth["credential_ref"], p + ".auth.credential_ref", "runtime-provider")
+            from .runtime_provider import METHODS
+            if type(auth["method"]) is not str or auth["method"] not in METHODS[provider["runtime"]]:
+                raise ConfigError(p + ".auth.method", "unsupported Runtime authentication method")
         if "model" in provider:
             _text(provider["model"], p + ".model", 256)
         if "endpoint" in provider:

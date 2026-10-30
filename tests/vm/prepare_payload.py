@@ -210,7 +210,8 @@ def source_files(repository_root, paths):
     return selected
 
 
-def build_payload(directory, repository_root, nonce, *, source_paths, profile="static-go-v1"):
+def build_payload(directory, repository_root, nonce, *, source_paths, profile="static-go-v1",
+                  prepared_directory=None, prepared_sha256=None):
     """Return an owned read-only ISO; all installations occur later in guest.
 
     ``source_paths`` is the caller's explicit repository-relative allowlist. The
@@ -218,13 +219,15 @@ def build_payload(directory, repository_root, nonce, *, source_paths, profile="s
     existing Go fixture is ``/fixture``; signed packages are ``/rpms`` and the
     fingerprint-checked certificate and manifest are at the ISO root.
     """
-    if profile not in ("static-go-v1", "native-pi-v1", "artifacts-v1-source"):
+    if profile not in ("static-go-v1", "native-pi-v1", "artifacts-v1-source", "room-launch-ipv4-v1"):
         raise ValueError("unknown payload profile")
     native = None
     if profile == "native-pi-v1":
         import prepare_native_payload as native
     elif profile == "artifacts-v1-source":
         import prepare_artifact_payload as native
+    elif profile == "room-launch-ipv4-v1":
+        import prepare_room_payload as native
     if os.environ.get("GITHUB_ACTIONS") != "true" or os.geteuid() == 0:
         raise RuntimeError("payload preparation runs only as unprivileged disposable CI user")
     if not re.fullmatch(r"[0-9a-f]{32}", nonce):
@@ -232,6 +235,12 @@ def build_payload(directory, repository_root, nonce, *, source_paths, profile="s
     directory, repository_root = Path(directory), Path(repository_root)
     if not directory.is_absolute() or directory.resolve() != directory or not directory.is_dir():
         raise ValueError("owned build parent must be a canonical existing directory")
+    reused = None
+    if prepared_directory is not None or prepared_sha256 is not None:
+        if profile != 'room-launch-ipv4-v1':
+            raise ValueError('prepared pool is only valid for Room profile')
+        import prepared_room
+        reused = prepared_room.select(Path(prepared_directory), prepared_sha256, repository_root)
     selected = source_files(repository_root, source_paths)
     fixture = source_files(repository_root, ["tests/vm/boundary_fixture.go"])[0][1]
     if "tests/vm/boundary_fixture.go" not in source_paths:
@@ -268,62 +277,96 @@ def build_payload(directory, repository_root, nonce, *, source_paths, profile="s
         if not target.is_file() or target.is_symlink() or target.stat().st_size > maximum:
             raise RuntimeError("download is missing or exceeded its byte budget")
 
-    keyring = work / "fedora.gpg"
-    fetch(lock["keyring_url"], keyring, 1024 * 1024)
-    gpg = ["gpg", "--no-options", "--homedir", str(work / "gnupg"), "--batch", "--no-auto-key-retrieve"]
-    key = payload / "fedora-44.asc"
-    key.write_text(run([*gpg, "--no-default-keyring", "--keyring", str(keyring), "--armor", "--export", fingerprint]))
-    verify_key_listing(run([*gpg, "--with-colons", "--fingerprint", "--show-keys", str(key)]), fingerprint)
-    run(["rpm", "--dbpath", str(work / "rpmdb"), "--initdb"])
-    run(["rpmkeys", "--dbpath", str(work / "rpmdb"), "--import", str(key)])
-    config = work / "dnf.conf"
-    config.write_text("[main]\nplugins=1\ngpgcheck=1\nsslverify=1\ninstall_weak_deps=False\n"
-                      "keepcache=True\nskip_if_unavailable=False\ntimeout=30\nretries=2\n")
-    repository = work / "repos/fedora.repo"
-    repository.write_text("".join(f"[{name}]\nname=UAS Fedora 44 {name}\nbaseurl={url}\nenabled=1\n"
-                                  f"gpgcheck=1\ngpgkey=file://{key}\nsslverify=1\nskip_if_unavailable=0\n\n"
-                                  for name, url in REPOSITORIES.items()))
-    dnf = ["dnf", "--config", str(config), "--releasever=44", "--forcearch=x86_64",
-           "--installroot", str(work / "installroot"), "--setopt=reposdir=" + str(work / "repos"),
-           "--setopt=cachedir=" + str(work / "cache"), "--setopt=persistdir=" + str(work / "persist"),
-           "--setopt=logdir=" + str(work / "logs"), "--disableplugin=*", "--enableplugin=download"]
-    # forcearch sets the solver basearch, not the download query's architecture
-    # filter: DNF4 otherwise selects all compatible arches, including i686.
-    roots = (*PACKAGES, *native.RPM_ROOTS) if native else PACKAGES
-    urls = package_urls(run([*dnf, "download", "--arch=x86_64,noarch", "--resolve", "--alldeps", "--url", "--urlprotocol=https",
-                             *roots], timeout=600))
-    print("VM payload phase: downloading and verifying RPM candidates:", len(urls), flush=True)
-    manifest = {"version": 1, "nonce": nonce, "release": "44", "signing_fingerprint": fingerprint,
-                "key": {"file": key.name, "sha256": hashlib.sha256(key.read_bytes()).hexdigest(), "bytes": key.stat().st_size},
-                "packages": [], "source": [], "dependencies_reproducibly_pinned": False}
-    total = 0
-    for name, url in urls:
-        target = packages / name
-        fetch(url, target, min(MAX_PACKAGE_BYTES, MAX_PACKAGE_TOTAL - total))
-        total += target.stat().st_size
-        if total > MAX_PACKAGE_TOTAL:
-            raise RuntimeError("RPM bundle byte budget exceeded")
-        verify_signature_output(run(["rpmkeys", "--dbpath", str(work / "rpmdb"), "--checksig", "--verbose", str(target)]))
-        metadata = package_metadata(name, run(["rpm", "--dbpath", str(work / "rpmdb"), "-qp", "--queryformat",
-                        "%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\n", str(target)]))
-        with target.open("rb") as value:
-            digest = hashlib.file_digest(value, "sha256").hexdigest()
-        manifest["packages"].append({"file": name, "name": metadata[0], "epoch": metadata[1],
-                                     "version": metadata[2], "release": metadata[3], "arch": metadata[4],
-                                     "bytes": target.stat().st_size, "sha256": digest, "signature_verified": True})
-        if len(manifest["packages"]) % 32 == 0 or len(manifest["packages"]) == len(urls):
-            print("VM payload progress:", json.dumps({"verified_packages": len(manifest["packages"]),
-                  "packages_total": len(urls), "package_bytes": total,
-                  "elapsed_seconds": round(time.monotonic() - started)}), flush=True)
-    if not set(roots) <= {item["name"] for item in manifest["packages"]}:
-        raise RuntimeError("resolved package bundle omitted a required package")
-    # DNF4 download resolves each requested root separately, so its union may
-    # contain conflicting alternatives. Offer the signed RPMs as candidates to
-    # the guest's native solver; do not force-install the entire download pool.
-    print("VM payload phase: verified RPM pool; generating hash-bound metadata and static fixture", flush=True)
-    run(["createrepo_c", "--no-database", "--checksum", "sha256", "--general-compress-type", "gz",
-         "--error-exit-val", "--workers", "2", str(packages)], timeout=120)
-    manifest["repository_metadata"] = repository_metadata(packages)
+    if reused is not None:
+        pool = reused['foundation']['pool']
+        # The fresh payload directory already exists; copy only verified pool
+        # files, never a previous nonce/source/fixture/manifest or acceptance.
+        for prefix, entries in (('', [pool['key']]), ('rpms/', pool['packages'] + pool['repository_metadata'])):
+            for entry in entries:
+                target = payload / (prefix + entry['file'])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with (Path(prepared_directory) / 'pool' / (prefix + entry['file'])).open('rb') as source, target.open('xb') as output:
+                    shutil.copyfileobj(source, output)
+        # Hashes bind exact bytes; independently recheck their release-key
+        # signatures without network resolution or metadata regeneration.
+        key = payload / 'fedora-44.asc'
+        gpg = ['gpg', '--no-options', '--homedir', str(work / 'gnupg'), '--batch', '--no-auto-key-retrieve']
+        verify_key_listing(run([*gpg, '--with-colons', '--fingerprint', '--show-keys', str(key)]), fingerprint)
+        run(['rpm', '--dbpath', str(work / 'rpmdb'), '--initdb'])
+        run(['rpmkeys', '--dbpath', str(work / 'rpmdb'), '--import', str(key)])
+        total = 0
+        for package in pool['packages']:
+            target = packages / package['file']
+            if prepared_room.hash_file(target, MAX_PACKAGE_BYTES) != {k:package[k] for k in ('bytes','sha256')}:
+                raise RuntimeError('copied prepared RPM changed')
+            verify_signature_output(run(['rpmkeys','--dbpath',str(work / 'rpmdb'),'--checksig','--verbose',str(target)]))
+            total += package['bytes']
+        if repository_metadata(packages) != pool['repository_metadata']:
+            raise RuntimeError('copied prepared repository metadata changed')
+        manifest = {**pool, 'nonce':nonce, 'source':[], 'dependencies_reproducibly_pinned':False}
+        native.guest_package_roots(manifest)
+        print('VM payload phase: reused exact signed pool; rebuilding current source and fixture', flush=True)
+    else:
+        keyring = work / "fedora.gpg"
+        fetch(lock["keyring_url"], keyring, 1024 * 1024)
+        gpg = ["gpg", "--no-options", "--homedir", str(work / "gnupg"), "--batch", "--no-auto-key-retrieve"]
+        key = payload / "fedora-44.asc"
+        key.write_text(run([*gpg, "--no-default-keyring", "--keyring", str(keyring), "--armor", "--export", fingerprint]))
+        verify_key_listing(run([*gpg, "--with-colons", "--fingerprint", "--show-keys", str(key)]), fingerprint)
+        run(["rpm", "--dbpath", str(work / "rpmdb"), "--initdb"])
+        run(["rpmkeys", "--dbpath", str(work / "rpmdb"), "--import", str(key)])
+        config = work / "dnf.conf"
+        config.write_text("[main]\nplugins=1\ngpgcheck=1\nsslverify=1\ninstall_weak_deps=False\n"
+                          "keepcache=True\nskip_if_unavailable=False\ntimeout=30\nretries=2\n")
+        repository = work / "repos/fedora.repo"
+        repository.write_text("".join(f"[{name}]\nname=UAS Fedora 44 {name}\nbaseurl={url}\nenabled=1\n"
+                                      f"gpgcheck=1\ngpgkey=file://{key}\nsslverify=1\nskip_if_unavailable=0\n\n"
+                                      for name, url in REPOSITORIES.items()))
+        dnf = ["dnf", "--config", str(config), "--releasever=44", "--forcearch=x86_64",
+               "--installroot", str(work / "installroot"), "--setopt=reposdir=" + str(work / "repos"),
+               "--setopt=cachedir=" + str(work / "cache"), "--setopt=persistdir=" + str(work / "persist"),
+               "--setopt=logdir=" + str(work / "logs"), "--disableplugin=*", "--enableplugin=download"]
+        # forcearch sets the solver basearch, not the download query's architecture
+        # filter: DNF4 otherwise selects all compatible arches, including i686.
+        roots = (*PACKAGES, *native.RPM_ROOTS) if native else PACKAGES
+        urls = package_urls(run([*dnf, "download", "--arch=x86_64,noarch", "--resolve", "--alldeps", "--url", "--urlprotocol=https",
+                                 *roots], timeout=600))
+        print("VM payload phase: downloading and verifying RPM candidates:", len(urls), flush=True)
+        manifest = {"version": 1, "nonce": nonce, "release": "44", "signing_fingerprint": fingerprint,
+                    "key": {"file": key.name, "sha256": hashlib.sha256(key.read_bytes()).hexdigest(), "bytes": key.stat().st_size},
+                    "packages": [], "source": [], "dependencies_reproducibly_pinned": False}
+        total = 0
+        for name, url in urls:
+            target = packages / name
+            fetch(url, target, min(MAX_PACKAGE_BYTES, MAX_PACKAGE_TOTAL - total))
+            total += target.stat().st_size
+            if total > MAX_PACKAGE_TOTAL:
+                raise RuntimeError("RPM bundle byte budget exceeded")
+            verify_signature_output(run(["rpmkeys", "--dbpath", str(work / "rpmdb"), "--checksig", "--verbose", str(target)]))
+            metadata = package_metadata(name, run(["rpm", "--dbpath", str(work / "rpmdb"), "-qp", "--queryformat",
+                            "%{NAME}\\t%{EPOCHNUM}\\t%{VERSION}\\t%{RELEASE}\\t%{ARCH}\\n", str(target)]))
+            with target.open("rb") as value:
+                digest = hashlib.file_digest(value, "sha256").hexdigest()
+            manifest["packages"].append({"file": name, "name": metadata[0], "epoch": metadata[1],
+                                         "version": metadata[2], "release": metadata[3], "arch": metadata[4],
+                                         "bytes": target.stat().st_size, "sha256": digest, "signature_verified": True})
+            if len(manifest["packages"]) % 32 == 0 or len(manifest["packages"]) == len(urls):
+                print("VM payload progress:", json.dumps({"verified_packages": len(manifest["packages"]),
+                      "packages_total": len(urls), "package_bytes": total,
+                      "elapsed_seconds": round(time.monotonic() - started)}), flush=True)
+        if not set(roots) <= {item["name"] for item in manifest["packages"]}:
+            raise RuntimeError("resolved package bundle omitted a required package")
+        if profile == "room-launch-ipv4-v1":
+            # Reject a mixed/missing signed SSH family before spending a VM boot.
+            # The guest repeats this exact selection against the verified manifest.
+            native.guest_package_roots({**manifest, "profile": profile})
+        # DNF4 download resolves each requested root separately, so its union may
+        # contain conflicting alternatives. Offer the signed RPMs as candidates to
+        # the guest's native solver; do not force-install the entire download pool.
+        print("VM payload phase: verified RPM pool; generating hash-bound metadata and static fixture", flush=True)
+        run(["createrepo_c", "--no-database", "--checksum", "sha256", "--general-compress-type", "gz",
+             "--error-exit-val", "--workers", "2", str(packages)], timeout=120)
+        manifest["repository_metadata"] = repository_metadata(packages)
     for name, source in selected:
         target = payload / "repo" / name
         target.parent.mkdir(parents=True, exist_ok=True)

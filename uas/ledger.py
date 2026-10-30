@@ -6,25 +6,18 @@ A connection belongs to one thread. Separate connections serialize via SQLite.
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-import math
 from pathlib import Path
 import re
 import sqlite3
 from typing import Callable
 
+from .typed_json import LedgerError, MAX_JSON_BYTES, MAX_SEQUENCE, _json
 
-MAX_JSON_BYTES = 1_048_576
+
 MAX_EVENTS = 256
-MAX_SEQUENCE = 2**63 - 1
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 
 
-class LedgerError(Exception):
-    """Stable, non-secret failure code. Storage errors require reconciliation."""
-
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
 
 
 def _token(value):
@@ -33,42 +26,6 @@ def _token(value):
     return value
 
 
-def _json(value):
-    """Canonical typed JSON: object order is irrelevant; bool/int/float differ."""
-    def check(item, depth=0):
-        if depth > 32:
-            raise LedgerError("INVALID_JSON")
-        if item is None or type(item) is bool:
-            return
-        if type(item) is int and abs(item) <= MAX_SEQUENCE:
-            return
-        if type(item) is float and math.isfinite(item):
-            return
-        if type(item) is str:
-            if len(item) > MAX_JSON_BYTES:
-                raise LedgerError("INVALID_JSON")
-            return
-        if type(item) is list and len(item) <= 4096:
-            for child in item:
-                check(child, depth + 1)
-            return
-        if type(item) is dict and len(item) <= 4096:
-            for key, child in item.items():
-                if type(key) is not str:
-                    raise LedgerError("INVALID_JSON")
-                check(key, depth + 1)
-                check(child, depth + 1)
-            return
-        raise LedgerError("INVALID_JSON")
-
-    check(value)
-    try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        if len(encoded.encode("utf-8")) > MAX_JSON_BYTES:
-            raise LedgerError("INVALID_JSON")
-    except (ValueError, UnicodeError, RecursionError) as error:
-        raise LedgerError("INVALID_JSON") from error
-    return encoded
 
 
 @dataclass(frozen=True)
@@ -179,13 +136,35 @@ class RoomLedger:
             self._db.close()
             self._db = None
 
+    def writer_binding(self):
+        """Capture trusted existing store identity on this connection's thread."""
+        rows = self._connection().execute('PRAGMA database_list').fetchall()
+        paths = [Path(row[2]) for row in rows if row[1] == 'main']
+        if len(paths) != 1 or not paths[0].is_absolute():
+            raise LedgerError('INVALID_STORE')
+        path = paths[0]
+        info = path.stat()
+        return path, (info.st_dev, info.st_ino)
+
     @classmethod
     def open_reader(cls, path: str | Path, room_id: str):
-        """Open an existing exact Room store for a passive host exporter.
+        return cls._open_existing(path, room_id)
 
-        Construct on the exporter thread, separately from the Hub writer. No
-        schema creation, journal-mode change or write transaction is performed.
-        SQLite mode=ro also prevents the normal mutation methods from writing.
+    @classmethod
+    def open_writer(cls, path: str | Path, room_id: str, *, identity):
+        """One thread-local connection to the same existing canonical store.
+
+        Never initializes a schema or creates a missing database. Authority and
+        exact attachment validation still belong inside the consuming transaction.
+        """
+        return cls._open_existing(path, room_id, writable=True, identity=identity)
+
+    @classmethod
+    def _open_existing(cls, path: str | Path, room_id: str, *, writable=False, identity=None):
+        """Open a validated existing store on its calling thread, never create.
+
+        Readers remain query-only. Writers require the trusted inode binding;
+        each connection retains SQLite's normal thread-affinity and transactions.
         """
         reader = cls.__new__(cls)
         reader.room_id, reader._db = _token(room_id), None
@@ -193,10 +172,21 @@ class RoomLedger:
             path = Path(path)
             if str(path) == ':memory:':
                 raise LedgerError('INVALID_STORE')
-            reader._db = sqlite3.connect(path.absolute().as_uri() + '?mode=ro',
+            if writable:
+                info = path.stat()
+                if type(identity) is not tuple or len(identity) != 2 or (info.st_dev, info.st_ino) != identity:
+                    raise LedgerError('STORE_REPLACED')
+            reader._db = sqlite3.connect(path.absolute().as_uri() + ('?mode=rw' if writable else '?mode=ro'),
                                          uri=True, timeout=5, isolation_level=None)
             reader._db.row_factory = sqlite3.Row
-            reader._db.execute('PRAGMA query_only=ON')
+            if writable:
+                info = path.stat()
+                if (info.st_dev, info.st_ino) != identity:
+                    raise LedgerError('STORE_REPLACED')
+                reader._db.execute('PRAGMA foreign_keys=ON')
+                reader._db.execute('PRAGMA synchronous=FULL')
+            else:
+                reader._db.execute('PRAGMA query_only=ON')
             tables = {row[0] for row in reader._db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             if tables != {'room', 'operations', 'events'}:

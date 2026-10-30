@@ -11,7 +11,7 @@ import select
 
 from .context import MAX_CONTEXT_GENERATION
 from .forge_projections import enqueue_run_projection
-from .ledger import Command, Event, LedgerError, Transition, _token
+from .ledger import Command, Event, LedgerError, Transition, _token, _json
 from .peer import FixturePeerHub, TERMINAL, _now
 
 
@@ -30,6 +30,7 @@ def reserve_run_control_capacity(state):
             if scope is not None and scope['run_id'] == run_id:
                 participants.add(participant)
         return [{'participant_id': participant, 'incarnation_id': wide,
+                 'actor_id':wide,'attachment_id':wide,
                  'scope': {'room_id': wide, 'participant_id': participant,
                     'run_id': run_id, 'generation': maximum, 'context_generation': maximum}}
                 for participant in sorted(participants)]
@@ -44,6 +45,7 @@ def reserve_run_control_capacity(state):
             coordinator={'participant_id': wide, 'incarnation_id': wide, 'generation': maximum,
                 'expires_at': maximum, 'request_budget': 16, 'requests_used': 16, 'appointment': wide},
             control_pending={'operation_id': wide, 'kind': 'policy-migrate',
+                'control_revision': maximum, 'completion_digest': 'f' * 64,
                 'source_generation': maximum, 'target_generation': maximum,
                 'targets': owners, 'reason': wide, 'attention': wide,
                 'policy_id': wide, 'policy_version': maximum, 'successor_run': wide})
@@ -88,7 +90,7 @@ class RunControl:
         # particular, an unconfirmed handoff does not become NOT_APPLIED.
         return cancelled
 
-    def _control_targets(self, state, run_id, document, *, admission=None):
+    def _control_contexts(self, state, run_id, *, admission=None):
         targets = []
         for participant, context in state['fixture_context']['participants'].items():
             scope = context['bound_run'] or context['reserved_run']
@@ -103,13 +105,18 @@ class RunControl:
             if not withdrawing_reset and (context['status'] != 'READY'
                     or reset is not None and reset['status'] != 'SUCCEEDED'):
                 raise LedgerError('CONTEXT_UNAVAILABLE')
-            record = document['seats'].get(participant)
             targets.append({'participant_id': participant,
-                'incarnation_id': record['incarnation_id'] if record else None,
                 'scope': {'room_id': self.ledger.room_id, 'participant_id': participant,
                     **scope, 'context_generation': context['context_generation']}})
         if not targets or len(targets) > 32:
             raise LedgerError('RUN_CONTEXT_OWNERSHIP_UNKNOWN')
+        return targets
+
+    def _control_targets(self, state, run_id, document, *, admission=None):
+        targets=self._control_contexts(state,run_id,admission=admission)
+        for target in targets:
+            record=document['seats'].get(target['participant_id'])
+            target['incarnation_id']=record['incarnation_id'] if record else None
         return targets
 
     @staticmethod
@@ -304,13 +311,16 @@ class RunControl:
         return self._generation_control(operation_id, run_id, generation, revision,
             reason, human, 'terminal-stop', {'successor_run': successor_run})
 
+    def _control_document(self):
+        return self.controller._read()
+
     def _generation_control(self, operation_id, run_id, generation, revision, reason, human, kind, extra):
         command = Command(operation_id, 'run.human-' + kind, _token(run_id), generation,
                           {'expected_revision': revision, 'reason': _token(reason), **extra})
         terminal = Command(self._finish_id(operation_id), 'run.human-' + kind + '-result',
                            run_id, generation, {'operation_id': operation_id})
         with self.supervisor._locked():
-            document = self.controller._read()
+            document = self._control_document()
             def prepare(state, _):
                 # An explicit newer human stop can fence an interrupted
                 # migration/stop. Its old exact retry cannot finish this one.
@@ -462,3 +472,58 @@ class RunControl:
                           'authorization_consumed': False, 'checkout_release': checkout}
                 return Transition(current, (Event('run.admission-withdrawn', result),), result)
             return self._apply(terminal, human, finish)['result']
+
+
+    @staticmethod
+    def _completion_digest(row):
+        pin={key:row.get(key) for key in ('run_id','generation','status','outcome','completion',
+            'review_stage','participant_id','actor_id','checkout','policy')}
+        return hashlib.sha256(_json(pin).encode()).hexdigest()
+
+    def _retire_completed(self, operation_id, run_id, generation, revision, *, human):
+        """Annotate owned native retirement without rewriting completed Run truth."""
+        command=Command(_token(operation_id),'run.human-retire-completed',_token(run_id),generation,
+                        {'expected_revision':revision})
+        terminal=Command(self._finish_id(operation_id),'run.human-retire-completed-result',run_id,generation,
+                         {'operation_id':operation_id,'expected_revision':revision})
+        with self.supervisor._locked():
+            self._room()
+            cached=self.ledger.exact_receipt(terminal,human,authorize=lambda *_:self._human(human,command))
+            if cached is not None:return cached['result']
+            def prepare(state,_):
+                row=state.get('runs',{}).get(run_id)
+                if (type(generation) is not int or type(revision) is not int
+                        or not 1<=generation<=MAX_CONTEXT_GENERATION or not 0<=revision<MAX_CONTEXT_GENERATION
+                        or not row or row['status']!='CLOSED' or row.get('outcome')!='completed'
+                        or row['generation']!=generation or row.get('control_revision',0)!=revision
+                        or row.get('control_pending') is not None or type(row.get('completion')) is not dict):
+                    raise LedgerError('COMPLETED_RETIREMENT_SCOPE_CHANGED')
+                targets=self._completed_retirement_targets(state,run_id)
+                row.update(control_revision=revision+1,control_pending={
+                    'operation_id':operation_id,'kind':'retire-completed','control_revision':revision+1,'source_generation':generation,
+                    'target_generation':generation,'targets':targets,'completion_digest':self._completion_digest(row),
+                    'attention':'NATIVE_RECONCILIATION_REQUIRED'})
+                return self._control_finish(state,row,'run.completed-retirement-requested',{
+                    'run_id':run_id,'generation':generation,'control_revision':revision+1,'status':'CLOSED'})
+            self._apply(command,human,prepare)
+            pending=self.ledger.snapshot()['state']['runs'][run_id].get('control_pending')
+            if pending is None or pending['operation_id']!=operation_id:
+                raise LedgerError('RUN_CONTROL_CONFLICT')
+        self._stop_completed_owned(pending,human,command)
+        checkout=self._release_completed_checkout(run_id,pending,human,command)
+        with self.supervisor._locked():
+            self._verify_completed_retirement(pending)
+            def finish(state,_):
+                row=state['runs'][run_id]
+                if (row.get('control_pending')!=pending or row['control_revision']!=pending['control_revision']
+                        or self._completion_digest(row)!=pending['completion_digest']):
+                    raise LedgerError('COMPLETED_RETIREMENT_SCOPE_CHANGED')
+                self._verify_completed_targets(state,pending)
+                row.update(native_stop={'operation_id':operation_id,'status':'VERIFIED',
+                    'generation':generation,'restored':False,'restore_attention':None},
+                    checkout_release=deepcopy(checkout),control_pending=None)
+                return self._control_finish(state,row,'run.completed-retirement-recorded',{
+                    'run_id':run_id,'generation':generation,'status':'CLOSED','outcome':row['outcome'],
+                    'control_revision':row['control_revision'],'native_stop':row['native_stop'],
+                    'checkout_release':deepcopy(checkout)})
+            return self._apply(terminal,human,finish)['result']

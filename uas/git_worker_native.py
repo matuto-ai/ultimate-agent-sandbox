@@ -25,24 +25,17 @@ from .git_policy import GitIdentity, GitTarget, parse_git
 from .git_provenance import parse_commit
 from .git_runtime import BACKEND_FD, GitRuntime, RuntimeView, SealedGit
 from .git_service import decode, send
+from .git_protocol import GitWorkerError, MAX_BLOB, _NAMES, _fail, receive_blob
 from .git_stream import MAX_BYTES, MAX_DATA, MAX_QUEUE, data_frame, parse_frame
 from .kernel_origin import HeldOrigin, OriginDenied, alive, enable, receive
 from .ledger import _token
 
-MAX_BLOB = 1_048_576
-_NAMES = {'source', 'source-proof', 'stdout', 'stderr', 'commit'}
 _OID = re.compile(r'[0-9a-f]{40}\Z')
 _CODE = re.compile(r'[A-Z][A-Z0-9_]{0,63}\Z')
 
 
-class GitWorkerError(OriginDenied):
-    def __init__(self, code):
-        self.code = code
-        super().__init__(code)
 
 
-def _fail(code='INVALID_GIT_WORKER_PROTOCOL'):
-    raise GitWorkerError(code)
 
 
 def send_blob(channel, name, data):
@@ -56,37 +49,6 @@ def send_blob(channel, name, data):
             'data': base64.b64encode(data[index * MAX_DATA:(index + 1) * MAX_DATA]).decode('ascii')})
 
 
-def receive_blob(name, recv_callback):
-    """Shared with Supervisor controller; callback authenticates every record."""
-    if type(name) is not str or name not in _NAMES or not callable(recv_callback):
-        _fail('INVALID_GIT_WORKER_BLOB')
-    header = recv_callback()
-    if (type(header) is not dict or set(header) != {'kind', 'name', 'bytes', 'count', 'sha256'}
-            or header['kind'] != 'blob' or header['name'] != name
-            or type(header['bytes']) is not int or not 0 <= header['bytes'] <= MAX_BLOB
-            or type(header['count']) is not int
-            or header['count'] != max(1, (header['bytes'] + MAX_DATA - 1) // MAX_DATA)
-            or type(header['sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}', header['sha256'])):
-        _fail('INVALID_GIT_WORKER_BLOB')
-    raw = bytearray()
-    for index in range(header['count']):
-        part = recv_callback()
-        if (type(part) is not dict or set(part) != {'kind', 'name', 'index', 'data'}
-                or part['kind'] != 'blob-part' or part['name'] != name
-                or type(part['index']) is not int or part['index'] != index
-                or type(part['data']) is not str or len(part['data']) > 43692):
-            _fail('INVALID_GIT_WORKER_BLOB')
-        try:
-            block = base64.b64decode(part['data'], validate=True)
-        except (ValueError, UnicodeError):
-            _fail('INVALID_GIT_WORKER_BLOB')
-        expected = min(MAX_DATA, header['bytes'] - index * MAX_DATA)
-        if len(block) != expected or base64.b64encode(block).decode('ascii') != part['data']:
-            _fail('INVALID_GIT_WORKER_BLOB')
-        raw.extend(block)
-    if len(raw) != header['bytes'] or hashlib.sha256(raw).hexdigest() != header['sha256']:
-        _fail('INVALID_GIT_WORKER_BLOB')
-    return bytes(raw)
 
 
 def _supervisor_value(channel, supervisor):

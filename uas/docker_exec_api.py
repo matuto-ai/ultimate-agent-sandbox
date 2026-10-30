@@ -70,6 +70,10 @@ class DockerExecAPI:
     def inspect(self, exec_id):
         return self._request('GET', '/exec/' + self._id(exec_id) + '/json')
 
+    def inspect_container(self, container_id):
+        """Bounded read for opt-in installation-selected native recipe binding."""
+        return self._request('GET', '/containers/' + self._id(container_id) + '/json')
+
     def start(self, exec_id):
         path = API + '/exec/' + self._id(exec_id) + '/start'
         return self._upgrade(path, b'{"Detach":false,"Tty":false}')

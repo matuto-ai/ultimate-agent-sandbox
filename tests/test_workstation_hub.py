@@ -38,7 +38,10 @@ class HubLoopTests(unittest.TestCase):
         self.children[0].send(self.packet())
         self.sender.close()
         with self.assertRaises(OriginDenied):self.loop.step(1)
-        self.assertEqual(self.ledger.snapshot()['room_seq'],before)
+        events=self.ledger.replay(before)
+        self.assertEqual([event['kind'] for event in events],['peer.observed','peer.observed'])
+        self.assertEqual({event['payload']['participant_id'] for event in events},{'alice','bob'})
+        self.assertTrue(all(event['payload']['readiness']=='lost' for event in events))
         self.assertFalse(self.admissions._active)
 
     def test_control_revoke_wins_over_queued_peer_and_sibling_survives(self):

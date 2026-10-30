@@ -16,7 +16,6 @@ from pathlib import PurePosixPath
 import re
 import unicodedata
 
-from .forge import ForgeBinding
 
 
 class GitPolicyError(ValueError):
@@ -89,6 +88,7 @@ def parse_ssh(argv, binding):
     permission left to GitHub. Receive-pack is pinned to the Room Project.
     No -G probe, arbitrary option, shell parser or alternate host is accepted.
     """
+    from .forge import ForgeBinding
     if (type(binding) is not ForgeBinding or binding.host != 'github.com'
             or not _repository(binding.repository)):
         _deny('INVALID_GIT_BINDING')

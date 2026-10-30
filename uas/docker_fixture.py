@@ -107,6 +107,19 @@ class DockerFixtureBackend:
     def _project_writable(self, state, path):
         return False
 
+    def _resource_limits(self, state):
+        return {"Memory": 64 * 1024 * 1024, "MemorySwap": 64 * 1024 * 1024,
+                "NanoCpus": 500_000_000, "PidsLimit": 32}
+
+    def _log_config(self, state):
+        return {"Type": "local", "Config": {
+            "max-size": "1m", "max-file": "1", "compress": "false"}}
+
+    def _endpoint_mounts(self, state):
+        # Only a trusted fixed backend may supply these. Its admission must
+        # retain/revalidate actual endpoint objects before returning this plan.
+        return ()
+
     def _project_paths(self, state):
         for path in state["spec"]["project_paths"]:
             result = observe_path(path, control="fixture.project")
@@ -126,6 +139,10 @@ class DockerFixtureBackend:
                           "DAEMON_SECCOMP")
         except (TypeError, ValueError) as error:
             raise BackendUnknown() from error
+        return self._admit_resources(state)
+
+    def _admit_resources(self, state):
+        # Private body: public admission always observes paths and daemon policy.
         volume = self._inspect_object(state, "volume")
         resource = self._inspect_object(state, "container")
         if volume is None or resource is None:
@@ -149,17 +166,16 @@ class DockerFixtureBackend:
             required(all(host[key] in (None, []) for key in ("Devices", "DeviceRequests", "DeviceCgroupRules")), "DEVICES")
             required(host["PublishAllPorts"] is False and host["PortBindings"] in (None, {}), "PORTS")
             required(host["RestartPolicy"] == {"Name": "no", "MaximumRetryCount": 0}, "RESTART_POLICY")
-            required(all(type(host[key]) is int and host[key] == value for key, value in {
-                "Memory": 64 * 1024 * 1024, "MemorySwap": 64 * 1024 * 1024,
-                "NanoCpus": 500_000_000, "PidsLimit": 32}.items()), "RESOURCE_LIMITS")
-            required(host["LogConfig"] == {"Type": "local", "Config": {
-                "max-size": "1m", "max-file": "1", "compress": "false"}}, "LOG_LIMITS")
+            required(all(type(host[key]) is int and host[key] == value
+                         for key, value in self._resource_limits(state).items()), "RESOURCE_LIMITS")
+            required(host["LogConfig"] == self._log_config(state), "LOG_LIMITS")
             required({"/proc/kcore", "/proc/keys", "/proc/timer_list", "/sys/firmware"}
                      <= set(host["MaskedPaths"]), "MASKED_PATHS")
             required({"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}
                      <= set(host["ReadonlyPaths"]), "READONLY_PATHS")
             mounts = resource["Mounts"]
-            required(type(mounts) is list and len(mounts) == len(state["spec"]["project_paths"]) + 1, "MOUNTS")
+            endpoints = dict(self._endpoint_mounts(state))
+            required(type(mounts) is list and len(mounts) == len(state["spec"]["project_paths"]) + len(endpoints) + 1, "MOUNTS")
             destinations = set()
             for mount in mounts:
                 destination = mount["Destination"]
@@ -168,11 +184,14 @@ class DockerFixtureBackend:
                 if destination == "/state":
                     required(mount["Type"] == "volume" and mount["Name"] == self.name(state, "volume")
                              and mount["Driver"] == "local" and mount["RW"] is True, "STATE_MOUNT")
+                elif destination in endpoints:
+                    required(mount["Type"] == "bind" and mount["Source"] == endpoints[destination]
+                             and mount["RW"] is False and mount["Propagation"] == "rprivate", "ENDPOINT_MOUNT")
                 else:
                     required(destination in state["spec"]["project_paths"] and mount["Type"] == "bind"
                              and mount["Source"] == destination and mount["RW"] is self._project_writable(state, destination)
                              and mount["Propagation"] == "rprivate", "PROJECT_MOUNT")
-            required(destinations == {"/state", *state["spec"]["project_paths"]}, "MOUNTS")
+            required(destinations == {"/state", *state["spec"]["project_paths"], *endpoints}, "MOUNTS")
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             # Missing/malformed daemon data never becomes an accepted default.
             raise BackendUnknown() from error
@@ -196,14 +215,19 @@ class DockerFixtureBackend:
                 raise ValueError("unsupported fixture mount path")
             mode = "" if self._project_writable(state, path) else ",readonly"
             mounts += ["--mount", f"type=bind,source={path},target={path}" + mode]
+        for destination, source in self._endpoint_mounts(state):
+            mounts += ["--mount", f"type=bind,source={source},target={destination},readonly"]
+        limits, logging = self._resource_limits(state), self._log_config(state)
+        cpu = str(limits["NanoCpus"] // 1_000_000_000) + "." + str(limits["NanoCpus"] % 1_000_000_000).zfill(9)
         self._run(["create", "--name", self.name(state, kind), *labels,
                    "--user", "65532:65532", "--read-only", "--network", self._network_name(state),
                    "--ipc", "private", "--cgroupns", "private",
                    "--cap-drop", "ALL",
                    *[value for option in self._security_options(state) for value in ("--security-opt", option)],
-                   "--memory", "64m", "--memory-swap", "64m", "--cpus", "0.5", "--pids-limit", "32",
-                   "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
-                   "--log-opt", "compress=false",
+                   "--memory", str(limits["Memory"]), "--memory-swap", str(limits["MemorySwap"]),
+                   "--cpus", cpu, "--pids-limit", str(limits["PidsLimit"]),
+                   "--log-driver", logging["Type"],
+                   *[value for key, item in logging["Config"].items() for value in ("--log-opt", key + "=" + item)],
                    *mounts, state["spec"]["image_id"]])
 
     def start(self, state):

@@ -49,9 +49,9 @@ class RunReview:
     Broker methods must be durable/idempotent, including uncertain outcomes.
     """
     def __init__(self, ledger, gates, identity, broker, *, reviewers, target_fence,
-                 authorize_human, human_mergers):
+                 authorize_human, human_mergers, native_host=None):
         if (gates.ledger is not ledger or gates.identity is not identity
-                or not callable(getattr(identity, 'operation_fence', None))
+                or native_host is None and not callable(getattr(identity, 'operation_fence', None))
                 or not callable(target_fence) or not callable(authorize_human)):
             raise LedgerError('INVALID_REVIEW_OWNER')
         if type(reviewers) is not list or len(reviewers) > 64:
@@ -69,12 +69,25 @@ class RunReview:
         self.ledger, self.gates, self.identity, self.broker = ledger, gates, identity, broker
         self.reviewers, self.target_fence = deepcopy(reviewers), target_fence
         self.authorize_human, self.human_mergers = authorize_human, frozenset(human_mergers)
+        if native_host is not None:
+            from .native_review_host import NativeReviewHost
+            if (type(native_host) is not NativeReviewHost or native_host.identity is not identity
+                    or native_host.gates is not gates):
+                raise LedgerError('INVALID_NATIVE_REVIEW_OWNER')
+        self.native_host = native_host
 
     @contextmanager
     def _fence(self, admission_operation):
-        with self.identity.operation_fence(admission_operation):
-            with self.target_fence():
-                yield
+        if self.native_host is not None:
+            scope = self.identity.active
+            if scope is None or scope.admission_operation != admission_operation:
+                raise LedgerError('NATIVE_REVIEW_SCOPE_REQUIRED')
+            scope.require_observing()
+            yield  # The actual local consuming fence lives in _apply/_receipt.
+        else:
+            with self.identity.operation_fence(admission_operation):
+                with self.target_fence():
+                    yield
 
     @staticmethod
     def _run(state, run_id, generation, *, paused=False):
@@ -99,6 +112,27 @@ class RunReview:
             'participant_id', 'policy', 'checkout', 'gate_target', 'gate_target_binding', 'control_pending', 'control_revision')})
 
     def _apply(self, command, origin, authorize, decide, *, _manager_fence=None):
+        if self.native_host is not None:
+            scope = self.identity.active
+            if scope is None: raise LedgerError('NATIVE_REVIEW_SCOPE_REQUIRED')
+            from contextlib import nullcontext
+            if _manager_fence is not None:
+                from .manager_actions import OwnerFence
+                if (type(_manager_fence) is not OwnerFence or scope.human_fence is None
+                        or _manager_fence.session is not scope.human_fence.session
+                        or _manager_fence.value != scope.human_fence.value
+                        or _manager_fence.supervisor is not self.identity.supervisor):
+                    raise LedgerError('INVALID_NATIVE_REVIEW_SCOPE')
+            with (_manager_fence.prepare() if _manager_fence is not None else nullcontext()), scope.commit():
+                def native_authorize(*_):
+                    scope.check_state(self.ledger.snapshot()['state'])
+                    return authorize() is True
+                def native_decide(state, operation):
+                    scope.check_state(state)
+                    return decide(state, operation)
+                with (_manager_fence.guard(lifecycle_locked=True) if _manager_fence is not None else nullcontext()):
+                    if _manager_fence is not None: _manager_fence.before(command)
+                    return self.ledger.apply(command, origin, authorize=native_authorize, decide=native_decide)['result']
         if _manager_fence is not None:
             with _manager_fence.guard():
                 _manager_fence.before(command)
@@ -108,6 +142,15 @@ class RunReview:
                                  decide=decide)['result']
 
     def _receipt(self, command, origin, authorize):
+        if self.native_host is not None:
+            scope = self.identity.active
+            if scope is None: raise LedgerError('NATIVE_REVIEW_SCOPE_REQUIRED')
+            with scope.commit():
+                def native_authorize(*_):
+                    scope.check_state(self.ledger.snapshot()['state'])
+                    return authorize() is True
+                receipt = self.ledger.exact_receipt(command, origin, authorize=native_authorize)
+                return None if receipt is None else receipt['result']
         receipt = self.ledger.exact_receipt(command, origin, authorize=lambda *_: authorize() is True)
         return None if receipt is None else receipt['result']
 
@@ -208,7 +251,15 @@ class RunReview:
             raise LedgerError('REVIEW_CANDIDATE_CHANGED')
         return observation
 
-    def submit(self, envelope, *, origin, authorize, admission_operation, observation_id=None):
+    def submit(self, envelope, *, origin, authorize, admission_operation, observation_id=None, _native_scope=None):
+        if _native_scope is not None:
+            from .native_review_host import NativeReviewAcceptance
+            if (type(_native_scope) is not NativeReviewAcceptance or _native_scope.host is not self.native_host
+                    or _native_scope.envelope != envelope or origin != _native_scope.ingress.origin):
+                raise LedgerError('INVALID_NATIVE_REVIEW_SCOPE')
+            with _native_scope.operation(admission_operation):
+                return self.submit(envelope,origin=origin,authorize=authorize,admission_operation=admission_operation,
+                                   observation_id=observation_id)
         if (type(envelope) is not dict or set(envelope) not in (
                 {'id', 'kind', 'run_id', 'generation', 'payload'},
                 {'id', 'kind', 'run_id', 'generation', 'payload', 'observation_id'})
@@ -231,6 +282,12 @@ class RunReview:
                 return self._submit_review(command, origin, authorize, observation_id)
             return self._result(command, origin, authorize, observation_id)
 
+    def _operation_gates(self, run_id, generation, operation, *, origin):
+        if self.native_host is not None:
+            return self.gates.prepare_native_operation(run_id,generation,operation,origin=origin,
+                                                       acceptance=self.identity.active)
+        return self.gates.operation_gates(run_id,generation,operation,origin=origin)
+
     def _submit_review(self, command, origin, authorize, observation_id=None):
         payload = command.payload
         if type(payload) is not dict or set(payload) != {'target', 'evidence'}:
@@ -240,8 +297,14 @@ class RunReview:
         if ('implement' not in origin.capabilities or origin.actor_id != run['actor_id']
                 or origin.participant_id != run['participant_id']):
             raise LedgerError('REVIEW_IMPLEMENTER_REQUIRED')
+        if self.native_host is not None and getattr(self.native_host,'gate_workflow',None) is not None:
+            self.native_host.prepare_submission(command, origin)
+            state = self.ledger.snapshot()['state']; run = self._run(state, command.target, command.generation)
         target = self._target(run, payload['target']); scope = self._scope(run)
-        gate_view = self.gates.operation_gates(command.target, command.generation, 'submit-for-review', origin=origin)
+        gate_view = self._operation_gates(command.target, command.generation, 'submit-for-review', origin=origin)
+        state = self.ledger.snapshot()['state']
+        if self._scope(self._run(state, command.target, command.generation)) != scope:
+            raise LedgerError('REVIEW_RUN_STALE')
         require_operation_gates(state, gate_view)
         self._observed(self._observe(command, origin, authorize, target, attempt=observation_id), target)
         selected = self._select(state, run)
@@ -372,6 +435,9 @@ class RunReview:
 
     def manager_eligibility(self, action, run_id, *, session, admission_operation, supervisor):
         """Local owning-module eligibility; never a provider read or authority grant."""
+        if self.native_host is not None and self.identity.active is None:
+            if supervisor is not self.identity.supervisor: raise LedgerError('INVALID_NATIVE_REVIEW_OWNER')
+            return self.native_host.human_eligibility(action,run_id,session=session)
         with self._fence(admission_operation), supervisor._locked():
             room = supervisor._read()
             if not room or room['instance_id'] != session.instance_id: raise LedgerError('ROOM_REPLACED')
@@ -401,6 +467,10 @@ class RunReview:
 
     def manager_action(self, value, *, session, admission_operation, audit, repository, supervisor):
         """Authenticated exact-version Manager entry; ordinary methods remain owners."""
+        if self.native_host is not None and self.identity.active is None:
+            if supervisor is not self.identity.supervisor or repository != self.identity.binding.repository:
+                raise LedgerError('INVALID_NATIVE_REVIEW_OWNER')
+            return self.native_host.human_action(value,session=session,audit=audit)
         from .manager_actions import OwnerFence, REVIEW_ACTIONS
         fence = OwnerFence(self.ledger, session, value, REVIEW_ACTIONS,
             audit=audit, repository=repository, supervisor=supervisor)
@@ -504,7 +574,17 @@ class RunReview:
             target = self._target(run, row['target']); scope = self._scope(run)
             if not row.get('override_id'):
                 self._fact(run, row['reviewer']['actor_id'], row['reviewer']['authority_epoch'])
-            gates = self.gates.operation_gates(run_id, generation, 'complete', origin=origin)
+            if self.native_host is not None:
+                self.native_host.prepare_completion(command,origin)
+                prepared = self.ledger.snapshot()['state']
+                if (self._scope(self._run(prepared, run_id, generation)) != scope
+                        or prepared.get('run_reviews', {}).get(run_id, {}).get('current') != row):
+                    raise LedgerError('REVIEW_COMPLETION_STALE')
+            gates = self._operation_gates(run_id, generation, 'complete', origin=origin)
+            state = self.ledger.snapshot()['state']
+            if (self._scope(self._run(state, run_id, generation)) != scope
+                    or state.get('run_reviews', {}).get(run_id, {}).get('current') != row):
+                raise LedgerError('REVIEW_COMPLETION_STALE')
             require_operation_gates(state, gates)
             response = self._observe(command, origin, authorize, target, attempt=observation_id)
             observed = response['observation']

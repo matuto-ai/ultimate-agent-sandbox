@@ -7,5 +7,9 @@ UAS_PI_EVIDENCE="${UAS_PI_EVIDENCE:-$PWD/tests/pi/evidence.jsonl}"
 export UAS_PI_INSTALL UAS_PI_EVIDENCE PYTHONDONTWRITEBYTECODE=1
 : > "$UAS_PI_EVIDENCE"
 node -e 'const fs=require("node:fs"); const p=process.env.UAS_PI_INSTALL+"/node_modules/@earendil-works/pi-coding-agent/package.json"; if(JSON.parse(fs.readFileSync(p)).version!=="1.4.0") throw Error("Official Pi 1.4.0 required");'
-python3 -m unittest discover -s tests -p "test_pi_*.py" -v
+node tests/pi/auth-contract.mjs
+node tests/pi/resume-contract.mjs
+node tests/pi/library-scan-contract.mjs
+node tests/pi/library-capture-contract.mjs
+python3 tests/pi/parallel-tests.py "$@"
 cat "$UAS_PI_EVIDENCE"

@@ -103,6 +103,14 @@ class PiNativeTests(unittest.TestCase):
 
     def test_first_ever_delivery_has_native_persisted_receipt_without_priming(self):
         self.assertFalse(Path(self.native.initial_state['session_file']).exists())
+        # Reuse this already-running account-free pinned Pi: prove its actual
+        # state notification/prompt ACK pair supports the activation sample.
+        sample = self.native.prepare_admission_observation()
+        self.assertIs(self.native.validate_admission_observation(sample), Readiness.SAFE)
+        self.assertIs(self.native.validate_admission_observation(sample, consume=True), Readiness.SAFE)
+        with self.assertRaises(NativeUnavailable):
+            self.native.validate_admission_observation(sample, consume=True)
+        self.assertFalse(Path(self.native.initial_state['session_file']).exists())
         self.submit()
         self.assertIsNone(self.state()['traffic']['work-1']['response_started_at'])
         self.assertEqual(self.deliver()['outcome'], 'CONFIRMED')

@@ -123,3 +123,13 @@ the existing explicit exemption. Historical spike demos are not part of this
 successor suite and no real Runtime, container, VM, or external Forge acceptance
 is claimed. Future slices extend this aggregate rather than replacing it with a
 placeholder.
+
+## Optional native provider authentication reference
+
+Provider `auth` may specify a `credential_ref` declared with kind
+`runtime-provider`, plus the fixed method `pi-oauth-json` or
+`claude-oauth-token` matching its Runtime. The schema accepts no secret contents
+or arbitrary paths/environment keys. Existing offline examples remain without
+authentication; actual opt-in native launch requires a selected reference.
+[Native provider authentication](native-provider-auth.md) describes persistence,
+fresh-context separation and the explicit remaining live qualification.

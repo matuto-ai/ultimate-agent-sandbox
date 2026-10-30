@@ -78,19 +78,24 @@ def verify_runtime(payload, native):
     """Verify both complete assets before any rootfs creation or extraction."""
     if not payload.is_absolute() or payload.resolve() != payload or not stat.S_ISDIR(payload.lstat().st_mode):
         raise ValueError('canonical read-only payload directory required')
-    if (type(native) is not dict or native.get('profile') not in ('native-pi-v1', 'artifacts-v1-source')
+    if (type(native) is not dict or native.get('profile') not in ('native-pi-v1', 'artifacts-v1-source', 'room-launch-ipv4-v1')
             or native.get('rpm_roots') != list(ROOTS) or native.get('rpm_scriptlets') is not False
             or native.get('dependencies_reproducibly_pinned') is not False):
         raise ValueError('unsupported native payload profile')
     artifact = native['profile'] == 'artifacts-v1-source'
-    if (not artifact and (native.get('node_version') != '24.22.1' or native.get('pi_version') != '1.4.0')):
+    room = native['profile'] == 'room-launch-ipv4-v1'
+    if (not artifact and not room and (native.get('node_version') != '24.22.1' or native.get('pi_version') != '1.4.0')):
         raise ValueError('unsupported native Pi runtime')
     if artifact and (set(native.get('helper_sha256', {})) != {'artifact-bootstrap', 'artifact-evaluator',
             'artifact-test-bootstrap', 'artifact-confinement-probe'}
             or any(type(value) is not str or not HEX.fullmatch(value) for value in native['helper_sha256'].values())
             or native.get('production_enabled') is not False):
         raise ValueError('unsupported artifacts source profile')
-    prefix = 'artifact' if artifact else 'native'
+    if room and (native.get('production_enabled') is not False or native.get('help_only') is not True
+                 or native.get('runtime_python_only') is not True
+                 or native.get('guest_rpm_roots') != ['git-core', 'openssh', 'openssh-clients', 'openssh-server']):
+        raise ValueError('unsupported Room fixture source profile')
+    prefix = 'room' if room else 'artifact' if artifact else 'native'
     archive = checked_asset(payload, {k: native.get(k) for k in ('file', 'bytes', 'sha256')},
                             prefix + '-runtime.tar', MAX_ARCHIVE_BYTES)
     listing = checked_asset(payload, native.get('file_manifest'), prefix + '-files.json', 8 * 1024 * 1024)
@@ -123,7 +128,7 @@ def verify_runtime(payload, native):
                 raise ValueError('artifacts immutable binary manifest differs')
     git_runtime = native.get('git_runtime')
     if git_runtime is not None:
-        if (artifact or type(git_runtime) is not dict or set(git_runtime) != {'version', 'entries', 'launcher_sha256', 'connector_sha256'}
+        if (artifact or room or type(git_runtime) is not dict or set(git_runtime) != {'version', 'entries', 'launcher_sha256', 'connector_sha256'}
                 or type(git_runtime['version']) is not int or git_runtime['version'] != 1
                 or type(git_runtime['entries']) is not list or not 1 <= len(git_runtime['entries']) <= 128
                 or any(type(name) is not str or not re.fullmatch(r'(?:git(?:-[a-z0-9-]+)?|scalar)', name) for name in git_runtime['entries'])
@@ -538,6 +543,21 @@ def verify_filesystem_layout(root, *, run):
 
 def build_rootfs(nonce, manifest, destination, *, run):
     guest_guard(nonce)
+    if manifest.get('profile') == 'room-launch-ipv4-v1':
+        raise ValueError('Room profile requires its separate fixed boot guard')
+    return _build_rootfs(manifest, destination, run=run)
+
+
+def build_room_rootfs(nonce, manifest, destination, *, run):
+    """Distinct fixed NIC contract, observed before offline image assembly."""
+    from room_profile import PROFILE, guest_guard as room_guard
+    room_guard(nonce, run=run)
+    if manifest.get('profile') != PROFILE or manifest.get('native_runtime', {}).get('profile') != PROFILE:
+        raise ValueError('exact Room source profile required')
+    return _build_rootfs(manifest, destination, run=run)
+
+
+def _build_rootfs(manifest, destination, *, run):
     archive, files = verify_runtime(PAYLOAD, manifest['native_runtime'])
     root = Path(destination)
     if not root.is_absolute() or root.parent.resolve() != root.parent or root.exists() or root.is_symlink():
@@ -564,13 +584,28 @@ def build_rootfs(nonce, manifest, destination, *, run):
     print('Native rootfs phase: filesystem-metadata start', flush=True)
     filesystem_layout = verify_filesystem_layout(root, run=run)
     print('Native rootfs phase: filesystem-metadata complete', flush=True)
-    from native_trust import generate_trust
+    from native_trust import generate_trust, validate_public_ca
     print('Native rootfs phase: trust-generation start', flush=True)
     trust_generation = generate_trust(root, run=run)
+    trust_generation['public_ca_validation'] = validate_public_ca(root)
+    if len(canonical(trust_generation)) > 8192:
+        raise ValueError('validated trust evidence exceeds bound')
     print('Native rootfs phase: trust-generation complete', flush=True)
     print('Native rootfs phase: runtime-extraction start', flush=True)
     extract_runtime(archive, files, root)
     install_git_entries(root, manifest['native_runtime'].get('git_runtime'))
+    if manifest.get('profile') == 'room-launch-ipv4-v1':
+        # Existing fixed synthetic probe, already source/signature-manifest
+        # bound by payload preparation. No new helper or arbitrary executable.
+        source = PAYLOAD / 'fixture'
+        info = ordinary(source)
+        expected = manifest['fixture']
+        if (info.st_size != expected['bytes'] or digest(source) != expected['sha256']
+                or not 0 < info.st_size <= 32 * 1024 * 1024):
+            raise ValueError('Room synthetic probe differs')
+        with source.open('rb') as input_, (root / 'fixture').open('xb') as output:
+            shutil.copyfileobj(input_, output)
+        (root / 'fixture').chmod(0o555)
     print('Native rootfs phase: runtime-extraction complete', flush=True)
     print('Native rootfs phase: tini-copy start', flush=True)
     source = resolve_inside(root, 'usr/bin/tini')

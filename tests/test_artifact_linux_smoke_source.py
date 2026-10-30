@@ -105,10 +105,11 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
     def test_workflow_is_bounded_parallel_readonly_and_never_runs_full_vm(self):
         workflow = (ROOT / '.github/workflows/validate.yml').read_text()
         job = workflow.split('  artifact-linux-smoke:\n', 1)[1].split('  docker-lifecycle:\n', 1)[0]
-        self.assertIn('needs: [validate, unit-slow]', job)
+        self.assertIn('needs: [validate, unit-slow, unit-integration]', job)
         self.assertIn('timeout-minutes: 1', job)
         self.assertIn("needs.validate.outputs.skip_tests != 'true'", job)
         self.assertIn("needs.unit-slow.outputs.skip_tests != 'true'", job)
+        self.assertIn("needs.unit-integration.outputs.skip_tests != 'true'", job)
         self.assertIn('persist-credentials: false', job)
         self.assertIn('timeout --signal=TERM --kill-after=2s 43s sudo -n', job)
         self.assertIn('tests/linux/artifact_smoke.py --run', job)
@@ -117,7 +118,8 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
         self.assertEqual(smoke.LIMIT_SECONDS, 40)
 
     def test_staged_sources_are_exact_bounded_readonly_ordinary_copies(self):
-        self.assertEqual(len(smoke.SOURCES), 26)
+        self.assertEqual(len(smoke.SOURCES), 27)
+        self.assertIn('uas/typed_json.py', smoke.SOURCES)
         self.assertEqual(len(set(smoke.SOURCES)), len(smoke.SOURCES))
         with tempfile.TemporaryDirectory() as directory:
             payload = smoke.stage_sources(Path(directory))

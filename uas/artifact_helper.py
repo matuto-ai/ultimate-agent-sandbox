@@ -42,6 +42,20 @@ _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _TOKEN = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
 
 
+def helper_host_identity(host_profile=None):
+    """Trusted composition input only; never deserialize this from Gate wire data."""
+    if host_profile is None:
+        return HELPER_HOST_UID, HELPER_HOST_GID
+    from .local_host_profile import LocalHostProfile, HostProfileError
+    if type(host_profile) is not LocalHostProfile:
+        raise ArtifactError('INVALID_GATE_HOST_PROFILE')
+    try:
+        LocalHostProfile.parse(host_profile.document())
+    except (HostProfileError, TypeError, ValueError):
+        raise ArtifactError('INVALID_GATE_HOST_PROFILE') from None
+    return host_profile.host_id(HELPER_UID), host_profile.host_id(HELPER_GID)
+
+
 def _profile_target(profile, value):
     if profile == COMMAND_PROFILE:
         from .gate_repository import validate_command_target
@@ -111,8 +125,10 @@ class GateWorkstation:
     mapping_digest: str
     receiver_context: str
     profile: str = PROFILE_ID
+    host_profile: object = None
 
     def __post_init__(self):
+        helper_host_identity(self.host_profile)
         if self.profile not in BOOTSTRAPS:
             raise ArtifactError('UNSUPPORTED_GATE_PROFILE')
         if (any(type(v) is not str or not _TOKEN.fullmatch(v)
@@ -263,7 +279,8 @@ class GateHelperLaunch:
                 or value.get('ContainerID') != self.workstation.container_id
                 or value.get('Running') is not True or type(value.get('Pid')) is not int
                 or self.origin is None or self.origin.revoked or not alive(self.origin.pidfd)
-                or value['Pid'] != self.origin.credentials[0]):
+                or value['Pid'] != self.origin.credentials[0]
+                or self.origin.credentials[1:] != helper_host_identity(self.workstation.host_profile)):
             raise ArtifactError('GATE_EXEC_IDENTITY_UNVERIFIED')
         self._remaining()
 
@@ -299,7 +316,7 @@ class GateHelperLaunch:
             with receive(self.channel) as record:
                 if (len(record.data) != 36 or record.data[:4] != b'AGH1'
                         or not hmac.compare_digest(record.data[4:], challenge)
-                        or record.credentials[1:] != (HELPER_HOST_UID, HELPER_HOST_GID)):
+                        or record.credentials[1:] != helper_host_identity(self.workstation.host_profile)):
                     raise ArtifactError('GATE_BOOTSTRAP_ORIGIN_MISMATCH')
                 self.origin = HeldOrigin(record)
             challenge = None
@@ -351,6 +368,45 @@ class GateHelperLaunch:
         except BaseException:
             self._quarantine('binding-unknown')
             raise
+
+    def local_offer(self, paths, *, exchange_id, controller):
+        """Move this exact helper channel to a co-located trusted Gate consumer.
+
+        The duplicated pidfd is an observer of the already-held task, not a
+        new admission/lease. The launch retains its original exit authority.
+        No caller-supplied channel, Record, credentials or PID is accepted.
+        """
+        if (self.state != 'bound' or type(self.origin) is not HeldOrigin
+                or self.origin.revoked or self.channel is None):
+            raise ArtifactError('GATE_NOT_BOUND')
+        _profile_request(self.workstation.profile, paths)
+        self._inspect(); self.endpoint.require()
+        document = _binding_document(self, exchange_id, controller)
+        self._save('binding')  # one attempt, including uncertain journal/dup
+        duplicate = -1
+        observer = None
+        try:
+            duplicate = os.dup(self.origin.pidfd)
+            record = Record(b'', self.origin.credentials, duplicate)
+            observer = HeldOrigin(record, receiver=self.origin.receiver)
+            duplicate = -1
+            if observer.identity != self.origin.identity:
+                raise ArtifactError('GATE_LOCAL_ORIGIN_CHANGED')
+            offer = GateOffer(document, self.channel, observer, paths)
+            offer.deadline = min(offer.deadline, self.deadline)
+            self.binding = document
+            self._save('running')
+            self.channel = None  # only the returned exact offer reads facts
+            observer = None
+            return offer
+        except BaseException:
+            self._quarantine('local-binding-unknown')
+            raise
+        finally:
+            if observer is not None:
+                observer.close()
+            if duplicate >= 0:
+                os.close(duplicate)
 
     def _exit(self):
         if self.origin is None or self.origin.pidfd < 0:
