@@ -1,4 +1,4 @@
-"""Standard discovery, eight complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, ten complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -11,101 +11,105 @@ import sys
 import unittest
 
 
-# Hosted 6c97 elapsed intervals: approximately 35.8 / 32.2 / 34.6 seconds.
-# Hosted 46f2154 remainder moved 3.624 + 3.314 + 2.929 seconds to integration.
-# Hosted 3678efe remainder overflow: move measured 17.581s / 11.223s into
-# existing parallel jobs (19.815s / 27.673s), not new jobs or larger limits.
-# Estimates become 37.396 / 38.896 / 43.763s; timings vary, not a guarantee.
-# Keep module ownership stable; new modules default to remainder, never disappear.
-# #168 dispatch real-process/Git suite measured9.4s locally; remainder timed
-# out at61s. Existing slow lane43s hosted has headroom; no excluded tests.
-SLOW_MODULES = frozenset({'test_library_import', 'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
-                          'test_forge_mutations', 'test_artifact_manual_source',
-                          'test_run_review',
-                          'test_claude_permission_policy', 'test_artifact_native_source',
-                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-# #155 hosted remainder reached its one-minute job boundary despite passing
-# tests (49s + setup/smoke). Move the ~7s registration module to the measured
-# 24s integration partition; no exclusions, new jobs or enlarged timeouts.
-# #164 run41001402968 passed380 tests52.26s but job cleanup hit60s.
-# Move hosted5.70s Hub to45s slow job; Git payload3.03s to45s remainder.
-# Preserve every test and timeout; new assembly stays integration.
-# #162 kernel/Git route module measured ~3.5s locally; keep off tight remainder.
-# #177 run41038439439: scheduler45 tests passed52.913s but job timed out.
-# Service measured23.69s; integration27.108s has room. Move the entire
-# module, preserving exhaustive disjoint inventory and one-minute limits.
-INTEGRATION_MODULES = frozenset({'test_library_adjudication', 'test_library_disposition', 'test_library_service', 'test_participant',
-    'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
-    'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
-    'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
-    'test_manager_action_host', 'test_forge_assignment',
-    'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
-# Run 40958947508: remainder took 60.833s before its process smoke.
-# Move ~23s of measured remainder work and ~7.5s from integration to a sibling.
-# #155 final graph: remainder 48s plus setup reached 62s. These four
-# modules measured 4.34s locally out of 24.05s remainder (~8.7s hosted).
-# Existing additional lane measured 18s hosted; move rather than exclude.
-# #158 real-Git projection module measured 3.9s locally. Keep it off the
-# previously tight remainder; additional has ~26s hosted baseline headroom.
-# #165 moved the measured enqueue module to this parallel lane.
-# #168 follow-up: slow lane hit60s; move existing Hub (~5.7shosted)
-# to additional lane (46s) without changing total inventory/limits.
-ADDITIONAL_MODULES = frozenset({'test_library_observations', 
-    'test_library_hub',
-    'test_library_enqueue',
-    'test_local_three_runs',
-    'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
-    'test_native_claude_checks', 'test_native_git_operations',
-    'test_forge_mutation_audit', 'test_manager_read_model',
-    'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
-    'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
-    'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
-})
-# #170 actual process interruption/recovery suite measured20s locally. Existing
-# hosted lanes51-53s cannot absorb it; one parallel one-minute lane preserves
-# all tests and the overall2-3min graph, with no timeout increase.
-# #173 relocation suite measured 6s; synthesis has headroom after #170.
-# #178 hosted inspection46cases22.7s nearly fills remainder53.8s. Move it
-# to synthesis30.5s and relocation4.8s back to remainder: ~48/36s; retain
-# every ID, seven lanes, one-minute job ceilings and aggregate dependency graph.
-# #234 remainder3585passed47.137s but setup/smoke exceeded60s; move
-# relocation23cases6.788s to integration38.858s (~40.3/45.6s).
-# Postmerge #178 synthesis117 tests passed64.044s and55.701s but exceeded
-# unchanged job budget with setup. Move measured observations8.9s to additional
-# (29.7s), import6.6s to slow(35.3s): worst synthesis~48.5s, no exclusions.
-# Next measured run: slow331passed50.413s plus setup exceeded60s. Move
-# staged-source-closure8cases8.2s to synthesis34.429s (~42.2/42.6s).
-# Repeated passing suites still exhausted setup headroom in seven lanes.
-# One parallel matrix lane retains the same 60s roots and <=180s graph.
-# Inspection+relocation ~34s; synthesis+context/reset ~33s; integration ~40s.
-INSPECTION_MODULES = frozenset({'test_library_inspection', 'test_library_relocation', 'test_library_disposition_native', 'test_library_adjudication_native'})
-SYNTHESIS_MODULES = frozenset({'test_library_adjudication_recovery', 'test_library_disposition_recovery', 'test_library_attempts', 'test_staged_source_closure',
-    'test_context', 'test_native_pi_reset_adversarial'})
-# T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
-# approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
-# #177 second hosted run: integration60.174s/remainder49.460s hit job budget.
-# Move assembly9.94s+registration4.48s to scheduler25.37s, and
-# records5.67s+payload3.04s to operator32.38s. Keep every discovered ID.
-SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly', 'test_library_registration'})
-# #175 controls adds ~20s real Git/service/socket proofs; prior scheduler44s
-# and remaining lanes~50s cannot absorb it inside unchanged one-minute jobs.
-# Additional reached60s; terminal/stop/records now belong to remainder.
-# Native controls varied19.4–44s, so leave operator alone; the three modules
-# measured5.2s on latest run and remainder37s leaves room without exclusions.
-OPERATOR_MODULES = frozenset({'test_library_controls', 'test_library_retention', 'test_library_records', 'test_git_payload'})
-assert not INSPECTION_MODULES & (OPERATOR_MODULES | SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
-assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
-PARTITIONS = ('inspection', 'operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
-assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
-assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
-assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES
-            or INTEGRATION_MODULES & ADDITIONAL_MODULES)
+# #241: postmerge41047585809 passed311 integration tests60.074s and84
+# synthesis tests52.524s, then hit unchanged60s jobs. Eight suites total351s;
+# nine average39s before setup. Ten lanes target32–38s measured headroom.
+# Full module timings and planning bounds: docs/testing/ci-partition-headroom.md.
+# These are partitions, not exclusions. Every future module defaults to remainder.
+SLOW_MODULES = frozenset({'test_artifact_manual_source',
+ 'test_artifact_native_source',
+ 'test_checkouts',
+ 'test_claude_permission_policy',
+ 'test_forge_mutations',
+ 'test_gate_evaluation',
+ 'test_library_dispatch',
+ 'test_library_import',
+ 'test_participant_pi_launch',
+ 'test_peer',
+ 'test_peer_delivery_phases',
+ 'test_review_hosted',
+ 'test_room_control_plane',
+ 'test_run_review',
+ 'test_workstation_control',
+ 'test_workstation_peer'})
+
+INTEGRATION_MODULES = frozenset({'test_command_native_source',
+ 'test_diff_native',
+ 'test_forge_assignment',
+ 'test_forge_projections',
+ 'test_forge_read_process',
+ 'test_gate_forge_hub',
+ 'test_ledger',
+ 'test_library_enqueue',
+ 'test_library_registration',
+ 'test_manager_action_host',
+ 'test_native_completed_reviewer_reset',
+ 'test_native_gate_completion',
+ 'test_native_reviewer_recruitment_adversarial',
+ 'test_native_reviewer_reset_adversarial',
+ 'test_native_session_driver',
+ 'test_native_session_human_actions',
+ 'test_native_trust',
+ 'test_participant',
+ 'test_run_admission'})
+
+ADDITIONAL_MODULES = frozenset({'test_artifact_connected',
+ 'test_exec_state',
+ 'test_forge_capacity',
+ 'test_forge_mutation_audit',
+ 'test_forge_reconciliation',
+ 'test_gate_diff_hub',
+ 'test_library_git',
+ 'test_library_observations',
+ 'test_library_projection',
+ 'test_library_settings',
+ 'test_lifecycle',
+ 'test_local_room_prepare',
+ 'test_local_three_runs',
+ 'test_manager_read_model',
+ 'test_native_broker_audit_source',
+ 'test_native_claude_checks',
+ 'test_native_combined_image_package',
+ 'test_native_git_operations',
+ 'test_room_cli_diagnostics',
+ 'test_workstation_delivery'})
+
+SYNTHESIS_MODULES = frozenset({'test_context',
+ 'test_library_attempts',
+ 'test_native_pi_reset_adversarial',
+ 'test_staged_source_closure'})
+
+SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'})
+
+OPERATOR_MODULES = frozenset({'test_library_retention', 'test_library_controls', 'test_git_payload'})
+
+INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
+
+LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service'})
+
+DISPOSITION_MODULES = frozenset({'test_library_adjudication',
+ 'test_library_adjudication_native',
+ 'test_library_adjudication_recovery',
+ 'test_library_disposition',
+ 'test_library_disposition_native',
+ 'test_library_disposition_recovery'})
+
+PARTITIONS = ('lifecycle', 'disposition', 'inspection', 'operator', 'slow',
+              'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
+MODULE_GROUPS = (LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
+                OPERATOR_MODULES, SLOW_MODULES, INTEGRATION_MODULES,
+                ADDITIONAL_MODULES, SYNTHESIS_MODULES, SCHEDULER_MODULES)
+assert sum(map(len, MODULE_GROUPS)) == len(set().union(*MODULE_GROUPS))
 
 
 def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in LIFECYCLE_MODULES:
+        return 'lifecycle'
+    if module in DISPOSITION_MODULES:
+        return 'disposition'
     if module in INSPECTION_MODULES:
         return 'inspection'
     if module in OPERATOR_MODULES:
@@ -173,7 +177,7 @@ def main(argv=None):
         raise ValueError('empty discovered unit partition')
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
-    print(f'Unit inventory: total={len(cases)} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
+    print(f'Unit inventory: total={len(cases)} lifecycle={len(groups["lifecycle"])} disposition={len(groups["disposition"])} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
           f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
