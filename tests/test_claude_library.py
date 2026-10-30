@@ -118,7 +118,8 @@ class NativeSession:
             test.assertEqual(record.data,b'CLAUDE-LIBRARY-FIXTURE')
             self.origin=HeldOrigin(record)
         self.ledger=RoomLedger(self.root/'room.db',project);self.hub=FixturePeerHub(self.ledger)
-        self.hub.configure('configure',(FixtureParticipant('claude','actor-'+project),),'run-1')
+        self.hub.configure('configure',(FixtureParticipant('claude','actor-'+project),
+            FixtureParticipant('observer','observer-'+project)),'run-1')
         self.control,self.sender=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET);enable(self.control)
         self.sender.send(b'trusted-supervisor')
         with receive(self.control) as record:self.supervisor=HeldOrigin(record)
