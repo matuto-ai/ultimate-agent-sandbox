@@ -78,8 +78,8 @@ ADDITIONAL_MODULES = frozenset({'test_library_observations',
 # Repeated passing suites still exhausted setup headroom in seven lanes.
 # One parallel matrix lane retains the same 60s roots and <=180s graph.
 # Inspection+relocation ~34s; synthesis+context/reset ~33s; integration ~40s.
-INSPECTION_MODULES = frozenset({'test_library_inspection', 'test_library_relocation'})
-SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_staged_source_closure',
+INSPECTION_MODULES = frozenset({'test_library_inspection', 'test_library_relocation', 'test_library_disposition_native'})
+SYNTHESIS_MODULES = frozenset({'test_library_disposition', 'test_library_attempts', 'test_staged_source_closure',
     'test_context', 'test_native_pi_reset_adversarial'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
