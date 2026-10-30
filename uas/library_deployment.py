@@ -401,7 +401,8 @@ class DeploymentLibrary:
             if room in self._hubs:
                 fail('ROOM_HUB_ALREADY_ATTACHED')
             endpoint = EnqueueEndpoint(self._publisher, settings=self._current_settings,
-                                       projection=bound.projection)
+                                       projection=bound.projection,
+                                       guard=self._current_settings)
             ledger = self.ledger_for(room)
             hub = LibraryHub(ledger, room_id=room, project=bound.item.project,
                              source_identity=bound.item.source_identity, contact=endpoint.contact,

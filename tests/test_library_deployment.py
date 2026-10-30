@@ -477,6 +477,29 @@ class DeploymentLibraryTests(unittest.TestCase):
         self.assertEqual(response['outcome'], 'observed')
         recovered.stop()
 
+    def test_revocation_during_capture_admission_blocks_publication(self):
+        allowed = [True]
+        deployment = self.make_deployment(qualification=lambda _settings: allowed[0])
+        deployment.start()
+        self.register(deployment, 'alpha')
+        self.assertTrue(deployment.wait_idle('alpha'))
+        head = self.head()
+        hub = deployment.hub('alpha')
+        calls = []
+        def current():
+            calls.append(1)
+            if len(calls) == 1:
+                allowed[0] = False
+            return True
+        request = {'id': 'command-revoked', 'kind': 'library.enqueue',
+                   'request_id': 'request-revoked',
+                   'capture': support.value(title='REVOKED_MARKER', body='Revoked body.\n')}
+        prepared = hub.prepare(request, self.origins['alpha'], authorize=lambda: True)
+        result = hub.perform(prepared, current=current)
+        self.assertNotEqual(result['outcome'], 'DURABLY_QUEUED')
+        self.assertEqual(self.head(), head)
+        self.assertTrue(self.wait_for(lambda: not deployment.running, seconds=5))
+
     def test_unavailable_active_settings_during_attempt_blocks_publication(self):
         from uas.library_settings import SettingsOwner
         fixture, scope, options = self.attempt_fixture('success')

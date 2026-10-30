@@ -35,8 +35,9 @@ foreign owner or writable child is refused before any clone work), the credentia
 reference, target qualification, every Room binding, reference-mount ownership
 and real-path disjointness, and every model runner's Project/target binding. Only
 then does `Service.startup()` take the host-local lease and reconstruct the
-working clone. Every new capture also revalidates qualification, the credential
-reference and current settings; the service loop rechecks them and fails closed,
+working clone. Every new capture also revalidates qualification, the credential reference and
+current settings at the endpoint's admission and publication authority
+callbacks; the service loop rechecks them and fails closed,
 operator controls run the same guard, and each composed runner and dispatcher is
 bound to that live reader so the existing admission and publication fences refuse
 a revoked qualification or an unavailable settings store even mid-attempt. An
