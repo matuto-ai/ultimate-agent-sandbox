@@ -233,10 +233,13 @@ class DeploymentLibrary:
                     continue
                 self.failure = error.code
                 self._stopping.set()
+                # The operator path must fail closed once no loop can execute it.
+                self._service.request_stop()
                 return
             except BaseException:
                 self.failure = 'DEPLOYMENT_SERVICE_FAILED'
                 self._stopping.set()
+                self._service.request_stop()
                 return
             self._stopping.wait(0.1)
 

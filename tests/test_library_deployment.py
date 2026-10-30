@@ -158,6 +158,11 @@ class DeploymentLibraryTests(unittest.TestCase):
         rooms['beta']['project']['roots']['reference'] = str(self.base / 'missing' / 'reference')
         with self.assertRaisesRegex(library.LibraryError, 'UNSAFE_REFERENCE_ROOT'):
             self.make_deployment(rooms=rooms).start()
+        writable = self.base / 'alpha' / 'reference'
+        writable.chmod(0o777)
+        self.addCleanup(writable.chmod, 0o755)
+        with self.assertRaisesRegex(library.LibraryError, 'UNSAFE_REFERENCE_ROOT'):
+            self.make_deployment().start()
         self.assertFalse((self.state / 'library').exists())
 
     def test_second_instance_is_refused_before_clone_work(self):
