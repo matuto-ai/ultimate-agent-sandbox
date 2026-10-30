@@ -77,6 +77,9 @@ CONCEPT_DIRECTORIES = ("context", "decisions", "research")
 # Fixed crash-protection maxima. They are constants, not settings: an operator
 # cannot raise them and admission refuses any value above them.
 MAXIMA = {
+    "request_files": 512,
+    "request_bytes": 2097152,
+    "request_tokens": 524288,
     "title_chars": 512,
     "body_bytes": 262144,
     "sources": 64,
@@ -95,6 +98,9 @@ MAXIMA = {
 # Published starting values. Admission never substitutes them for a missing
 # setting; a deployment supplies every one of them explicitly.
 INITIAL_LIMITS = {
+    "request_files": 64,
+    "request_bytes": 131072,
+    "request_tokens": 32768,
     "title_chars": 200,
     "body_bytes": 16384,
     "sources": 16,
@@ -698,10 +704,21 @@ def _capture_payload(value, limits):
     for index, item in enumerate(_array(value.get("sources", []), "capture.sources",
                                         limits["sources"])):
         field = f"capture.sources[{index}]"
-        _object(item, field, ("resource",), ("title",))
+        _object(item, field, ("resource",), ("title", "range", "sha256"))
         sources.append({"resource": _text(item["resource"], field + ".resource")})
         if "title" in item:
             sources[-1]["title"] = _text(item["title"], field + ".title", limits["title_chars"])
+        if ("range" in item) != ("sha256" in item):
+            _fail("INCOMPLETE_EXCERPT", field)
+        if "range" in item:
+            span = _text(item["range"], field + ".range", 24)
+            if not re.fullmatch(r"[1-9][0-9]*-[1-9][0-9]*", span):
+                _fail("INVALID_EXCERPT_RANGE", field)
+            first, last = map(int, span.split("-"))
+            if not first <= last <= 2**31-1 or last-first+1 > 200:
+                _fail("INVALID_EXCERPT_RANGE", field)
+            _digest_value(item["sha256"], field + ".sha256")
+            sources[-1].update(range=span, sha256=item["sha256"])
     if value["type"] == "research" and not sources:
         _fail("SOURCE_REQUIRED", "capture.sources")
     hints = []

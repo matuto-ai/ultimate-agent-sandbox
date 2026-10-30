@@ -250,21 +250,25 @@ class Resolver:
                  and callable(source_allowed), 'SOURCE_AUTHORITY_REQUIRED')
         self.source, self.current_scope, self.source_allowed = source, current_scope, source_allowed
 
+    def authorize(self, scope, resource):
+        """Recheck a retained excerpt grant without rereading or returning content."""
+        _require(type(scope) is contracts.LibraryScope and scope.subject != 'operator'
+                 and scope.project_identity == self.source.project_identity, 'SOURCE_SCOPE_REFUSED')
+        try:
+            fresh = self.current_scope()
+            allowed = (type(fresh) is contracts.LibraryScope and fresh.canonical() == scope.canonical()
+                       and self.source_allowed(fresh, resource) is True)
+        except Exception:
+            raise contracts.LibraryError('SOURCE_AUTHORITY_UNAVAILABLE', 'source') from None
+        _require(allowed, 'SOURCE_AUTHORITY_REVOKED')
+
     def resolve(self, scope, settings, declaration):
         # No source bytes or source commands are accessed before both checks.
         settings = contracts.admit_settings_value(settings)
         value, first, last = _declaration(declaration)
         resource = value['resource']
         def current():
-            _require(type(scope) is contracts.LibraryScope and scope.subject != 'operator'
-                     and scope.project_identity == self.source.project_identity, 'SOURCE_SCOPE_REFUSED')
-            try:
-                fresh = self.current_scope()
-                allowed = (type(fresh) is contracts.LibraryScope and fresh.canonical() == scope.canonical()
-                           and self.source_allowed(fresh, resource) is True)
-            except Exception:
-                raise contracts.LibraryError('SOURCE_AUTHORITY_UNAVAILABLE', 'source') from None
-            _require(allowed, 'SOURCE_AUTHORITY_REVOKED')
+            self.authorize(scope, resource)
         try:
             current()
             content, immutable = self.source.read(resource, settings['limits']['document_bytes'], current)
