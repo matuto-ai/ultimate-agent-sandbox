@@ -119,7 +119,7 @@ The selected document is version 1 with these fields:
 | `rooms` | Approved Rooms and their immutable source identity. The Project binding itself stays in the closed installation configuration, so paths, repository coordinates and Room ownership cannot drift from it. |
 | `qualification` | Externally established target qualification evidence: target, branch and the `qualified` flag it establishes. False, absent or mismatched evidence fails startup at `TARGET_NOT_QUALIFIED` before any clone work. |
 | `model` | The fixed synthesis route: one qualified profile identity plus the exact adapter argv. The adapter inherits only the host environment; it never receives Library content on its command line. |
-| `operator` | Optional host-local human principal (`human_id`, `actor_id`). When present it grants the installation owner the Library human actions over the approved Projects only. |
+| `operator` | Optional host-local human principal (`human_id`, `actor_id`). Omitted, it is the installation owner, which grants the Library human actions over the approved Projects only; an explicit `null` disables the T22 endpoint. |
 
 `uas/local_library.py` builds the composition from that document
 (`open_library`), and `uas.local_cli.run_host` constructs exactly one
@@ -176,6 +176,8 @@ controlled fixtures. It covers:
 - a document naming a foreign Room, an unknown credential or malformed
   qualification evidence refused by the closed selection schema.
 
-It proves installed wiring and projection boundaries. It does not prove a VM,
+It also covers the default installation-owner operator path and an explicit
+`null` that disables only the operator endpoint while the host and Rooms keep
+running. It proves installed wiring and projection boundaries. It does not prove a VM,
 Docker or live native Room, a live model provider, actual target qualification,
 or the split-process Hub enqueue route above.

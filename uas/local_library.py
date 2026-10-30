@@ -34,6 +34,9 @@ REQUIRED = ('version', 'settings', 'credentials', 'rooms', 'qualification', 'mod
 PROFILE = ('reference', 'placement', 'provider', 'version', 'endpoint', 'region',
            'retention', 'terms')
 OPERATOR = ('human_id', 'actor_id')
+# The installation owner is the authenticated host-local principal; a document
+# may rename it or disable the path explicitly with null.
+INSTALLATION_OWNER = {'human_id': 'installation-owner', 'actor_id': 'installation-owner'}
 
 
 def fail(code):
@@ -157,7 +160,7 @@ def admit(raw, config):
             'rooms': _rooms(raw['rooms'], config),
             'qualification': _qualification(raw['qualification']),
             'model': _model(raw['model'], settings),
-            'operator': _operator(raw.get('operator'))}
+            'operator': _operator(raw['operator'] if 'operator' in raw else INSTALLATION_OWNER)}
 
 
 def _environment(names):

@@ -104,7 +104,6 @@ class LocalLibraryWiringTests(unittest.TestCase):
                                   'region': 'local', 'retention': 'zero',
                                   'terms': 'terms-v1'},
                       'command': ['/bin/true']},
-            'operator': {'human_id': 'installation-owner', 'actor_id': 'installation-owner'},
         }
         value.update(overrides)
         return value
@@ -253,6 +252,23 @@ class LocalLibraryWiringTests(unittest.TestCase):
         self.assertNotIn('.git', observed['names'])
         self.assertNotIn(observed['private'], observed['text'])
         self.assertNotIn('example/beta', observed['text'])
+
+    def test_explicit_null_operator_disables_the_host_local_path_only(self):
+        observed = {}
+
+        def driver(controller):
+            observed['socket'] = (Path(self.install.root) / 'library' / 'operator'
+                                 / 'library-operator.sock').exists()
+            observed['running'] = self.deployment.running
+            controller.handle(self.packet('start', 'alpha'))
+            observed['room'] = controller.handle(
+                self.packet('status', 'alpha'))['infrastructure']['phase']
+
+        self.selected(self.library_document(operator=None))
+        self.host(driver)
+        self.assertFalse(observed['socket'])
+        self.assertTrue(observed['running'])
+        self.assertEqual(observed['room'], 'running')
 
     def test_host_refuses_to_serve_without_the_selected_credential_reference(self):
         self.selected()
