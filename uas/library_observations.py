@@ -87,12 +87,14 @@ class Owner:
             captures={}; parking={}; published=set(); outcomes=merged=humans=corrections=0; lag=0
             acknowledgements={r['operation_id'] for r in history if r['kind']=='drain-report-ack' and r['receipt'] is not None}
             for record in history:
+                if record["state"]=="DETAIL_EXPIRED": continue
                 transition=record.get('manifest',{}).get('transition')
                 if record['kind']=='scheduler-state' and transition:
                     ident='report-'+library._digest([scope.project_identity,transition['drain_id'],transition['sequence']])
                     lag+=ident not in acknowledgements
             for category in ('capture','source','model','validation','transport','audit','recovery'):row[category+'_failures']=0
             for record in history:
+                if record["state"]=="DETAIL_EXPIRED": continue
                 if record['kind']=='enqueue' and record['receipt'] and record['receipt']['outcome']=='DURABLY_QUEUED':
                     when=moment(record['provenance']['at'])
                     captures[record['queue_id']]=min(when,captures.get(record['queue_id'],when))

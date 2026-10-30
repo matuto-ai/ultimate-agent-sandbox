@@ -104,6 +104,15 @@ class Enqueuer:
                         raise library.LibraryError('ID_CONFLICT', 'request_id')
                     # First provenance is authoritative, never re-derived from a retry.
                     operation = replace(operation, provenance=dict(submission['origin']))
+                if submission is not None:
+                    expired = next((r for r in submission['attempts'] if r['state']=='DETAIL_EXPIRED'),None)
+                    if expired is not None:
+                        # The Command identity is independent of request dedupe.
+                        # An expired request never excuses reuse of another Command.
+                        if records.record(operation.operation_id, project_identity=operation.scope.project_identity) is not None:
+                            records.begin(operation)
+                        current()
+                        return self._from_receipt(expired['receipt'],operation)
                 prior = records.begin(operation)['record']
                 begun = True
                 if prior['receipt'] is not None:
@@ -224,8 +233,8 @@ class Enqueuer:
 
     def _from_receipt(self, receipt, operation):
         publication = receipt['publication']
-        projection = self._projection(operation) if publication else {'commit_sha': None, 'visible': False}
-        return CaptureResult(receipt['outcome'], receipt['request_id'], receipt['reason'],
+        projection = self._projection(operation) if publication and not receipt.get('detail_expired') else {'commit_sha': None, 'visible': False}
+        return CaptureResult(receipt['outcome'], receipt['request_id'], 'DETAIL_EXPIRED' if receipt.get('detail_expired') else receipt['reason'],
                              receipt['retryable'], receipt['queue_id'],
                              'pending/' + operation.queue_id + '.md' if publication else None,
                              publication['commit_sha'] if publication else None,
