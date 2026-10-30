@@ -26,7 +26,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata, synthesis_manifest, batch_manifest, _digest as value_digest
+from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata, synthesis_manifest, batch_manifest, operation_manifest, _digest as value_digest
 
 
 RECORD_VERSION = 1
@@ -186,9 +186,9 @@ def _identity(operation):
     _origin(operation.scope)  # validate the authenticated origin fields
     _safe(identity, "identity")
     if operation.manifest is not None:
-        if operation.kind not in ("synthesis-attempt", "synthesis-batch"):
+        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state"):
             raise LibraryError("INVALID_RECORD", "manifest")
-        identity["manifest"] = (batch_manifest(operation.manifest) if operation.kind == "synthesis-batch" else synthesis_manifest(operation.manifest))
+        identity["manifest"] = operation_manifest(operation.kind, operation.manifest)
         expected = identity["manifest"] if operation.kind == "synthesis-batch" else {"manifest_sha256": value_digest(identity["manifest"])}
         if operation.payload != expected: raise LibraryError("INVALID_RECORD", "manifest")
     return identity
@@ -426,6 +426,29 @@ class LibraryRecords:
 
         return self._read(read)
 
+    def latest_schedule(self, project_identity):
+        """Latest persisted transition, including a durable intent with lost receipt."""
+        _token(project_identity, 'project_identity')
+        def read(db):
+            rows = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? "
+                "AND operation_id LIKE ? ORDER BY rowid DESC LIMIT 1", (project_identity, 'scheduler-' + value_digest(project_identity) + '-%')).fetchall()
+            return self._attempt(db, rows[0]['operation_id']) if rows else None
+        return self._read(read)
+
+    def iter_drain(self, drain_id, *, project_identity):
+        """Bounded pages without an arbitrary lifetime retry count ceiling."""
+        _token(drain_id, 'drain_id'); _token(project_identity, 'project_identity')
+        cursor = 0
+        while True:
+            def read(db):
+                rows = db.execute("SELECT rowid,operation_id FROM attempts WHERE drain_id=? "
+                    "AND project_identity=? AND rowid>? ORDER BY rowid LIMIT 64",
+                    (drain_id, project_identity, cursor)).fetchall()
+                return [(row['rowid'], self._attempt(db, row['operation_id'])) for row in rows]
+            rows = self._read(read)
+            if not rows: return
+            for cursor, record in rows: yield record
+
     def pending(self, *, project_identity=None):
         """Bounded restart inventory: records whose terminal was never captured."""
         if project_identity is not None:
@@ -549,8 +572,8 @@ def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
     result = {key: value[key] for key in _ATTEMPT_KEYS}
     if "manifest" in value:
-        if value["kind"] not in ("synthesis-attempt", "synthesis-batch"): raise LibraryError("INVALID_RECORD")
-        result["manifest"] = (batch_manifest(value["manifest"]) if value["kind"] == "synthesis-batch" else synthesis_manifest(value["manifest"]))
+        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state"): raise LibraryError("INVALID_RECORD")
+        result["manifest"] = operation_manifest(value["kind"], value["manifest"])
         expected = result["manifest"] if value["kind"] == "synthesis-batch" else {"manifest_sha256": value_digest(result["manifest"])}
         if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")
     return result

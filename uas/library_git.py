@@ -385,6 +385,26 @@ class LibraryGit:
                 raise LibraryError('INCOMPATIBLE_HEAD', 'commit')
             return self._project_tree(scope, limits, current, commit)
 
+    def queue_order(self, scope, settings, head, queues, *, current):
+        """Canonical first-parent publication order, not author timestamps or filenames."""
+        prefix = project_prefix(scope)
+        library._commit(head, 'head')
+        for queue in queues: library._digest_value(queue, 'queue_id')
+        with self._locked():
+            current()
+            raw = self._bounded_read(['log', '--first-parent', '--reverse', '--format=commit:%H',
+                '--name-only', '--diff-filter=A', head, '--', ':(glob)projects/**/pending/*.md'],
+                8 * 1024 * 1024, current)
+        order, rank = {}, -1
+        for line in raw.decode('utf-8').splitlines():
+            if line.startswith('commit:'):
+                library._commit(line[7:], 'history'); rank += 1
+            elif line.startswith('projects/') and '/pending/' in line and line.endswith('.md'):
+                queue = line.rsplit('/', 1)[-1][:-3]
+                if queue in queues: order.setdefault(queue, rank)
+        if set(order) != set(queues): raise LibraryError('QUEUE_HISTORY_INCOMPLETE')
+        return tuple(sorted(queues, key=lambda queue: (order[queue], queue)))
+
     def projection_snapshot(self, scope, settings, *, current):
         """Read canonical immutable objects without taking the publisher lock.
 
