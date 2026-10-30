@@ -391,6 +391,42 @@ class LocalLibraryWiringTests(unittest.TestCase):
         self.assertTrue(observed['running'])
         self.assertEqual(observed['room'], 'running')
 
+    def test_installation_without_a_library_selection_refuses_to_serve(self):
+        # An admitted selection with no Library reference at all.
+        value = {'version': 1, 'project': self.reference(self.config_path),
+                 'native': self.reference(self.native), 'manager': None}
+        self.install.setup(json.dumps(value).encode())
+        served = []
+        with self.assertRaises(LocalInstallationError) as raised:
+            self.host(served.append)
+        self.assertEqual(raised.exception.code, 'LIBRARY_NOT_CONFIGURED')
+        self.assertEqual(served, [])
+        self.services.close.assert_called_once()
+
+    def test_report_ingress_never_creates_the_hub_canonical_store(self):
+        self.selected()
+        observed = {}
+
+        def driver(controller):
+            self.register('alpha')
+            controller.handle(self.packet('start', 'alpha'))
+            owner, backend, state = controller.native.resources('alpha')
+            path = backend.layout(state)['hub'] / 'room.db'
+            observed['missing_before'] = not path.exists()
+            with self.assertRaises(LocalInstallationError) as raised:
+                controller.ledger('alpha')
+            observed['code'] = raised.exception.code
+            observed['missing_after'] = not path.exists()
+            # The ingress path the composed service uses leaves it replayable.
+            observed['delivered'] = self.deployment._transport(
+                {'room_id': 'alpha', 'project_identity': 'x'})
+
+        self.host(driver)
+        self.assertTrue(observed['missing_before'])
+        self.assertEqual(observed['code'], 'LIBRARY_LEDGER_UNAVAILABLE')
+        self.assertTrue(observed['missing_after'])
+        self.assertFalse(observed['delivered'])
+
     def test_host_refuses_to_serve_without_the_selected_credential_reference(self):
         self.selected()
         os.environ.pop(ENVIRONMENT)

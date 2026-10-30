@@ -420,7 +420,12 @@ class DeploymentLibrary:
         item = self._rooms.get(room)
         if item is None:
             return False
-        ledger = self.ledger_for(room)
+        try:
+            ledger = self.ledger_for(room)
+        except Exception:
+            # A missing or unusable canonical store keeps the report replayable;
+            # it never becomes a new store under the host identity.
+            return False
         if type(ledger) is not RoomLedger or ledger.room_id != room:
             return False
         try:

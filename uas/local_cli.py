@@ -48,9 +48,8 @@ def run_host(installation):
             # One Library singleton for the whole installation lifetime, started
             # before any Room binds; absent, unsafe or unqualified configuration
             # fails the host here instead of running without it.
-            if library is not None:
-                library.start()
-                started = True
+            library.start()
+            started = True
             for sig in (signal.SIGINT, signal.SIGTERM):
                 previous[sig] = signal.signal(sig, stop)
             serve(installation, controller, stopped=stopped.is_set, owner_lock_fd=lock_fd)

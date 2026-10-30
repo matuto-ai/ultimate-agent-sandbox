@@ -110,11 +110,12 @@ repository requirements installed.
 ## Installed Deployment wiring (#252)
 
 The installation selects the composition with one digest-pinned Library
-deployment document. `installation.json` gains an optional `library` reference
-beside `native`, `manager` and `runtime`; `uas.local_installation.selection`
+deployment document. `installation.json` gains a `library` reference beside
+`native`, `manager` and `runtime`; `uas.local_installation.selection`
 admits it through the existing closed schema and `Installation.inspect` validates
-the pinned bytes before any host effect. An installation that selects no Library
-keeps running exactly as before.
+the pinned bytes before any host effect. The installed host has no Library-free
+mode: a selection that omits the reference is refused at `LIBRARY_NOT_CONFIGURED`
+before the host serves.
 
 The selected document is version 1 with these fields:
 
@@ -131,7 +132,8 @@ The selected document is version 1 with these fields:
 (`open_library`), and `uas.local_cli.run_host` constructs exactly one
 `DeploymentLibrary` for the installation lifetime:
 
-- `library.start()` runs before any Room binds. Absent, unsafe, unqualified or
+- `open_library` refuses an installation that selects no Library, and
+  `library.start()` runs before any Room binds. Absent, unsafe, unqualified or
   credential-less configuration raises there, so the host refuses to serve
   instead of running without its Library.
 - The composition publishes every approved Room's read-only projection when the
@@ -182,7 +184,8 @@ controlled fixtures. It covers:
 - Room Stop leaving canonical head unchanged, the other Room's projection bound
   and the singleton running, plus an authenticated operator observation for the
   stopped Room;
-- a missing referenced credential variable refusing to serve at all;
+- an installation selecting no Library refused before the host serves, and a
+  missing referenced credential variable refusing to serve at all;
 - false qualification evidence stopping the host before any clone exists;
 - a Room restart after Stop republishing the same canonical generation;
 - a failed native Stop releasing the projection while keeping the error and the

@@ -13,6 +13,7 @@ import socket
 import stat
 import struct
 
+from .ledger import LedgerError
 from .local_installation import Installation, LocalInstallationError, document, canonical, require
 
 MAX_REQUEST = 8192
@@ -65,7 +66,12 @@ class LocalController:
             owner, backend, state = self.native.resources(room)
             path = backend.layout(state)['hub'] / 'room.db'
             self._ledgers[room] = path
-        return RoomLedger(path, room)
+        try:
+            # Reports must never create or initialize the Hub's canonical store
+            # under the host identity; a missing one leaves them replayable.
+            return RoomLedger.open_reader(path, room)
+        except LedgerError:
+            raise LocalInstallationError('LIBRARY_LEDGER_UNAVAILABLE') from None
 
     def _handle(self, raw):
         require(type(raw) is bytes and 0 < len(raw) <= MAX_REQUEST, 'REQUEST_SIZE')

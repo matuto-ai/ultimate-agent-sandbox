@@ -239,14 +239,15 @@ def composition(admitted, *, deployment_id, state_root, ledger_for,
 
 
 def open_library(installation, *, ledger_for, **options):
-    """The selected Library deployment, or None when the installation selects none.
+    """The required Library deployment selected by the installation.
 
     ``state_root`` is the private installation root; the T40 owner keeps its
     service state, clone and operator endpoint in its own ``library`` child.
     """
     _value, config, selected = installation.open()
     admitted = selected['library']
-    if admitted is None:
-        return None
+    # The installed host has no Library-free mode, so a missing selection is a
+    # configuration failure rather than a quiet downgrade.
+    require(admitted is not None, 'LIBRARY_NOT_CONFIGURED')
     return composition(admitted, deployment_id=config['deployment']['id'],
                        state_root=installation.root, ledger_for=ledger_for, **options)
