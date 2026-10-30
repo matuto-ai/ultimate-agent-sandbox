@@ -46,6 +46,8 @@ class CIPartitionTests(unittest.TestCase):
             'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
         })
         self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_attempts', 'test_library_import', 'test_library_relocation'})
+        self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler'})
+        self.assertEqual('scheduler', ci.partition_for('test_library_scheduler.Case.test_one'))
         self.assertEqual('synthesis', ci.partition_for('test_library_attempts.Case.test_one'))
         self.assertFalse(ci.SLOW_MODULES & ci.INTEGRATION_MODULES)
         self.assertFalse(ci.ADDITIONAL_MODULES & (ci.SLOW_MODULES | ci.INTEGRATION_MODULES))
@@ -63,13 +65,13 @@ class CIPartitionTests(unittest.TestCase):
         slow, future = case('test_peer.Case.test_one'), case('test_future.Case.test_one')
         cases, groups = ci.partition_suite(unittest.TestSuite([unittest.TestSuite([slow]), future]))
         self.assertEqual([slow, future], cases)
-        self.assertEqual({'slow': [slow], 'integration': [], 'additional': [], 'synthesis': [],
+        self.assertEqual({'slow': [slow], 'integration': [], 'additional': [], 'scheduler': [], 'synthesis': [],
                           'remainder': [future]}, groups)
         slow.run.assert_not_called(); future.run.assert_not_called()
 
     def test_rebalanced_modules_each_run_once_without_changing_total_inventory(self):
         identifiers = [module + '.Case.test_one' for module in sorted(
-            ci.SLOW_MODULES | ci.INTEGRATION_MODULES | ci.ADDITIONAL_MODULES | ci.SYNTHESIS_MODULES)]
+            ci.SLOW_MODULES | ci.INTEGRATION_MODULES | ci.ADDITIONAL_MODULES | ci.SYNTHESIS_MODULES | ci.SCHEDULER_MODULES)]
         identifiers += ['test_future.Case.test_one', 'test_ci_partitions.Case.test_one']
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
@@ -78,6 +80,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['integration']), 21)
         self.assertEqual(len(groups['additional']), 23)
         self.assertEqual(len(groups['synthesis']), 3)
+        self.assertEqual(len(groups['scheduler']), 1)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
@@ -98,11 +101,11 @@ class CIPartitionTests(unittest.TestCase):
                    ({'slow': [slow], 'remainder': [rest], 'extra': []})]
         for groups in invalid:
             with self.subTest(groups=groups), self.assertRaises(ValueError):
-                ci.verify_partition_ids([slow, rest], dict(integration=[], additional=[], synthesis=[], **groups))
+                ci.verify_partition_ids([slow, rest], dict(integration=[], additional=[], synthesis=[], scheduler=[], **groups))
         integration = 'test_context.Case.test_one'
         additional = 'test_local_native_terminal.Case.test_one'
         valid = {'slow': [slow], 'integration': [integration],
-                 'additional': [additional], 'synthesis': [], 'remainder': [rest]}
+                 'additional': [additional], 'scheduler': [], 'synthesis': [], 'remainder': [rest]}
         ci.verify_partition_ids([slow, integration, additional, rest], valid)
         for broken in ({'slow': [slow], 'remainder': [rest]},
                        dict(valid, integration=[]),
@@ -120,9 +123,10 @@ class CIPartitionTests(unittest.TestCase):
             slow, rest = case('test_peer.Case.test_one'), case('test_future.Case.test_one')
             integration = case('test_context.Case.test_one')
             additional = case('test_local_native_terminal.Case.test_one')
+            scheduler = case('test_library_scheduler.Case.test_one')
             synthesis = case('test_library_attempts.Case.test_one')
             loader = Mock(errors=[], discover=Mock(return_value=unittest.TestSuite(
-                [slow, integration, additional, synthesis, rest])))
+                [slow, integration, additional, synthesis, scheduler, rest])))
             runner = Mock()
             runner.run.return_value.wasSuccessful.return_value = True
             with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
@@ -131,10 +135,10 @@ class CIPartitionTests(unittest.TestCase):
                 self.assertEqual(0, ci.main([partition]))
             loader.discover.assert_called_once_with(str(Path(__file__).resolve().parent), pattern='test*.py')
             self.assertEqual(list(runner.run.call_args.args[0]),
-                             [slow, integration, additional, synthesis, rest] if partition == 'all' else {
+                             [slow, integration, additional, synthesis, scheduler, rest] if partition == 'all' else {
                                  'slow': [slow], 'integration': [integration],
-                                 'additional': [additional], 'synthesis': [synthesis], 'remainder': [rest]}[partition])
-            for item in (slow, integration, additional, synthesis, rest):
+                                 'additional': [additional], 'synthesis': [synthesis], 'scheduler': [scheduler], 'remainder': [rest]}[partition])
+            for item in (slow, integration, additional, synthesis, scheduler, rest):
                 item.run.assert_not_called()
 
     def test_discovery_and_selected_test_failures_are_required_failures(self):
@@ -147,7 +151,7 @@ class CIPartitionTests(unittest.TestCase):
         loader.errors = []
         loader.discover.return_value = unittest.TestSuite([case('test_peer.Case.test_one'),
                                                           case('test_future.Case.test_one'), case('test_context.Case.test_one'),
-                                                          case('test_local_native_terminal.Case.test_one'), case('test_library_attempts.Case.test_one')])
+                                                          case('test_local_native_terminal.Case.test_one'), case('test_library_attempts.Case.test_one'), case('test_library_scheduler.Case.test_one')])
         runner = Mock(); runner.run.return_value.wasSuccessful.return_value = False
         with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
                 patch.object(ci.unittest, 'TextTestRunner', return_value=runner), \

@@ -616,7 +616,7 @@ class Operation:
                 "at": self.at, "payload_digest": self.digest(),
                 "scope": scope, "provenance": self.provenance}
         if self.manifest is not None:
-            result["manifest"] = (batch_manifest(self.manifest) if self.kind == "synthesis-batch" else synthesis_manifest(self.manifest))
+            result["manifest"] = operation_manifest(self.kind, self.manifest)
         return result
 
     def audit_metadata(self):
@@ -1201,4 +1201,30 @@ def batch_manifest(value):
     _object(value, 'manifest', ('selected',))
     for queue in _array(value['selected'], 'selected', 64): _digest_value(queue, 'selected')
     if not value['selected'] or len(set(value['selected'])) != len(value['selected']): _fail('INVALID_BATCH')
+    return json.loads(_canonical(value))
+
+
+def operation_manifest(kind, value):
+    if kind == 'synthesis-batch': return batch_manifest(value)
+    if kind == 'scheduler-state': return scheduler_manifest(value)
+    if kind == 'synthesis-attempt': return synthesis_manifest(value)
+    _fail('INVALID_RECORD', 'manifest')
+
+
+def scheduler_manifest(value):
+    """Bounded durable scheduling metadata, never draft or model content."""
+    _object(value, 'schedule', ('sequence', 'served', 'state', 'due', 'drain_id',
+        'selected', 'attempt', 'failures', 'model_failures', 'wake', 'reason'))
+    for key in ('sequence', 'served', 'attempt', 'failures', 'model_failures'):
+        if type(value[key]) is not int or not 0 <= value[key] <= 2**53 - 1: _fail('INVALID_SCHEDULE', key)
+    if value['state'] not in ('IDLE','READY','ACTIVE','BACKOFF','BLOCKED'): _fail('INVALID_SCHEDULE')
+    if type(value['wake']) is not bool: _fail('INVALID_SCHEDULE')
+    if value['due'] is not None: _timestamp(value['due'], 'due')
+    if value['drain_id'] is not None: _token(value['drain_id'], 'drain_id')
+    if value['reason'] is not None: _token(value['reason'], 'reason')
+    for queue in _array(value['selected'], 'selected', 64): _digest_value(queue, 'selected')
+    if len(value['selected']) != len(set(value['selected'])): _fail('INVALID_SCHEDULE')
+    if bool(value['selected']) != bool(value['drain_id']): _fail('INVALID_SCHEDULE')
+    _reject_content(value)
+    if _size(value) > 8192: _fail('INVALID_SCHEDULE')
     return json.loads(_canonical(value))

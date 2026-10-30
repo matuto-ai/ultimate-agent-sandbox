@@ -56,6 +56,12 @@ class Attempts:
             {'manifest_sha256': library._digest(manifest)}, at, drain_id=drain_id)
         return replace(op, manifest=library.synthesis_manifest(manifest))
 
+    def _prior_records(self, drain_id, project_identity):
+        with self.records() as records:
+            for record in records.iter_drain(drain_id, project_identity=project_identity):
+                library_deadline.remaining(120)
+                if record['kind'] == 'synthesis-attempt': yield record
+
     def _recover(self, op, settings, current):
         publication = self.publisher.publication_for(op, current=current)
         if publication is None: return None
@@ -159,11 +165,9 @@ class Attempts:
             records.finish(batch_op, library.receipt(batch_op, 'ACKNOWLEDGED', at=batch_at,
                 acknowledgement=library._digest(list(selected)), reason='BATCH_FIXED'))
         identity = 'attempt-' + library._digest([scope.project_identity, drain_id, attempt])
-        with self.records() as records:
-            prior_attempts = [r for r in records.drain(drain_id, project_identity=scope.project_identity)
-                              if r['kind'] == 'synthesis-attempt']
         prior = None
-        for record in prior_attempts:
+        for record in self._prior_records(drain_id, scope.project_identity):
+            remaining()
             manifest = record['manifest']
             if tuple(manifest['selected']) != selected: fail('DRAIN_BATCH_CONFLICT')
             if manifest['attempt'] == attempt:
@@ -172,8 +176,18 @@ class Attempts:
                     fail('ID_CONFLICT')
             original_settings = {**settings, 'settings_id': record['settings_id']}
             op = self.operation(scope, original_settings, drain_id, manifest['attempt'], record['at'], manifest)
-            recovered = self._recover(op, settings, authority)
+            settled_absence = (record['receipt'] is not None and
+                record['receipt']['reason'] == 'RECONCILED_NOT_PUBLISHED')
+            if settled_absence and manifest['attempt'] == attempt: fail('NEW_ATTEMPT_REQUIRED')
+            recovered = None if settled_absence else self._recover(op, settings, authority)
             if recovered is not None: return recovered
+            if manifest['attempt'] < attempt and record['receipt'] is None:
+                # T06 has just reconciled this operation against canonical history.
+                # Retain the immutable attempt, but do not count settled absence as
+                # unresolved forever or impose an accidental 256-retry ceiling.
+                with self.records() as records:
+                    records.finish(op, library.receipt(op, 'REFUSED', at=at,
+                        reason='RECONCILED_NOT_PUBLISHED'))
             if manifest['attempt'] == attempt: prior = record
             elif manifest['attempt'] > attempt: fail('ATTEMPT_NUMBER_STALE')
         if prior is not None:
@@ -252,13 +266,17 @@ class Attempts:
         dispatcher.audit = audit
         result = dispatcher.dispatch(request, max_seconds=remaining())
         proposal = json.loads(result.proposal, object_pairs_hook=library._unique_pairs)
-        if any(item.get('op') in ('update','deprecate') and item.get('target') not in accepted
-               for item in proposal['operations']): fail('UNSELECTED_CONCEPT_TARGET')
+        if any(type(item) is not dict or (item.get('op') in ('update','deprecate')
+               and item.get('target') not in accepted) for item in proposal['operations']):
+            fail('MODEL_OUTPUT_INVALID')
         # Compatible concurrent publication is reconciliation, not another call.
         while True:
             latest, current_tree = fenced()
-            compiled = compiler.compile_proposal(scope, settings, current=current_tree, selected=selected,
-                input_sha=head, drain_id=drain_id, attempt=attempt, at=at, proposal=proposal)
+            try:
+                compiled = compiler.compile_proposal(scope, settings, current=current_tree, selected=selected,
+                    input_sha=head, drain_id=drain_id, attempt=attempt, at=at, proposal=proposal)
+            except library.LibraryError as error:
+                raise library.LibraryError('MODEL_OUTPUT_INVALID', 'proposal') from error
             outcomes = [dict(value) for value in compiled.outcomes]
             for value in outcomes:
                 if 'targets' in value: value['targets'] = [compiled.paths[ref] for ref in value['targets']]
