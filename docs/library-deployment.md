@@ -100,3 +100,82 @@ account, backup or deployment evidence is claimed here.
 
 Run `PYTHONPATH=.:tests python3 -m unittest test_library_deployment` with the
 repository requirements installed.
+
+## Installed Deployment wiring (#252)
+
+The installation selects the composition with one digest-pinned Library
+deployment document. `installation.json` gains an optional `library` reference
+beside `native`, `manager` and `runtime`; `uas.local_installation.selection`
+admits it through the existing closed schema and `Installation.inspect` validates
+the pinned bytes before any host effect. An installation that selects no Library
+keeps running exactly as before.
+
+The selected document is version 1 with these fields:
+
+| Field | Content |
+| --- | --- |
+| `settings` | The complete Library settings document, admitted by the existing validator. Hosted egress needs an approval this document cannot grant. |
+| `credentials` | Maps each referenced credential to the exact host environment variable names that carry its Git transport environment. Each reference must be a configured `git` credential; a missing variable fails the host closed. |
+| `rooms` | Approved Rooms and their immutable source identity. The Project binding itself stays in the closed installation configuration, so paths, repository coordinates and Room ownership cannot drift from it. |
+| `qualification` | Externally established target qualification evidence: target, branch and the `qualified` flag it establishes. False, absent or mismatched evidence fails startup at `TARGET_NOT_QUALIFIED` before any clone work. |
+| `model` | The fixed synthesis route: one qualified profile identity plus the exact adapter argv. The adapter inherits only the host environment; it never receives Library content on its command line. |
+| `operator` | Optional host-local human principal (`human_id`, `actor_id`). When present it grants the installation owner the Library human actions over the approved Projects only. |
+
+`uas/local_library.py` builds the composition from that document
+(`open_library`), and `uas.local_cli.run_host` constructs exactly one
+`DeploymentLibrary` for the installation lifetime:
+
+- `library.start()` runs before any Room binds. Absent, unsafe, unqualified or
+  credential-less configuration raises there, so the host refuses to serve
+  instead of running without its Library.
+- Room Start publishes that Room's read-only projection through
+  `DeploymentLibrary.start_room` before the Room's container starts, and unbinds
+  it if the native start fails. Room Stop calls `stop_room` after the native
+  stop, which releases only that projection; canonical content and the singleton
+  keep running.
+- The T22 operator endpoint in `<installation root>/library/operator` serves the
+  authenticated installation owner with no Hub and no bound Room, including
+  after a Room stopped.
+- Host shutdown stops the remaining Rooms, then the Library singleton, then the
+  Hub service owner.
+
+The supervisor mints `scope_for` from an installation-authority origin over the
+exact approved binding. That origin is used only inside the host service for
+projection and scheduling authority; it never leaves the host, and a Participant
+capture still requires the Room Hub's authenticated Participant origin.
+
+### Not wired by this slice
+
+The Participant `library.enqueue` route across the Room Hub process boundary is
+not established here. The production Room Hub is the fixed-uid
+`uas.workstation_service` process with its own hardened bootstrap and
+`/uas/hub/room.db` ledger, and `AdmittedPeerDispatcher.attach_library` currently
+requires the Library owner to share that in-process ledger. Connecting the
+host's `EnqueueEndpoint` to it needs a new authenticated duplex channel carried
+through the Hub startup document, with its own kernel peer verification, request
+framing and bounded failure behaviour; that channel does not exist yet, so no
+candidate claims it. `DeploymentLibrary._transport` report ingress is bound to
+the running Room's ledger through `LocalController.ledger`, and a Room whose
+ledger is unavailable stays replayable rather than losing its reports.
+
+## Proof for the installed wiring
+
+`tests/test_local_library_wiring.py` drives the real `run_host`, installation
+selection, document admission, Room controller and T40 composition over a real
+disposable canonical Git target, two configured Rooms and their real reference
+mounts, with the native Room backend, Hub service owner and Manager owner as
+controlled fixtures. It covers:
+
+- host start and stop with two Rooms, each publishing only its own `library/`
+  tree and `library.snapshot.json`;
+- Room Stop leaving canonical head unchanged, the other Room's projection bound
+  and the singleton running, plus an authenticated operator observation for the
+  stopped Room;
+- a missing referenced credential variable refusing to serve at all;
+- false qualification evidence stopping the host before any clone exists;
+- a document naming a foreign Room, an unknown credential or malformed
+  qualification evidence refused by the closed selection schema.
+
+It proves installed wiring and projection boundaries. It does not prove a VM,
+Docker or live native Room, a live model provider, actual target qualification,
+or the split-process Hub enqueue route above.

@@ -20,14 +20,20 @@ MAX_RESPONSE = 1024 * 1024
 
 
 class LocalController:
-    def __init__(self, installation, native_factory, *, services, host_lock_fd=None, manager=None):
+    def __init__(self, installation, native_factory, *, services, host_lock_fd=None, manager=None,
+                 library=None):
         require(type(installation) is Installation, 'INSTALLATION_OWNER_REQUIRED')
+        if library is not None:
+            from .library_deployment import DeploymentLibrary
+            require(type(library) is DeploymentLibrary, 'LOCAL_LIBRARY_DEPLOYMENT_REQUIRED')
         self.installation = installation
         self.value, self.config, selected = installation.open()
         self.rooms = {r['id'] for r in self.config['rooms']}
         self.services = services
         self.host_lock_fd = host_lock_fd
         self.manager = manager
+        self.library = library
+        self._ledgers = {}
         self.native = None
         if selected['native'] is not None:
             self.native = native_factory(self.config, selected['native'],
@@ -49,6 +55,16 @@ class LocalController:
                 return self._handle(raw)
         return self._handle(raw)
 
+    def ledger(self, room):
+        """The running Room's canonical ledger; no guessed instance or path."""
+        from .ledger import RoomLedger
+        path = self._ledgers.get(room)
+        if path is None:
+            owner, backend, state = self.native.resources(room)
+            path = backend.layout(state)['hub'] / 'room.db'
+            self._ledgers[room] = path
+        return RoomLedger(path, room)
+
     def _handle(self, raw):
         require(type(raw) is bytes and 0 < len(raw) <= MAX_REQUEST, 'REQUEST_SIZE')
         request = document(raw)
@@ -65,14 +81,30 @@ class LocalController:
         if action == 'start':
             if self.host_lock_fd is not None:
                 self.native.prepare_start(room, owner_lock_fd=self.host_lock_fd)
-            result = self.native.start(room)
+            # The Project projection is published before the Room runs, so a
+            # refused bind starts no container and a failed start unbinds it.
+            if self.library is not None and not self.library.bound(room):
+                self.library.start_room(room)
+            try:
+                result = self.native.start(room)
+            except BaseException:
+                if self.library is not None:
+                    self.library.stop_room(room)
+                raise
             owner, backend, state = self.native.resources(room)
+            self._ledgers.pop(room, None)  # a restarted Room owns a new ledger path
             service = self.services.ensure(room, owner, backend, state)
             manager = ({'status':'owned-by-runtime-child'} if service.get('manager_owner') in {'runtime','unknown'} else
                        self.manager.ensure(room, owner, backend, state) if self.manager else {'status':'not-configured'})
             return {**result, 'services': service, 'manager':manager}
         if action == 'stop':
-            return self.native.stop(room)
+            result = self.native.stop(room)
+            # Room Stop releases only this projection; canonical data and the
+            # Library singleton keep running.
+            if self.library is not None:
+                self.library.stop_room(room)
+            self._ledgers.pop(room, None)
+            return result
         return {**self.native.status(room), 'services': self.services.status(room),
                 'manager':self.manager.status() if self.manager else {'status':'not-configured'}}
 

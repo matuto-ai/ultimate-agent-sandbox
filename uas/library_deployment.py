@@ -371,6 +371,10 @@ class DeploymentLibrary:
             fail('ROOM_NOT_BOUND')
         return bound.projection.wait_idle(timeout)
 
+    def bound(self, room):
+        """Whether this Room's projection is currently published by this lease."""
+        return room in self._bound
+
     def read(self, room):
         """One coherent pinned public generation for a bound Room."""
         bound = self._bound.get(room)

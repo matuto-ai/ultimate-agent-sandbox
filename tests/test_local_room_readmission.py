@@ -135,6 +135,6 @@ class BootstrapTests(unittest.TestCase):
         installation=Mock();installation.bootstrap.return_value=({},config,{'native':native})
         services=Mock();services.rooms=();services.close.return_value=True
         controller=Mock();controller.native=None
-        with patch.object(local_cli,'host_lock',return_value=nullcontext(12)),patch.object(prepare,'readmit_document',side_effect=lambda *a,**k:events.append('readmit')) as readmit,patch('uas.local_services.LocalServices',side_effect=lambda *a,**k:events.append('helpers') or services),patch('uas.local_manager_owner.ManagerOwner'),patch.object(local_cli,'LocalController',return_value=controller),patch.object(local_cli,'serve'),patch.object(local_cli.signal,'signal'):
+        with patch.object(local_cli,'host_lock',return_value=nullcontext(12)),patch.object(prepare,'readmit_document',side_effect=lambda *a,**k:events.append('readmit')) as readmit,patch('uas.local_services.LocalServices',side_effect=lambda *a,**k:events.append('helpers') or services),patch('uas.local_manager_owner.ManagerOwner'),patch('uas.local_library.open_library',return_value=None),patch.object(local_cli,'LocalController',return_value=controller),patch.object(local_cli,'serve'),patch.object(local_cli.signal,'signal'):
             local_cli.run_host(installation)
         self.assertEqual(events,['readmit','helpers']);readmit.assert_called_once_with(config,native,runtime_plan_for=installation.runtime_plan_for)

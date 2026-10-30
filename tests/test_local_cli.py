@@ -36,6 +36,7 @@ class LocalCLITests(unittest.TestCase):
             'observed':{'container':{'running':True}}}}
         services=Mock();services.rooms=('alpha',);services.close.return_value=True
         with patch('uas.local_cli.host_lock',return_value=contextlib.nullcontext(12)), \
+             patch('uas.local_library.open_library',return_value=None), \
              patch('uas.local_services.LocalServices',return_value=services), \
              patch('uas.local_manager_owner.ManagerOwner'), \
              patch('uas.local_cli.LocalController',return_value=controller), \
