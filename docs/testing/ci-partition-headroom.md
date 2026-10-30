@@ -45,6 +45,14 @@ composed, with matching explicit partition expectation and full ID inventory.
 That changes the lifecycle estimate to36.7 seconds. This correction does not
 pretend an absent future module has executed.
 
+T26 adds four resume cases and one restart-recovery case to the disposition family
+plus one native socket case. Local suite deltas are +22.8, +9.3 and +8.4 seconds
+on `test_library_disposition`, `test_library_disposition_recovery` and
+`test_library_disposition_native`, raising the disposition lane to roughly 42
+estimated hosted seconds before setup. That stays inside the one-minute job with
+about 18 seconds of margin; the next addition to this lane needs a measured
+rebalance rather than another module.
+
 `tests/test_ci_partitions.py` checks fixed membership, exact selection, duplicate,
 missing, extra and misplaced IDs and discovery failures. `test_vm_ci_policy.py`
 checks the actual workflow matrix and unchanged all-root dependency gates. Each

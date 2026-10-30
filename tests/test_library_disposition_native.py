@@ -52,3 +52,5 @@ class NativeDispositionTests(unittest.TestCase):
         self.fx.entry()['state']['state']='BLOCKED'
         result=self.fx.send(self.fx.value());self.assertEqual(result['outcome'],'COMMITTED')
         self.assertEqual(self.fx.entry()['state']['state'],'DISPOSED')
+    def test_resume_of_retained_remainder_over_socket(self):
+        fixture.ResumeTests.test_resume_releases_new_drain_identity_without_git_or_resurrection(self.fx)
