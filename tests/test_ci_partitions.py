@@ -132,7 +132,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['additional']), 20)
         self.assertEqual(len(groups['synthesis']), 4)
         self.assertEqual(len(groups['scheduler']), 2)
-        self.assertEqual(len(groups['operator']), 3)
+        self.assertEqual(len(groups['operator']), 5)
         self.assertEqual(len(groups['inspection']), 3)
         self.assertEqual(len(groups['lifecycle']), 3)
         self.assertEqual(len(groups['disposition']), 6)
