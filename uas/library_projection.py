@@ -247,13 +247,18 @@ class ProjectProjection:
             os.close(fd)
             raise
         self._lease = fd
-        pin = {'project_id': self.scope.project_id, 'project_identity': self.scope.project_identity,
-               'project_path': self.scope.project_path}
+        pin = {'project_id': self.scope.project_id, 'project_identity': self.scope.project_identity}
         pin_path = state / 'project.json'
         if not os.path.lexists(pin_path):
             _write(pin_path, json.dumps(pin, sort_keys=True).encode())
-        elif json.loads(_bytes(pin_path, 4096)) != pin:
-            _fail('PROJECT_MISMATCH')
+        else:
+            stored = json.loads(_bytes(pin_path, 4096))
+            # Legacy pins included mutable coordinates. Identity, not a rename,
+            # determines whether this fixed reference root may be reused.
+            if type(stored) is not dict or set(stored) not in (set(pin), set(pin) | {'project_path'}):
+                _fail('PROJECT_MISMATCH')
+            if any(stored.get(key) != value for key,value in pin.items()):
+                _fail('PROJECT_MISMATCH')
         if not os.path.lexists(state / 'read.lock'):
             _write(state / 'read.lock', b'')
         with _guard(self.root, True):

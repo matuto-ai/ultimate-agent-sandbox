@@ -62,7 +62,8 @@ ADDITIONAL_MODULES = frozenset({
 # #170 actual process interruption/recovery suite measured20s locally. Existing
 # hosted lanes51-53s cannot absorb it; one parallel one-minute lane preserves
 # all tests and the overall2-3min graph, with no timeout increase.
-SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import'})
+# #173 relocation suite measured 6s; synthesis has headroom after #170.
+SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import', 'test_library_relocation'})
 PARTITIONS = ('slow', 'integration', 'additional', 'synthesis', 'remainder')
 assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES

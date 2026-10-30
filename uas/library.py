@@ -52,6 +52,7 @@ INITIAL_FILTERS = {"high_confidence": "block", "heuristic": "observe"}
 # else reaches the service, so a caller cannot assert a commit, outcome or path.
 HUMAN_PAYLOADS = {
     "register": ((), ()),
+    "relocate": ((), ()),
     "import-preview": (("source_commit", "paths"), ("types",)),
     "import-confirm": (("preview_id", "source_commit", "paths", "observed_version"), ("types",)),
     "inspect": (("queue_id", "observed_version"), ("drain_id",)),
