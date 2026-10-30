@@ -1,0 +1,14 @@
+"""T25 executes shared durable recovery against actual disposable Git/SQLite."""
+import test_library_adjudication as adjudication
+import test_library_disposition_recovery as recovery
+
+
+class AdjudicationRecoveryTests(adjudication.AdjudicationBase):
+    test_push_before_schedule = recovery.RecoveryTests.test_push_before_schedule_interrupt_recovers_without_resurrection
+    test_schedule_before_receipt = recovery.RecoveryTests.test_schedule_before_receipt_interrupt_exact_reconcile
+    test_unknown_before_push = recovery.RecoveryTests.test_unknown_pre_push_never_reapplies
+    test_old_attempt_refused = recovery.RecoveryTests.test_direct_attempt_run_and_recover_old_drain_refused
+    test_revoked_restart = recovery.RecoveryTests.test_postpush_revoked_restart_then_authority_restore_uses_new_report_slot
+    test_retained_item = recovery.RecoveryTests.test_later_rejection_of_retained_item_keeps_original_disposition_terminal
+    test_record_loss = recovery.RecoveryTests.test_missing_scheduler_records_reconstructed_from_canonical_transition
+    test_real_process_death = recovery.RecoveryTests.test_real_process_death_commit_push_record_and_report

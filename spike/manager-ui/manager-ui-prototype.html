@@ -599,6 +599,14 @@
       .prototype-variant-copy { max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .prototype-tools label { display:none; }
     }
+    .library-operations { margin-top:30px; padding:24px; border:1px solid var(--line); border-top:5px solid var(--accent); background:var(--surface); }
+    .library-operations h2 { margin-bottom:8px; }
+    .library-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 24px; }
+    .library-groups h3 { margin:12px 0 6px; }
+    .library-operations dd { overflow-wrap:anywhere; }
+    .library-attachments { display:flex; flex-wrap:wrap; gap:12px; margin-top:18px; }
+    .library-attachments section { flex:1 1 200px; padding:12px; border:1px dashed var(--line); }
+    @media(max-width:700px) { .library-groups { grid-template-columns:1fr; } .library-operations { padding:16px; } }
     @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
   </style>
 </head>
@@ -656,9 +664,15 @@
       return project.view.status !== "connected" || project.view.projection_stale === true || project.view.catching_up === true || !Number.isFinite(until) || now > until || now < captured;
     }
     function quality(project, source) { return stale(project) ? "stale" : source.freshness; }
+    function libraryQuality(project, source) {
+      if (quality(project, source) === "stale") return "stale";
+      const observed = Date.parse(source.observed_at), captured = Date.parse(project.view.projection?.captured_at);
+      const ttl = Date.parse(project.valid_until) - captured, age = Date.now() - observed;
+      return !Number.isFinite(observed) || !Number.isFinite(ttl) || ttl < 0 || age < 0 || age > ttl ? "stale" : source.freshness;
+    }
     function sourceLine(project, section) {
       const source = fact(project, section);
-      return `<p class="truth"><strong>${esc(source.source_owner)}</strong> · version ${esc(source.observed_version)} · source ${status(source.status)} · data ${status(quality(project, source))}<br>Observed ${esc(source.observed_at)} · committed ${esc(source.source_committed_at)}${source.reason ? `<br>Reason: ${esc(source.reason)}` : ""}</p>`;
+      return `<p class="truth"><strong>${esc(source.source_owner)}</strong> · version ${esc(source.observed_version)} · source ${status(source.status)} · data ${status(section === "library" ? libraryQuality(project, source) : quality(project, source))}<br>Observed ${esc(source.observed_at)} · committed ${esc(source.source_committed_at)}${source.reason ? `<br>Reason: ${esc(source.reason)}` : ""}</p>`;
     }
     function fields(value) {
       if (!object(value)) return `<p class="muted">unknown</p>`;
@@ -821,10 +835,23 @@
       if (!run || run.repository !== repository || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(repository) || !Number.isSafeInteger(candidate?.pull_number) || candidate.pull_number < 1) return '<p class="small muted">Canonical GitHub target unavailable.</p>';
       return `<a class="btn primary" href="https://github.com/${esc(repository)}/pull/${candidate.pull_number}" target="_blank" rel="noopener noreferrer">Open in GitHub</a><p class="small muted">Navigation only; opening GitHub neither approves nor completes this Run.</p>`;
     }
+    function libraryOperations(project) {
+      const source = fact(project, "library"), entries = rows(project, "library");
+      // Rows were bound to this authenticated Room by the Library/Hub owner.
+      // No browser-selected identity, arbitrary field enumeration or inferred health.
+      const value = entries.length === 1 && entries[0][0] === entries[0][1]?.project_identity ? entries[0][1] : null;
+      const groups = [
+        ["Queue and drain", ["project_identity","queue_status","active_depth","parked_depth","oldest_age_seconds","adjudication_wait_seconds","drain_state","drain_id","attempt","retry_count","next_retry_at"]],
+        ["Publication and projection", ["canonical_sha","projected_sha","projection_state","projected_at","replay_lag"]],
+        ["Observed window", ["window_start","window_end","coverage","published_drafts","completed_outcomes","effectiveness","duplicate_merges","feedback","human_corrections","human_decisions"]],
+        ["Provider and failures", ["provider_state","provider_mode","provider_profile_sha256","provider_version","provider_observed_at","capture_failures","source_failures","model_failures","validation_failures","transport_failures","audit_failures","recovery_failures"]]
+      ];
+      return `<section class="library-operations" aria-labelledby="library-title" data-library-project="${esc(project.key)}"><h2 id="library-title">Library operations</h2><p class="small muted">Project-bound operational metadata only. Empty queues, connectivity and successful publication do not establish healthy inference or knowledge quality.</p>${sourceLine(project,"library")}${value ? `<p>Literal drain ${status(value.drain_state)} · queue ${status(value.queue_status)} · projection ${status(value.projection_state)} · provider ${status(value.provider_state)}</p><div class="library-groups">${groups.map(([title,keys])=>`<section><h3>${esc(title)}</h3>${fields(Object.fromEntries(keys.map(key=>[key,value[key]])))}</section>`).join("")}</div>` : '<p class="empty">Library observation unknown or unavailable. No healthy, empty or completed state inferred.</p>'}<div class="library-attachments"><section data-library-actions><h3>Library actions</h3><p class="small muted">Separate Project-authorized action surface. Not attached in this view.</p></section><section data-library-settings><h3>Library settings</h3><p class="small muted">Separate installation-operator surface affecting all Projects. Not attached in this view.</p></section></div></section>`;
+    }
     function projectBody(state, roomOnly = false) {
       const project = state.project;
       if (roomOnly) return `${actionLauncher(project.key,"lifecycle")}${sectionDetails(project, "room_lifecycle", null, true)}${["image_profile_drift", "checkout_slots", "capabilities", "processes", "adapter_connections", "readiness", "context_binding", "last_observation"].map(section => sectionDetails(project, section)).join("")}`;
-      return `<div class="folio-project-layout"><div><section class="folio-section"><h2>Runs</h2>${runLinks(project)}</section><section class="folio-section"><h2>Participants</h2><p class="small muted">Persisted process authority, adapter attachment, and readiness are independent observations.</p><div class="folio-people">${participants(project)}</div></section></div><aside class="folio-side-note"><h2>Project note</h2>${signals(project)}<p class="small">Room ${esc(project.view.identity.room_id)} · Deployment ${esc(project.view.identity.deployment_id)}</p><a class="btn" href="${href("room", project.key)}" data-nav>Room details</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Source and binding</button><button class="btn ghost" data-health-project="${esc(project.key)}">Health details</button></aside></div>`;
+      return `<div class="folio-project-layout"><div><section class="folio-section"><h2>Runs</h2>${runLinks(project)}</section><section class="folio-section"><h2>Participants</h2><p class="small muted">Persisted process authority, adapter attachment, and readiness are independent observations.</p><div class="folio-people">${participants(project)}</div></section>${libraryOperations(project)}</div><aside class="folio-side-note"><h2>Project note</h2>${signals(project)}<p class="small">Room ${esc(project.view.identity.room_id)} · Deployment ${esc(project.view.identity.deployment_id)}</p><a class="btn" href="${href("room", project.key)}" data-nav>Room details</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Source and binding</button><button class="btn ghost" data-health-project="${esc(project.key)}">Health details</button></aside></div>`;
     }
     function cases(state) { return `<div class="folio-case-list">${state.attention.map(item => `<button class="folio-case" data-attention="${esc(item.key)}"><span class="folio-case-code">${esc(item.quality.toUpperCase())}</span><span><strong>${esc(item.title)}</strong><span class="attention-summary">${esc(item.project.name)} · ${esc(item.runId)}</span></span><span>${status(item.quality)}</span></button>`).join("") || '<p class="empty">No human-attention rows recorded in available snapshots. Unavailable sources do not establish absence.</p>'}</div>`; }
     function render(focus = false) {
@@ -877,9 +904,9 @@
     if (bootstrap) { try { installDocument(JSON.parse(bootstrap)); } catch (_) { document.getElementById("app").textContent = "Manager data unavailable — unsupported or invalid view. No actions are available."; } }
     else render();
     // A retained page must age out even if its authorized host stops refreshing.
-    let lastStaleness = stateFor().projects.map(project => `${project.key}:${stale(project)}`).join("|");
+    let lastStaleness = stateFor().projects.map(project => `${project.key}:${stale(project)}:${libraryQuality(project, fact(project, "library"))}`).join("|");
     setInterval(() => {
-      const marker = stateFor().projects.map(project => `${project.key}:${stale(project)}`).join("|");
+      const marker = stateFor().projects.map(project => `${project.key}:${stale(project)}:${libraryQuality(project, fact(project, "library"))}`).join("|");
       if (marker !== lastStaleness) { lastStaleness = marker; closeDrawer(false); closeItem(false); render(); }
     }, 1000);
   </script>

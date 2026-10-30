@@ -1,4 +1,4 @@
-"""Human rejection: one canonical Git transition, metadata-only recovery/reporting.
+"""Human dispositions: one canonical Git transition, metadata-only recovery/reporting.
 
 Historical human scopes below are evidence, never authority. Every read and
 publication uses a freshly trusted caller-supplied current-authority fence.
@@ -28,10 +28,11 @@ def evidence(operation, state):
 def historic_operation(scope, settings, settings_id, identity, request, payload, at):
     # Re-admit bounded historical evidence, not today's write settings. Its
     # original digest is verified against the durable record and Git trailer.
-    library._require_scope(scope, 'human', 'library-reject')
+    kind = 'adjudicate' if 'conclusion' in payload else 'reject'
+    library._require_scope(scope, 'human', 'library-'+kind)
     limits={**settings['limits'],'body_bytes':8192,'payload_bytes':8192}
-    library._human_payload('reject',payload,limits)
-    return library._operation('reject',scope,{**settings,'settings_id':settings_id,'limits':limits},
+    library._human_payload(kind,payload,limits)
+    return library._operation(kind,scope,{**settings,'settings_id':settings_id,'limits':limits},
         identity,request,payload,at,drain_id=payload['drain_id'])
 
 
@@ -104,8 +105,9 @@ def apply_schedule(scheduler, entry, value, commit):
     # Canonical sequence is a lower bound, not a claim on an occupied outbox
     # slot: an intervening revoked-authority restart can report BLOCKED first.
     # _save atomically persists the chosen schedule/report identity before send.
-    outcomes=[dict(queue_id=q,kind='rejected' if q==value['payload']['queue_id'] else 'retained',
-        reason='OPERATOR_REJECTED' if q==value['payload']['queue_id'] else 'OPERATOR_RETAINED') for q in value['selected']]
+    adjudicated = 'conclusion' in value['payload']
+    outcomes=[dict(queue_id=q,kind=('adjudicated' if adjudicated else 'rejected') if q==value['payload']['queue_id'] else 'retained',
+        reason=('OPERATOR_ADJUDICATED' if adjudicated else 'OPERATOR_REJECTED') if q==value['payload']['queue_id'] else 'OPERATOR_RETAINED') for q in value['selected']]
     scheduler._save(entry,{**old,'state':'DISPOSED','due':None,'wake':False,
         'drain_id':value['payload']['drain_id'],'selected':value['selected'],
         'attempt':value['attempt'],'reason':'OPERATOR_DISPOSED'}, scheduler.now(),
@@ -113,18 +115,19 @@ def apply_schedule(scheduler, entry, value, commit):
             resulting_sha=commit,outcomes=outcomes,attempt=value['attempt']))
 
 
-def reject(controls, value, principal, entry, scope, settings):
+def apply(controls, value, principal, entry, scope, settings):
+    kind = value['action']
     scheduler=controls.service.scheduler; publisher=controls.service.publisher
     def current():
         controls._entry(scope.project_id)
-        if (controls._scope(principal,entry,'reject').canonical()!=scope.canonical()
+        if (controls._scope(principal,entry,kind).canonical()!=scope.canonical()
                 or controls._settings(entry)['settings_id']!=settings['settings_id']): fail('STALE_CONTROL_STATE')
     current()
-    payload={k:value[k] for k in ('queue_id','drain_id','reason','observed_version')}
+    payload={k:value[k] for k in library.HUMAN_PAYLOADS[kind][0]}
     identity='human-control-'+library._digest([scope.project_identity,value['request_id']])
     with scheduler._records() as records: prior=records.record(identity,project_identity=scope.project_identity)
     if prior:
-        if (prior['kind']!='reject' or prior['settings_id']!=value['settings_id']
+        if (prior['kind']!=kind or prior['settings_id']!=value['settings_id']
                 or prior['payload_sha256']!=library._digest(payload)
                 or any(prior['scope'][k]!=scope.canonical()[k] for k in ('human_id','actor_id','subject','project_id','project_identity'))): fail('ID_CONFLICT')
         if prior['receipt'] is not None:
@@ -145,7 +148,7 @@ def reject(controls, value, principal, entry, scope, settings):
             if recovered is None: fail('DISPOSITION_EVIDENCE_INVALID')
             apply_schedule(scheduler,entry,*recovered)
         return finish(publisher,operation,publication)
-    operation=library.action(scope,settings,kind='reject',operation_id=identity,
+    operation=library.action(scope,settings,kind=kind,operation_id=identity,
         request_id=value['request_id'],payload=payload,at=scheduler.now().isoformat())
     scheduler._check()
     old=entry['state']; queue=value['queue_id']
@@ -168,8 +171,12 @@ def reject(controls, value, principal, entry, scope, settings):
         files[prefix+'/pending/index.md']=_index(tree.files[prefix+'/pending/index.md'],
             'pending',{path},files,prefix,{},tree.files)
         canonical=evidence(operation,old)
-        # Check unescaped reason separately as authored Markdown, never as audit metadata.
-        gate._policy('log.md',value['reason'],settings['filters'],[])
+        if kind == 'adjudicate':
+            from .library_adjudication import render
+            render(files, tree, operation, settings, head)
+        else:
+            # Check unescaped reason as authored Markdown, not audit metadata.
+            gate._policy('log.md',value['reason'],settings['filters'],[])
         files[prefix+'/log.md'] += ('\n'+MARKER+library._canonical(canonical)+'\n').encode('utf-8')
         checked=gate.validate(scope,settings,proposed=bundle.Tree(files),current=tree,selected=(queue,))
         current()
@@ -185,3 +192,9 @@ def reject(controls, value, principal, entry, scope, settings):
         if publishing: scheduler._failed=True
         raise
     finally: publisher.synthesis_lock.release()
+
+
+# Compatibility for existing trusted service callers.
+def reject(controls, value, principal, entry, scope, settings):
+    if value.get("action") != "reject": fail("INVALID_CONTROL_REQUEST")
+    return apply(controls, value, principal, entry, scope, settings)

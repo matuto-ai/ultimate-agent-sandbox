@@ -79,6 +79,8 @@ class VMCITriggerTests(unittest.TestCase):
           - {partition: scheduler, name: unit-scheduler}
           - {partition: operator, name: unit-operator}
           - {partition: inspection, name: unit-inspection}
+          - {partition: lifecycle, name: unit-lifecycle}
+          - {partition: disposition, name: unit-disposition}
 """
                     self.assertEqual(jobs['unit-integration'].count(matrix), 1)
                     self.assertEqual(jobs['unit-integration'].replace(matrix, '', 1)
@@ -219,10 +221,14 @@ class RuntimeBudgetTests(unittest.TestCase):
         self.assertIn('baseline median: 100.0s', self.check(self.evidence(samples=[60, 95, 100, 105, 145])))
 
     def test_old_seven_lane_measurement_is_eligible_only_as_historical_evidence(self):
-        jobs = [job for job in self.jobs() if job['name'] != 'unit-inspection']
-        self.assertEqual(80, budget.critical_path('validate.yml', jobs, historical=True))
+        for absent in ({'unit-lifecycle', 'unit-disposition'},
+                       {'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
+            jobs = [job for job in self.jobs() if job['name'] not in absent]
+            self.assertEqual(80, budget.critical_path('validate.yml', jobs, historical=True))
+            with self.assertRaises(budget.BudgetError):
+                budget.critical_path('validate.yml', jobs)
         with self.assertRaises(budget.BudgetError):
-            budget.critical_path('validate.yml', jobs)
+            budget.critical_path('validate.yml', self.jobs()[:-1], historical=True)
         jobs = [dict(self.jobs('pi-native.yml')[0], name='official-pi-native')]
         self.assertEqual(40, budget.critical_path('pi-native.yml', jobs, historical=True))
         with self.assertRaises(budget.BudgetError):

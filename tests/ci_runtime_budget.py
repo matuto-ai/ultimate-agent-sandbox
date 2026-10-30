@@ -13,7 +13,8 @@ ABSOLUTE_SECONDS = 150
 GROWTH_PERCENT = 10
 BASELINE_SAMPLES = 5
 UNIT_JOBS = frozenset(('validate', 'unit-slow', 'unit-integration', 'unit-additional',
-                       'unit-synthesis', 'unit-scheduler', 'unit-operator', 'unit-inspection'))
+                       'unit-synthesis', 'unit-scheduler', 'unit-operator', 'unit-inspection',
+                       'unit-lifecycle', 'unit-disposition'))
 SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle',
                        'git-native-seams', 'gate-linux-smoke', 'gate-command-native',
                        'gate-artifact-native', 'room-control-plane', 'manager-mtls',
@@ -44,9 +45,13 @@ def critical_path(workflow, jobs, *, historical=False):
     if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
         stages = (frozenset(names),)
     expected = set().union(*stages)
-    # The inspection lane was added before this policy; older full runs had seven roots.
-    if historical and workflow == 'validate.yml' and 'unit-inspection' not in names:
-        expected.remove('unit-inspection')
+    # Full historical graphs had seven, then eight roots before today's ten.
+    if historical and workflow == 'validate.yml':
+        for absent in ({'unit-lifecycle', 'unit-disposition'},
+                       {'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
+            if set(names) == expected - absent:
+                expected -= absent
+                break
     require(len(names) == len(set(names)) and set(names) == expected,
             'Missing, duplicate or unexpected validation jobs; update the measured graph')
     by_name = {job['name']: job for job in measured}
