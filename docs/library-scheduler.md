@@ -12,7 +12,11 @@ wakes an idle Project after the configured coalescing interval (initially ten
 seconds). Further publications cannot postpone its first wake, clear backoff or
 release BLOCKED state. Explicit drain removes delay but neither preempts the
 active unit nor changes fair priority. Explicit retry releases a blocked drain
-with its complete original queue IDs and a new attempt number.
+with its complete original queue IDs and a new attempt number. An explicit
+resume releases only what a terminal blocked-batch disposition retained, as a
+newly identified fairly scheduled drain (no drain ID, no batch, no attempt) that
+the next turn mints; an empty remainder then makes no model call. Neither a
+resumed Project nor startup recovery continues the disposed drain.
 
 The eligible least-recently-served Project wins, with immutable canonical identity
 as tie-breaker. A durable service timestamp/monotonic tie counter reserves the

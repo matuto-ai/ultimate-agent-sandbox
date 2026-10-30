@@ -14,7 +14,7 @@ GROWTH_PERCENT = 10
 BASELINE_SAMPLES = 5
 UNIT_JOBS = frozenset(('validate', 'unit-slow', 'unit-integration', 'unit-additional',
                        'unit-synthesis', 'unit-scheduler', 'unit-operator', 'unit-inspection',
-                       'unit-lifecycle', 'unit-disposition'))
+                       'unit-lifecycle', 'unit-disposition', 'unit-maintenance', 'unit-archive'))
 SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle',
                        'git-native-seams', 'gate-linux-smoke', 'gate-command-native',
                        'gate-artifact-native', 'room-control-plane', 'manager-mtls',
@@ -45,10 +45,11 @@ def critical_path(workflow, jobs, *, historical=False):
     if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
         stages = (frozenset(names),)
     expected = set().union(*stages)
-    # Full historical graphs had seven, then eight roots before today's ten.
+    # Recognize only complete historical graphs; current runs require all twelve roots.
     if historical and workflow == 'validate.yml':
-        for absent in ({'unit-lifecycle', 'unit-disposition'},
-                       {'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
+        for absent in ({'unit-archive'}, {'unit-archive', 'unit-maintenance'},
+                       {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition'},
+                       {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
             if set(names) == expected - absent:
                 expected -= absent
                 break

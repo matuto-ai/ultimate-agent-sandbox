@@ -431,7 +431,7 @@ class Result:
     observations: tuple = ()
 
 
-def validate(scope, settings, *, proposed, current=None, selected=()):
+def validate(scope, settings, *, proposed, current=None, selected=(), repair=False, lifecycle=None):
     """Validate the complete proposed Project result, or refuse all of it.
 
     ``proposed`` and ``current`` are ``library_bundle.Tree`` views, and
@@ -444,7 +444,24 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
     filters = contracts.admit_settings_value(settings)["filters"]
     bundle = library_bundle.validate(scope, settings, proposed=proposed,
                                      current=current, selected=selected,
-                                     source_fields=SOURCE_FIELDS)
+                                     source_fields=SOURCE_FIELDS, repair=repair)
+    if current is not None:
+        from .library_registration import project_state
+        prefix = library_bundle._prefix(scope)
+        if prefix + '/index.md' in current.files:
+            archived = project_state(current, prefix) == 'archived'
+            if lifecycle is not None:
+                from .library_lifecycle import proposed_state
+                if (lifecycle.scope != scope or lifecycle.kind not in ('archive','restore')
+                        or dict(proposed_state(lifecycle, current).files) != dict(proposed.files)):
+                    _fail('INVALID_LIFECYCLE', 'lifecycle')
+                contracts._require_scope(scope, 'human', 'library-' + lifecycle.kind)
+            elif project_state(proposed, prefix) != project_state(current, prefix):
+                _fail('LIFECYCLE_AUTHORITY_REQUIRED', 'lifecycle')
+            elif archived and dict(proposed.files) != dict(current.files):
+                _fail('PROJECT_ARCHIVED', 'lifecycle')
+    elif lifecycle is not None:
+        _fail('INVALID_LIFECYCLE', 'lifecycle')
     observations = []
     for relative in sorted(set(bundle.added) | set(bundle.updated)):
         text = bundle.files[bundle.prefix + "/" + relative].decode("utf-8")

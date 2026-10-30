@@ -796,7 +796,7 @@ def _removals(previous, current, allowed):
 
 # --- Public seam ----------------------------------------------------------
 
-def validate(scope, settings, *, proposed, current=None, selected=(), source_fields=()):
+def validate(scope, settings, *, proposed, current=None, selected=(), source_fields=(), repair=False):
     """Validate the complete proposed Project result, or refuse all of it.
 
     ``current`` is the canonical bundle tree or ``None`` before registration,
@@ -822,7 +822,18 @@ def validate(scope, settings, *, proposed, current=None, selected=(), source_fie
     initialization = previous_tree is None
     # The canonical state must stay coherent too: a conflicting registration or
     # a malformed existing bundle fails closed instead of being overwritten.
-    if not initialization:
+    if repair:
+        if initialization or selected:
+            _fail("INVALID_REPAIR", "repair")
+        from .library_indexes import reconstruct
+        reconstructed, _ = reconstruct(scope, previous_tree)
+        if dict(reconstructed.files) != dict(proposed_tree.files):
+            _fail("INVALID_REPAIR", "repair")
+        # Only independently reproduced index bytes may normalize predecessor
+        # structure. Actual previous bytes remain the basis for history/diff.
+        normalized = _canonical_files(reconstructed, prefix, limits, "repair")
+        _structure(normalized, normalized, scope, limits, set(), False)
+    elif not initialization:
         _structure(previous, previous, scope, limits, set(), False)
     removed = _structure(files, previous, scope, limits, allowed, initialization,
                          source_fields)

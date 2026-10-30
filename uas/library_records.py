@@ -193,7 +193,7 @@ def _identity(operation):
     _origin(operation.scope)  # validate the authenticated origin fields
     _safe(identity, "identity")
     if operation.manifest is not None:
-        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation"):
+        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation", "archive-final"):
             raise LibraryError("INVALID_RECORD", "manifest")
         identity["manifest"] = operation_manifest(operation.kind, operation.manifest)
         expected = identity["manifest"] if operation.kind in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(identity["manifest"])}
@@ -516,6 +516,16 @@ class LibraryRecords:
 
         return self._read(read)
 
+    def latest_lifecycle(self, project_identity):
+        """Current archive/restore intent; unfinished work keeps the capture fence."""
+        _token(project_identity, 'project_identity')
+        def read(db):
+            row = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? "
+                "AND json_extract(identity, '$.kind') IN ('archive','restore') "
+                "ORDER BY rowid DESC LIMIT 1", (project_identity,)).fetchone()
+            return self._attempt(db, row['operation_id']) if row else None
+        return self._read(read)
+
     def latest_schedule(self, project_identity):
         """Latest persisted transition, including a durable intent with lost receipt."""
         _token(project_identity, 'project_identity')
@@ -648,12 +658,15 @@ class LibraryRecords:
         latest = {}; active_drains = set()
         by_id = {r['operation_id']:r for r in records}
         for r in records:
-            if r['state'] != 'DETAIL_EXPIRED' and r['kind'] in ('scheduler-state','library-observation'):
+            if r['state'] != 'DETAIL_EXPIRED' and r['kind'] in ('scheduler-state','library-observation','archive','restore'):
                 latest[(r['scope']['project_identity'],r['kind'])] = r
         for r in latest.values():
             protected.add(r['operation_id'])
             if r['kind']=='scheduler-state' and r['manifest']['drain_id']:
                 active_drains.add((r['scope']['project_identity'],r['manifest']['drain_id']))
+        for r in latest.values():
+            if r['kind']=='archive' and r['receipt'] is None:
+                active_drains.add((r['scope']['project_identity'], 'archive-final-' + value_digest(r['operation_id'])))
         for r in records:
             if r['operation_id'] in protected and r['drain_id']:
                 active_drains.add((r['scope']['project_identity'],r['drain_id']))
@@ -855,7 +868,7 @@ class LibraryRecords:
         No external action occurs inside it. A lost commit response is uncertain;
         a fresh Project-fenced receipt read reconciles the whole transition.
         """
-        if (operation.kind not in ('drain','retry') or operation.scope.subject != 'human'
+        if (operation.kind not in ('drain','retry','resume') or operation.scope.subject != 'human'
                 or schedule.kind != 'scheduler-state'
                 or operation.scope.project_identity != schedule.scope.project_identity
                 or receipt['outcome'] != 'ACKNOWLEDGED'
@@ -879,7 +892,7 @@ def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
     result = {key: value[key] for key in _ATTEMPT_KEYS}
     if "manifest" in value:
-        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation"): raise LibraryError("INVALID_RECORD")
+        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation", "archive-final"): raise LibraryError("INVALID_RECORD")
         result["manifest"] = operation_manifest(value["kind"], value["manifest"])
         expected = result["manifest"] if value["kind"] in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(result["manifest"])}
         if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")
