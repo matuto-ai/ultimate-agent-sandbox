@@ -11,7 +11,7 @@ import sys
 ABSOLUTE_SECONDS = 150
 GROWTH_PERCENT = 20
 UNIT_JOBS = frozenset(('validate', 'unit-slow', 'unit-integration', 'unit-additional',
-                       'unit-synthesis', 'unit-scheduler', 'unit-operator'))
+                       'unit-synthesis', 'unit-scheduler', 'unit-operator', 'unit-inspection'))
 SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle',
                        'git-native-seams', 'gate-linux-smoke', 'gate-command-native',
                        'gate-artifact-native', 'room-control-plane', 'manager-mtls',

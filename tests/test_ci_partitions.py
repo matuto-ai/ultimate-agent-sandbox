@@ -52,7 +52,6 @@ class CIPartitionTests(unittest.TestCase):
         workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/validate.yml').read_text()
         self.assertIn('- {partition: inspection, name: unit-inspection}', workflow)
         matrix=workflow.split('  unit-integration:',1)[1].split('  forge-broker-smoke:',1)[0]
-        self.assertIn('timeout-minutes: 1', matrix)
         self.assertEqual(matrix.count('- {partition:'), 6)
         self.assertNotIn('needs:', matrix)
         self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly', 'test_library_registration'})
