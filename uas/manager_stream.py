@@ -120,7 +120,7 @@ def public_event(event, room_id):
 class RoomStream:
     """One fixed Room source. Capture is detached before any outbound I/O."""
     def __init__(self, ledger, identity, *, supervisor=None, participants=None, checkouts=None, audit=None, forge=None,
-                 schema_version=SCHEMA_VERSION, library=None):
+                 schema_version=SCHEMA_VERSION):
         _identity(identity)
         if type(ledger) is not RoomLedger or ledger.room_id != identity.room_id:
             raise StreamError('SOURCE_ROOM_MISMATCH')
@@ -152,11 +152,6 @@ class RoomStream:
             if type(audit) is not ForgeAudit or audit.deployment_id != identity.deployment_id:
                 raise StreamError('SOURCE_OWNER_MISMATCH')
             self._owners.append((audit, ('forge_diagnostics',)))
-        if library is not None:
-            from .library_observations import HubObservations
-            if type(library) is not HubObservations or library.ledger is not ledger:
-                raise StreamError('SOURCE_OWNER_MISMATCH')
-            self._owners.append((library, ('library',)))
         self._forge = forge
         if forge is not None:
             from .forge import ReadOnlyForgeBroker

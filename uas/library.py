@@ -1206,7 +1206,7 @@ def batch_manifest(value):
 
 def operation_manifest(kind, value):
     if kind == 'library-observation':
-        from .library_observation_schema import observation, ObservationError
+        from .manager_projection import (library_observation as observation, library_ObservationError as ObservationError)
         try: return observation(value)
         except ObservationError: _fail('INVALID_LIBRARY_OBSERVATION')
     if kind == 'synthesis-batch': return batch_manifest(value)

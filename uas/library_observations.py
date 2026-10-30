@@ -11,7 +11,7 @@ import threading
 from . import library
 from .library_records import LibraryRecords
 
-from .library_observation_schema import COUNTS, TIMES, HASHES, ENUMS, FIELDS, validate_row, observation, moment, fail
+from .manager_projection import (library_COUNTS as COUNTS, library_TIMES as TIMES, library_HASHES as HASHES, library_ENUMS as ENUMS, library_FIELDS as FIELDS, library_validate_row as validate_row, library_observation as observation, library_moment as moment, library_fail as fail)
 
 def failure_class(code):
     if not code: return None

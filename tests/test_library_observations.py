@@ -11,7 +11,7 @@ import library_support as support
 from uas import library
 from uas.library_records import LibraryRecords
 from uas.library_observations import Owner, HubObservations, ProviderObservation
-from uas.library_observation_schema import observation, ObservationError
+from uas.manager_projection import (library_observation as observation, library_ObservationError as ObservationError)
 from uas.ledger import RoomLedger, LedgerError
 from uas.manager_projection import SourceObservation, ProjectionError
 from uas.manager_stream import RoomIdentity, RoomStream, ManagerReadModel, SnapshotTransfer, StreamError
@@ -29,12 +29,12 @@ class ObservationTests(unittest.TestCase):
         self.ledger=RoomLedger(self.source.base/'observation-hub.db','alpha');self.addCleanup(self.ledger.close)
         self.hub=HubObservations(self.ledger,project_identity=self.project,authenticate=lambda:True)
         self.identity=RoomIdentity('deployment-1','alpha','stream-alpha')
-        self.stream=RoomStream(self.ledger,self.identity,library=self.hub)
+        self.stream=RoomStream(self.ledger,self.identity)
         self.path=self.source.base/'manager.db';self.model=ManagerReadModel(self.path);self.addCleanup(self.model.close)
         self.session=ManagerSession(self.model,self.identity);self.addCleanup(self.session.close)
     def capture(self,**kwargs):return self.owner.capture(observed_at=AT,window_start=START,**kwargs)
     def install(self,at=AT):
-        t=self.stream.capture(self.model.cursor(self.identity),captured_at=at)
+        t=self.stream.capture(self.model.cursor(self.identity),captured_at=at,observations=self.hub.manager_observations())
         self.session.handle({'kind':'begin','transfer':t.begin()});cursor=t.after_seq
         while cursor is not None and cursor<t.cut:
             page=t.page(cursor,limit=2);cursor=self.session.handle({'kind':'events','page':page})['room_seq']
@@ -103,10 +103,10 @@ class ObservationTests(unittest.TestCase):
         with RoomLedger(self.source.base/'beta.db','beta') as ledger:
             hub=HubObservations(ledger,project_identity=beta_scope.project_identity,authenticate=lambda:True)
             hub.receive(beta);identity=RoomIdentity('deployment-1','beta','stream-beta')
-            stream=RoomStream(ledger,identity,library=hub)
+            stream=RoomStream(ledger,identity)
             session=ManagerSession(self.model,identity)
             try:
-                t=stream.capture(None,captured_at=AT)
+                t=stream.capture(None,captured_at=AT,observations=hub.manager_observations())
                 session.handle({'kind':'begin','transfer':t.begin()})
                 session.handle({'kind':'finish','transfer_id':t.transfer_id})
                 beta_view=self.model.view(identity,now=AT)
@@ -120,7 +120,7 @@ class ObservationTests(unittest.TestCase):
         self.assertNotIn(self.project,repr(beta_view))
 
     def test_old_schema_frame_without_optional_section_still_installs(self):
-        t=self.stream.capture(None,captured_at=AT)
+        t=self.stream.capture(None,captured_at=AT,observations=self.hub.manager_observations())
         projection=json.loads(t._projection)
         del projection['sections']['library']
         t=SnapshotTransfer(self.ledger,self.identity,None,projection)
@@ -141,7 +141,7 @@ class ObservationTests(unittest.TestCase):
         for mutation,expected in (
             (lambda p:p['sections']['library']['value'][self.project].update(active_depth=-1),ProjectionError),
             (lambda p:p['sections']['library'].update(observed_at='2026-10-31T00:00:00+00:00'),StreamError)):
-            projection=json.loads(self.stream.capture(None,captured_at=AT)._projection)
+            projection=json.loads(self.stream.capture(None,captured_at=AT,observations=self.hub.manager_observations())._projection)
             mutation(projection)
             transfer=SnapshotTransfer(self.ledger,self.identity,None,projection)
             with self.assertRaises(expected):self.session.handle({'kind':'begin','transfer':transfer.begin()})

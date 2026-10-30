@@ -122,7 +122,76 @@ def fact(owner, version, *, value=None, observed_at=None, source_committed_at=No
 
 # These owners have no universal versioned passive snapshot API in the current
 # source. This is a finite extension seam, not a caller-defined owner registry.
-from .library_observation_schema import FIELDS as LIBRARY_FIELDS
+def library_identifier(value):
+    if type(value) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', value): library_fail()
+
+def library_digest(value,length=None):
+    if type(value) is not str or len(value) not in ((length,) if length else (40,64)) or not re.fullmatch('[0-9a-f]+',value): library_fail()
+
+library_COUNTS = ('active_depth','parked_depth','oldest_age_seconds','adjudication_wait_seconds',
+          'published_drafts','completed_outcomes','duplicate_merges','human_corrections',
+          'human_decisions','provider_version','attempt','retry_count','replay_lag',
+          'capture_failures','source_failures','model_failures','validation_failures',
+          'transport_failures','audit_failures','recovery_failures')
+library_TIMES = ('window_start','window_end','next_retry_at','projected_at','provider_observed_at')
+library_HASHES = ('canonical_sha','projected_sha','provider_profile_sha256')
+library_ENUMS = {'coverage':{'complete','partial'},'queue_status':{'known','unknown','unavailable'},
+         'drain_state':{'unknown','IDLE','READY','ACTIVE','BACKOFF','BLOCKED','DISPOSED'},
+         'projection_state':{'unknown','current','stale','unavailable'},
+         'provider_state':{'unknown','available','unavailable'},
+         'provider_mode':{'unknown','local','hosted'},
+         'effectiveness':{'unmeasured','observed'},'feedback':{'unmeasured','observed'}}
+library_FIELDS = ('project_identity',*library_COUNTS,*library_TIMES,*library_HASHES,*library_ENUMS,'drain_id')
+
+
+class library_ObservationError(ValueError):
+    code = 'INVALID_LIBRARY_OBSERVATION'
+
+def library_fail(): raise library_ObservationError('INVALID_LIBRARY_OBSERVATION')
+def library_moment(value):
+    if type(value) is not str or len(value)>40: library_fail()
+    try: result=datetime.fromisoformat(value)
+    except ValueError: library_fail()
+    if result.tzinfo is None: library_fail()
+    return result
+
+
+def library_validate_row(row):
+    if type(row) is not dict or set(row)!=set(library_FIELDS): library_fail()
+    library_identifier(row['project_identity'])
+    for key in library_COUNTS:
+        if row[key] is not None and (type(row[key]) is not int or not 0<=row[key]<2**53): library_fail()
+    for key in library_TIMES:
+        if row[key] is not None: library_moment(row[key])
+    if library_moment(row['window_start'])>library_moment(row['window_end']): library_fail()
+    for key in library_HASHES:
+        if row[key] is not None:
+            library_digest(row[key], 64 if key.endswith('sha256') else None)
+    for key,values in library_ENUMS.items():
+        if type(row[key]) is not str or row[key] not in values: library_fail()
+    if row['drain_id'] is not None: library_identifier(row['drain_id'])
+    for label,numerator,denominator in (('effectiveness','duplicate_merges','completed_outcomes'),
+                                       ('feedback','human_corrections','human_decisions')):
+        if row[label]=='unmeasured':
+            if row[numerator] is not None or row[denominator] is not None: library_fail()
+        elif (row[numerator] is None or row[denominator] is None
+              or row[denominator]==0 or row[numerator]>row[denominator]): library_fail()
+    if row['provider_state']=='unknown' and any(row[x] is not None for x in ('provider_profile_sha256','provider_observed_at','provider_version')): library_fail()
+    if row['provider_state']=='unknown' and row['provider_mode']!='unknown': library_fail()
+    if row['provider_state']!='unknown' and (any(row[k] is None for k in ('provider_profile_sha256','provider_observed_at','provider_version')) or row['provider_mode']=='unknown'): library_fail()
+    if row['queue_status']!='known' and any(row[k] is not None for k in ('active_depth','parked_depth','oldest_age_seconds','adjudication_wait_seconds')): library_fail()
+    return deepcopy(row)
+
+
+def library_observation(value):
+    if type(value) is not dict or set(value)!={'sequence','observed_at','row'}: library_fail()
+    if type(value['sequence']) is not int or not 1<=value['sequence']<2**53: library_fail()
+    library_moment(value['observed_at']); library_validate_row(value['row'])
+    if value['row']['window_end']!=value['observed_at']: library_fail()
+    return deepcopy(value)
+
+
+LIBRARY_FIELDS = library_FIELDS
 
 EXTERNAL_FIELDS = {
     'library': ('library-service', LIBRARY_FIELDS),
@@ -185,13 +254,12 @@ class SourceObservation:
             raise ProjectionError('KNOWN_FACT_WITHOUT_SOURCE_VERSION')
         rows = _rows(self.rows, definition[1]) if self.status == 'known' else None
         if self.section == 'library' and rows is not None:
-            from .library_observation_schema import validate_row, ObservationError
             if type(self.rows) is not dict or len(self.rows) != 1 or any(key != row.get('project_identity') for key,row in self.rows.items()):
                 raise ProjectionError('INVALID_LIBRARY_BINDING')
             for row in self.rows.values():
                 if row.get('window_end') != self.observed_at: raise ProjectionError('LIBRARY_SAMPLE_TIME_MISMATCH')
-                try: validate_row(row)
-                except ObservationError as error: raise ProjectionError('INVALID_LIBRARY_OBSERVATION') from error
+                try: library_validate_row(row)
+                except library_ObservationError as error: raise ProjectionError('INVALID_LIBRARY_OBSERVATION') from error
         if self.status != 'known' and self.rows is not None:
             raise ProjectionError('UNKNOWN_FACT_HAS_VALUE')
         # Quota semantics are not inferred from a number or native readiness.
@@ -364,11 +432,10 @@ HUB_FIELDS = {
 def validate_section_value(section, value):
     """Also enforce the disclosure allowlist on the receiving side."""
     if section == 'library':
-        from .library_observation_schema import validate_row, ObservationError
         if type(value) is not dict or len(value) != 1: raise ProjectionError('INVALID_LIBRARY_BINDING')
         for key,row in value.items():
-            try: validate_row(row)
-            except ObservationError as error: raise ProjectionError('INVALID_LIBRARY_OBSERVATION') from error
+            try: library_validate_row(row)
+            except library_ObservationError as error: raise ProjectionError('INVALID_LIBRARY_OBSERVATION') from error
             if key != row['project_identity']: raise ProjectionError('INVALID_LIBRARY_BINDING')
     if section == 'journey':
         from .manager_journey import validate_journey

@@ -11,7 +11,7 @@ observation does not re-sample or claim a fresh timestamp.
 The Supervisor binds `HubObservations` to the authenticated service transport,
 Room ledger and immutable Project identity. Its receive operation refuses foreign
 Projects, unauthenticated calls, changed same-version payloads and stale versions.
-A retained observation is sent to the existing `RoomStream(..., library=owner)`
+A retained observation is sent to the existing `RoomStream.capture(..., observations=hub.manager_observations())`
 and `ManagerReadModel` seam. The finite `library` external section is owned by
 `library-service`, not by the Hub: source time and version survive replay. The
 Hub cut is explicitly not atomic with the Library snapshot. Missing observation
