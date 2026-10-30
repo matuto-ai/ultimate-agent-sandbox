@@ -21,6 +21,8 @@ from .local_host import peer_owner
 
 MAX_REQUEST = 8192
 MAX_RESPONSE = 16384
+INSPECTION_REASONS = frozenset(('MISSING_CONTEXT', 'CONTEXT_LIMIT', 'RESPONSE_LIMIT',
+    'RECURSION_NOT_EXPANDED', 'UNAVAILABLE_REFERENCE', 'INERT_RESOURCE'))
 
 
 def fail(code):
@@ -48,8 +50,18 @@ def decode(raw):
     library._identifier(value.get('project_id'), 'project_id')
     action = value.get('action')
     if action == 'observe':
-        if set(value) != {'version','action','project_id','for_action'} or value['for_action'] not in ('drain','retry'):
+        keys = {'version','action','project_id','for_action'}
+        if value.get('for_action') == 'inspect': keys.add('queue_id')
+        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect'):
             fail('INVALID_CONTROL_REQUEST')
+        if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
+    elif action == 'inspect':
+        if set(value) != {'version','action','project_id','queue_id','request_id','settings_id','observed_version'}:
+            fail('INVALID_CONTROL_REQUEST')
+        library._digest_value(value['queue_id'], 'queue_id')
+        library._token(value['request_id'], 'request_id')
+        library._digest_value(value['settings_id'], 'settings_id')
+        library._digest_value(value['observed_version'], 'observed_version')
     elif action in ('drain','retry'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
         if action == 'retry': keys.add('drain_id')
@@ -117,6 +129,8 @@ class Controls:
             key = scope.project_identity
             # Fresh configured authority/settings; no authority inferred from UID.
             settings = self._settings(entry)
+            if kind == 'inspect':
+                return self._inspect(value, principal, entry, scope, settings)
             if value['action'] == 'observe':
                 scheduler._check()
                 target = self._target(entry,scope,settings,principal,kind)
@@ -156,6 +170,130 @@ class Controls:
             if fresh.canonical() != scope.canonical() or current['settings_id'] != settings['settings_id']:
                 fail('STALE_CONTROL_STATE')
             return scheduler.request(key, retry=kind=='retry', control=operation)
+
+
+    def _inspect(self, value, principal, entry, scope, settings):
+        """One committed pending item; no body receipt, event, cache or fetch.
+
+        Observation returns only opaque version evidence. Every open, even with
+        the same request ID, reads and authorizes again. It is not write replay.
+        The enclosing scheduler lock fences local lifecycle/coordinate changes.
+        """
+        def current():
+            if (self._scope(principal, entry, 'inspect').canonical() != scope.canonical()
+                    or self._settings(entry)['settings_id'] != settings['settings_id']):
+                fail('STALE_INSPECTION')
+            self._entry(scope.project_id)
+        current()
+        commit, tree = self.service.publisher.project_snapshot(scope, settings, current=current)
+        library_gate.validate(scope, settings, proposed=tree, current=tree)
+        prefix = library_bundle._prefix(scope)
+        if project_state(tree, prefix) != 'active': fail('PROJECT_ARCHIVED')
+        relative = 'pending/' + value['queue_id'] + '.md'
+        data = tree.files.get(prefix + '/' + relative)
+        if data is None: fail('PENDING_ITEM_UNAVAILABLE')
+        text = data.decode('utf-8')
+        meta, body = library_bundle.frontmatter(text, relative)
+        if meta.get('status') != 'draft': fail('PENDING_ITEM_UNAVAILABLE')
+        content_version = library._digest({p:hashlib.sha256(b).hexdigest() for p,b in tree.files.items()})
+        target_version = hashlib.sha256(data).hexdigest()
+        version = library._digest({'human_scope':scope.canonical(), 'project_identity':scope.project_identity,
+            'project_path':scope.project_path, 'queue_id':value['queue_id'],
+            'commit':commit, 'content_version':content_version, 'target_version':target_version,
+            'settings_id':settings['settings_id']})
+        evidence = dict(version=1, project_id=scope.project_id, queue_id=value['queue_id'],
+            commit_sha=commit, target_version=target_version, content_version=content_version,
+            settings_id=settings['settings_id'], observed_version=version)
+        if value['action'] == 'observe':
+            current()
+            return evidence
+        operation_id = 'human-control-' + library._digest([scope.project_identity, value['request_id']])
+        payload = {'queue_id':value['queue_id'], 'observed_version':value['observed_version']}
+        with self.service.scheduler._records() as records:
+            prior = records.record(operation_id, project_identity=scope.project_identity)
+        if prior is not None:
+            original = prior['scope']
+            if (prior['kind'] != 'inspect' or prior['settings_id'] != value['settings_id']
+                    or prior['payload_sha256'] != library._digest(payload)
+                    or any(original[k] != scope.canonical()[k] for k in ('human_id','actor_id','subject','project_id','project_identity'))):
+                fail('ID_CONFLICT')
+        if value['settings_id'] != settings['settings_id'] or value['observed_version'] != version:
+            fail('STALE_INSPECTION')
+        limits = settings['limits']
+        if len(data) > limits['inspection_context_bytes']: fail('INSPECTION_CONTEXT_LIMIT')
+        result = dict(evidence, request_id=value['request_id'], media_type='text/plain',
+            item={'text':text, 'sha256':target_version}, context=[],
+            context_bytes=len(data), insufficient_context=False, reasons=[],
+            selection='direct-local-concept-references-only', recursive=False,
+            remote_resources=False)
+        # Bound the *complete encoded transport response*, including escaping
+        # and version metadata, not just Python character count or body length.
+        ceiling = min(limits['inspection_bytes'], MAX_RESPONSE)
+        def fits(): return len(canonical({'outcome':'observed','result':result})) <= ceiling
+        if not fits(): fail('INSPECTION_RESPONSE_LIMIT')
+        references, incomplete = self._inspection_references(meta, body, relative)
+        reasons = set(incomplete)
+        total = len(data)
+        for reference in sorted(references):
+            raw = tree.files.get(prefix + '/' + reference)
+            if raw is None:
+                reasons.add('MISSING_CONTEXT'); continue
+            if total + len(raw) > limits['inspection_context_bytes']:
+                reasons.add('CONTEXT_LIMIT'); continue
+            context_text = raw.decode('utf-8')
+            context_meta, context_body = library_bundle.frontmatter(context_text, reference)
+            nested, omitted = self._inspection_references(context_meta, context_body, reference)
+            if nested: reasons.add('RECURSION_NOT_EXPANDED')
+            reasons.update(omitted)
+            item = dict(reference=reference, text=context_text, sha256=hashlib.sha256(raw).hexdigest())
+            result['context'].append(item)
+            result['context_bytes'] = total + len(raw)
+            # Reserve all finite reason labels so adding the final omission
+            # explanation cannot turn a valid partial response into overflow.
+            result['reasons'] = sorted(INSPECTION_REASONS)
+            result['insufficient_context'] = True
+            if not fits():
+                result['context'].pop(); result['context_bytes'] = total
+                reasons.add('RESPONSE_LIMIT'); continue
+            total += len(raw)
+        result['reasons'] = sorted(reasons)
+        result['insufficient_context'] = bool(reasons)
+        if not fits(): fail('INSPECTION_RESPONSE_LIMIT')
+        current()  # revoke/reconfigure during reads or serialization: disclose nothing
+        operation = library.action(scope, settings, kind='inspect', operation_id=operation_id,
+            request_id=value['request_id'], payload=payload,
+            at=prior['at'] if prior is not None else self.service.scheduler.now().isoformat())
+        with self.service.scheduler._records() as records:
+            records.inspection_identity(operation)
+        current()  # persistence is not authority to disclose a cached body
+        return result
+
+    @staticmethod
+    def _inspection_references(meta, body, relative):
+        """Service-selected direct concept edges. No arbitrary file or traversal.
+
+        Existing canonical reader data may contain unsafe historical references;
+        refuse expansion rather than render/fetch them or infer new authority.
+        Other pending items, indexes, logs and sibling Projects are not context.
+        """
+        refs, reasons = set(), set()
+        def concept(path):
+            if (type(path) is str and len(path.split('/')) == 2
+                    and path.split('/')[0] in library.CONCEPT_DIRECTORIES
+                    and path.endswith('.md') and path.split('/')[1] != 'index.md'
+                    and library.SLUG.fullmatch(path.split('/')[1][:-3])):
+                refs.add(path)
+            else: reasons.add('UNAVAILABLE_REFERENCE')
+        for source in meta.get('sources', ()):
+            concept(source.get('resource'))
+        for kind, destination in library_gate.scan(body, relative, include_definitions=False):
+            if kind != 'link':
+                reasons.add('INERT_RESOURCE'); continue
+            try: path = library_gate.destination(relative, destination)
+            except library.LibraryError:
+                reasons.add('UNAVAILABLE_REFERENCE'); continue
+            if path is not None: concept(path)
+        return refs, reasons
 
 
 def private_root(root):
