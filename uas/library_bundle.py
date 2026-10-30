@@ -462,8 +462,14 @@ def _scan(body):
         if fence:
             continue
         index = 0
+        openings = []
         while index < len(line):
             character = line[index]
+            if character == "\\":
+                index += 2
+                continue
+            if character == "[":
+                openings.append(index)
             if character == "`":
                 closing = line.find("`", index + 1)
                 index = len(line) if closing < 0 else closing + 1
@@ -477,7 +483,7 @@ def _scan(body):
                     depth += {"(": 1, ")": -1}.get(line[closing], 0)
                     closing += 1
                 if depth == 0:
-                    opening = line.rfind("[", 0, index)
+                    opening = openings.pop() if openings else -1
                     yield (line[opening + 1:index] if opening >= 0 else "",
                            line[index + 2:closing - 1])
                 index = closing
@@ -515,7 +521,8 @@ def _links(body, index_relative):
     for text, target in _scan(body):
         candidate = _target(target, index_relative)
         if candidate is not None:
-            found[candidate] = text.strip()
+            # Writer labels escape Markdown punctuation; compare decoded text.
+            found[candidate] = re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])", r"\1", text.strip())
     return found
 
 
