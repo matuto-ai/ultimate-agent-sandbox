@@ -18,7 +18,8 @@ class DispositionBase(unittest.TestCase):
         self.source=self.fx.source;self.service=self.fx.service;self.controls=self.fx.controls
         self.q=self.fx.fx.fixture.q;self.allowed=True
         self.principal=library.LocalHuman('human','actor','grant',lambda p,key,action:self.allowed
-            and key==self.source.scope.project_identity and action in ('library-reject','library-inspect'),lambda:True)
+            and key==self.source.scope.project_identity
+            and action in ('library-reject','library-inspect','library-resume'),lambda:True)
     def send(self,value):
         return self.controls.handle(canonical(value),self.principal)
     def value(self,reason='PRIVATE_HUMAN_REASON not relevant.',request='reject-one'):
@@ -28,6 +29,18 @@ class DispositionBase(unittest.TestCase):
             drain_id=state['drain_id'] if self.q in state['selected'] and state['state']!='DISPOSED' else None,reason=reason,
             request_id=request,settings_id=observed['settings_id'],observed_version=observed['observed_version'])
     def entry(self):return self.service.scheduler._entries[self.source.scope.project_identity]
+    def observed(self,kind='resume'):
+        return self.send(dict(version=1,action='observe',for_action=kind,project_id='alpha'))
+    def resume(self,request='resume-one',drain=None,observed=None):
+        observed=observed or self.observed()
+        return dict(version=1,action='resume',project_id='alpha',request_id=request,
+            drain_id=observed['drain_id'] if drain is None else drain,
+            settings_id=observed['settings_id'],observed_version=observed['observed_version'])
+    def disposed(self,second=True):
+        other=self.blocked(second=second)
+        self.assertEqual(self.send(self.value())['outcome'],'COMMITTED')
+        self.assertEqual(self.entry()['state']['state'],'DISPOSED')
+        return other
     def blocked(self,second=True,attempt=1,drain='original-drain'):
         other=self.source.capture('untouched',body='UNCHANGED_DRAFT') if second else None
         entry=self.entry();state=entry['state']
@@ -95,3 +108,99 @@ class DispositionTests(DispositionBase):
         def publish(*a,**kw):self.allowed=False;return original(*a,**kw)
         with patch.object(self.source.publisher,'publish',publish):self.refused(value,'FORBIDDEN')
         self.assertEqual(self.source.count(),before)
+
+
+class ResumeTests(DispositionBase):
+    """T26: a separately receipted resume releases only the retained remainder."""
+    def test_resume_releases_new_drain_identity_without_git_or_resurrection(self):
+        other=self.disposed();before=deepcopy(self.entry()['state'])
+        head=self.source.head();count=self.source.count();value=self.resume()
+        result=self.send(value)
+        self.assertEqual(result['outcome'],'ACKNOWLEDGED');self.assertIsNone(result['publication'])
+        self.assertEqual(result['drain_id'],before['drain_id'])
+        released=deepcopy(self.entry()['state'])
+        self.assertEqual((released['state'],released['selected'],released['drain_id'],released['attempt']),
+            ('READY',[],None,0))
+        self.assertEqual((self.source.head(),self.source.count()),(head,count))
+        self.assertEqual(self.send(value),result);self.assertEqual(self.entry()['state'],released)
+        drained=self.service.tick()
+        self.assertEqual(drained['state'],'COMMITTED')
+        self.assertNotEqual(drained['drain_id'],before['drain_id'])
+        _,tree=self.source.publisher.project_snapshot(self.source.scope,self.source.settings,current=lambda:None)
+        prefix='projects/'+self.source.scope.project_path
+        self.assertIn(disposition.MARKER,tree.files[prefix+'/log.md'].decode())
+        self.assertNotIn(self.q,tree.files[prefix+'/pending/index.md'].decode())
+        phases=[(t['phase'],t['drain_id']) for t in self.fx.fx.transitions()]
+        self.assertIn(('OPERATOR_DISPOSED',before['drain_id']),phases)
+        self.assertEqual(phases[-1],('COMMITTED',drained['drain_id']))
+        runner=self.entry()['runner']
+        for call in (lambda:runner.recover(before['drain_id']),
+                     lambda:runner.run(drain_id=before['drain_id'],attempt=before['attempt']+1,
+                         selected=before['selected'],at='2026-10-30T00:00:00+00:00')):
+            with self.assertRaises(library.LibraryError) as error:call()
+            self.assertEqual(error.exception.code,'DRAIN_DISPOSED')
+    def test_empty_remainder_resume_makes_no_model_call(self):
+        self.disposed(second=False);marker=self.fx.fx.fixture.marker
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.send(self.resume())['outcome'],'ACKNOWLEDGED')
+        self.assertEqual(self.service.tick()['state'],'EMPTY')
+        self.assertEqual(self.entry()['state']['state'],'IDLE');self.assertFalse(marker.exists())
+    def test_resume_requires_disposition_and_current_same_project_grant(self):
+        self.refused(self.resume(drain='drain-invented'),'STALE_CONTROL_STATE')
+        with self.assertRaises(library.LibraryError) as error:
+            self.service.scheduler.request(self.source.scope.project_identity,resume=True)
+        self.assertEqual(error.exception.code,'PROJECT_NOT_DISPOSED')
+        self.disposed();value=self.resume()
+        self.assertEqual(self.send(value)['outcome'],'ACKNOWLEDGED')
+        released=deepcopy(self.entry()['state'])
+        self.refused({**value,'observed_version':'a'*64},'ID_CONFLICT')
+        self.allowed=False;self.refused(value,'FORBIDDEN');self.allowed=True
+        self.refused({**value,'project_id':'beta'},'PROJECT_UNAVAILABLE')
+        self.assertEqual(self.entry()['state'],released)
+        self.assertEqual(self.send(value)['outcome'],'ACKNOWLEDGED')
+        with self.assertRaises(library.LibraryError) as error:
+            self.service.scheduler.request(self.source.scope.project_identity,retry=True)
+        self.assertEqual(error.exception.code,'PROJECT_NOT_BLOCKED')
+    def test_stale_content_archive_and_store_failure_change_nothing(self):
+        import sqlite3
+        self.disposed();value=self.resume()
+        self.source.capture('newer');self.refused(value,'STALE_CONTROL_STATE')
+        value=self.resume()
+        path='projects/'+self.source.scope.project_path+'/index.md'
+        original=self.source.root_bytes()
+        self.source.mutate({path:original+b'\nLibrary state: archived\n'})
+        self.refused(value,'PROJECT_ARCHIVED')
+        self.source.mutate({path:original})
+        disposed=deepcopy(self.entry()['state']);value=self.resume()
+        with patch.object(LibraryRecords,'_commit',side_effect=sqlite3.OperationalError('disk')):
+            self.refused(value,'RECORD_UNCERTAIN')
+        with LibraryRecords(self.source.records,'deployment-1') as records:
+            self.assertEqual(records.latest_schedule(self.source.scope.project_identity)['manifest'],disposed)
+            operation='human-control-'+library._digest([self.source.scope.project_identity,value['request_id']])
+            self.assertIsNone(records.record(operation,project_identity=self.source.scope.project_identity))
+        self.assertEqual(self.entry()['state'],disposed)
+        self.restart();self.assertEqual(self.entry()['state'],disposed)
+        self.assertEqual(self.send(self.resume(request='resume-after-failure'))['outcome'],'ACKNOWLEDGED')
+
+    def test_lost_resume_response_reconciles_without_second_release(self):
+        import sqlite3
+        self.disposed();value=self.resume()
+        original=LibraryRecords._commit;lost=[False]
+        def commit(records):
+            original(records)
+            if not lost[0]:lost[0]=True;raise sqlite3.OperationalError('lost commit ack')
+        with patch.object(LibraryRecords,'_commit',commit):self.refused(value,'RECORD_UNCERTAIN')
+        self.assertTrue(self.service.scheduler._failed)
+        # The committed release is durable but unacknowledged: the exact request
+        # reconciles its receipt and a later turn is fenced until restart.
+        replay=self.send(value)
+        self.assertEqual(replay['outcome'],'ACKNOWLEDGED')
+        self.assertEqual(self.entry()['state']['state'],'DISPOSED')
+        self.assertEqual(self.send(value),replay)
+        self.restart()
+        released=deepcopy(self.entry()['state'])
+        self.assertEqual(released['state'],'READY')
+        self.assertEqual(self.send(value),replay)
+        with LibraryRecords(self.source.records,'deployment-1') as records:
+            self.assertEqual(records.latest_schedule(self.source.scope.project_identity)['manifest']['sequence'],
+                released['sequence'])

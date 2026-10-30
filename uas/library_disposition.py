@@ -131,7 +131,10 @@ def apply(controls, value, principal, entry, scope, settings):
                 or prior['payload_sha256']!=library._digest(payload)
                 or any(prior['scope'][k]!=scope.canonical()[k] for k in ('human_id','actor_id','subject','project_id','project_identity'))): fail('ID_CONFLICT')
         if prior['receipt'] is not None:
-            if payload['drain_id'] and entry['state']['state']!='DISPOSED':
+            # Reconcile only while the live schedule still shows that batch. A
+            # later resume already released the remainder; an old disposition
+            # must not re-dispose it from this replay.
+            if payload['drain_id'] and entry['state']['drain_id']==payload['drain_id']:
                 recovered=find(publisher,scope,settings,current,payload['drain_id'])
                 if recovered is None: fail('DISPOSITION_EVIDENCE_INVALID')
                 apply_schedule(scheduler,entry,*recovered)
@@ -143,7 +146,7 @@ def apply(controls, value, principal, entry, scope, settings):
             settings,prior['settings_id'],identity,value['request_id'],payload,prior['at'])
         publication=publisher.publication_for(operation,current=current)
         if publication is None: fail('CONTROL_OUTCOME_UNKNOWN')
-        if operation.drain_id:
+        if operation.drain_id and entry['state']['drain_id']==operation.drain_id:
             recovered=find(publisher,scope,settings,current,operation.drain_id)
             if recovered is None: fail('DISPOSITION_EVIDENCE_INVALID')
             apply_schedule(scheduler,entry,*recovered)

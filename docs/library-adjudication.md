@@ -30,7 +30,8 @@ T24's shared active-input busy rule, terminal blocked-batch disposal, untouched
 pending retention, publication recovery and exact request deduplication apply.
 Reports say `adjudicated`/`retained`, not successful model integration. Old drains
 cannot run/recover over the human decision. A later action against a retained item
-uses `drain_id: null`; a separately authorized resume remains T26. Current human
+uses `drain_id: null`; release of the remainder belongs to the separate
+[resume](library-resume.md) action. Current human
 and Project authority is rechecked even for historical receipts. Unknown writes
 are reconciled against canonical publication, never blindly repeated. An absent
 pre-push operation remains unknown and needs fresh inspection/new request.

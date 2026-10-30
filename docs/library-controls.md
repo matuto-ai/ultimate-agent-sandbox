@@ -19,9 +19,10 @@ exclusive private lock prevents competing listeners and permits recovery of the
 owned stale socket after process death. No shell, arbitrary path, clone edit,
 configuration mutation or Participant route is exposed.
 
-The bounded version-1 request contract carries `observe`, `drain`, `retry`, the
-disposition actions, inspection and `requeue`; see [Releasing parked work](library-requeue.md)
-for the release contract.
+The bounded version-1 request contract has `observe`, `inspect`, `reject`,
+`adjudicate`, `drain`, `retry`, `resume`, the archive/lifecycle actions and
+`requeue`; each action's own module owns its fields and evidence, and
+[Releasing parked work](library-requeue.md) owns the release contract.
 An observation names the Project and intended action; it returns current settings
 identity, opaque observed version, scheduler state and drain identity. The version
 binds immutable Project identity/current coordinates, full durable scheduling
@@ -29,8 +30,10 @@ state, configured settings and canonical Project-content digest. Admission reads
 and validates the current Project (including active state), without invoking a
 model or publishing Git. Request JSON may not supply identities, grants or paths.
 
-Drain/retry sends that observed version, settings identity and a unique request
-ID. Retry also names the observed drain identity. State/content/configuration
+Drain/retry/resume sends that observed version, settings identity and a unique
+request ID. Retry additionally names the observed drain identity; resume names
+the disposed drain whose remainder it releases, see
+[Library resume](library-resume.md). State/content/configuration
 changes require refresh. Reuse of an ID with a different action, human identity,
 settings or payload is a conflict. Fresh authority is checked even when replaying
 an old receipt; a new authority version for the same currently authorized human
