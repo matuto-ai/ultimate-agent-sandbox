@@ -855,7 +855,7 @@ class LibraryRecords:
         No external action occurs inside it. A lost commit response is uncertain;
         a fresh Project-fenced receipt read reconciles the whole transition.
         """
-        if (operation.kind not in ('drain','retry') or operation.scope.subject != 'human'
+        if (operation.kind not in ('drain','retry','resume') or operation.scope.subject != 'human'
                 or schedule.kind != 'scheduler-state'
                 or operation.scope.project_identity != schedule.scope.project_identity
                 or receipt['outcome'] != 'ACKNOWLEDGED'

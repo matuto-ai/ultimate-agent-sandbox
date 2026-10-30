@@ -141,3 +141,25 @@ class RecoveryTests(fixture.DispositionBase):
                     self.service.flush();reports=self.fx.fx.reports()
                     keys=[(r['payload']['drain_id'],r['payload']['sequence']) for r in reports]
                     self.assertEqual(len(keys),len(set(keys)))
+
+    def test_restart_after_resume_keeps_remainder_released_and_replay_cannot_re_dispose(self):
+        other=self.blocked();value=self.value()
+        self.assertEqual(self.send(value)['outcome'],'COMMITTED')
+        old=deepcopy(self.entry()['state'])
+        self.assertEqual(self.send(self.resume())['outcome'],'ACKNOWLEDGED')
+        released=deepcopy(self.entry()['state'])
+        def remaining():
+            state=self.entry()['state']
+            return (state['state'],state['selected'],state['drain_id'],state['attempt'])
+        self.assertEqual(remaining(),('READY',[],None,0))
+        self.restart();self.assertEqual(remaining(),('READY',[],None,0))
+        # The original rejection is exact-replayed from its receipt only: the
+        # later resume is not overwritten by the disposed drain.
+        self.assertEqual(self.send(value)['publication']['commit_sha'],old['transition']['resulting_sha'])
+        self.assertEqual(remaining(),('READY',[],None,0))
+        self.restart();self.assertEqual(remaining(),('READY',[],None,0))
+        continued=self.service.tick()
+        self.assertEqual(continued['state'],'COMMITTED')
+        self.assertNotEqual(continued['drain_id'],old['drain_id'])
+        self.restart();self.assertEqual(self.entry()['state']['state'],'READY')
+        self.assertEqual(self.service.tick()['state'],'EMPTY')

@@ -55,7 +55,7 @@ def decode(raw):
     if action == 'observe':
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
-        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect'):
+        if set(value) != keys or value['for_action'] not in ('drain','retry','resume','inspect'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
     elif action in ('reject', 'adjudicate'):
@@ -80,14 +80,16 @@ def decode(raw):
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
-    elif action in ('drain','retry'):
+    elif action in ('drain','retry','resume'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
-        if action == 'retry': keys.add('drain_id')
+        if action in ('retry','resume'): keys.add('drain_id')
         if set(value) != keys: fail('INVALID_CONTROL_REQUEST')
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
         if action == 'retry' and value['drain_id'] is not None: library._token(value['drain_id'], 'drain_id')
+        # Only a terminal disposition has a remainder; resume names that exact drain.
+        if action == 'resume': library._token(value['drain_id'], 'drain_id')
     else: fail('UNKNOWN_CONTROL_ACTION')
     return value
 
@@ -168,7 +170,7 @@ class Controls:
                     'state':entry['state']['state'], 'drain_id':entry['state']['drain_id']}
             operation_id = 'human-control-' + library._digest([key, value['request_id']])
             payload = {'observed_version':value['observed_version']}
-            if kind == 'retry': payload['drain_id'] = value['drain_id']
+            if kind in ('retry','resume'): payload['drain_id'] = value['drain_id']
             with scheduler._records() as records:
                 prior = records.record(operation_id, project_identity=key)
             if prior is not None:
@@ -187,7 +189,7 @@ class Controls:
             if (value['settings_id'] != settings['settings_id']
                     or value['observed_version'] != self._version(entry, scope, settings, target)):
                 fail('STALE_CONTROL_STATE')
-            if kind == 'retry' and value['drain_id'] != entry['state']['drain_id']:
+            if kind in ('retry','resume') and value['drain_id'] != entry['state']['drain_id']:
                 fail('STALE_CONTROL_STATE')
             operation = library.action(scope, settings, kind=kind,
                 operation_id=operation_id, request_id=value['request_id'], payload=payload,
@@ -198,7 +200,7 @@ class Controls:
             current = self._settings(entry)
             if fresh.canonical() != scope.canonical() or current['settings_id'] != settings['settings_id']:
                 fail('STALE_CONTROL_STATE')
-            return scheduler.request(key, retry=kind=='retry', control=operation)
+            return scheduler.request(key, retry=kind=='retry', resume=kind=='resume', control=operation)
 
 
     def _inspect(self, value, principal, entry, scope, settings):

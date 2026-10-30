@@ -24,7 +24,8 @@ and per-item `rejected`/`retained` outcomes in the same Git transition. Untouche
 drafts remain byte-identical and pending, but the Project remains blocked under
 `DISPOSED`. Neither old retries nor direct attempt recovery can resurrect that
 drain. A later rejection of a retained item uses `drain_id:null`, preserves the
-original terminal report and still does not release the Project. Releasing the remainder is a separate, not-yet-implemented human action.
+original terminal report and still does not release the Project. Releasing
+the remainder is the separate receipted [resume](library-resume.md) action.
 
 Only a pushed commit produces `COMMITTED`; its receipt cites that commit.
 Metadata records, logs and Hub reports contain no human reason or draft body.

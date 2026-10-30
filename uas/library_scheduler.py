@@ -112,7 +112,10 @@ class Scheduler:
             state = deepcopy(saved['manifest']) if saved else dict(sequence=0, served=0, state='IDLE',
                 due=None, drain_id=None, selected=[], attempt=0, failures=0, model_failures=0,
                 wake=False, reason=None)
-            entry = dict(scope=scope, runner=runner, context=context, state=state,
+            # ``restored`` records whether any durable schedule existed at
+            # registration; startup recovery may not trust a missing record as
+            # proof that nothing happened.
+            entry = dict(scope=scope, runner=runner, context=context, state=state, restored=saved is not None,
                          subscription=self.publisher.subscribe(scope), version=0)
             self._entries[key] = entry
             if state['state'] == 'DISPOSED':
@@ -135,30 +138,38 @@ class Scheduler:
             self._check(); entry = self._entries[key]; self._authority(entry)
             return deepcopy(entry['state'])
 
-    def request(self, key, *, retry=False, control=None):
+    def request(self, key, *, retry=False, resume=False, control=None):
         """Trusted operator-service request; caller-facing authorization is owned by T22.
 
         retry is the distinct explicit action releasing the original blocked batch.
-        Neither action executes work or changes fair priority/preempts a turn.
+        resume releases only the remainder a blocked-batch disposition retained,
+        as a new drain identity. Neither executes work or changes fair priority.
         """
         with self._lock:
             self._check(); entry = self._entries[key]
+            if retry and resume: fail('INVALID_CONTROL_REQUEST')
+            kind = 'resume' if resume else 'retry' if retry else 'drain'
             if control is None:
                 self._authority(entry)
             else:
-                library._require_scope(control.scope, 'human', 'library-' + ('retry' if retry else 'drain'))
+                library._require_scope(control.scope, 'human', 'library-' + kind)
                 if control.scope.project_identity != key: fail('FORBIDDEN')
                 settings = library.admit_settings_value(entry['runner'].assembler._settings())
                 if settings['settings_id'] != control.settings_id: fail('STALE_CONTROL_STATE')
                 entry['settings'] = settings
             old = entry['state']; now = instant(self.now())
-            if old['state'] == 'DISPOSED': fail('DRAIN_DISPOSED')
+            if old['state'] == 'DISPOSED':
+                if not resume: fail('DRAIN_DISPOSED')
+            elif resume: fail('PROJECT_NOT_DISPOSED')
             if old['state'] == 'BLOCKED' and not retry: fail('PROJECT_BLOCKED')
             if retry and old['state'] != 'BLOCKED': fail('PROJECT_NOT_BLOCKED')
             state = {**old, 'wake':True}
             if old['state'] != 'ACTIVE':
                 state.update(state='READY', due=now.isoformat(), reason=None)
             if retry: state.update(model_failures=0, failures=0)
+            # A resume never continues the disposed drain: its identity and old
+            # batch are dropped, and the next turn mints a fresh drain identity.
+            if resume: state.update(drain_id=None, selected=[], attempt=0, failures=0, model_failures=0)
             return self._save(entry, state, now, control=control)
 
     def reconcile(self, key):
@@ -298,10 +309,15 @@ class Scheduler:
                     fresh, active = self._authority(entry)
                     if fresh.canonical()!=scope.canonical() or active['settings_id']!=settings['settings_id']:
                         fail('CONFIGURATION_CHANGED')
-                disposed=find(self.publisher,scope,settings,current,old['drain_id'])
-                if disposed is not None:
-                    apply_schedule(self,entry,*disposed)
-                    return
+                # A tombstone supersedes a durable schedule only while that
+                # schedule still shows the batch, or when record loss left no
+                # schedule at all but canonical history. A resume cleared that
+                # batch already and never continues the old drain.
+                if old['selected'] or not entry['restored']:
+                    disposed=find(self.publisher,scope,settings,current,old['drain_id'])
+                    if disposed is not None:
+                        apply_schedule(self,entry,*disposed)
+                        return
                 if old['selected']:
                     result = entry['runner'].recover(old['drain_id'])
                     if result is not None:
