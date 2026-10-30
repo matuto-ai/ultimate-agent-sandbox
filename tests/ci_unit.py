@@ -63,15 +63,16 @@ ADDITIONAL_MODULES = frozenset({
 # hosted lanes51-53s cannot absorb it; one parallel one-minute lane preserves
 # all tests and the overall2-3min graph, with no timeout increase.
 # #173 relocation suite measured 6s; synthesis has headroom after #170.
-SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import', 'test_library_relocation'})
+SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_relocation'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'})
 # #175 controls adds ~20s real Git/service/socket proofs; prior scheduler44s
 # and remaining lanes~50s cannot absorb it inside unchanged one-minute jobs.
-# First hosted additional reached60s; move measured terminal9s/stop1.5s/records3s
-# into operator19.4s, not exclusions or enlarged limits.
-OPERATOR_MODULES = frozenset({'test_library_controls', 'test_local_native_terminal', 'test_local_native_stop', 'test_library_records'})
+# Additional reached60s; terminal/stop/records now belong to remainder.
+# Native controls varied19.4–44s, so leave operator alone; the three modules
+# measured5.2s on latest run and remainder37s leaves room without exclusions.
+OPERATOR_MODULES = frozenset({'test_library_controls'})
 assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 PARTITIONS = ('operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
