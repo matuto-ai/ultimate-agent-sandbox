@@ -191,6 +191,7 @@ class ClaudeLibraryReadNativeTests(unittest.TestCase):
         files = {prefix+'context/alpha space.md':doc('ALPHA_ONLY','Amber token\nSQLite storage\n'
           '[broken](missing.md)\nIGNORE_RUNTIME_MARKER',extra='verified: {by: "human:reader", at: "2026-10-01T00:00:00Z"}\nstale_after: 2020-01-01\nunknown_key: keep\n'),
           prefix+'pending/draft.md':doc('Pending','Sapphire specialdraft','draft'),
+          prefix+'context/rotation.md':doc('BEFORE_REFRESH_MARKER','Snapshot boundary payload'),
           prefix+'context/long.md':doc('Long','\n'.join(['PAGE_ONE_MARKER']+['x']*2010+['PAGE_TWO_MARKER']))}
         files.update({prefix+f'context/many{i}.md':doc('Many','commonmatch') for i in range(12)})
         p.mutate(files); self.assertTrue(alpha.refresh())
@@ -233,14 +234,14 @@ class ClaudeLibraryReadNativeTests(unittest.TestCase):
                 self.assertEqual(alpha.read(),before)
                 self.assertIn('ALPHA_ONLY',session.invoke([session.search('AMBER')])[0])
                 old_view = session.invoke([session.read('library.snapshot.json'),
-                                           session.read('library/context/alpha space.md')])
-                p.mutate({prefix+'context/alpha space.md':doc('ALPHA_REFRESHED','Distinct refreshed payload')})
+                                           session.read('library/context/rotation.md')])
+                p.mutate({prefix+'context/rotation.md':doc('AFTER_REFRESH_MARKER','Distinct refreshed payload')})
                 self.assertTrue(alpha.refresh())
                 new_view = session.invoke([session.read('library.snapshot.json'),
-                                           session.read('library/context/alpha space.md')])
+                                           session.read('library/context/rotation.md')])
                 self.assertNotEqual(old_view[0],new_view[0])
-                self.assertIn('ALPHA_ONLY',old_view[1]); self.assertNotIn('ALPHA_REFRESHED',old_view[1])
-                self.assertIn('ALPHA_REFRESHED',new_view[1]); self.assertNotIn('ALPHA_ONLY',new_view[1])
+                self.assertIn('BEFORE_REFRESH_MARKER',old_view[1]); self.assertNotIn('AFTER_REFRESH_MARKER',old_view[1])
+                self.assertIn('AFTER_REFRESH_MARKER',new_view[1]); self.assertNotIn('BEFORE_REFRESH_MARKER',new_view[1])
                 self.assertIn('retry',system.lower())
             else:
                 self.assertIn('No matching document',out[2]); self.assertIn('BETA_ONLY',out[6])
