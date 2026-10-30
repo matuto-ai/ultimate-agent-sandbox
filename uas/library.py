@@ -60,7 +60,7 @@ HUMAN_PAYLOADS = {
     "retry": (("drain_id", "observed_version"), ()),
     "defer": (("drain_id", "observed_version"), ()),
     "requeue": (("drain_id", "observed_version"), ()),
-    "resume": (("drain_id", "observed_version"), ("queue_ids",)),
+    "resume": (("drain_id", "observed_version"), ()),
     "reject": (("drain_id", "queue_id", "reason", "observed_version"), ()),
     "adjudicate": (("drain_id", "queue_id", "conclusion", "rationale",
                     "observed_version"), ()),
@@ -831,10 +831,6 @@ def _human_payload(kind, payload, limits):
         types = _array(payload["types"], "payload.types", limits["scan_documents"], nonempty=True)
         if len(types) != len(payload["paths"]) or any(item not in CAPTURE_TYPES for item in types):
             _fail("INVALID_IMPORT_TYPES", "payload.types")
-    if "queue_ids" in payload:
-        for index, queue_id in enumerate(_array(payload["queue_ids"], "payload.queue_ids",
-                                                limits["batch_drafts"], nonempty=True)):
-            _digest_value(queue_id, f"payload.queue_ids[{index}]")
     return payload
 
 

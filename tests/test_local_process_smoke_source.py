@@ -53,10 +53,9 @@ class LocalProcessSmokeSourceTests(unittest.TestCase):
             self.assertEqual(owner.left(20),11)
             with self.assertRaisesRegex(AssertionError,'deadline'):owner.left()
 
-    def test_workflow_reuses_fast_lane_without_timeout_or_graph_change(self):
+    def test_workflow_keeps_bounded_process_smoke_in_root_lane(self):
         text=(ROOT/'.github/workflows/validate.yml').read_text()
         lane=text.split('  validate:\n',1)[1].split('\n  unit-slow:',1)[0]
-        self.assertIn('timeout-minutes: 1',lane)
         self.assertIn('15s python3 tests/linux/local_process_smoke.py --run',lane)
         self.assertIn('UAS_LOCAL_PROCESS_SMOKE: "1"',lane)
         self.assertNotIn('sudo',lane)

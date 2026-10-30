@@ -11,5 +11,5 @@ node tests/pi/auth-contract.mjs
 node tests/pi/resume-contract.mjs
 node tests/pi/library-scan-contract.mjs
 node tests/pi/library-capture-contract.mjs
-python3 tests/pi/parallel-tests.py
+python3 tests/pi/parallel-tests.py "$@"
 cat "$UAS_PI_EVIDENCE"
