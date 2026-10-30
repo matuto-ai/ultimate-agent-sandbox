@@ -32,6 +32,9 @@ def draft(operation):
             lines.append('  - resource: ' + json.dumps(source['resource'], ensure_ascii=False))
             if 'title' in source:
                 lines.append('    title: ' + json.dumps(source['title'], ensure_ascii=False))
+            for key in ('range', 'sha256'):
+                if key in source:
+                    lines.append('    ' + key + ': ' + json.dumps(source[key]))
     lines.extend(['---', '', library_gate.NOTICE, '',
                   'Submission Actor: ' + origin['actor_id'],
                   'Submission time: ' + origin['at'],
