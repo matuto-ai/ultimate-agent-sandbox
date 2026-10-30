@@ -1,4 +1,4 @@
-"""Standard discovery, six complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, seven complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -67,7 +67,11 @@ SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import', '
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'})
-PARTITIONS = ('slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
+# #175 controls adds ~20s real Git/service/socket proofs; prior scheduler44s
+# and remaining lanes~50s cannot absorb it inside unchanged one-minute jobs.
+OPERATOR_MODULES = frozenset({'test_library_controls'})
+assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
+PARTITIONS = ('operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
 assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES
@@ -78,6 +82,8 @@ def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in OPERATOR_MODULES:
+        return 'operator'
     if module in SCHEDULER_MODULES:
         return 'scheduler'
     if module in SYNTHESIS_MODULES:

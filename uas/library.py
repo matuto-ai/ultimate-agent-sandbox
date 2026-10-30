@@ -573,6 +573,52 @@ def human_scope(session, *, binding, kind):
                         human_id=session.manager_id)
 
 
+@dataclass(frozen=True)
+class LocalHuman:
+    """Host-authenticated human, never deserialized from a request.
+
+    The installation supplies this principal after OS peer authentication. Its
+    current grants explicitly name immutable Project identity or None (settings).
+    Owning the Unix socket is not a Project grant. No Room session is required.
+    """
+    human_id: str
+    actor_id: str
+    authority_version: str
+    authorized: object
+    connected: object
+
+    def __post_init__(self):
+        for name in ('human_id','actor_id','authority_version'):
+            _token(getattr(self, name), name)
+        if not callable(self.authorized) or not callable(self.connected):
+            _fail('LIBRARY_AUTHENTICATION_REQUIRED')
+
+    def allowed(self, project_identity, action):
+        return self.connected() is True and self.authorized(self, project_identity, action) is True
+
+
+def local_human_scope(principal, *, binding, kind):
+    """Shared Project admission for authenticated local human actions."""
+    if type(principal) is not LocalHuman: _fail('LIBRARY_AUTHENTICATION_REQUIRED')
+    if kind not in HUMAN_KINDS: _fail('UNKNOWN_OPERATION')
+    action = 'library-' + kind
+    if not principal.allowed(binding['project_identity'], action): _fail('FORBIDDEN')
+    return LibraryScope(seal=_SCOPE_SEAL, subject='human', actor_id=principal.actor_id,
+        authority_version=principal.authority_version, capabilities=(action,),
+        project_id=binding['project_id'], project_identity=binding['project_identity'],
+        project_path=binding['project_path'], reference_root=binding['reference_root'],
+        human_id=principal.human_id)
+
+
+def local_settings_scope(principal):
+    """Separate installation grant; never grants access to any Project."""
+    if type(principal) is not LocalHuman: _fail('LIBRARY_AUTHENTICATION_REQUIRED')
+    if not principal.allowed(None, SETTINGS_CAPABILITY): _fail('FORBIDDEN')
+    return LibraryScope(seal=_SCOPE_SEAL, subject='operator', actor_id=principal.actor_id,
+        authority_version=principal.authority_version, capabilities=(SETTINGS_CAPABILITY,),
+        human_id=principal.human_id)
+
+
 def installation_scope(origin):
     """Shared-settings authority: installation scope, no Project content."""
     if type(origin) is not Origin:
@@ -757,7 +803,7 @@ def _human_payload(kind, payload, limits):
         _commit(payload["source_commit"], "payload.source_commit")
     if "preview_id" in payload:
         _token(payload["preview_id"], "payload.preview_id")
-    if "drain_id" in payload:
+    if "drain_id" in payload and not (kind == "retry" and payload["drain_id"] is None):
         _token(payload["drain_id"], "payload.drain_id")
     if "queue_id" in payload:
         _digest_value(payload["queue_id"], "payload.queue_id")

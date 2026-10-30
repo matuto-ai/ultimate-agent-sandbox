@@ -57,7 +57,7 @@ class Scheduler:
         entry['settings'] = deepcopy(settings)
         return scope, settings
 
-    def _save(self, entry, value, at, *, transition=None):
+    def _save(self, entry, value, at, *, transition=None, control=None):
         # Service-owned operational evidence must survive Project revocation.
         # This does not read or publish Project content under stale authority.
         scope, settings = entry['scope'], entry['settings']
@@ -83,13 +83,19 @@ class Scheduler:
         operation = replace(operation, manifest=value)
         try:
             with self._records() as records:
-                records.begin(operation)
-                records.finish(operation, library.receipt(operation, 'ACKNOWLEDGED', at=at.isoformat(),
-                    acknowledgement=library._digest(value), reason='SCHEDULE_RECORDED'))
+                schedule_receipt = library.receipt(operation, 'ACKNOWLEDGED', at=at.isoformat(),
+                    acknowledgement=library._digest(value), reason='SCHEDULE_RECORDED')
+                if control is None:
+                    records.begin(operation); records.finish(operation, schedule_receipt)
+                else:
+                    response = library.receipt(control, 'ACKNOWLEDGED', at=at.isoformat(),
+                        acknowledgement=library._digest(value), reason='SCHEDULE_RECORDED')
+                    records.schedule_control(control, response, operation, schedule_receipt)
         except BaseException:
             self._failed = True  # reopen/read durable intent before any other turn
             raise
         entry['state'] = value
+        return response if control is not None else None
 
     def register(self, runner, *, context=lambda selected: ((), ()), recovery=False, binding_scope=None):
         """Register a trusted current Project composition; reconnect restores durable state."""
@@ -129,14 +135,22 @@ class Scheduler:
             self._check(); entry = self._entries[key]; self._authority(entry)
             return deepcopy(entry['state'])
 
-    def request(self, key, *, retry=False):
+    def request(self, key, *, retry=False, control=None):
         """Trusted operator-service request; caller-facing authorization is owned by T22.
 
         retry is the distinct explicit action releasing the original blocked batch.
         Neither action executes work or changes fair priority/preempts a turn.
         """
         with self._lock:
-            self._check(); entry = self._entries[key]; self._authority(entry)
+            self._check(); entry = self._entries[key]
+            if control is None:
+                self._authority(entry)
+            else:
+                library._require_scope(control.scope, 'human', 'library-' + ('retry' if retry else 'drain'))
+                if control.scope.project_identity != key: fail('FORBIDDEN')
+                settings = library.admit_settings_value(entry['runner'].assembler._settings())
+                if settings['settings_id'] != control.settings_id: fail('STALE_CONTROL_STATE')
+                entry['settings'] = settings
             old = entry['state']; now = instant(self.now())
             if old['state'] == 'DISPOSED': fail('DRAIN_DISPOSED')
             if old['state'] == 'BLOCKED' and not retry: fail('PROJECT_BLOCKED')
@@ -145,7 +159,7 @@ class Scheduler:
             if old['state'] != 'ACTIVE':
                 state.update(state='READY', due=now.isoformat(), reason=None)
             if retry: state.update(model_failures=0, failures=0)
-            self._save(entry, state, now)
+            return self._save(entry, state, now, control=control)
 
     def reconcile(self, key):
         """T21 startup/reconnect signal, deliberately not an implicit operator retry."""
