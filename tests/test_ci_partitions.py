@@ -81,7 +81,7 @@ class CIPartitionTests(unittest.TestCase):
  'test_library_attempts',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
-        self.assertEqual(ci.OPERATOR_MODULES, {'test_library_retention', 'test_library_controls', 'test_git_payload'})
+        self.assertEqual(ci.OPERATOR_MODULES, {'test_library_retention', 'test_library_controls', 'test_git_payload', 'test_library_repair', 'test_library_repair_native'})
         self.assertEqual(ci.LIFECYCLE_MODULES, {'test_library_records', 'test_library_service', 'test_manager_library_transport'})
         self.assertEqual(ci.DISPOSITION_MODULES, {'test_library_adjudication',
  'test_library_adjudication_native',
