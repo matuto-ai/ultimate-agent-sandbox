@@ -135,7 +135,17 @@ class GotifyDelivery:
 
     def deliver(self, notice):
         if type(notice) is not AttentionNotice: raise LedgerError('INVALID_ATTENTION_METADATA')
-        body = _json(notice.payload()).encode()
+        return self.deliver_payload(notice.payload())
+
+    def deliver_payload(self, payload):
+        """One bounded POST for an already validated metadata-only payload.
+
+        The transport is shared by the run notice above and the Library attention
+        owner; both are finite sanitized metadata, and every size bound still
+        applies here, not only in the producing notice.
+        """
+        body = _json(payload).encode()
+        if len(body) > MAX_NOTICE_BYTES: raise LedgerError('ATTENTION_LIMIT')
         try: secret = self.resolve(self.reference)
         except Exception: return {'outcome': 'not-sent', 'reason': 'GOTIFY_CREDENTIAL_UNAVAILABLE'}
         if type(secret) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', secret):

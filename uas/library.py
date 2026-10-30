@@ -58,7 +58,7 @@ HUMAN_PAYLOADS = {
     "inspect": (("queue_id", "observed_version"), ("drain_id",)),
     "drain": (("observed_version",), ()),
     "retry": (("drain_id", "observed_version"), ()),
-    "defer": (("drain_id", "observed_version"), ()),
+    "defer": (("observed_version",), ()),
     "requeue": (("drain_id", "observed_version"), ()),
     "resume": (("drain_id", "observed_version"), ()),
     "reject": (("drain_id", "queue_id", "reason", "observed_version"), ()),
@@ -1258,6 +1258,10 @@ def operation_manifest(kind, value):
         from .manager_projection import (library_observation as observation, library_ObservationError as ObservationError)
         try: return observation(value)
         except ObservationError: _fail('INVALID_LIBRARY_OBSERVATION')
+    if kind == 'library-attention':
+        from .manager_projection import attention_sample, ProjectionError
+        try: return attention_sample(value)
+        except ProjectionError: _fail('INVALID_LIBRARY_ATTENTION')
     if kind == 'synthesis-batch': return batch_manifest(value)
     if kind in ('scheduler-state','archive-final'): return scheduler_manifest(value)
     if kind == 'source-park': return source_manifest(value)

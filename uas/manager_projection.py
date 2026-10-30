@@ -78,7 +78,7 @@ def _fields(row, fields):
                     or '..' in value.split('/') or any(ord(c) < 32 or ord(c) == 127 for c in value)):
                 raise ProjectionError('INVALID_CHECKOUT_PATH')
             result[key] = value
-        elif key in {'working_tree_observed_at', 'observation_time', 'updated_at', 'window_start', 'window_end', 'next_retry_at', 'projected_at', 'provider_observed_at'}:
+        elif key in {'working_tree_observed_at', 'observation_time', 'updated_at', 'window_start', 'window_end', 'next_retry_at', 'projected_at', 'provider_observed_at', 'snoozed_until'}:
             result[key] = None if row[key] is None else timestamp(row[key])
         elif key == 'review_reference':
             value = row[key]
@@ -193,8 +193,70 @@ def library_observation(value):
 
 LIBRARY_FIELDS = library_FIELDS
 
+# T38 attention is derived only from one T29 observation plus durable snoozes.
+ATTENTION_KINDS = ('PARKED_CONFLICT', 'PROJECT_BLOCKED', 'AUDIT_FAILURE',
+                   'RECOVERY_FAILURE', 'OLDEST_DRAFT_WARNING')
+ATTENTION_FIELDS = ('kind', 'count', 'age_seconds', 'snoozed_until')
+
+
+def attention_fail():
+    raise ProjectionError('INVALID_LIBRARY_ATTENTION')
+
+
+def attention_rows(rows):
+    value = _rows(rows, ATTENTION_FIELDS)
+    for row in value.values():
+        if (row['kind'] not in ATTENTION_KINDS or type(row['count']) is not int
+                or not 0 < row['count'] < 2**53
+                or row['age_seconds'] is not None and (type(row['age_seconds']) is not int
+                    or not 0 <= row['age_seconds'] < 2**53)
+                or row['snoozed_until'] is not None and type(row['snoozed_until']) is not str):
+            attention_fail()
+    return value
+
+
+def attention_sample(value):
+    """One versioned attention cut; unknown never carries rows.
+
+    ``snooze`` holds the durable receipted snooze window and ``episodes`` the
+    per-kind episode numbers that keep one notice per newly blocked or failed
+    episode, so neither depends on the immediately preceding cut surviving.
+    """
+    if type(value) is not dict or set(value) != {'sequence', 'observed_at', 'state',
+            'rows', 'snooze', 'episodes', 'project_identity'}:
+        attention_fail()
+    library_identifier(value['project_identity'])
+    if type(value['sequence']) is not int or not 1 <= value['sequence'] < 2**53: attention_fail()
+    if value['state'] not in ('known', 'unknown'): attention_fail()
+    if value['rows'] != {} and value['state'] == 'unknown': attention_fail()
+    if value['state'] == 'known' or value['observed_at'] is not None:
+        timestamp(value['observed_at'])
+    rows = attention_rows(value['rows']) if value['state'] == 'known' else {}
+    snooze = value['snooze']
+    if snooze is not None:
+        if type(snooze) is not dict or set(snooze) != {'until', 'kinds'}: attention_fail()
+        timestamp(snooze['until'])
+        kinds = snooze['kinds']
+        if (type(kinds) is not list or not 1 <= len(kinds) <= len(ATTENTION_KINDS)
+                or len(set(kinds)) != len(kinds)
+                or any(kind not in ATTENTION_KINDS for kind in kinds)):
+            attention_fail()
+    for row in rows.values():
+        if row['snoozed_until'] is None: continue
+        if snooze is None or row['kind'] not in snooze['kinds'] or row['snoozed_until'] != snooze['until']:
+            attention_fail()
+    episodes = value['episodes']
+    if (type(episodes) is not dict
+            or set(episodes) - set(ATTENTION_KINDS)
+            or any(type(number) is not int or not 1 <= number < 2**53
+                   for number in episodes.values())):
+        attention_fail()
+    return deepcopy(value)
+
+
 EXTERNAL_FIELDS = {
     'library': ('library-service', LIBRARY_FIELDS),
+    'library_attention': ('library-service', ATTENTION_FIELDS),
     'room_lifecycle': ('supervisor', ('phase', 'desired', 'authority', 'error')),
     'seats': ('supervisor', ('participant_id', 'actor_id', 'profile_id', 'runtime', 'enabled')),
     'processes': ('supervisor', ('participant_id', 'incarnation_id', 'epoch', 'state', 'reason')),
@@ -431,6 +493,10 @@ HUB_FIELDS = {
 
 def validate_section_value(section, value):
     """Also enforce the disclosure allowlist on the receiving side."""
+    if section == 'library_attention':
+        if attention_rows(value) != value:
+            raise ProjectionError('UNSUPPORTED_PROJECTED_FIELD')
+        return
     if section == 'library':
         if type(value) is not dict or len(value) != 1: raise ProjectionError('INVALID_LIBRARY_BINDING')
         for key,row in value.items():

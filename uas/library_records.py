@@ -45,6 +45,9 @@ _ATTEMPT_KEYS = ("record_version", "kind", "operation_id", "request_id", "queue_
 # Mutable bundle coordinates stay descriptive; the supplied Operation.canonical
 # contract excludes them so a rename does not break exact-retry reconciliation.
 _COORDINATES = ("project_path",)
+_MANIFEST_KINDS = ("synthesis-attempt", "synthesis-batch", "scheduler-state",
+                   "source-park", "library-observation", "library-attention",
+                   "archive-final")
 
 # An outcome a Producer cannot reach for this kind is refused, so a record
 # cannot claim a publication its operation does not make.
@@ -193,7 +196,7 @@ def _identity(operation):
     _origin(operation.scope)  # validate the authenticated origin fields
     _safe(identity, "identity")
     if operation.manifest is not None:
-        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation", "archive-final"):
+        if operation.kind not in _MANIFEST_KINDS:
             raise LibraryError("INVALID_RECORD", "manifest")
         identity["manifest"] = operation_manifest(operation.kind, operation.manifest)
         expected = identity["manifest"] if operation.kind in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(identity["manifest"])}
@@ -574,6 +577,31 @@ class LibraryRecords:
             return self._attempt(db, row['operation_id']) if row else None
         return self._read(read)
 
+    def latest_attention(self, project_identity):
+        """Latest durable attention cut; a lost receipt stays literally pending."""
+        _token(project_identity, 'project_identity')
+        def read(db):
+            row = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? AND json_extract(identity, '$.kind')='library-attention' ORDER BY rowid DESC LIMIT 1",
+                (project_identity,)).fetchone()
+            return self._attempt(db, row['operation_id']) if row else None
+        return self._read(read)
+
+    def notice_attempts(self, prefix):
+        """Prior attempts for one notice identity: the exact total plus the newest page.
+
+        The total allocates the next attempt identity, so a credential that stays
+        unavailable past the page bound still gets a fresh identity on recovery.
+        """
+        _token(prefix, 'prefix')
+        def read(db):
+            count = db.execute("SELECT COUNT(*) FROM attempts WHERE operation_id LIKE ?",
+                (prefix + '-%',)).fetchone()[0]
+            rows = db.execute("SELECT operation_id FROM attempts WHERE operation_id LIKE ? ORDER BY rowid DESC LIMIT 16",
+                (prefix + '-%',)).fetchall()
+            return {'count': count,
+                    'items': [self._attempt(db, row['operation_id']) for row in rows]}
+        return self._read(read)
+
     def project_history(self, project_identity, *, limit):
         """Bounded owner metadata snapshot; truncation must remain explicit."""
         _token(project_identity, 'project_identity')
@@ -658,7 +686,8 @@ class LibraryRecords:
         latest = {}; active_drains = set()
         by_id = {r['operation_id']:r for r in records}
         for r in records:
-            if r['state'] != 'DETAIL_EXPIRED' and r['kind'] in ('scheduler-state','library-observation','archive','restore'):
+            if r['state'] != 'DETAIL_EXPIRED' and r['kind'] in (
+                    'scheduler-state','library-observation','library-attention','archive','restore'):
                 latest[(r['scope']['project_identity'],r['kind'])] = r
         for r in latest.values():
             protected.add(r['operation_id'])
@@ -887,12 +916,36 @@ class LibraryRecords:
             return finish(db)
         return self._write(work)
 
+    def attention_control(self, operation, receipt, attention, attention_receipt):
+        """One durable transaction for a human snooze receipt and attention cut.
+
+        The acknowledgement digest names the exact snoozed cut, so reconciliation
+        cannot pair a receipt with different attention or repeat the write.
+        """
+        if (operation.kind != 'defer' or operation.scope.subject != 'human'
+                or attention.kind != 'library-attention'
+                or operation.scope.project_identity != attention.scope.project_identity
+                or receipt['outcome'] != 'ACKNOWLEDGED'
+                or receipt['acknowledgement'] != value_digest(attention.manifest)):
+            raise LibraryError('INVALID_OPERATION')
+        begin = self._begin_work(operation)
+        begin_attention = self._begin_work(attention, exclusive=True)
+        finish_attention = self._finish_work(attention, attention_receipt)
+        finish = self._finish_work(operation, receipt)
+        def work(db):
+            prior = begin(db)['record']
+            if prior['receipt'] is not None:
+                raise LibraryError('CONTROL_ALREADY_RECORDED')
+            begin_attention(db); finish_attention(db)
+            return finish(db)
+        return self._write(work)
+
 
 def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
     result = {key: value[key] for key in _ATTEMPT_KEYS}
     if "manifest" in value:
-        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park", "library-observation", "archive-final"): raise LibraryError("INVALID_RECORD")
+        if value["kind"] not in _MANIFEST_KINDS: raise LibraryError("INVALID_RECORD")
         result["manifest"] = operation_manifest(value["kind"], value["manifest"])
         expected = result["manifest"] if value["kind"] in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(result["manifest"])}
         if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")

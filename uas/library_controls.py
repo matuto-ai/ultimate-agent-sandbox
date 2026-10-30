@@ -9,6 +9,7 @@ import hashlib
 import fcntl
 from contextlib import contextmanager
 import os
+from datetime import timedelta
 from pathlib import Path
 import socket
 import stat
@@ -55,9 +56,17 @@ def decode(raw):
     if action == 'observe':
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
-        if set(value) != keys or value['for_action'] not in ('drain','retry','resume','inspect','repair','archive','restore'):
+        if set(value) != keys or value['for_action'] not in (
+                'drain','retry','resume','inspect','repair','archive','restore','defer'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
+    elif action == 'defer':
+        # Attention snooze only: no drain, queue or content identity is supplied.
+        if set(value) != {'version','action','project_id','request_id','settings_id','observed_version'}:
+            fail('INVALID_CONTROL_REQUEST')
+        library._token(value['request_id'], 'request_id')
+        library._digest_value(value['settings_id'], 'settings_id')
+        library._digest_value(value['observed_version'], 'observed_version')
     elif action in ('reject', 'adjudicate'):
         content = ('reason',) if action == 'reject' else ('conclusion', 'rationale')
         if set(value) != {'version','action','project_id','queue_id','drain_id','request_id','settings_id','observed_version', *content}:
@@ -195,10 +204,13 @@ class Controls:
             if kind in ('reject', 'adjudicate'):
                 from .library_disposition import apply
                 return apply(self, value, principal, entry, scope, settings)
+            if value['action'] == 'defer':
+                return self._defer(value, principal, entry, scope, settings)
             if kind == 'inspect':
                 return self._inspect(value, principal, entry, scope, settings)
             if value['action'] == 'observe':
                 scheduler._check()
+                if kind == 'defer': return self._attention_evidence(entry, scope, settings)
                 target = self._target(entry,scope,settings,principal,kind)
                 return {'version':1, 'project_id':scope.project_id,
                     'settings_id':settings['settings_id'], 'observed_version':self._version(entry,scope,settings,target),
@@ -237,6 +249,79 @@ class Controls:
                 fail('STALE_CONTROL_STATE')
             return scheduler.request(key, retry=kind=='retry', resume=kind=='resume', control=operation)
 
+
+    def _attention_evidence(self, entry, scope, settings):
+        """Current durable attention cut identity; unknown attention is not snoozable."""
+        with self.service.scheduler._records() as records:
+            saved = records.latest_attention(scope.project_identity)
+        if saved is None: fail('ATTENTION_UNAVAILABLE')
+        sample = saved['manifest']
+        if sample['state'] != 'known': fail('ATTENTION_UNKNOWN')
+        if self._settings(entry)['settings_id'] != settings['settings_id']:
+            fail('STALE_CONTROL_STATE')
+        return {'version':1, 'project_id':scope.project_id,
+                'settings_id':settings['settings_id'],
+                'observed_version':library._digest(sample)}
+
+    def _defer(self, value, principal, entry, scope, settings):
+        """Receipted attention snooze; work, parking and blocked state are untouched.
+
+        The cut identity binds the exact sampled attention, so a newer observation
+        requires refresh. Exact request retry reads its receipt; a second snooze
+        while one is active is refused rather than silently extended.
+        """
+        from . import library_attention
+        scheduler = self.service.scheduler
+        payload = {'observed_version':value['observed_version']}
+        operation_id = 'human-control-' + library._digest([scope.project_identity, value['request_id']])
+        with scheduler._records() as records:
+            prior = records.record(operation_id, project_identity=scope.project_identity)
+        if prior is not None:
+            original = prior['scope']
+            if (prior['kind'] != 'defer' or prior['settings_id'] != value['settings_id']
+                    or prior['payload_sha256'] != library._digest(payload)
+                    or any(original[k] != scope.canonical()[k] for k in
+                           ('human_id','actor_id','subject','project_id','project_identity'))):
+                fail('ID_CONFLICT')
+            if prior['receipt'] is not None: return deepcopy(prior['receipt'])
+            fail('CONTROL_OUTCOME_UNKNOWN')
+
+        def current():
+            if (self._scope(principal, entry, 'defer').canonical() != scope.canonical()
+                    or self._settings(entry)['settings_id'] != settings['settings_id']):
+                fail('STALE_CONTROL_STATE')
+
+        if value['settings_id'] != settings['settings_id']: fail('STALE_CONTROL_STATE')
+        current()
+        if value['observed_version'] != self._attention_evidence(entry, scope, settings)['observed_version']:
+            fail('STALE_CONTROL_STATE')
+        scheduler._check()
+        with scheduler._records() as records:
+            saved = records.latest_attention(scope.project_identity)
+        if saved is None: fail('ATTENTION_UNAVAILABLE')
+        sample = saved['manifest']
+        if sample['state'] != 'known': fail('ATTENTION_UNKNOWN')
+        if library._digest(sample) != value['observed_version']: fail('STALE_CONTROL_STATE')
+        now = scheduler.now()
+        if library_attention.snoozes(sample, now=now): fail('ATTENTION_ALREADY_SNOOZED')
+        if not sample['rows']: fail('ATTENTION_NOT_PRESENT')
+        until = (now + timedelta(seconds=library_attention.SNOOZE_SECONDS)).isoformat()
+        kinds = sorted({row['kind'] for row in sample['rows'].values()})
+        snoozed = {**sample, 'sequence': sample['sequence'] + 1,
+                   'rows': {key:{**row, 'snoozed_until':until}
+                            for key, row in sample['rows'].items()},
+                   'snooze': {'until':until, 'kinds':kinds}}
+        at = now.isoformat()
+        operation = library.action(scope, settings, kind='defer', operation_id=operation_id,
+            request_id=value['request_id'], payload=payload, at=at)
+        attention = library_attention.sample_operation(scope, settings, snoozed, at)
+        receipt = library.receipt(operation, 'ACKNOWLEDGED', at=at,
+            acknowledgement=library._digest(snoozed), reason='ATTENTION_SNOOZED')
+        current()
+        with scheduler._records() as records:
+            records.attention_control(operation, receipt, attention,
+                library_attention.sample_receipt(attention, at=at, reason='ATTENTION_SNOOZED'))
+        return receipt
 
     def _inspect(self, value, principal, entry, scope, settings):
         """One committed pending item; no body receipt, event, cache or fetch.
