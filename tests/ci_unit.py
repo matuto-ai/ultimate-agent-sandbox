@@ -1,4 +1,4 @@
-"""Standard discovery, six complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, seven complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -51,10 +51,10 @@ INTEGRATION_MODULES = frozenset({'test_library_assembly', 'test_context', 'test_
 ADDITIONAL_MODULES = frozenset({
     'test_library_hub',
     'test_library_enqueue',
-    'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
+    'test_local_three_runs',
     'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
     'test_native_claude_checks', 'test_native_git_operations',
-    'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
+    'test_forge_mutation_audit', 'test_manager_read_model',
     'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
     'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
     'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
@@ -67,7 +67,14 @@ SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attemp
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'})
-PARTITIONS = ('slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
+# #175 controls adds ~20s real Git/service/socket proofs; prior scheduler44s
+# and remaining lanes~50s cannot absorb it inside unchanged one-minute jobs.
+# Additional reached60s; terminal/stop/records now belong to remainder.
+# Native controls varied19.4–44s, so leave operator alone; the three modules
+# measured5.2s on latest run and remainder37s leaves room without exclusions.
+OPERATOR_MODULES = frozenset({'test_library_controls'})
+assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
+PARTITIONS = ('operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
 assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES
@@ -78,6 +85,8 @@ def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in OPERATOR_MODULES:
+        return 'operator'
     if module in SCHEDULER_MODULES:
         return 'scheduler'
     if module in SYNTHESIS_MODULES:
@@ -143,7 +152,7 @@ def main(argv=None):
     selected = cases if args.partition == 'all' else groups[args.partition]
     print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
-          f'scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
+          f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
     return 0 if result.wasSuccessful() else 1

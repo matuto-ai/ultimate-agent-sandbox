@@ -59,6 +59,7 @@ class VMCITriggerTests(unittest.TestCase):
           - {partition: additional, name: unit-additional}
           - {partition: synthesis, name: unit-synthesis}
           - {partition: scheduler, name: unit-scheduler}
+          - {partition: operator, name: unit-operator}
 """
                     self.assertEqual(jobs['unit-integration'].count(matrix), 1)
                     self.assertEqual(jobs['unit-integration'].replace(matrix, '', 1)

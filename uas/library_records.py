@@ -515,6 +515,9 @@ class LibraryRecords:
     # --- writes ----------------------------------------------------------
 
     def begin(self, operation, *, exclusive=False):
+        return self._write(self._begin_work(operation, exclusive=exclusive))
+
+    def _begin_work(self, operation, *, exclusive=False):
         """Durably record one attempt intent; no acknowledgement before commit.
 
         An exact repeat returns the committed record unchanged. Reusing a
@@ -561,7 +564,7 @@ class LibraryRecords:
                         canonical, _now()))
             return {"state": "PENDING", "record": self._attempt(db, operation.operation_id)}
 
-        return self._write(work)
+        return work
 
     def _capacity(self, db):
         pending = db.execute("SELECT count(*) FROM attempts WHERE receipt IS NULL").fetchone()[0]
@@ -569,6 +572,9 @@ class LibraryRecords:
             raise LibraryError("RECORD_CAPACITY")
 
     def finish(self, operation, receipt):
+        return self._write(self._finish_work(operation, receipt))
+
+    def _finish_work(self, operation, receipt):
         """Durably record the terminal receipt before any acknowledgement.
 
         The receipt must describe this stored attempt. An exact repeat returns
@@ -611,6 +617,31 @@ class LibraryRecords:
                        (value, _now(), operation.operation_id))
             return self._attempt(db, operation.operation_id)
 
+        return work
+
+    def schedule_control(self, operation, receipt, schedule, schedule_receipt):
+        """One durable transaction for a human acknowledgement and schedule intent.
+
+        No external action occurs inside it. A lost commit response is uncertain;
+        a fresh Project-fenced receipt read reconciles the whole transition.
+        """
+        if (operation.kind not in ('drain','retry') or operation.scope.subject != 'human'
+                or schedule.kind != 'scheduler-state'
+                or operation.scope.project_identity != schedule.scope.project_identity
+                or receipt['outcome'] != 'ACKNOWLEDGED'
+                or receipt['acknowledgement'] != value_digest(schedule.manifest)):
+            raise LibraryError('INVALID_OPERATION')
+        begin = self._begin_work(operation)
+        begin_schedule = self._begin_work(schedule, exclusive=True)
+        finish_schedule = self._finish_work(schedule, schedule_receipt)
+        finish = self._finish_work(operation, receipt)
+        def work(db):
+            prior = begin(db)['record']
+            if prior['receipt'] is not None:
+                # Caller reconciles before choosing a new sequence; never repeat.
+                raise LibraryError('CONTROL_ALREADY_RECORDED')
+            begin_schedule(db); finish_schedule(db)
+            return finish(db)
         return self._write(work)
 
 
