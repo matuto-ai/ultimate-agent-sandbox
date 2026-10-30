@@ -44,8 +44,10 @@ or hidden workspace copy is created.
 Same librarian ID/canonical payload recovers the original publication without
 another content commit or log entry. Different payload under that ID conflicts;
 different IDs remain distinct drafts. Original Actor, optional Run and submission
-time are read from durable records on every retry; later attempts retain their
-actual Actor, time, Command and outcome separately. Retry does not weaken Hub
+time are read from durable records on every retry; each admitted capture/retry
+attempt retains its actual Actor, time, Command and outcome separately. Malformed
+input and conflicting identities are refused before attempt admission and do not
+replace an existing journal row; T09 owns any separate Hub refusal audit. Retry does not weaken Hub
 origin equality. The metadata schema remains backward-compatible with records
 that have no optional Run field.
 
