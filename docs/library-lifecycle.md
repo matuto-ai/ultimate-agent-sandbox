@@ -61,3 +61,6 @@ cannot skip on GitHub Actions. Failure, restart, lost synthesis/archive/restore
 acknowledgements, fresh authority, history preservation and gate rejection are
 covered. Independent full-diff Standards/Specification/Runtime review and exact
 hosted CI remain required; this does not qualify production model/storage/VM.
+
+For separately authorized guidance contributions and unrecorded outcomes during
+archive freeze, see the [private promotion handoff](library-promotion.md).
