@@ -232,6 +232,7 @@ class AttemptTests(unittest.TestCase):
         code = """
 import os, json, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[3])
 from test_library_attempts import AttemptTests
 from uas.library_records import LibraryRecords
 case=AttemptTests();case.setUp()
@@ -254,7 +255,7 @@ elif boundary=='push':
 case.run_attempt()
 raise AssertionError('crash boundary not reached')
 """
-        process=subprocess.run([sys.executable,'-c',code,str(state),boundary],capture_output=True,timeout=20)
+        process=subprocess.run([sys.executable,'-c',code,str(state),boundary,str(Path(__file__).resolve().parent)],capture_output=True,timeout=20)
         self.assertEqual(process.returncode,91,process.stderr.decode())
         data=json.loads(state.read_text());self.addCleanup(lambda:shutil.rmtree(data['base']))
         recovered=AttemptTests();source=assembly_tests.AssemblyTests()
