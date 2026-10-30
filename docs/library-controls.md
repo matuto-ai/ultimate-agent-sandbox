@@ -19,7 +19,9 @@ exclusive private lock prevents competing listeners and permits recovery of the
 owned stale socket after process death. No shell, arbitrary path, clone edit,
 configuration mutation or Participant route is exposed.
 
-The bounded version-1 request contract has only `observe`, `drain`, and `retry`.
+The bounded version-1 request contract carries `observe`, `drain`, `retry`, the
+disposition actions, inspection and `requeue`; see [Releasing parked work](library-requeue.md)
+for the release contract.
 An observation names the Project and intended action; it returns current settings
 identity, opaque observed version, scheduler state and drain identity. The version
 binds immutable Project identity/current coordinates, full durable scheduling

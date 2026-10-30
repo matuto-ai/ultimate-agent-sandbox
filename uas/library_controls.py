@@ -55,7 +55,7 @@ def decode(raw):
     if action == 'observe':
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
-        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect','repair'):
+        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect','repair','requeue'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
     elif action in ('reject', 'adjudicate'):
@@ -80,14 +80,17 @@ def decode(raw):
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
-    elif action in ('drain','retry','repair'):
+    elif action in ('drain','retry','repair','requeue'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
-        if action == 'retry': keys.add('drain_id')
+        if action in ('retry','requeue'): keys.add('drain_id')
         if set(value) != keys: fail('INVALID_CONTROL_REQUEST')
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
+        # Retry may retry a pre-batch selection ticket; requeue always names the
+        # drain whose recorded parked outcomes it may release.
         if action == 'retry' and value['drain_id'] is not None: library._token(value['drain_id'], 'drain_id')
+        if action == 'requeue': library._token(value['drain_id'], 'drain_id')
     else: fail('UNKNOWN_CONTROL_ACTION')
     return value
 
@@ -179,6 +182,9 @@ class Controls:
                 return handle(self, value, principal, entry, scope, settings)
             if kind in ('reject', 'adjudicate'):
                 from .library_disposition import apply
+                return apply(self, value, principal, entry, scope, settings)
+            if kind == 'requeue' and value['action'] == 'requeue':
+                from .library_requeue import apply
                 return apply(self, value, principal, entry, scope, settings)
             if kind == 'inspect':
                 return self._inspect(value, principal, entry, scope, settings)

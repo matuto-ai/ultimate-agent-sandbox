@@ -50,7 +50,8 @@ without partial content mutation. All attributable failed drafts are parked in
 one compiler-validated canonical commit, retaining draft bytes and exact safe
 reason in the pending index/log. Unrelated drafts remain unchanged and can be
 selected in a subsequent bounded attempt. No partial model request is returned.
-Already parked drafts refuse until the separate authorized requeue path acts.
+Already parked drafts refuse until the separate authorized requeue path acts;
+see [Releasing parked work](library-requeue.md).
 
 The assembly attempt ID derives from immutable Project identity, drain ID and
 attempt. Its input SHA, selections, settings, scope and original timestamp are

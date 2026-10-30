@@ -38,7 +38,7 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| disposition |35.8|All six rejection/adjudication functional, recovery and native modules|
+| disposition |42.3|All six rejection/adjudication functional, recovery and native modules plus T27 requeue|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -66,8 +66,19 @@ repair (21 tests), its native transport (4), and the existing retention module.
 Hosted timestamp deltas estimate10.7s +3.2s +9.3s =23.2s suite time, leaving
 roughly27s for setup/cleanup and variance under the unchanged60s deadline.
 `operator` retains controls and Git-payload tests (about30s suite time);
-`disposition` retains its original six modules. No existing test is removed,
+`disposition` retains its original six modules plus T27's requeue release module. No existing test is removed,
 weakened, or duplicated; future modules still default to remainder. The exact
 partition/workflow contract checks include this lane and all downstream jobs
 still require every matrix member. No timeout, permission, or runtime-budget
 policy changes accompany this test-capacity adjustment.
+
+## T27 requeue capacity (#191)
+
+The requeue release module measured36.6 seconds locally for seven real
+Git/SQLite/Service cases. Scaled by the ratio this document derives from hosted
+logs, that adds about6.5 seconds to the existing disposition family, so the
+disposition lane estimate rises from35.8 to42.3 seconds: roughly18 seconds below
+the unchanged deadline. Keeping the rejection, adjudication, recovery, native and
+requeue proofs in one behavioural family avoids opening a near-full sibling lane;
+no test was moved out or excluded to make room. The next hosted run must confirm
+this estimate or rebalance the lane.
