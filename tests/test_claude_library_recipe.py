@@ -51,3 +51,26 @@ class ClaudeLibraryRecipeTests(recipe_tests.NativeClaudeRecipeTests):
         profile['tools']=['library.enqueue'];profile['capabilities']=[]
         with self.assertRaises(NativeRecipeError):build()
         profile['tools']=[];self.assertEqual(build().tool_profile,'native-v1')
+        profile['tools']=['Read','Bash']
+        with self.assertRaises(NativeRecipeError):build()
+        roots['reference']='/project/reference'
+        mounts=tuple(NativeMount(v,v,k=='reference') for k,v in roots.items())+(NativeMount(runtime,runtime,False),NativeMount(room['state_root']+'/peer','/peer',True))
+        self.assertEqual(build().tool_profile,'library-read-v1')
+        for mixed in (['Read'],['Bash'],['Read','Bash','library.enqueue'],['Read','Bash','gh']):
+            profile['tools']=mixed
+            with self.assertRaises(NativeRecipeError):build()
+
+    def test_native_read_requires_separate_fixed_readonly_projection_and_identity(self):
+        from uas.native_pi_recipe import NativeMount
+        with self.assertRaises(NativeRecipeError): self.make(tool_profile='library-read-v1')
+        mounts=(NativeMount('/project/repo','/project/repo',False),
+                NativeMount('/published/project-a','/project/reference',True),
+                NativeMount('/runtime','/runtime',False),NativeMount('/sockets','/transport',True))
+        selected=self.make(tool_profile='library-read-v1',mounts=mounts)
+        self.assertEqual(selected.host_spec(manifest_in_image='/opt/uas/claude-manifest.json')['Cmd'][-1],'library-read-v1')
+        self.assertNotEqual(selected.identity['recipe_sha256'],self.make().identity['recipe_sha256'])
+        with self.assertRaises(NativeRecipeError): self.make(tool_profile='library-read-v1',mounts=tuple(
+            NativeMount(m.source,m.destination,False) if m.destination=='/project/reference' else m for m in mounts))
+        for artifact in ('/opt/uas/runtime/claude/library-read.mjs','/opt/uas/runtime/pi/library-scan.mjs',
+                         '/opt/uas/pi/node_modules/yaml/package.json','/opt/uas/pi/node_modules/yaml/dist/index.js'):
+            self.assertIn(artifact,ARTIFACTS)

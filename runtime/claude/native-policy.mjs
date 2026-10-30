@@ -1,16 +1,22 @@
 // Opt-in native MCP profile. The tool-less fixture policy is intentionally untouched.
 import {NativeState, CLI_VERSION} from './sdk-policy.mjs';
+import {LIBRARY_READ_PROFILE, LIBRARY_READ_TOOLS, LIBRARY_READ_GUIDANCE} from './library-read.mjs';
 export const SERVER = 'uas';
 export const TOOL_NAMES = Object.freeze(['mcp__uas__uas_peer', 'mcp__uas__uas_review', 'mcp__uas__gh']);
 export const LIBRARY_TOOL_NAMES = Object.freeze(['mcp__uas__library_enqueue']);
 export function profileTools(profile = 'native-v1') {
   if (profile === 'native-v1') return TOOL_NAMES;
+  if (profile === LIBRARY_READ_PROFILE) return LIBRARY_READ_TOOLS;
   if (profile === 'library-capture-v1') return LIBRARY_TOOL_NAMES;
   throw Error('unqualified-native-profile');
 }
 const exact = (actual, wanted) => Array.isArray(actual) && actual.length === wanted.length
   && new Set(actual).size === actual.length && actual.every(x => wanted.includes(x));
-export function requireMcp(statuses) {
+export function requireMcp(statuses, profile = 'native-v1') {
+  if (profile === LIBRARY_READ_PROFILE) {
+    if (!Array.isArray(statuses) || statuses.length) throw Error('unexpected-native-mcp');
+    return;
+  }
   if (!Array.isArray(statuses) || statuses.length !== 1 || statuses[0]?.name !== SERVER
       || statuses[0]?.status !== 'connected') throw Error('native-mcp-unavailable');
 }
@@ -26,13 +32,16 @@ export function nativeOptions({binary, cwd, home, model, sessionId, helper, endp
     env: {PATH:'/opt/uas/node/bin:/usr/bin:/bin', HOME:home, CLAUDE_CONFIG_DIR:home + '/config',
       ...(providerToken === undefined ? {} : {CLAUDE_CODE_OAUTH_TOKEN:providerToken}),
       LANG:'C.UTF-8', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1', CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS:'1'},
-    tools:[], mcpServers:{uas:{type:'stdio',command:helper,args:[endpoint,...(profile === 'native-v1' ? [] : [profile])],env:{PATH:'/opt/uas/node/bin:/usr/bin:/bin',LANG:'C.UTF-8'}}},
-    strictMcpConfig:true, settingSources:[], allowedTools:[...names], permissionMode:'default', maxTurns:16, model,
+    tools:profile === LIBRARY_READ_PROFILE ? [...LIBRARY_READ_TOOLS] : [], mcpServers:profile === LIBRARY_READ_PROFILE ? {} : {uas:{type:'stdio',command:helper,args:[endpoint,...(profile === 'native-v1' ? [] : [profile])],env:{PATH:'/opt/uas/node/bin:/usr/bin:/bin',LANG:'C.UTF-8'}}},
+    strictMcpConfig:true, settingSources:[], allowedTools:profile === LIBRARY_READ_PROFILE ? [] : [...names], permissionMode:'default', maxTurns:16, model,
+    ...(profile === LIBRARY_READ_PROFILE ? {permissionPrompts:'host', disallowedTools:['mcp__*'],
+      settings:{permissions:{ask:[...LIBRARY_READ_TOOLS]}},
+      systemPrompt:{type:'preset',preset:'claude_code',append:LIBRARY_READ_GUIDANCE}} : {}),
     ...(resume ? {resume:sessionId} : {sessionId}),
     extraArgs:{bare:null, restricted:null, 'replay-user-messages':null}};
 }
 export class NativeToolState extends NativeState {
-  constructor(sessionId, profile = 'native-v1') { super(sessionId); this.allowed = profileTools(profile); this.tools = new Set(); this.seenTools=new Set(); this.turnBound=false; this.frames=0; }
+  constructor(sessionId, profile = 'native-v1') { super(sessionId); this.profile = profile; this.allowed = profileTools(profile); this.tools = new Set(); this.seenTools=new Set(); this.turnBound=false; this.frames=0; }
   begin(uuid,content) { super.begin(uuid,content); this.turnBound=false; this.frames=0; this.seenTools.clear(); }
   event(e) {
     if (this.fenced) return;
@@ -40,7 +49,7 @@ export class NativeToolState extends NativeState {
     if (e.type === 'system' && e.subtype === 'init') {
       if (e.claude_code_version !== CLI_VERSION || !exact(e.tools, this.allowed)
           || e.mcp_server_errors?.length || e.plugin_errors?.length) return this.hold('unsupported-native-profile');
-      try { requireMcp(e.mcp_servers); } catch { return this.hold('unsupported-native-profile'); }
+      try { requireMcp(e.mcp_servers, this.profile); } catch { return this.hold('unsupported-native-profile'); }
       this.initialized = true; this.revision++; return;
     }
     if (e.type === 'assistant') {
