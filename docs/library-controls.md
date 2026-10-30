@@ -59,3 +59,5 @@ sandbox denies Unix socket creation (EPERM), so its native cases are explicitly
 skipped, not claimed passing; GitHub Actions must execute them and **fails** rather
 than skipping on EPERM. This is deterministic fixture evidence, not live-provider,
 production-host authentication integration, account, VM or deployment evidence.
+
+Explicit index-only repair and its conservative uncertainty/recovery contract are documented in [library-repair.md](library-repair.md).

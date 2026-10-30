@@ -1,4 +1,4 @@
-"""Standard discovery, ten complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, eleven complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -81,11 +81,16 @@ SYNTHESIS_MODULES = frozenset({'test_context',
 
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'})
 
-OPERATOR_MODULES = frozenset({'test_library_retention', 'test_library_controls', 'test_git_payload'})
+OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
+
+# #182 measured repair+native+retention ~23s; keep setup/variance margin.
+MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
-LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service'})
+# #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
+# leaves margin in the existing60s lane, without changing discovery or limits.
+LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service', 'test_manager_library_transport'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
@@ -94,9 +99,9 @@ DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_disposition_native',
  'test_library_disposition_recovery'})
 
-PARTITIONS = ('lifecycle', 'disposition', 'inspection', 'operator', 'slow',
+PARTITIONS = ('maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
-MODULE_GROUPS = (LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
+MODULE_GROUPS = (MAINTENANCE_MODULES, LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
                 OPERATOR_MODULES, SLOW_MODULES, INTEGRATION_MODULES,
                 ADDITIONAL_MODULES, SYNTHESIS_MODULES, SCHEDULER_MODULES)
 assert sum(map(len, MODULE_GROUPS)) == len(set().union(*MODULE_GROUPS))
@@ -106,6 +111,8 @@ def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in MAINTENANCE_MODULES:
+        return 'maintenance'
     if module in LIFECYCLE_MODULES:
         return 'lifecycle'
     if module in DISPOSITION_MODULES:
@@ -177,7 +184,7 @@ def main(argv=None):
         raise ValueError('empty discovered unit partition')
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
-    print(f'Unit inventory: total={len(cases)} lifecycle={len(groups["lifecycle"])} disposition={len(groups["disposition"])} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
+    print(f'Unit inventory: total={len(cases)} maintenance={len(groups["maintenance"])} lifecycle={len(groups["lifecycle"])} disposition={len(groups["disposition"])} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
           f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)

@@ -55,7 +55,7 @@ def decode(raw):
     if action == 'observe':
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
-        if set(value) != keys or value['for_action'] not in ('drain','retry','resume','inspect'):
+        if set(value) != keys or value['for_action'] not in ('drain','retry','resume','inspect','repair'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
     elif action in ('reject', 'adjudicate'):
@@ -80,7 +80,7 @@ def decode(raw):
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
-    elif action in ('drain','retry','resume'):
+    elif action in ('drain','retry','resume','repair'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
         if action in ('retry','resume'): keys.add('drain_id')
         if set(value) != keys: fail('INVALID_CONTROL_REQUEST')
@@ -143,6 +143,25 @@ class Controls:
         if project_state(tree,library_bundle._prefix(scope)) != 'active': fail('PROJECT_ARCHIVED')
         return library._digest({p:hashlib.sha256(data).hexdigest() for p,data in tree.files.items()})
 
+    def reconcile(self, raw, principal):
+        """Read-only recovery: an absent service reservation can never write.
+
+        The scheduler RLock covers both lookup and the existing disposition
+        duplicate path. That path may finish operational receipts, not republish.
+        """
+        value = decode(raw)
+        if value['action'] not in ('reject', 'adjudicate', 'repair'):
+            fail('INVALID_CONTROL_REQUEST')
+        with self.service.scheduler._lock:
+            entry = self._entry(value['project_id'])
+            scope = self._scope(principal, entry, value['action'])
+            identity = 'human-control-' + library._digest([scope.project_identity, value['request_id']])
+            with self.service.scheduler._records() as records:
+                prior = records.record(identity, project_identity=scope.project_identity)
+            if prior is None:
+                fail('CONTROL_OUTCOME_UNKNOWN')
+            return self.handle(raw, principal)
+
     def handle(self, raw, principal):
         value = decode(raw)
         if value['action'] in ('settings-observe','settings-update'):
@@ -157,6 +176,9 @@ class Controls:
             key = scope.project_identity
             # Fresh configured authority/settings; no authority inferred from UID.
             settings = self._settings(entry)
+            if kind == 'repair':
+                from .library_repair import handle
+                return handle(self, value, principal, entry, scope, settings)
             if kind in ('reject', 'adjudicate'):
                 from .library_disposition import apply
                 return apply(self, value, principal, entry, scope, settings)

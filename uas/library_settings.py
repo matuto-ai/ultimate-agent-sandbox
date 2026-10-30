@@ -15,7 +15,7 @@ from pathlib import Path
 import sqlite3
 import stat
 
-from . import library, library_gate
+from . import library
 
 MAX_REQUEST = library.MAX_SETTINGS_BYTES
 MAX_STORE_BYTES = 16 * 1024 * 1024
@@ -37,9 +37,10 @@ def shared(value):
     candidate = deepcopy(value)
     if type(candidate) is not dict or set(candidate) != {'limits','filters'}:
         fail('INVALID_SHARED_SETTINGS')
-    if (type(candidate['filters']) is dict and candidate['filters'].get('heuristic') == 'block'
-            and not library_gate.heuristic_qualified()):
-        fail('HEURISTIC_NOT_QUALIFIED')
+    if type(candidate['filters']) is dict and candidate['filters'].get('heuristic') == 'block':
+        # The parser qualification dependency is needed only to enable blocking.
+        from . import library_gate
+        if not library_gate.heuristic_qualified(): fail('HEURISTIC_NOT_QUALIFIED')
     return candidate
 
 
@@ -174,7 +175,15 @@ class SettingsOwner:
         finally: self._pin.reset(token)
 
     def handle(self, raw, principal):
+        return self._handle(raw, principal, reconcile=False)
+
+    def reconcile(self, raw, principal):
+        """Receipt-only lookup; never applies an unexecuted settings update."""
+        return self._handle(raw, principal, reconcile=True)
+
+    def _handle(self, raw, principal, *, reconcile):
         value = decode(raw)
+        if reconcile and value['action'] != 'settings-update': fail('INVALID_SETTINGS_REQUEST')
         scope = library.local_settings_scope(principal)
         if value['deployment'] != self.deployment: fail('WRONG_SETTINGS_SCOPE')
         with self._db() as db:
@@ -198,6 +207,7 @@ class SettingsOwner:
                 library.audit_metadata({k:v for k,v in result.items() if k != 'publication'})
                 library.local_settings_scope(principal)
                 return result
+            if reconcile: fail('SETTINGS_OUTCOME_UNKNOWN')
             if db.execute('SELECT count(*) FROM requests').fetchone()[0] >= MAX_REQUESTS:
                 fail('SETTINGS_CAPACITY_EXHAUSTED')
             at = self.now().isoformat(); library._timestamp(at,'at')
