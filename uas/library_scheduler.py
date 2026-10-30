@@ -57,11 +57,25 @@ class Scheduler:
         entry['settings'] = deepcopy(settings)
         return scope, settings
 
-    def _save(self, entry, value, at):
+    def _save(self, entry, value, at, *, transition=None):
         # Service-owned operational evidence must survive Project revocation.
         # This does not read or publish Project content under stale authority.
         scope, settings = entry['scope'], entry['settings']
         value = {**deepcopy(value), 'sequence': entry['state']['sequence'] + 1}
+        value.pop('transition', None)
+        phase = transition
+        if phase is None:
+            if value['state'] == 'ACTIVE' and value['drain_id'] and value['attempt'] > entry['state']['attempt']: phase = {'phase':'STARTED'}
+            elif value['state'] in ('BACKOFF','BLOCKED') and any(value[k] != entry['state'][k] for k in ('state','attempt','failures','reason')):
+                phase = {'phase':'RETRY_SCHEDULED' if value['state']=='BACKOFF' else 'BLOCKED'}
+        if phase is not None:
+            old = entry['state']
+            value['transition'] = library.drain_transition(dict(
+                drain_id=phase.get('drain_id', value['drain_id'] or old['drain_id'] or 'validation-'+library._digest(entry['scope'].project_identity)),
+                sequence=value['sequence'], phase=phase['phase'],
+                attempt=phase.get('attempt', value['attempt'] or old['attempt']),
+                outcomes=phase.get('outcomes', []), resulting_sha=phase.get('resulting_sha'),
+                reason=value['reason'], due=value['due'] if phase['phase']=='RETRY_SCHEDULED' else None))
         library.scheduler_manifest(value)
         identity = 'scheduler-' + library._digest(scope.project_identity) + '-' + str(value['sequence'])
         operation = library._operation('scheduler-state', scope, settings, identity, identity,
@@ -77,14 +91,15 @@ class Scheduler:
             raise
         entry['state'] = value
 
-    def register(self, runner, *, context=lambda selected: ((), ())):
+    def register(self, runner, *, context=lambda selected: ((), ()), recovery=False, binding_scope=None):
         """Register a trusted current Project composition; reconnect restores durable state."""
         with self._lock:
             self._check()
             if type(runner) is not Attempts or runner.publisher is not self.publisher or not callable(context):
                 fail('SCHEDULER_DEPENDENCY_REQUIRED')
-            scope = runner.assembler._scope()
-            library._require_scope(scope, 'participant', library.ENQUEUE_CAPABILITY)
+            scope = binding_scope if recovery and binding_scope is not None else runner.assembler._scope()
+            if not recovery: library._require_scope(scope, 'participant', library.ENQUEUE_CAPABILITY)
+            if type(scope) is not library.LibraryScope: fail('LIBRARY_AUTHENTICATION_REQUIRED')
             key = scope.project_identity
             if key in self._entries: fail('PROJECT_ALREADY_REGISTERED')
             with self._records() as records: saved = records.latest_schedule(key)
@@ -93,10 +108,19 @@ class Scheduler:
                 wake=False, reason=None)
             entry = dict(scope=scope, runner=runner, context=context, state=state,
                          subscription=self.publisher.subscribe(scope), version=0)
-            self._authority(entry)
             self._entries[key] = entry
+            if state['state'] == 'DISPOSED':
+                entry['settings'] = runner.assembler._settings()
+                return key
+            try:
+                self._authority(entry)
+            except library.LibraryError as error:
+                if not recovery: self._entries.pop(key); self.publisher.unsubscribe(entry['subscription']); raise
+                entry['settings'] = runner.assembler._settings()
+                self._save(entry,{**state,'state':'BLOCKED','due':None,'reason':error.code},instant(self.now()))
+                return key
             # Startup reconciliation does not bypass backoff or model blocking.
-            if state['state'] not in ('BACKOFF', 'BLOCKED'):
+            if state['state'] not in ('BACKOFF', 'BLOCKED', 'DISPOSED'):
                 self._save(entry, {**state, 'state':'READY', 'due':instant(self.now()).isoformat()}, instant(self.now()))
             return key
 
@@ -114,6 +138,7 @@ class Scheduler:
         with self._lock:
             self._check(); entry = self._entries[key]; self._authority(entry)
             old = entry['state']; now = instant(self.now())
+            if old['state'] == 'DISPOSED': fail('DRAIN_DISPOSED')
             if old['state'] == 'BLOCKED' and not retry: fail('PROJECT_BLOCKED')
             if retry and old['state'] != 'BLOCKED': fail('PROJECT_NOT_BLOCKED')
             state = {**old, 'wake':True}
@@ -126,7 +151,7 @@ class Scheduler:
         """T21 startup/reconnect signal, deliberately not an implicit operator retry."""
         with self._lock:
             self._check(); entry = self._entries[key]; old = entry['state']
-            if old['state'] in ('BLOCKED', 'BACKOFF', 'ACTIVE'): return
+            if old['state'] in ('BLOCKED', 'BACKOFF', 'ACTIVE', 'DISPOSED'): return
             now = instant(self.now())
             self._save(entry, {**old, 'state':'READY', 'due':now.isoformat()}, now)
 
@@ -136,6 +161,7 @@ class Scheduler:
             if closed or version == entry['version']: continue
             entry['version'] = version
             old = entry['state']; now = instant(self.now())
+            if old['state'] == 'DISPOSED': continue
             try:
                 _, settings = self._authority(entry)
             except library.LibraryError as error:
@@ -151,7 +177,12 @@ class Scheduler:
     def _batch(self, entry):
         scope, settings = self._authority(entry)
         current = lambda: self._authority(entry)
-        head, tree = self.publisher.project_snapshot(scope, settings, current=current)
+        try:
+            head, tree = self.publisher.project_snapshot(scope, settings, current=current)
+        except library.LibraryError as error:
+            if error.code in ('UNSUPPORTED_PROJECT_ENTRY','INVALID_PROJECT_TREE','TOO_MANY_DOCUMENTS','BUNDLE_TOO_LARGE'):
+                raise library.LibraryError('PROJECT_QUEUE_INVALID', 'scheduler') from error
+            raise
         try:
             gate.validate(scope, settings, proposed=tree, current=tree)
         except library.LibraryError as error:
@@ -211,6 +242,9 @@ class Scheduler:
                 result = entry['runner'].run(drain_id=state['drain_id'], attempt=state['attempt'],
                     selected=state['selected'], accepted=accepted, indexes=indexes, at=at.isoformat())
             except library.LibraryError as error:
+                if (error.code.startswith(('RECORD_', 'STORE_', 'GIT_', 'REMOTE_', 'LEASE_', 'CLONE_', 'PIN_')) or error.code in ('PUBLICATION_UNAVAILABLE','INVALID_STORE','INVALID_RECORD')):
+                    self._failed = True
+                    raise
                 with self._lock:
                     old = entry['state']; now = instant(self.now())
                     failures = old['failures'] + 1
@@ -229,10 +263,36 @@ class Scheduler:
                 old = entry['state']; now = instant(self.now())
                 self._save(entry, {**old, 'state':'READY', 'due':now.isoformat(),
                     'drain_id':None, 'selected':[], 'attempt':0, 'failures':0, 'model_failures':0,
-                    'reason':None}, now)
+                    'reason':None}, now, transition=dict(phase='COMMITTED', drain_id=result.drain_id,
+                        attempt=result.attempt, resulting_sha=result.resulting_sha,
+                        outcomes=[dict(queue_id=q,kind='parked',reason=r) for q,r in result.outcomes]
+                            if result.state=='SOURCE_PARKED' else list(result.outcomes)))
             return dict(project_identity=key, state=result.state, drain_id=result.drain_id,
                         attempt=result.attempt, resulting_sha=result.resulting_sha)
         finally: self._turn.release()
+
+    def recover(self, key):
+        """Startup only: validate canonical Project, recover commits without model contact."""
+        with self._lock:
+            self._check(); entry = self._entries[key]
+            try:
+                old = entry['state']
+                if old['state'] == 'DISPOSED': return
+                if old['selected']:
+                    result = entry['runner'].recover(old['drain_id'])
+                    if result is not None:
+                        now = instant(self.now())
+                        self._save(entry, {**old, 'state':'READY', 'due':now.isoformat(),
+                            'drain_id':None,'selected':[],'attempt':0,'failures':0,'model_failures':0,'reason':None}, now,
+                            transition=dict(phase='COMMITTED',drain_id=result.drain_id,attempt=result.attempt,
+                                resulting_sha=result.resulting_sha,outcomes=list(result.outcomes)))
+                self._batch(entry)  # validate next eligible bundle only after committed recovery
+            except library.LibraryError as error:
+                if (error.code.startswith(('RECORD_', 'STORE_', 'GIT_', 'REMOTE_', 'LEASE_', 'CLONE_', 'PIN_')) or error.code in ('PUBLICATION_UNAVAILABLE','INVALID_STORE','INVALID_RECORD')): raise
+                old = entry['state']
+                self._save(entry, {**old,'state':'BLOCKED','due':None,'reason':error.code},instant(self.now()),
+                    transition={'phase':'BLOCKED','drain_id':old['drain_id'] or 'validation-'+library._digest(key),
+                        'attempt':old['attempt']})
 
     def close(self):
         if not self._turn.acquire(blocking=False): fail('SCHEDULER_BUSY')

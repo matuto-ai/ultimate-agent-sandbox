@@ -1207,6 +1207,7 @@ def batch_manifest(value):
 def operation_manifest(kind, value):
     if kind == 'synthesis-batch': return batch_manifest(value)
     if kind == 'scheduler-state': return scheduler_manifest(value)
+    if kind == 'source-park': return source_manifest(value)
     if kind == 'synthesis-attempt': return synthesis_manifest(value)
     _fail('INVALID_RECORD', 'manifest')
 
@@ -1214,10 +1215,10 @@ def operation_manifest(kind, value):
 def scheduler_manifest(value):
     """Bounded durable scheduling metadata, never draft or model content."""
     _object(value, 'schedule', ('sequence', 'served', 'state', 'due', 'drain_id',
-        'selected', 'attempt', 'failures', 'model_failures', 'wake', 'reason'))
+        'selected', 'attempt', 'failures', 'model_failures', 'wake', 'reason'), ('transition',))
     for key in ('sequence', 'served', 'attempt', 'failures', 'model_failures'):
         if type(value[key]) is not int or not 0 <= value[key] <= 2**53 - 1: _fail('INVALID_SCHEDULE', key)
-    if value['state'] not in ('IDLE','READY','ACTIVE','BACKOFF','BLOCKED'): _fail('INVALID_SCHEDULE')
+    if value['state'] not in ('IDLE','READY','ACTIVE','BACKOFF','BLOCKED','DISPOSED'): _fail('INVALID_SCHEDULE')
     if type(value['wake']) is not bool: _fail('INVALID_SCHEDULE')
     if value['due'] is not None: _timestamp(value['due'], 'due')
     if value['drain_id'] is not None: _token(value['drain_id'], 'drain_id')
@@ -1226,5 +1227,57 @@ def scheduler_manifest(value):
     if len(value['selected']) != len(set(value['selected'])): _fail('INVALID_SCHEDULE')
     if bool(value['selected']) != bool(value['drain_id']): _fail('INVALID_SCHEDULE')
     _reject_content(value)
-    if _size(value) > 8192: _fail('INVALID_SCHEDULE')
+    if _size({k:v for k,v in value.items() if k != 'transition'}) > 8192: _fail('INVALID_SCHEDULE')
+    if 'transition' in value:
+        transition = drain_transition(value['transition'])
+        if transition['sequence'] != value['sequence']: _fail('INVALID_SCHEDULE')
+    return json.loads(_canonical(value))
+
+
+def drain_transition(value):
+    """Closed, bounded metadata-only T21 report. Never document or model bytes."""
+    _object(value, 'transition', ('drain_id', 'sequence', 'phase', 'attempt',
+        'outcomes', 'resulting_sha', 'reason', 'due'))
+    _token(value['drain_id'], 'drain_id')
+    for name in ('sequence', 'attempt'):
+        if type(value[name]) is not int or not 0 <= value[name] <= 2**53-1: _fail('INVALID_TRANSITION')
+    if value['sequence']==0 or (value['attempt']==0 and value['phase']!='BLOCKED'): _fail('INVALID_TRANSITION')
+    if value['phase'] not in ('STARTED','RETRY_SCHEDULED','COMMITTED','BLOCKED','OPERATOR_DISPOSED'):
+        _fail('INVALID_TRANSITION')
+    if value['reason'] is not None: _token(value['reason'], 'reason')
+    if value['due'] is not None: _timestamp(value['due'], 'due')
+    if value['resulting_sha'] is not None: _commit(value['resulting_sha'], 'resulting_sha')
+    if (value['phase'] == 'COMMITTED') != (value['resulting_sha'] is not None): _fail('INVALID_TRANSITION')
+    if (value['phase'] == 'RETRY_SCHEDULED') != (value['due'] is not None): _fail('INVALID_TRANSITION')
+    seen = set()
+    for item in _array(value['outcomes'], 'outcomes', 64):
+        _object(item, 'outcome', ('queue_id', 'kind'), ('targets','reason'))
+        queue = _digest_value(item['queue_id'], 'queue_id')
+        if queue in seen: _fail('INVALID_TRANSITION')
+        seen.add(queue)
+        if item['kind'] in ('integrated', 'merged'):
+            if set(item) != {'queue_id','kind','targets'}: _fail('INVALID_TRANSITION')
+            for path in _array(item['targets'], 'targets', 64):
+                if (type(path) is not str or len(path)>1024 or '..' in path.split('/')
+                        or not path.startswith(('context/','decisions/','research/'))): _fail('INVALID_TRANSITION')
+        elif item['kind'] in ('parked','rejected','adjudicated'):
+            if set(item) != {'queue_id','kind','reason'}: _fail('INVALID_TRANSITION')
+            _token(item['reason'], 'reason')
+        else: _fail('INVALID_TRANSITION')
+    if value['phase'] not in ('COMMITTED','OPERATOR_DISPOSED') and value['outcomes']: _fail('INVALID_TRANSITION')
+    if value['phase'] != 'OPERATOR_DISPOSED' and any(x['kind'] in ('rejected','adjudicated') for x in value['outcomes']):
+        _fail('INVALID_TRANSITION')
+    _reject_content(value)
+    if _size(value)>262144: _fail('INVALID_TRANSITION')
+    return json.loads(_canonical(value))
+
+
+def source_manifest(value):
+    _object(value,'source_manifest',('basis','selected','accepted','indexes','attempt'))
+    _commit(value['basis'],'basis'); _integer(value['attempt'],'attempt')
+    for queue in _array(value['selected'],'selected',64): _digest_value(queue,'queue_id')
+    for ref in _array(value['accepted'],'accepted',64): _token(ref,'reference')
+    for name in _array(value['indexes'],'indexes',4):
+        if name not in ('index.md','context/index.md','decisions/index.md','research/index.md'): _fail('INVALID_RECORD')
+    if _size(value)>32768: _fail('INVALID_RECORD')
     return json.loads(_canonical(value))

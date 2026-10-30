@@ -40,8 +40,8 @@ unique identities; a lost acknowledgement is reconciled by reading the latest
 durable intent. In-process uncertainty fences selection. Re-registering after
 restart preserves backoff, BLOCKED and fixed batch; an interrupted active unit
 gets a new numbered attempt, whose T19 reconciliation checks canonical publication
-before any new model contact. This is not a claim that T21 startup/report recovery
-is implemented.
+before any new model contact. T21 startup/report recovery is composed by `Service`; see
+[Library service](library-service.md).
 
 Retry delays are 5, 30, 120, 600 and then 1800 seconds capped. Transport failures
 have no fixed retry-count limit. Prior T19 intents are settled only after

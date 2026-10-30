@@ -64,9 +64,9 @@ ADDITIONAL_MODULES = frozenset({
 # all tests and the overall2-3min graph, with no timeout increase.
 # #173 relocation suite measured 6s; synthesis has headroom after #170.
 SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import', 'test_library_relocation'})
-# #172 real-process scheduler suite measured 25s locally; existing lanes
+# T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
-SCHEDULER_MODULES = frozenset({'test_library_scheduler'})
+SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'})
 PARTITIONS = ('slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
 assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
