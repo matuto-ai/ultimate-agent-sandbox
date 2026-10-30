@@ -206,9 +206,10 @@ class LibraryGit:
     """
 
     def __init__(self, root, *, records_path, deployment_id, target, branch,
-                 environment=None, timeout=120):
+                 environment=None, timeout=120, audit=None):
         self.root = Path(root)
         self.records_path = Path(records_path)
+        self.audit = None if audit is None else dict(audit)
         self.deployment_id = deployment_id
         self.target = _unsafe_argv(target, "target")
         # One branch contract with the settings owner; no second copy.
@@ -272,6 +273,8 @@ class LibraryGit:
             raise LibraryError("ALREADY_STARTED", "lease")
         self._acquire()
         try:
+            if self.audit is not None:
+                with self._records() as records: records.configure_retention(self.audit)
             self._pin()
             state = self._clone_state()
             if state == "mismatch":

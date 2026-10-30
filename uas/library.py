@@ -960,7 +960,7 @@ def admit_receipt(value):
     _object(value, "$", ("version", "operation_id", "kind", "request_id", "queue_id",
                          "drain_id", "settings_id", "outcome", "at", "publication",
                          "projection", "configuration", "acknowledgement",
-                         "reason", "retryable"), ("evidence",))
+                         "reason", "retryable"), ("evidence", "detail_expired"))
     if type(value["version"]) is not int or value["version"] != CONTRACT_VERSION:
         _fail("UNSUPPORTED_CONTRACT_VERSION", "$.version")
     _token(value["kind"], "kind")
@@ -1029,6 +1029,8 @@ def admit_receipt(value):
             _fail("INVALID_PROJECTION", "projection.visible")
         if projection["visible"] and projection["commit_sha"] is None:
             _fail("INVALID_PROJECTION", "projection.commit_sha")
+    if "detail_expired" in value and (value["detail_expired"] is not True or "evidence" in value):
+        _fail("INVALID_RECEIPT", "detail_expired")
     if "evidence" in value:
         for index, fact in enumerate(_array(value["evidence"], "evidence", 64)):
             field = "evidence[%d]" % index

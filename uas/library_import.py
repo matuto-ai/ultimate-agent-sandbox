@@ -140,6 +140,7 @@ class Importer:
         operation, settings, current = self._admit(operation, settings, kind)
         with LibraryRecords(self.publisher.records_path, self.publisher.deployment_id) as records:
             prior = records.begin(operation)['record']
+            if prior['state']=='DETAIL_EXPIRED': raise library.LibraryError('DETAIL_EXPIRED')
             if prior['receipt'] is not None and prior['receipt']['outcome'] in ('REFUSED', 'NOT_DURABLE'):
                 raise library.LibraryError(prior['receipt']['reason'])
             try:

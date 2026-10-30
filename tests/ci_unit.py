@@ -72,7 +72,7 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'}
 # Additional reached60s; terminal/stop/records now belong to remainder.
 # Native controls varied19.4–44s, so leave operator alone; the three modules
 # measured5.2s on latest run and remainder37s leaves room without exclusions.
-OPERATOR_MODULES = frozenset({'test_library_controls'})
+OPERATOR_MODULES = frozenset({'test_library_controls', 'test_library_retention'})
 assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 PARTITIONS = ('operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)

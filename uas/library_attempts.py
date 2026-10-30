@@ -134,6 +134,7 @@ class Attempts:
         current()
         with library_deadline.bounded(settings['limits']['attempt_seconds']):
             for record in self._prior_records(drain_id, scope.project_identity):
+                if record['state']=='DETAIL_EXPIRED': fail('DETAIL_EXPIRED')
                 op = self.operation(scope, {**settings,'settings_id':record['settings_id']},
                     drain_id, record['manifest']['attempt'], record['at'], record['manifest'])
                 result = self._recover(op, settings, current)
@@ -141,6 +142,7 @@ class Attempts:
             with self.records() as records:
                 sources = [r for r in records.iter_drain(drain_id,project_identity=scope.project_identity) if r['kind']=='source-park']
             for record in sources:
+                if record['state']=='DETAIL_EXPIRED': fail('DETAIL_EXPIRED')
                 manifest = record.get('manifest')
                 if manifest is None: fail('SOURCE_CANONICAL_EVIDENCE_INVALID')
                 op = library._operation('source-park',scope,{**settings,'settings_id':record['settings_id']},
@@ -203,6 +205,7 @@ class Attempts:
         prior = None
         for record in self._prior_records(drain_id, scope.project_identity):
             remaining()
+            if record['state']=='DETAIL_EXPIRED': fail('DETAIL_EXPIRED')
             manifest = record['manifest']
             if tuple(manifest['selected']) != selected: fail('DRAIN_BATCH_CONFLICT')
             if manifest['attempt'] == attempt:
