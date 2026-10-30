@@ -38,9 +38,9 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| maintenance |23.2|Retention, repair and native repair|
-| requeue |16.0|T27 parked-work release|
-| disposition |35.0|All six rejection/adjudication functional, recovery and native modules|
+| maintenance |24.0|Retention, repair and native repair|
+| requeue |13.0|T27 parked-work release|
+| disposition |44.0|All six rejection/adjudication functional, recovery and native modules|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -105,11 +105,15 @@ seconds in a48.0 second job for the four-module `maintenance` lane, so that lane
 lost the margin this document plans for even though it stayed inside the
 deadline.
 
-The module therefore has its own `requeue` lane: one module, about16 seconds of
-hosted suite time by the measured ratio, leaving every affected job well under
-the unchanged60s deadline. No test was moved out of discovery, excluded or
-weakened, and the exact-partition contract still runs every ID once. The next
-hosted run must confirm the new lane's timing.
+The module therefore has its own `requeue` lane. Hosted run
+[41066496452](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41066496452)
+confirms it at13.0 suite seconds in a22.0 second job, with `maintenance` back to
+24.0 suite seconds in a33.0 second job. The same run measured `disposition` at
+44.0 suite seconds in a53.0 second job after the resume work added its own
+recovery tests, which is the tight lane this document keeps watching: keeping the
+requeue module there would have pushed that job past its deadline. No test was
+moved out of discovery, excluded or weakened, and the exact-partition contract
+still runs every ID once.
 
 ## T35 archive acceptance capacity (#181)
 
