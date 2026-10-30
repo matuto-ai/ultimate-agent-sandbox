@@ -98,10 +98,11 @@ DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
- 'test_library_disposition_native',
- 'test_library_disposition_recovery'})
+ 'test_library_disposition_native'})
 
-ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration', 'test_library_archive_native'})
+# Run 41129393214: disposition recovery took 16.7s; archive's 30s job has room.
+ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration',
+ 'test_library_archive_native', 'test_library_disposition_recovery'})
 
 PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')

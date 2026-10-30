@@ -88,9 +88,10 @@ class CIPartitionTests(unittest.TestCase):
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
- 'test_library_disposition_native',
- 'test_library_disposition_recovery'})
-        self.assertEqual(ci.ARCHIVE_MODULES, {'test_library_archive', 'test_library_archive_integration', 'test_library_archive_native'})
+ 'test_library_disposition_native'})
+        self.assertEqual(ci.ARCHIVE_MODULES, {'test_library_archive', 'test_library_archive_integration',
+ 'test_library_archive_native', 'test_library_disposition_recovery'})
+        self.assertEqual('archive', ci.partition_for('test_library_disposition_recovery.Case.test_one'))
         self.assertEqual('archive', ci.partition_for('test_library_archive.Case.test_one'))
         self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_retention', 'test_library_repair', 'test_library_repair_native'})
         self.assertEqual('maintenance', ci.partition_for('test_library_repair.Case.test_one'))
@@ -139,9 +140,9 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['operator']), 2)
         self.assertEqual(len(groups['inspection']), 3)
         self.assertEqual(len(groups['lifecycle']), 4)
-        self.assertEqual(len(groups['disposition']), 6)
+        self.assertEqual(len(groups['disposition']), 5)
         self.assertEqual(len(groups['maintenance']), 3)
-        self.assertEqual(len(groups['archive']), 3)
+        self.assertEqual(len(groups['archive']), 4)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
