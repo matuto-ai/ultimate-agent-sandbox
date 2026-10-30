@@ -251,13 +251,20 @@ class EnqueueEndpoint:
     trusted Hub. Participant payloads cannot call it or supply scope/current.
     The service retains clone/settings ownership; the Hub receives only contact.
     """
-    def __init__(self, publisher, *, settings, projection=None):
+    def __init__(self, publisher, *, settings, projection=None, guard=None):
         if not callable(settings):
             raise library.LibraryError('INVALID_SETTINGS', 'settings')
+        if guard is not None and not callable(guard):
+            raise library.LibraryError('INVALID_SETTINGS', 'guard')
         self.publisher, self.settings, self.projection = publisher, settings, projection
+        self.guard = guard
 
     def contact(self, *, scope, current, operation_id, request_id, value, at, run_id):
         def fresh():
+            # Trusted composition's live service validity gates every authority
+            # callback, including the capture's admission and publication fences.
+            if self.guard is not None:
+                self.guard()
             if current() is not True:
                 raise library.LibraryError('LIBRARY_AUTHENTICATION_REQUIRED', 'scope')
             return scope
