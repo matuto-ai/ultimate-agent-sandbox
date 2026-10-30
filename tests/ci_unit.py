@@ -94,7 +94,10 @@ INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', '
 
 # #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
 # leaves margin in the existing60s lane, without changing discovery or limits.
-LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service', 'test_manager_library_transport'})
+# #185 deployment composition measured9.5s locally over real Git/SQLite/socket;
+# lifecycle keeps one-minute roots and changes no inventory, timeout or exclusion.
+LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service',
+    'test_manager_library_transport', 'test_library_deployment'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
