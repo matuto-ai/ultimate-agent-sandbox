@@ -71,3 +71,13 @@ weakened, or duplicated; future modules still default to remainder. The exact
 partition/workflow contract checks include this lane and all downstream jobs
 still require every matrix member. No timeout, permission, or runtime-budget
 policy changes accompany this test-capacity adjustment.
+
+## T35 archive acceptance capacity (#181)
+
+The new disposable Git/service lifecycle acceptance costs about 20 seconds
+locally, before hosted native-socket cases and setup. It belongs to a dedicated
+`archive` partition containing only its three new modules. Existing lane
+membership, one-minute deadlines, complete discovery, and all-root dependency
+gates remain unchanged. This avoids spending maintenance's measured headroom
+and is not the separately proposed dispatch-capacity correction or unmerged
+runtime-budget policy. Exact hosted total graph timing remains authoritative.

@@ -1,4 +1,4 @@
-"""Standard discovery, eleven complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, twelve complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -99,9 +99,11 @@ DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_disposition_native',
  'test_library_disposition_recovery'})
 
-PARTITIONS = ('maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
+ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration', 'test_library_archive_native'})
+
+PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
-MODULE_GROUPS = (MAINTENANCE_MODULES, LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
+MODULE_GROUPS = (ARCHIVE_MODULES, MAINTENANCE_MODULES, LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
                 OPERATOR_MODULES, SLOW_MODULES, INTEGRATION_MODULES,
                 ADDITIONAL_MODULES, SYNTHESIS_MODULES, SCHEDULER_MODULES)
 assert sum(map(len, MODULE_GROUPS)) == len(set().union(*MODULE_GROUPS))
@@ -111,6 +113,8 @@ def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in ARCHIVE_MODULES:
+        return 'archive'
     if module in MAINTENANCE_MODULES:
         return 'maintenance'
     if module in LIFECYCLE_MODULES:

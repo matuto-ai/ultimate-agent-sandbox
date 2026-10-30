@@ -1263,7 +1263,7 @@ def operation_manifest(kind, value):
         try: return observation(value)
         except ObservationError: _fail('INVALID_LIBRARY_OBSERVATION')
     if kind == 'synthesis-batch': return batch_manifest(value)
-    if kind == 'scheduler-state': return scheduler_manifest(value)
+    if kind in ('scheduler-state','archive-final'): return scheduler_manifest(value)
     if kind == 'source-park': return source_manifest(value)
     if kind == 'synthesis-attempt': return synthesis_manifest(value)
     _fail('INVALID_RECORD', 'manifest')
