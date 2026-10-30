@@ -8,11 +8,11 @@ a still-unresolved source, an archived Project and a Project block are never
 bypassed: scheduling state is untouched, so no drain is invented or resumed.
 """
 from copy import deepcopy
-import hashlib
 
 from . import library, library_bundle as bundle, library_gate as gate
 from .library_assembly import DETERMINISTIC as PREREQUISITES
 from .library_compiler import _index
+from .library_controls import content
 from .library_disposition import finish
 from .library_sources import Excerpt, Resolver
 
@@ -23,10 +23,6 @@ MARKER = 'Library requeue receipt '
 
 def fail(code):
     raise library.LibraryError(code, 'requeue')
-
-
-def content(files):
-    return library._digest({path: hashlib.sha256(data).hexdigest() for path, data in files.items()})
 
 
 def token(value):
@@ -78,8 +74,9 @@ def resolves(assembler, scope, settings, tree, prefix, queue):
     """Recheck every recorded source pin through the same trusted resolver.
 
     Eligibility is evidence, not the recorded label: a draft with no recheckable
-    pinned source, or one whose pin still fails deterministically, stays parked.
-    An uncertain resolver outcome is not permission to release. The human's
+    pinned source, a pin that still fails deterministically, or any uncertain
+    resolver outcome stays parked. Uncertainty is never permission to release,
+    and it never blocks another draft that can be confirmed. The human's
     capability gates this action; a source is read, as in assembly, under the
     service's own current Project composition rather than a stored human scope.
     """
@@ -94,31 +91,24 @@ def resolves(assembler, scope, settings, tree, prefix, queue):
         return False
     try:
         subject = assembler._scope()
-    except library.LibraryError:
-        fail('REQUEUE_PREREQUISITE_UNKNOWN')
-    if (type(subject) is not library.LibraryScope
-            or subject.project_identity != scope.project_identity):
-        fail('REQUEUE_PREREQUISITE_UNKNOWN')
-    for declaration in pins:
-        try:
+        if (type(subject) is not library.LibraryScope
+                or subject.project_identity != scope.project_identity):
+            return False
+        for declaration in pins:
             resolver = assembler.resolve_source(subject, declaration)
             if resolver is None:
                 return False
             if (type(resolver) is not Resolver
                     or resolver.source.project_identity != subject.project_identity):
-                fail('REQUEUE_PREREQUISITE_UNKNOWN')
+                return False
             excerpt = resolver.resolve(subject, settings, declaration)
             if (type(excerpt) is not Excerpt
                     or excerpt.project_identity != subject.project_identity
                     or excerpt.resource != declaration['resource']
                     or excerpt.sha256 != declaration['sha256']):
-                fail('REQUEUE_PREREQUISITE_UNKNOWN')
-        except library.LibraryError as error:
-            if error.code in PREREQUISITES:
                 return False
-            fail('REQUEUE_PREREQUISITE_UNKNOWN')
-        except Exception:
-            fail('REQUEUE_PREREQUISITE_UNKNOWN')
+    except Exception:
+        return False
     return True
 
 
@@ -158,10 +148,6 @@ def apply(controls, value, principal, entry, scope, settings):
     operation = library.action(scope, settings, kind='requeue', operation_id=identity,
         request_id=value['request_id'], payload=payload, at=scheduler.now().isoformat())
     scheduler._check()
-    # A release rewrites canonical content, so an in-flight attempt's input
-    # (and its fenced publication) must finish first.
-    if entry['state']['state'] == 'ACTIVE':
-        fail('CONTROL_BUSY')
     target = controls._target(entry, scope, settings, principal, 'requeue')
     if (value['settings_id'] != settings['settings_id']
             or value['observed_version'] != controls._version(entry, scope, settings, target)):
@@ -189,6 +175,11 @@ def apply(controls, value, principal, entry, scope, settings):
             released[queue] = reason
         if not released:
             fail('NO_ELIGIBLE_PARKED_WORK')
+        # Only an active attempt's own selected inputs are unaffected by a
+        # release of work selection already excluded.
+        if entry['state']['state'] == 'ACTIVE' and any(
+                queue in entry['state']['selected'] for queue in released):
+            fail('CONTROL_BUSY')
         files = dict(tree.files)
         files[prefix + '/pending/index.md'] = _index(tree.files[prefix + '/pending/index.md'],
             'pending', {'pending/' + queue + '.md' for queue in released}, files, prefix, {}, tree.files)

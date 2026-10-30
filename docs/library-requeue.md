@@ -36,10 +36,11 @@ later request may release them once their prerequisite resolves.
 Scheduling state is not touched. Requeue invents no drain, no attempt, no model
 call and no scheduling acknowledgement, so a `BLOCKED` Project stays blocked, a
 `DISPOSED` drain stays disposed, a backoff is not cleared and fair priority is
-unchanged. Ordinary drained work then arrives through the existing `drain`,
-`retry` or separately receipted `resume` actions. An archived Project refuses the
-action; an active attempt refuses it as busy, because a release rewrites content
-that attempt fenced.
+unchanged: released work becomes ordinary pending work and is executed only by
+the existing `drain`, `retry` or separately receipted `resume` actions. An
+archived Project refuses the action. An active attempt refuses the release only
+when the released queue is one of its own selected inputs, which is the input
+change that attempt's fences protect.
 
 ## Fences, identity and recovery
 
@@ -65,7 +66,8 @@ payload, so the human refreshes and uses a new request ID.
 `tests/test_library_requeue.py` uses disposable real Git repositories, SQLite and
 the started Service: a mixed resolved/unresolved drain released in one commit
 with the draft preserved, a retained draft released later, a model-declared
-contradiction left parked, stale/archived/busy/revoked refusals, exact retry,
+contradiction left parked, stale/archived/busy/revoked refusals, a `BLOCKED`
+Project that neither clears nor executes the release, exact retry,
 changed-payload conflict, restart eligibility, lost acknowledgement and an
 unknown pre-push outcome. These are deterministic fixture proofs. Manager/Hub
 transport for this action (T32), real deployment authority (T31), the separate

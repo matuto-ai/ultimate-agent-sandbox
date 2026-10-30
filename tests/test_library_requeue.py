@@ -127,14 +127,28 @@ class RequeueTests(unittest.TestCase):
         self.allowed = False
         self.refused(value, 'FORBIDDEN')
         self.allowed = True
-        self.entry()['state']['state'] = 'ACTIVE'
-        self.refused(value, 'CONTROL_BUSY')
-        self.entry()['state']['state'] = 'READY'
+        self.entry()['state'].update(state='ACTIVE', selected=[first])
+        self.refused(self.value(drain), 'CONTROL_BUSY')
+        self.entry()['state'].update(state='READY', selected=[])
+        value = self.value(drain)
         path = 'projects/' + self.source.scope.project_path + '/index.md'
         self.source.mutate({path: self.source.root_bytes() + b'\nLibrary state: archived\n'})
         self.refused(value, 'PROJECT_ARCHIVED')
         self.assertIn(first + '.md) - context; DRAFT PARKED: SOURCE_UNRESOLVED',
                       self.contents('pending/index.md'))
+
+    def test_blocked_project_is_not_bypassed_or_released_by_a_requeue(self):
+        first, second, drain = self.parked()
+        self.entry()['state'].update(state='BLOCKED', due=None, reason='MODEL_FAILURE',
+                                     drain_id=None, selected=[], attempt=3)
+        blocked = deepcopy(self.entry()['state'])
+        result = self.send(self.value(drain))
+        self.assertEqual(result['outcome'], 'COMMITTED')
+        self.assertIn(first + '.md) - context; draft;', self.contents('pending/index.md'))
+        # Releasing canonical work neither clears the block nor executes it.
+        self.assertEqual(self.entry()['state'], blocked)
+        self.assertIsNone(self.service.tick())
+        self.assertFalse(self.fx.fx.fixture.marker.exists())
 
     def test_lost_acknowledgement_reconciles_without_repeating_the_release(self):
         first, second, drain = self.parked()

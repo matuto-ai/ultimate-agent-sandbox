@@ -34,6 +34,11 @@ def canonical(value):
                       allow_nan=False).encode('utf-8')
 
 
+def content(files):
+    """Version of one complete canonical Project tree, by per-file digest."""
+    return library._digest({p: hashlib.sha256(data).hexdigest() for p, data in files.items()})
+
+
 def decode(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= MAX_REQUEST: fail('CONTROL_REQUEST_LIMIT')
     def pairs(items):
@@ -142,7 +147,7 @@ class Controls:
         _, tree = self.service.publisher.project_snapshot(scope, settings, current=current)
         library_gate.validate(scope,settings,proposed=tree,current=tree)
         if project_state(tree,library_bundle._prefix(scope)) != 'active': fail('PROJECT_ARCHIVED')
-        return library._digest({p:hashlib.sha256(data).hexdigest() for p,data in tree.files.items()})
+        return content(tree.files)
 
     def reconcile(self, raw, principal):
         """Read-only recovery: an absent service reservation can never write.
@@ -252,7 +257,7 @@ class Controls:
         text = data.decode('utf-8')
         meta, body = library_bundle.frontmatter(text, relative)
         if meta.get('status') != 'draft': fail('PENDING_ITEM_UNAVAILABLE')
-        content_version = library._digest({p:hashlib.sha256(b).hexdigest() for p,b in tree.files.items()})
+        content_version = content(tree.files)
         target_version = hashlib.sha256(data).hexdigest()
         version = library._digest({'human_scope':scope.canonical(), 'project_identity':scope.project_identity,
             'project_path':scope.project_path, 'queue_id':value['queue_id'],
