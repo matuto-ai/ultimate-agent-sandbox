@@ -36,7 +36,7 @@ class CIPartitionTests(unittest.TestCase):
     'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
         self.assertEqual(ci.ADDITIONAL_MODULES, {
             'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
-            'test_library_git', 'test_native_combined_image_package',
+            'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
             'test_native_claude_checks', 'test_native_git_operations',
             'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
             'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
@@ -72,7 +72,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual([item.id() for item in cases], identifiers)
         self.assertEqual(len(groups['slow']), 15)
         self.assertEqual(len(groups['integration']), 21)
-        self.assertEqual(len(groups['additional']), 20)
+        self.assertEqual(len(groups['additional']), 21)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))

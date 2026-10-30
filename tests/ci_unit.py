@@ -37,9 +37,11 @@ INTEGRATION_MODULES = frozenset({'test_context', 'test_library_registration',
 # #155 final graph: remainder 48s plus setup reached 62s. These four
 # modules measured 4.34s locally out of 24.05s remainder (~8.7s hosted).
 # Existing additional lane measured 18s hosted; move rather than exclude.
+# #158 real-Git projection module measured 3.9s locally. Keep it off the
+# previously tight remainder; additional has ~26s hosted baseline headroom.
 ADDITIONAL_MODULES = frozenset({
     'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
-    'test_library_git', 'test_native_combined_image_package',
+    'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
     'test_native_claude_checks', 'test_native_git_operations',
     'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
     'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
