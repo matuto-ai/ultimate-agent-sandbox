@@ -16,6 +16,10 @@ def source_list(name, variable='SOURCES'):
 # The disposable diff fixture never selects the local command/profile/host.
 # These exact lazy boundaries are optional, not an open-ended local_* wildcard.
 OPTIONAL_LOCAL_EDGES = {
+    # These disposable native profiles never call attach_library. The production
+    # Hub image packages every uas module; its explicitly selected Library route
+    # is tested separately through real admitted dispatch.
+    ('uas/workstation_peer.py', 'uas/library_hub.py'),
     ('uas/lifecycle.py', 'uas/local_native.py'),
     ('uas/__main__.py', 'uas/local_cli.py'),
     ('uas/native_qualification.py', 'uas/local_runtime_plan.py'),
@@ -114,6 +118,20 @@ class StagedSourceClosureTests(unittest.TestCase):
         self.assertIn('uas/ledger.py', missing_imports(sources - {'uas/ledger.py'},
             include_lazy=True, optional_edges=OPTIONAL_LOCAL_EDGES))
         self.assertTrue(missing_imports(sources, include_lazy=True))
+
+    def test_production_hub_packages_the_explicit_library_route(self):
+        from uas.native_hub_image import source_inventory
+        sources = source_inventory(ROOT)
+        self.assertTrue({'/opt/uas/uas/library.py', '/opt/uas/uas/library_hub.py',
+                         '/opt/uas/uas/workstation_peer.py'} <= set(sources))
+        # The optional edge is precisely the explicit trusted attachment method,
+        # not an unconditional import hidden from the fixed fixture inventory.
+        tree = ast.parse((ROOT/'uas/workstation_peer.py').read_bytes())
+        methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                   and node.name == 'attach_library']
+        self.assertEqual(len(methods), 1)
+        self.assertTrue(any(isinstance(node, ast.ImportFrom) and node.module == 'library_hub'
+                            for node in ast.walk(methods[0])))
 
     def test_qualifier_policy_checks_do_not_import_optional_local_product(self):
         import builtins

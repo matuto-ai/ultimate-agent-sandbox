@@ -129,6 +129,29 @@ exact-image qualification; #67 is not closed by source tests alone.
 
 ## Local test installation
 
+Use Python 3.11+ with `venv` and `pip` available. Install the hash-pinned Python dependencies before running checks or importing the Library content gate; validation does not install packages into your environment automatically. Keep the virtual environment outside the checkout:
+
+```sh
+python3 -m venv /tmp/uas-python
+. /tmp/uas-python/bin/activate
+python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+./validate.sh
+```
+
+The Library gate uses `markdown-it-py` in CommonMark mode (no rendering, plugins, or automatic bare-URL linking). HTML, images and destinations are checked as parsed tokens; fenced and indented code remain literal. Parser nesting at 32 levels is refused rather than silently leaving content unchecked. The parser and its sole runtime dependency, `mdurl`, are pinned with wheel hashes in `requirements.txt`; CI installs the same file in an isolated environment before each aggregate partition.
+
+### CI runtime budget
+
+The `validate`, `pi-native`, and `claude-native` workflows enforce `min(150 seconds, median of the last five eligible main measurements × 1.10)`. Each workflow uses five distinct main commits preceding the current run, restricted to the tested base's history. Only the first attempt of the first push run for a commit can supply a sample, and that attempt must have completed successfully. Re-running or re-pushing a commit cannot replace its measurement or count it twice. Documentation-only validation runs do not supply full-suite samples. Existing Actions history supplies the initial baseline; no guessed seed or writable baseline artifact is needed.
+
+The measurement includes setup, tests, and cleanup of each validation job. For `validate`, it is the longest unit job plus the longest dependent seam job; parallel jobs are not summed. Pi's three disjoint native partitions run on separate runners and contribute the longest complete job; all three must pass. Runner queue time and the final accounting job are excluded. GitHub's job timestamps supply the evidence. The final `runtime-budget` check reports the measured duration, source run/commit, and allowed duration in its job summary. Missing, failed, skipped, duplicate, or unrecognized validation jobs cannot produce acceptance, except for the existing explicit documentation-only exemption.
+
+The current PR is also judged on its first-attempt job measurements: retrying the same run cannot turn an over-budget result green. A failed first-attempt functional job likewise cannot become runtime evidence through a retry. This protects against retrying until a favorable runner appears; it does not prevent someone with branch-write authority from creating new commits, which remains a review responsibility.
+
+The three-minute unit/native job watchdogs only stop stuck jobs; they are not the accepted runtime budget. A completed workflow still fails its runtime check above the moving limit or the absolute 150-second ceiling. Existing shorter seam/process watchdogs remain in place. New tests can grow within the allowance without repeatedly redistributing tests to satisfy an unrelated one-minute unit-job ceiling.
+
+The accounting job has read-only Actions access. It fails closed if evidence is unavailable or fewer than five eligible distinct commits exist among the last 100 main push runs. Restore access to the retained baseline evidence before retrying the accounting check; do not substitute PR results or silently reset the baseline. Historical seven-, eight-, ten-, and eleven-unit-lane validation and single-job Pi runs remain comparable with today's graphs, but missing jobs are never accepted in the current run. When adding jobs or changing dependencies, update `tests/ci_runtime_budget.py` and the graph assertions in `tests/test_vm_ci_policy.py` together.
+
 See [the persistent local entrypoint](docs/local/entrypoint.md) for explicit setup,
 start/status/stop and authenticated Manager inspection. This is separate from
 disposable native qualification; required host preparation and currently absent

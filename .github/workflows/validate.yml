@@ -11,14 +11,15 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   validate:
     outputs:
       skip_tests: ${{ steps.changes.outputs.skip_tests }}
     if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -64,6 +65,13 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
+      - name: Install pinned Python dependencies
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
+
       - name: Validate successor interfaces
         if: steps.changes.outputs.skip_tests != 'true'
         env:
@@ -78,8 +86,7 @@ jobs:
         if: steps.changes.outputs.skip_tests != 'true'
         env:
           UAS_LOCAL_PROCESS_SMOKE: "1"
-        # Existing fast lane: observed remainder ~28s + bounded smoke15s;
-        # unchanged1min job and unchanged aggregate<=180s dependency graph.
+        # Keep the bounded process smoke in the measured remainder lane.
         run: timeout --signal=TERM --kill-after=1s 15s python3 tests/linux/local_process_smoke.py --run
 
       - name: Report tests not applicable
@@ -90,8 +97,8 @@ jobs:
     outputs:
       skip_tests: ${{ steps.changes.outputs.skip_tests }}
     if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -137,6 +144,13 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
+      - name: Install pinned Python dependencies
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
+
       - name: Validate measured slow unit partition
         if: steps.changes.outputs.skip_tests != 'true'
         env:
@@ -159,11 +173,19 @@ jobs:
         include:
           - {partition: integration, name: unit-integration}
           - {partition: additional, name: unit-additional}
+          - {partition: synthesis, name: unit-synthesis}
+          - {partition: scheduler, name: unit-scheduler}
+          - {partition: operator, name: unit-operator}
+          - {partition: inspection, name: unit-inspection}
+          - {partition: lifecycle, name: unit-lifecycle}
+          - {partition: disposition, name: unit-disposition}
+          - {partition: maintenance, name: unit-maintenance}
+          - {partition: archive, name: unit-archive}
     outputs:
       skip_tests: ${{ steps.changes.outputs.skip_tests }}
     if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -209,6 +231,13 @@ jobs:
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
+      - name: Install pinned Python dependencies
+        if: steps.changes.outputs.skip_tests != 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
+
       - name: Validate measured integration unit partition
         if: steps.changes.outputs.skip_tests != 'true'
         env:
@@ -226,7 +255,7 @@ jobs:
   forge-broker-smoke:
     # Preserve both required Forge checks without serializing them with the
     # aggregate. All downstream jobs must succeed for this workflow to pass.
-    # Critical path: max(unit roots 1, 1, 1) + max(Docker 2, other seams 1) <= 3.
+    # runtime-budget checks the complete two-stage critical path.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -243,7 +272,6 @@ jobs:
 
   artifact-linux-smoke:
     # Fast real Linux seams, NOT stock-policy/native/VM qualification.
-    # Both unit roots must pass; max(1, 1) + max(1, 2) <= 3 minutes.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -270,7 +298,6 @@ jobs:
 
   git-native-seams:
     # Account-free actual seams, not OpenSSH/GitHub or exact Pi image qualification.
-    # Both unit roots required: max(1, 1) + max(Docker 2, Git 1) <= 3 minutes.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -298,7 +325,6 @@ jobs:
 
   gate-linux-smoke:
     # Focused reviewed diff/Broker seams, not command runtime or VM qualification.
-    # Both roots mandatory; max(unit 1, 1) + max(Docker 2, this 1) <= 3 minutes.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -348,7 +374,6 @@ jobs:
 
   gate-command-native:
     # Reviewed isolated one-shot Linux seam; never a VM or production admission.
-    # Sibling of other integrations: max(unit 1, 1) + max(integrations 2) <= 3.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -362,7 +387,6 @@ jobs:
 
   gate-artifact-native:
     # Reviewed isolated one-shot Linux seam; never a VM or production admission.
-    # Sibling of other integrations: max(unit 1, 1) + max(integrations 2) <= 3.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -376,7 +400,6 @@ jobs:
 
   room-control-plane:
     # Actual account-free persistent service lifetime; no VM/native admission.
-    # Parallel sibling: max(unit 1, 1) + max(integrations 2) <= 3 minutes.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -393,7 +416,6 @@ jobs:
 
   manager-mtls:
     # Temporary test certificates and loopback sockets only; no production credentials.
-    # Parallel sibling: max(unit roots 1, 1, 1) + max(existing integrations 2, this 1) <= 3.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -409,7 +431,7 @@ jobs:
 
   manager-field-notes:
     # Reuses the existing check entrypoint and runner's installed Chrome.
-    # No download/server/sandbox bypass. max(unit 1,1)+max(existing 2,this 1)<=3.
+    # No download/server/sandbox bypass.
     needs: [validate, unit-slow, unit-integration]
     if: ${{ needs.validate.outputs.skip_tests != 'true' && needs.unit-slow.outputs.skip_tests != 'true' && needs.unit-integration.outputs.skip_tests != 'true' && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -433,3 +455,21 @@ jobs:
           path: ${{ runner.temp }}/manager-field-notes/browser-proof/
           if-no-files-found: warn
           retention-days: 7
+
+  runtime-budget:
+    name: ${{ github.workflow }} runtime budget
+    needs: [validate, unit-slow, unit-integration, forge-broker-smoke, artifact-linux-smoke, docker-lifecycle, git-native-seams, gate-linux-smoke, gate-command-native, gate-artifact-native, room-control-plane, manager-mtls, manager-field-notes]
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Enforce measured runtime growth and absolute ceiling
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 -B tests/ci_runtime_budget.py validate.yml --base "$BASE_SHA"

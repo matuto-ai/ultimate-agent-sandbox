@@ -11,21 +11,27 @@ One intent commits before an operation acts; one terminal receipt commits
 before the Service acknowledges it. An intent without a terminal is explicitly
 pending: it records that no outcome was durably captured, so it can never be
 read as canonical publication success or absence. Later Git reconciliation,
-scheduler recovery and report replay consume these records. Recovery and
-deduplication state is never pruned here; receipt-detail expiry belongs to a
-later slice.
+scheduler recovery and report replay consume these records. Recovery and deduplication identity never expires. Configured retention compacts
+settled detail into durable tombstones; required evidence is capacity-fenced.
 
 Attempt equality follows the supplied ``Operation.canonical()`` contract, so
 an exact retry reconciles while a reused Command ID or a changed request in the
 same Project or installation scope is refused for every operation kind.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from .library import receipt as library_receipt
+from contextlib import contextmanager
+import fcntl
+import os
+import time
+import stat
+from . import library_deadline
 import json
 from pathlib import Path
 import re
 import sqlite3
 
-from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata
+from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata, synthesis_manifest, batch_manifest, operation_manifest, _digest as value_digest
 
 
 RECORD_VERSION = 1
@@ -39,6 +45,9 @@ _ATTEMPT_KEYS = ("record_version", "kind", "operation_id", "request_id", "queue_
 # Mutable bundle coordinates stay descriptive; the supplied Operation.canonical
 # contract excludes them so a rename does not break exact-retry reconciliation.
 _COORDINATES = ("project_path",)
+_MANIFEST_KINDS = ("synthesis-attempt", "synthesis-batch", "scheduler-state",
+                   "source-park", "library-observation", "library-attention",
+                   "archive-final")
 
 # An outcome a Producer cannot reach for this kind is refused, so a record
 # cannot claim a publication its operation does not make.
@@ -52,6 +61,8 @@ _SCHEMA = {
     "submissions": "CREATE TABLE submissions (scope_key TEXT NOT NULL, request_id TEXT NOT NULL, identity TEXT NOT NULL, origin TEXT NOT NULL, submitted_at TEXT NOT NULL, PRIMARY KEY(scope_key, request_id))",
     "attempts": "CREATE TABLE attempts (operation_id TEXT PRIMARY KEY, project_identity TEXT, request_id TEXT NOT NULL, queue_id TEXT, drain_id TEXT, identity TEXT NOT NULL, started_at TEXT NOT NULL, receipt TEXT, finished_at TEXT)",
 }
+_OLD_SCHEMA = dict(_SCHEMA)
+_SCHEMA["retention"] = "CREATE TABLE retention (singleton INTEGER PRIMARY KEY CHECK(singleton=1), retention_days INTEGER NOT NULL, max_bytes INTEGER NOT NULL)"
 _INDEXES = {
     "attempt_request_idx": "CREATE INDEX attempt_request_idx ON attempts(project_identity, request_id)",
     "attempt_queue_idx": "CREATE INDEX attempt_queue_idx ON attempts(queue_id)",
@@ -126,11 +137,13 @@ def _origin(scope):
 def _submission_origin(operation):
     """Immutable first-submission provenance supplied by the contract seam."""
     origin = dict(operation.provenance)
-    if set(origin) != _SUBMISSION_ORIGIN:
+    if set(origin) not in (_SUBMISSION_ORIGIN, _SUBMISSION_ORIGIN | {"run_id"}):
         raise LibraryError("INVALID_RECORD", "provenance")
     for key in ("actor_id", "participant_id", "subject", "request_id"):
         if origin[key] is not None or key != "participant_id":
             _token(origin[key], "provenance." + key)
+    if "run_id" in origin:
+        _token(origin["run_id"], "provenance.run_id")
     _timestamp(origin["at"])
     _digest(origin["payload_sha256"], "provenance.payload_sha256")
     if origin["request_id"] != operation.request_id:
@@ -181,7 +194,14 @@ def _identity(operation):
     if (identity["kind"] == "enqueue") != (identity["queue_id"] is not None):
         raise LibraryError("INVALID_RECORD", "queue_id")
     _origin(operation.scope)  # validate the authenticated origin fields
-    return _safe(identity, "identity")
+    _safe(identity, "identity")
+    if operation.manifest is not None:
+        if operation.kind not in _MANIFEST_KINDS:
+            raise LibraryError("INVALID_RECORD", "manifest")
+        identity["manifest"] = operation_manifest(operation.kind, operation.manifest)
+        expected = identity["manifest"] if operation.kind in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(identity["manifest"])}
+        if operation.payload != expected: raise LibraryError("INVALID_RECORD", "manifest")
+    return identity
 
 
 def _submission(identity):
@@ -205,11 +225,12 @@ class LibraryRecords:
         self.deployment_id = _token(deployment_id, "deployment_id")
         self._db = None
         self._failed = False
+        self.path = Path(path)
         try:
             path = Path(path)
             if str(path) == ":memory:":
                 raise LibraryError("INVALID_STORE")
-            self._db = sqlite3.connect(path, timeout=5, isolation_level=None)
+            self._db = sqlite3.connect(path, timeout=library_deadline.remaining(5), isolation_level=None)
             self._db.row_factory = sqlite3.Row
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.execute("PRAGMA synchronous=FULL")
@@ -225,6 +246,10 @@ class LibraryRecords:
                     self._db.execute(statement)
                 self._db.execute("INSERT INTO deployment VALUES(1, ?, ?)",
                                  (RECORD_VERSION, self.deployment_id))
+            # Exact legacy schema only; reject unrelated databases before migration.
+            objects = {r["name"]: r["sql"] for r in self._db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            if objects == _OLD_SCHEMA:
+                self._db.execute(_SCHEMA["retention"])
             self._schema()
             self._db.commit()
         except (sqlite3.Error, OSError) as error:
@@ -272,8 +297,69 @@ class LibraryRecords:
         # Narrow storage boundary; tests replace this to model a lost commit.
         self._connection().commit()
 
-    def _write(self, work):
+    @contextmanager
+    def _writer(self):
+        # Bound lock waits, scanning and SQLite maintenance by the current
+        # operation deadline, with a finite storage-local ceiling as well.
+        fd = None
         db = self._connection()
+        with library_deadline.bounded(5):
+            def progress():
+                try: library_deadline.remaining(5)
+                except LibraryError: return 1
+                return 0
+            try:
+                fd = os.open(str(self.path) + ".writer", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                node = os.fstat(fd)
+                if (not stat.S_ISREG(node.st_mode) or node.st_nlink != 1
+                        or node.st_uid != os.geteuid() or node.st_mode & 0o077):
+                    raise LibraryError("INVALID_STORE", "writer")
+                while True:
+                    library_deadline.remaining(5)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.01)
+                db.execute('PRAGMA busy_timeout=' + str(max(1,int(library_deadline.remaining(5)*1000))))
+                db.set_progress_handler(progress, 1000)
+                yield
+            except OSError as error:
+                raise LibraryError("RECORD_UNAVAILABLE", "writer") from error
+            except sqlite3.Error as error:
+                self._failed = True
+                try: db.rollback()
+                except sqlite3.Error: pass
+                raise LibraryError("RECORD_UNCERTAIN", "maintenance") from error
+            finally:
+                db.set_progress_handler(None, 0)
+                if fd is not None: os.close(fd)
+
+    def _policy(self, db):
+        row = db.execute("SELECT retention_days,max_bytes FROM retention WHERE singleton=1").fetchone()
+        return dict(row) if row else None
+
+    def _page_limit(self, policy):
+        # Reserve main + VACUUM temporary copy + full WAL frames (24-byte
+        # headers), shm and header/locking overhead together.
+        page = self._connection().execute("PRAGMA page_size").fetchone()[0]
+        return max(0, (policy["max_bytes"] - 32768 - 4096) // (3 * page + 24))
+
+    def _write(self, work):
+        with self._writer():
+            return self._write_locked(work)
+
+    def _write_locked(self, work, *, enforce=True, reclaim=True):
+        db = self._connection()
+        policy = self._policy(db) if enforce else None
+        if policy:
+            checkpoint = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint[0] or checkpoint[1] != checkpoint[2]:
+                raise LibraryError("RECORD_CAPACITY", "checkpoint")
+            limit = self._page_limit(policy)
+            used = db.execute("PRAGMA page_count").fetchone()[0] - db.execute("PRAGMA freelist_count").fetchone()[0]
+            if limit < used: raise LibraryError("RECORD_CAPACITY", "required_state")
+            db.execute("PRAGMA max_page_count=" + str(max(1, limit)))
         try:
             db.execute("BEGIN IMMEDIATE")
         except sqlite3.Error as error:
@@ -281,9 +367,24 @@ class LibraryRecords:
             raise LibraryError("RECORD_UNAVAILABLE") from error
         try:
             result = work(db)
+            if policy:
+                self._compact_work(db, policy, datetime.now(timezone.utc))
+                if db.execute("PRAGMA page_count").fetchone()[0] > self._page_limit(policy):
+                    raise LibraryError("RECORD_CAPACITY", "required_state")
             self._commit()
             return result
         except sqlite3.Error as error:
+            if policy and getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_FULL:
+                db.rollback()
+                # SQLITE_FULL rolls back before any acknowledgement. Compact only
+                # settled detail once, then retry this metadata-only transaction.
+                if policy and reclaim:
+                    expired = self._write_locked(lambda connection: self._compact_work(
+                        connection, policy, datetime.now(timezone.utc), pressure=True), enforce=False)
+                    if expired:
+                        self._vacuum(db)
+                        return self._write_locked(work, reclaim=False)
+                raise LibraryError("RECORD_CAPACITY", "required_state") from error
             self._failed = True
             try:
                 db.rollback()
@@ -320,11 +421,13 @@ class LibraryRecords:
             receipt = None if row["receipt"] is None else admit_receipt(json.loads(row["receipt"]))
             if (type(identity) is not dict or row["identity"] != _canonical(identity)
                     or identity.get("operation_id") != operation_id
-                    or _canonical(_identity_like(identity)) != row["identity"]):
+                    or ("_expired" not in identity and _canonical(_identity_like(identity)) != row["identity"])):
                 raise ValueError()
             if receipt is not None and (row["receipt"] != _canonical(receipt)
                                         or receipt["operation_id"] != operation_id):
                 raise ValueError()
+            if "_expired" in identity:
+                self._tombstone(identity, receipt)
             _timestamp(row["started_at"])
             if row["finished_at"] is not None:
                 _timestamp(row["finished_at"])
@@ -337,7 +440,7 @@ class LibraryRecords:
         return {**identity, "record_version": RECORD_VERSION,
                 "started_at": row["started_at"], "receipt": receipt,
                 "finished_at": row["finished_at"],
-                "state": "PENDING" if receipt is None else "RECORDED"}
+                "state": "DETAIL_EXPIRED" if "_expired" in identity else "PENDING" if receipt is None else "RECORDED"}
 
     def record(self, operation_id, *, project_identity):
         """Exact Project-fenced read; nothing is disclosed across scopes."""
@@ -372,7 +475,7 @@ class LibraryRecords:
                 _timestamp(row["submitted_at"])
                 if (row["origin"] != _canonical(origin)
                         or row["identity"] != _canonical(identity)
-                        or set(origin) != _SUBMISSION_ORIGIN
+                        or set(origin) not in (_SUBMISSION_ORIGIN, _SUBMISSION_ORIGIN | {"run_id"})
                         or origin.get("request_id") != request_id
                         or set(identity) != _SUBMISSION_IDENTITY
                         or identity.get("payload_sha256") != origin.get("payload_sha256")):
@@ -416,6 +519,112 @@ class LibraryRecords:
 
         return self._read(read)
 
+    def latest_lifecycle(self, project_identity):
+        """Current archive/restore intent; unfinished work keeps the capture fence."""
+        _token(project_identity, 'project_identity')
+        def read(db):
+            row = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? "
+                "AND json_extract(identity, '$.kind') IN ('archive','restore') "
+                "ORDER BY rowid DESC LIMIT 1", (project_identity,)).fetchone()
+            return self._attempt(db, row['operation_id']) if row else None
+        return self._read(read)
+
+    def latest_schedule(self, project_identity):
+        """Latest persisted transition, including a durable intent with lost receipt."""
+        _token(project_identity, 'project_identity')
+        def read(db):
+            rows = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? "
+                "AND operation_id LIKE ? ORDER BY rowid DESC LIMIT 1", (project_identity, 'scheduler-' + value_digest(project_identity) + '-%')).fetchall()
+            return self._attempt(db, rows[0]['operation_id']) if rows else None
+        return self._read(read)
+
+    def iter_drain(self, drain_id, *, project_identity):
+        """Bounded pages without an arbitrary lifetime retry count ceiling."""
+        _token(drain_id, 'drain_id'); _token(project_identity, 'project_identity')
+        cursor = 0
+        while True:
+            def read(db):
+                rows = db.execute("SELECT rowid,operation_id FROM attempts WHERE drain_id=? "
+                    "AND project_identity=? AND rowid>? ORDER BY rowid LIMIT 64",
+                    (drain_id, project_identity, cursor)).fetchall()
+                return [(row['rowid'], self._attempt(db, row['operation_id'])) for row in rows]
+            rows = self._read(read)
+            if not rows: return
+            for cursor, record in rows: yield record
+
+    def iter_schedules(self, project_identity, *, after_sequence=0):
+        """All durable transition sources in bounded pages, including lost ACKs."""
+        _token(project_identity, 'project_identity')
+        if type(after_sequence) is not int or after_sequence < 0: raise LibraryError('INVALID_RECORD')
+        cursor = 0
+        prefix = 'scheduler-' + value_digest(project_identity) + '-'
+        while True:
+            def read(db):
+                rows = db.execute("SELECT rowid,operation_id FROM attempts WHERE project_identity=? "
+                    "AND operation_id LIKE ? AND CAST(substr(operation_id,?) AS INTEGER)>? AND rowid>? ORDER BY rowid LIMIT 64",
+                    (project_identity, prefix+'%', len(prefix)+1, after_sequence, cursor)).fetchall()
+                return [(row['rowid'], self._attempt(db, row['operation_id'])) for row in rows]
+            rows = self._read(read)
+            if not rows: return
+            for cursor, record in rows:
+                if record["state"] != "DETAIL_EXPIRED": yield record
+
+    def latest_observation(self, project_identity):
+        _token(project_identity, 'project_identity')
+        def read(db):
+            row = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? AND json_extract(identity, '$.kind')='library-observation' ORDER BY rowid DESC LIMIT 1",
+                (project_identity,)).fetchone()
+            return self._attempt(db, row['operation_id']) if row else None
+        return self._read(read)
+
+    def latest_attention(self, project_identity):
+        """Latest durable attention cut; a lost receipt stays literally pending."""
+        _token(project_identity, 'project_identity')
+        def read(db):
+            row = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? AND json_extract(identity, '$.kind')='library-attention' ORDER BY rowid DESC LIMIT 1",
+                (project_identity,)).fetchone()
+            return self._attempt(db, row['operation_id']) if row else None
+        return self._read(read)
+
+    def notice_attempts(self, prefix):
+        """Prior attempts for one notice identity: the exact total plus the newest page.
+
+        The total allocates the next attempt identity, so a credential that stays
+        unavailable past the page bound still gets a fresh identity on recovery.
+        """
+        _token(prefix, 'prefix')
+        def read(db):
+            count = db.execute("SELECT COUNT(*) FROM attempts WHERE operation_id LIKE ?",
+                (prefix + '-%',)).fetchone()[0]
+            rows = db.execute("SELECT operation_id FROM attempts WHERE operation_id LIKE ? ORDER BY rowid DESC LIMIT 16",
+                (prefix + '-%',)).fetchall()
+            return {'count': count,
+                    'items': [self._attempt(db, row['operation_id']) for row in rows]}
+        return self._read(read)
+
+    def project_history(self, project_identity, *, limit):
+        """Bounded owner metadata snapshot; truncation must remain explicit."""
+        _token(project_identity, 'project_identity')
+        if type(limit) is not int or not 1 <= limit <= 10000: raise LibraryError('INVALID_RECORD')
+        def read(db):
+            rows = db.execute("SELECT operation_id FROM attempts WHERE project_identity=? ORDER BY rowid DESC LIMIT ?",
+                (project_identity, limit + 1)).fetchall()
+            records = [self._attempt(db, row['operation_id']) for row in rows[:limit]]
+            return records, len(rows) <= limit and not any(r["state"] == "DETAIL_EXPIRED" for r in records)
+        return self._read(read)
+
+    def iter_pending(self):
+        """Startup inventory in bounded pages; outages do not impose a lifetime cap."""
+        cursor = 0
+        while True:
+            def read(db):
+                rows = db.execute("SELECT rowid,operation_id FROM attempts WHERE receipt IS NULL "
+                    "AND rowid>? ORDER BY rowid LIMIT 64", (cursor,)).fetchall()
+                return [(row['rowid'],self._attempt(db,row['operation_id'])) for row in rows]
+            rows = self._read(read)
+            if not rows: return
+            for cursor, record in rows: yield record
+
     def pending(self, *, project_identity=None):
         """Bounded restart inventory: records whose terminal was never captured."""
         if project_identity is not None:
@@ -433,9 +642,133 @@ class LibraryRecords:
 
         return self._read(read)
 
+    @staticmethod
+    def _matches(prior, equality):
+        if "_expired" in prior:
+            return prior["_expired"]["identity_sha256"] == value_digest(json.loads(equality))
+        return _canonical(_equality(_identity_like(prior))) == equality
+
+    @staticmethod
+    def _tombstone(identity, receipt):
+        if set(identity) != set(_ATTEMPT_KEYS) | {"_expired"} or receipt is None:
+            raise LibraryError("RECORD_INVALID")
+        proof = identity["_expired"]
+        if type(proof) is not dict or set(proof) != {"identity_sha256", "receipt_sha256"}:
+            raise LibraryError("RECORD_INVALID")
+        for value in proof.values(): _digest(value, "tombstone")
+        if receipt.get("detail_expired") is not True: raise LibraryError("RECORD_INVALID")
+        # Retain the original scoped identity/digest and outcome references.
+        _safe({key: value for key, value in identity.items() if key != "_expired"}, "tombstone")
+        _safe(proof, "tombstone")
+
+    def configure_retention(self, audit):
+        """Trusted Deployment audit config; persisted for every future handle.
+
+        No defaults, independent retention policy, or caller payload authority.
+        A too-small cap remains installed and safely blocks future writes.
+        """
+        if (type(audit) is not dict or set(audit) != {"retention_days", "max_bytes"}
+                or any(type(v) is not int or not 1 <= v <= 2**53-1 for v in audit.values())):
+            raise LibraryError("INVALID_RETENTION")
+        with self._writer():
+            self._write_locked(lambda db: db.execute("INSERT OR REPLACE INTO retention VALUES(1,?,?)",
+                (audit["retention_days"], audit["max_bytes"])), enforce=False)
+        return self.compact()
+
+    def _protected(self, db):
+        rows = db.execute("SELECT operation_id FROM attempts ORDER BY rowid").fetchall()
+        records = []
+        for row in rows:
+            library_deadline.remaining(5)
+            records.append(self._attempt(db, row[0]))
+        protected = {r['operation_id'] for r in records if r['receipt'] is None
+                     or r['receipt']['outcome'] in ('NOT_DURABLE','UNKNOWN')}
+        latest = {}; active_drains = set()
+        by_id = {r['operation_id']:r for r in records}
+        for r in records:
+            if r['state'] != 'DETAIL_EXPIRED' and r['kind'] in (
+                    'scheduler-state','library-observation','library-attention','archive','restore'):
+                latest[(r['scope']['project_identity'],r['kind'])] = r
+        for r in latest.values():
+            protected.add(r['operation_id'])
+            if r['kind']=='scheduler-state' and r['manifest']['drain_id']:
+                active_drains.add((r['scope']['project_identity'],r['manifest']['drain_id']))
+        for r in latest.values():
+            if r['kind']=='archive' and r['receipt'] is None:
+                active_drains.add((r['scope']['project_identity'], 'archive-final-' + value_digest(r['operation_id'])))
+        for r in records:
+            if r['operation_id'] in protected and r['drain_id']:
+                active_drains.add((r['scope']['project_identity'],r['drain_id']))
+            transition = r.get('manifest',{}).get('transition')
+            if r['kind']=='scheduler-state' and transition:
+                ack = 'report-' + value_digest([r['scope']['project_identity'],transition['drain_id'],transition['sequence']])
+                if ack not in by_id or by_id[ack]['receipt'] is None:
+                    protected.add(r['operation_id'])
+                    active_drains.add((r['scope']['project_identity'],transition['drain_id']))
+        for r in records:
+            if (r['scope']['project_identity'],r['drain_id']) in active_drains:
+                protected.add(r['operation_id'])
+        return records, protected
+
+    def _compact_work(self, db, policy, now, *, pressure=False):
+        records, protected = self._protected(db)
+        cutoff = now - timedelta(days=min(policy['retention_days'], 365000))
+        count = 0
+        for record in records:
+            library_deadline.remaining(5)
+            if record['operation_id'] in protected or record['state']=='DETAIL_EXPIRED': continue
+            if not pressure and datetime.fromisoformat(record['finished_at']) > cutoff: continue
+            identity = _identity_like(record)
+            proof = {'identity_sha256':value_digest(_equality(identity)),
+                     'receipt_sha256':value_digest(record['receipt'])}
+            identity.pop('manifest',None); identity['_expired']=proof
+            receipt = dict(record['receipt']); receipt.pop('evidence',None)
+            receipt['detail_expired'] = True
+            if receipt['projection'] is not None: receipt['projection']={'commit_sha':None,'visible':False}
+            admit_receipt(receipt)
+            db.execute("UPDATE attempts SET identity=?,receipt=? WHERE operation_id=?",
+                (_canonical(identity),_canonical(receipt),record['operation_id']))
+            count += 1
+        return count
+
+    @staticmethod
+    def _vacuum(db):
+        if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]:
+            raise LibraryError('RECORD_CAPACITY', 'checkpoint')
+        db.execute('VACUUM')
+        if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]:
+            raise LibraryError('RECORD_CAPACITY', 'checkpoint')
+
+    def compact(self, *, now=None):
+        """Only settled operational detail. Atomic tombstones, then physical reclaim.
+
+        Active reader/checkpoint or insufficient required-state capacity is a safe
+        failure, never permission to delete dedupe/recovery data or Git history.
+        """
+        now = datetime.now(timezone.utc) if now is None else now
+        if not isinstance(now,datetime) or now.tzinfo is None: raise LibraryError('INVALID_RETENTION')
+        with self._writer():
+            db=self._connection();policy=self._policy(db)
+            if policy is None: raise LibraryError('RETENTION_NOT_CONFIGURED')
+            count=self._write_locked(lambda connection:self._compact_work(connection,policy,now),enforce=False)
+            if db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0]:
+                raise LibraryError('RECORD_CAPACITY','checkpoint')
+            # VACUUM is crash-atomic SQLite maintenance; no second body store.
+            self._vacuum(db)
+            limit=self._page_limit(policy)
+            if db.execute('PRAGMA page_count').fetchone()[0] > limit:
+                count+=self._write_locked(lambda connection:self._compact_work(connection,policy,now,pressure=True),enforce=False)
+                self._vacuum(db)
+            if db.execute('PRAGMA page_count').fetchone()[0] > limit:
+                raise LibraryError('RECORD_CAPACITY','required_state')
+            return {'expired':count,'max_bytes':policy['max_bytes'],'details':'operational_only'}
+
     # --- writes ----------------------------------------------------------
 
-    def begin(self, operation):
+    def begin(self, operation, *, exclusive=False):
+        return self._write(self._begin_work(operation, exclusive=exclusive))
+
+    def _begin_work(self, operation, *, exclusive=False):
         """Durably record one attempt intent; no acknowledgement before commit.
 
         An exact repeat returns the committed record unchanged. Reusing a
@@ -455,8 +788,10 @@ class LibraryRecords:
         def work(db):
             prior = self._attempt(db, operation.operation_id)
             if prior is not None:
-                if _canonical(_equality(_identity_like(prior))) != equality:
+                if not self._matches(prior, equality):
                     raise LibraryError("ID_CONFLICT", "operation_id")
+                if exclusive:
+                    raise LibraryError("ATTEMPT_ALREADY_RESERVED", "operation_id")
                 return {"state": prior["state"], "record": prior}
             row = db.execute("SELECT identity FROM submissions WHERE scope_key=? "
                              "AND request_id=?",
@@ -464,6 +799,8 @@ class LibraryRecords:
             if row is not None:
                 if row["identity"] != submission:
                     raise LibraryError("ID_CONFLICT", "request_id")
+                expired = db.execute("SELECT operation_id FROM attempts WHERE project_identity IS ? AND request_id=? AND json_type(identity, '$._expired') IS NOT NULL LIMIT 1", (scope["project_identity"], identity["request_id"])).fetchone()
+                if expired: raise LibraryError("DETAIL_EXPIRED", "request_id")
             else:
                 # Only a retry may carry another actor's submission origin.
                 if any(origin[key] != scope[key] for key in
@@ -480,7 +817,7 @@ class LibraryRecords:
                         canonical, _now()))
             return {"state": "PENDING", "record": self._attempt(db, operation.operation_id)}
 
-        return self._write(work)
+        return work
 
     def _capacity(self, db):
         pending = db.execute("SELECT count(*) FROM attempts WHERE receipt IS NULL").fetchone()[0]
@@ -488,6 +825,9 @@ class LibraryRecords:
             raise LibraryError("RECORD_CAPACITY")
 
     def finish(self, operation, receipt):
+        return self._write(self._finish_work(operation, receipt))
+
+    def _finish_work(self, operation, receipt):
         """Durably record the terminal receipt before any acknowledgement.
 
         The receipt must describe this stored attempt. An exact repeat returns
@@ -520,22 +860,96 @@ class LibraryRecords:
             prior = self._attempt(db, operation.operation_id)
             if prior is None:
                 raise LibraryError("RECORD_NOT_FOUND")
-            if _canonical(_equality(_identity_like(prior))) != canonical_identity:
+            if not self._matches(prior, canonical_identity):
                 raise LibraryError("ID_CONFLICT", "operation_id")
             if prior["receipt"] is not None:
-                if _canonical(prior["receipt"]) != value:
+                if (prior.get("_expired", {}).get("receipt_sha256") != value_digest(admitted) if "_expired" in prior else _canonical(prior["receipt"]) != value):
                     raise LibraryError("ID_CONFLICT", "receipt")
                 return prior
             db.execute("UPDATE attempts SET receipt=?,finished_at=? WHERE operation_id=?",
                        (value, _now(), operation.operation_id))
             return self._attempt(db, operation.operation_id)
 
+        return work
+
+    def inspection_identity(self, operation):
+        """Atomically reserve only a read's identity; never its content/response.
+
+        Exact retries compare even compacted identity, but callers must freshly
+        authorize and read. The acknowledgement is not an inspection replay.
+        """
+        if operation.kind != 'inspect' or operation.scope.subject != 'human':
+            raise LibraryError('INVALID_OPERATION')
+        receipt = library_receipt(
+            operation, 'ACKNOWLEDGED', at=operation.at,
+            acknowledgement=operation.digest())
+        begin = self._begin_work(operation)
+        finish = self._finish_work(operation, receipt)
+        def work(db):
+            prior = begin(db)['record']
+            if prior['receipt'] is not None: return
+            finish(db)
+        self._write(work)
+
+    def schedule_control(self, operation, receipt, schedule, schedule_receipt):
+        """One durable transaction for a human acknowledgement and schedule intent.
+
+        No external action occurs inside it. A lost commit response is uncertain;
+        a fresh Project-fenced receipt read reconciles the whole transition.
+        """
+        if (operation.kind not in ('drain','retry','resume') or operation.scope.subject != 'human'
+                or schedule.kind != 'scheduler-state'
+                or operation.scope.project_identity != schedule.scope.project_identity
+                or receipt['outcome'] != 'ACKNOWLEDGED'
+                or receipt['acknowledgement'] != value_digest(schedule.manifest)):
+            raise LibraryError('INVALID_OPERATION')
+        begin = self._begin_work(operation)
+        begin_schedule = self._begin_work(schedule, exclusive=True)
+        finish_schedule = self._finish_work(schedule, schedule_receipt)
+        finish = self._finish_work(operation, receipt)
+        def work(db):
+            prior = begin(db)['record']
+            if prior['receipt'] is not None:
+                # Caller reconciles before choosing a new sequence; never repeat.
+                raise LibraryError('CONTROL_ALREADY_RECORDED')
+            begin_schedule(db); finish_schedule(db)
+            return finish(db)
+        return self._write(work)
+
+    def attention_control(self, operation, receipt, attention, attention_receipt):
+        """One durable transaction for a human snooze receipt and attention cut.
+
+        The acknowledgement digest names the exact snoozed cut, so reconciliation
+        cannot pair a receipt with different attention or repeat the write.
+        """
+        if (operation.kind != 'defer' or operation.scope.subject != 'human'
+                or attention.kind != 'library-attention'
+                or operation.scope.project_identity != attention.scope.project_identity
+                or receipt['outcome'] != 'ACKNOWLEDGED'
+                or receipt['acknowledgement'] != value_digest(attention.manifest)):
+            raise LibraryError('INVALID_OPERATION')
+        begin = self._begin_work(operation)
+        begin_attention = self._begin_work(attention, exclusive=True)
+        finish_attention = self._finish_work(attention, attention_receipt)
+        finish = self._finish_work(operation, receipt)
+        def work(db):
+            prior = begin(db)['record']
+            if prior['receipt'] is not None:
+                raise LibraryError('CONTROL_ALREADY_RECORDED')
+            begin_attention(db); finish_attention(db)
+            return finish(db)
         return self._write(work)
 
 
 def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
-    return {key: value[key] for key in _ATTEMPT_KEYS}
+    result = {key: value[key] for key in _ATTEMPT_KEYS}
+    if "manifest" in value:
+        if value["kind"] not in _MANIFEST_KINDS: raise LibraryError("INVALID_RECORD")
+        result["manifest"] = operation_manifest(value["kind"], value["manifest"])
+        expected = result["manifest"] if value["kind"] in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(result["manifest"])}
+        if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")
+    return result
 
 
 def _equality(value):

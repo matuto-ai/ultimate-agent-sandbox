@@ -4,4 +4,8 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 export PYTHONDONTWRITEBYTECODE=1
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ is required"'
+python3 -c 'import markdown_it, mdurl' || {
+    echo 'Install requirements.txt in your Python environment first (see README.md).' >&2
+    exit 1
+}
 python3 tests/ci_unit.py "$@"

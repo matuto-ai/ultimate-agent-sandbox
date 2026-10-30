@@ -599,6 +599,14 @@
       .prototype-variant-copy { max-width:118px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .prototype-tools label { display:none; }
     }
+    .library-operations { margin-top:30px; padding:24px; border:1px solid var(--line); border-top:5px solid var(--accent); background:var(--surface); }
+    .library-operations h2 { margin-bottom:8px; }
+    .library-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 24px; }
+    .library-groups h3 { margin:12px 0 6px; }
+    .library-operations dd { overflow-wrap:anywhere; }
+    .library-attachments { display:flex; flex-wrap:wrap; gap:12px; margin-top:18px; }
+    .library-attachments section { flex:1 1 200px; padding:12px; border:1px dashed var(--line); }
+    @media(max-width:700px) { .library-groups { grid-template-columns:1fr; } .library-operations { padding:16px; } }
     @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
   </style>
 </head>
@@ -621,7 +629,7 @@
   <script>
     // Read-only consumer. No fabricated fixtures, remote requests, or workflow commands.
     const variants = {C: "Field Notes · Light", D: "Field Notes · Dark"};
-    const pages = ["projects", "inbox", "health", "project", "room", "run"];
+    const pages = ["projects", "inbox", "health", "project", "room", "run", "library-settings"];
     const emptyDocument = {schema_version: 1, generated_at: null, rooms: []};
     let live = emptyDocument, lastTrigger = null;
     const own = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
@@ -656,9 +664,15 @@
       return project.view.status !== "connected" || project.view.projection_stale === true || project.view.catching_up === true || !Number.isFinite(until) || now > until || now < captured;
     }
     function quality(project, source) { return stale(project) ? "stale" : source.freshness; }
+    function libraryQuality(project, source) {
+      if (quality(project, source) === "stale") return "stale";
+      const observed = Date.parse(source.observed_at), captured = Date.parse(project.view.projection?.captured_at);
+      const ttl = Date.parse(project.valid_until) - captured, age = Date.now() - observed;
+      return !Number.isFinite(observed) || !Number.isFinite(ttl) || ttl < 0 || age < 0 || age > ttl ? "stale" : source.freshness;
+    }
     function sourceLine(project, section) {
       const source = fact(project, section);
-      return `<p class="truth"><strong>${esc(source.source_owner)}</strong> · version ${esc(source.observed_version)} · source ${status(source.status)} · data ${status(quality(project, source))}<br>Observed ${esc(source.observed_at)} · committed ${esc(source.source_committed_at)}${source.reason ? `<br>Reason: ${esc(source.reason)}` : ""}</p>`;
+      return `<p class="truth"><strong>${esc(source.source_owner)}</strong> · version ${esc(source.observed_version)} · source ${status(source.status)} · data ${status(section === "library" ? libraryQuality(project, source) : quality(project, source))}<br>Observed ${esc(source.observed_at)} · committed ${esc(source.source_committed_at)}${source.reason ? `<br>Reason: ${esc(source.reason)}` : ""}</p>`;
     }
     function fields(value) {
       if (!object(value)) return `<p class="muted">unknown</p>`;
@@ -821,10 +835,73 @@
       if (!run || run.repository !== repository || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}$/.test(repository) || !Number.isSafeInteger(candidate?.pull_number) || candidate.pull_number < 1) return '<p class="small muted">Canonical GitHub target unavailable.</p>';
       return `<a class="btn primary" href="https://github.com/${esc(repository)}/pull/${candidate.pull_number}" target="_blank" rel="noopener noreferrer">Open in GitHub</a><p class="small muted">Navigation only; opening GitHub neither approves nor completes this Run.</p>`;
     }
+    function libraryOperations(project) {
+      const source = fact(project, "library"), entries = rows(project, "library");
+      // Rows were bound to this authenticated Room by the Library/Hub owner.
+      // No browser-selected identity, arbitrary field enumeration or inferred health.
+      const value = entries.length === 1 && entries[0][0] === entries[0][1]?.project_identity ? entries[0][1] : null;
+      const groups = [
+        ["Queue and drain", ["project_identity","queue_status","active_depth","parked_depth","oldest_age_seconds","adjudication_wait_seconds","drain_state","drain_id","attempt","retry_count","next_retry_at"]],
+        ["Publication and projection", ["canonical_sha","projected_sha","projection_state","projected_at","replay_lag"]],
+        ["Observed window", ["window_start","window_end","coverage","published_drafts","completed_outcomes","effectiveness","duplicate_merges","feedback","human_corrections","human_decisions"]],
+        ["Provider and failures", ["provider_state","provider_mode","provider_profile_sha256","provider_version","provider_observed_at","capture_failures","source_failures","model_failures","validation_failures","transport_failures","audit_failures","recovery_failures"]]
+      ];
+      return `<section class="library-operations" aria-labelledby="library-title" data-library-project="${esc(project.key)}"><h2 id="library-title">Library operations</h2><p class="small muted">Project-bound operational metadata only. Empty queues, connectivity and successful publication do not establish healthy inference or knowledge quality.</p>${sourceLine(project,"library")}${value ? `<p>Literal drain ${status(value.drain_state)} · queue ${status(value.queue_status)} · projection ${status(value.projection_state)} · provider ${status(value.provider_state)}</p><div class="library-groups">${groups.map(([title,keys])=>`<section><h3>${esc(title)}</h3>${fields(Object.fromEntries(keys.map(key=>[key,value[key]])))}</section>`).join("")}</div>` : '<p class="empty">Library observation unknown or unavailable. No healthy, empty or completed state inferred.</p>'}<div class="library-attachments"><section data-library-actions><h3>Library actions</h3><p class="small muted">Separate Project-authorized action surface. Not attached in this view.</p></section><section data-library-settings><h3>Library settings</h3><p class="small muted">Separate installation-operator surface affecting all Projects.</p><a class="text-link" href="${href("library-settings")}" data-nav>Open Library settings</a><p class="small muted">A Project grant never authorizes installation settings.</p></section></div></section>`;
+    }
+    // Installation attachment is deliberately separate from per-Project action hosts.
+    let settingsHost = null, settingsEpoch = 0, settingsBusy = false, settingsView = null,
+        settingsDraft = null, settingsPending = null, settingsMessage = 'Attach an authenticated installation-operator host, then refresh.';
+    function installLibrarySettingsHost(binding) {
+      if (binding !== null && (!object(binding) || typeof binding.handle !== 'function' || typeof binding.deployment !== 'string')) throw Error('Trusted installation settings host required');
+      settingsHost = binding; settingsEpoch++; settingsBusy = false; settingsView = null; settingsDraft = null;
+      settingsMessage = settingsPending ? 'Outcome unknown. Reconcile the original request; no second write will be sent.' : 'Refresh to read the current shared configuration.';
+      render();
+    }
+    function librarySettingsPage() {
+      const disabled = !settingsHost || settingsBusy;
+      return `${folioHead('LS','Library settings','Installation-wide shared configuration · affects all Projects. Project permissions do not authorize these controls.')}<section class="folio-section library-settings-page" style="overflow-wrap:anywhere"><p>No provider provisioning, model selection, credentials, content access or per-Project overrides. Changes apply to new operations; in-flight work retains its starting configuration.</p><p role="status" id="settings-message">${esc(settingsMessage)}</p><button class="btn" data-settings-refresh ${disabled || settingsPending?'disabled':''}>Refresh configuration</button>${settingsPending?`<p>Original request ${esc(settingsPending.request.request_id)} · outcome not confirmed.</p><button class="btn" data-settings-reconcile ${disabled?'disabled':''}>Reconcile original request</button>`:''}${settingsView?`<p>Configuration version <strong>${esc(settingsView.configuration_version)}</strong> · all Projects</p><p class="small">Settings identity ${esc(settingsView.settings_id)}</p><div class="library-groups">${['limits','filters'].map(group=>`<fieldset><legend>${group==='limits'?'Shared limits and drain policy':'Content filter modes'}</legend>${Object.entries(settingsDraft[group]).map(([key,value])=>`<label style="display:block;margin:12px 0" for="setting-${esc(key)}">${esc(key.replaceAll('_',' '))}${group==='limits'?`<input style="display:block;max-width:100%" id="setting-${esc(key)}" data-setting-group="${group}" data-setting-key="${esc(key)}" type="number" min="1" step="1" value="${esc(value)}" ${disabled||settingsPending?'disabled':''}>`:`<select style="display:block;max-width:100%" id="setting-${esc(key)}" data-setting-group="${group}" data-setting-key="${esc(key)}" ${disabled||settingsPending?'disabled':''}>${['observe','block'].map(mode=>`<option value="${mode}" ${mode===value?'selected':''}>${mode}</option>`).join('')}</select>`}</label>`).join('')}</fieldset>`).join('')}</div><p>Owner validation enforces fixed ceilings and cross-field bounds. Heuristic blocking requires independent qualification.</p><button class="btn primary" data-settings-save ${disabled||settingsPending?'disabled':''}>Apply to all Projects</button>`:''}</section>`;
+    }
+    function settingsIdentity() { return globalThis.crypto?.randomUUID?.(); }
+    async function settingsCall(packet) {
+      const binding = settingsHost, epoch = settingsEpoch;
+      if (!binding || settingsBusy) return;
+      settingsBusy = true; settingsMessage = 'Waiting for the settings owner. No success inferred.'; render();
+      let response;
+      try { response = await binding.handle(JSON.parse(JSON.stringify(packet))); } catch (_) { response = null; }
+      if (binding !== settingsHost || epoch !== settingsEpoch) return;
+      settingsBusy = false;
+      const result = response?.result;
+      if (packet.request.action === 'settings-observe') {
+        if (response?.outcome === 'OBSERVED' && object(result) && result.deployment === binding.deployment && result.impact === 'all-projects' && Number.isSafeInteger(result.configuration_version) && result.configuration_version > 0 && /^[a-f0-9]{64}$/.test(result.settings_id) && object(result.shared?.limits) && object(result.shared?.filters) && Object.values(result.shared.limits).every(value=>Number.isSafeInteger(value)&&value>0) && Object.values(result.shared.filters).every(value=>['observe','block'].includes(value))) {
+          settingsView = result; settingsDraft = JSON.parse(JSON.stringify(result.shared)); settingsMessage = 'Current owner configuration. Review values before applying to all Projects.';
+        } else { settingsView = settingsDraft = null; settingsMessage = 'Configuration unavailable or permission refused. No default values substituted.'; }
+      } else if (response?.outcome === 'RECEIPT' && object(result) && result.request_id === packet.request.request_id && result.deployment === packet.request.deployment && /^[a-f0-9]{64}$/.test(result.prior_sha256) && Number.isSafeInteger(result.configuration_version) && ((result.outcome === 'CONFIGURED' && result.prior_sha256 === packet.request.settings_id && result.configuration_version === packet.request.configuration_version + 1 && /^[a-f0-9]{64}$/.test(result.resulting_sha256)) || (result.outcome === 'REJECTED' && result.configuration_version >= packet.request.configuration_version))) {
+        settingsPending = null; settingsView = settingsDraft = null;
+        settingsMessage = result.outcome === 'CONFIGURED' ? `Saved durably as configuration version ${result.configuration_version}. Refresh before another change.` : `Rejected (${result.reason || 'validation refused'}). Refresh current configuration before editing again.`;
+      } else { settingsMessage = 'Outcome unknown or permission refused. Reconcile the original request; never resubmit as a new write.'; }
+      render();
+    }
+    async function refreshLibrarySettings() {
+      if (!settingsHost || settingsBusy || settingsPending) return;
+      const id = settingsIdentity(); if (!id) { settingsMessage='Secure request identity unavailable. Nothing sent.'; render(); return; }
+      settingsView = settingsDraft = null;
+      return settingsCall({version:1,operation_id:id,mode:'execute',request:{version:1,action:'settings-observe',deployment:settingsHost.deployment}});
+    }
+    async function saveLibrarySettings() {
+      if (!settingsHost || settingsBusy || settingsPending || !settingsView) return;
+      const id = settingsIdentity(); if (!id) { settingsMessage='Secure request identity unavailable. Nothing sent.'; render(); return; }
+      settingsPending = {version:1,operation_id:id,mode:'execute',request:{version:1,action:'settings-update',deployment:settingsHost.deployment,request_id:id,configuration_version:settingsView.configuration_version,settings_id:settingsView.settings_id,shared:JSON.parse(JSON.stringify(settingsDraft))}};
+      return settingsCall(settingsPending);
+    }
+    async function reconcileLibrarySettings() {
+      if (!settingsPending || !settingsHost || settingsBusy) return;
+      return settingsCall({...settingsPending,mode:'reconcile'});
+    }
+
     function projectBody(state, roomOnly = false) {
       const project = state.project;
       if (roomOnly) return `${actionLauncher(project.key,"lifecycle")}${sectionDetails(project, "room_lifecycle", null, true)}${["image_profile_drift", "checkout_slots", "capabilities", "processes", "adapter_connections", "readiness", "context_binding", "last_observation"].map(section => sectionDetails(project, section)).join("")}`;
-      return `<div class="folio-project-layout"><div><section class="folio-section"><h2>Runs</h2>${runLinks(project)}</section><section class="folio-section"><h2>Participants</h2><p class="small muted">Persisted process authority, adapter attachment, and readiness are independent observations.</p><div class="folio-people">${participants(project)}</div></section></div><aside class="folio-side-note"><h2>Project note</h2>${signals(project)}<p class="small">Room ${esc(project.view.identity.room_id)} · Deployment ${esc(project.view.identity.deployment_id)}</p><a class="btn" href="${href("room", project.key)}" data-nav>Room details</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Source and binding</button><button class="btn ghost" data-health-project="${esc(project.key)}">Health details</button></aside></div>`;
+      return `<div class="folio-project-layout"><div><section class="folio-section"><h2>Runs</h2>${runLinks(project)}</section><section class="folio-section"><h2>Participants</h2><p class="small muted">Persisted process authority, adapter attachment, and readiness are independent observations.</p><div class="folio-people">${participants(project)}</div></section>${libraryOperations(project)}</div><aside class="folio-side-note"><h2>Project note</h2>${signals(project)}<p class="small">Room ${esc(project.view.identity.room_id)} · Deployment ${esc(project.view.identity.deployment_id)}</p><a class="btn" href="${href("room", project.key)}" data-nav>Room details</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Source and binding</button><button class="btn ghost" data-health-project="${esc(project.key)}">Health details</button></aside></div>`;
     }
     function cases(state) { return `<div class="folio-case-list">${state.attention.map(item => `<button class="folio-case" data-attention="${esc(item.key)}"><span class="folio-case-code">${esc(item.quality.toUpperCase())}</span><span><strong>${esc(item.title)}</strong><span class="attention-summary">${esc(item.project.name)} · ${esc(item.runId)}</span></span><span>${status(item.quality)}</span></button>`).join("") || '<p class="empty">No human-attention rows recorded in available snapshots. Unavailable sources do not establish absence.</p>'}</div>`; }
     function render(focus = false) {
@@ -832,6 +909,7 @@
       if (p === "projects") content = `${folioHead("P", "Project field notes", "Projects lead; Runs remain beneath their Project. All facts retain their own source and time.")}${currentDecision(state)}<div class="folio-projects">${state.projects.map((project, index) => `<article class="folio-project-card ${index === 0 ? "feature" : ""}"><div class="folio-card-number">${index + 1}</div><h2><a class="text-link" href="${href("project", project.key)}" data-nav>${esc(project.name)}</a></h2>${snapshot(project)}${signals(project)}<div class="folio-card-actions"><a class="btn primary" href="${href("project", project.key)}" data-nav>Open Project</a><button class="btn ghost" data-project-detail="${esc(project.key)}">Quick view</button></div></article>`).join("") || '<p class="empty">Disconnected — no authorized Room snapshots supplied.</p>'}</div>`;
       else if (p === "inbox") content = `${folioHead("I", "Attention casebook", "Source-recorded human attention, with context and evidence. Human controls require a trusted host and current owner eligibility.")}${currentDecision(state)}${cases(state)}`;
       else if (p === "health") content = `${folioHead("H", "Runtime field checks", "Connection, freshness, provider validity, inference, quota, partial outcomes and drift are separate facts.")}<div class="folio-health-grid">${state.projects.map(project => `<article class="folio-health-card"><h2>${esc(project.name)}</h2>${snapshot(project)}${signals(project)}<button class="btn" data-health-project="${esc(project.key)}">Open health sheet</button></article>`).join("")}</div>`;
+      else if (p === "library-settings") content = librarySettingsPage();
       else if (!state.project) content = folioHead("P", "Choose a Project", "This context is not present in the authorized snapshot. Choose a Project from the index.");
       else if (p === "project" || p === "room") content = `${trail(state)}${folioHead(p === "room" ? "RM" : "P", p === "room" ? `${state.project.name} / Room` : state.project.name, "Runs and technical Room facts stay inside this Project context.")}${snapshot(state.project)}${currentDecision(state)}${projectBody(state, p === "room")}`;
       else if (!state.run) content = `${trail(state)}${folioHead("R", "Choose a Run", "This Run is not recorded beneath the selected Project.")}`;
@@ -852,9 +930,16 @@
     function openAttention(key) { const item = stateFor().attention.find(item => item.key === key); if (!item) return; closeDrawer(false); lastTrigger = document.activeElement; document.getElementById("item-title").textContent = item.title; document.getElementById("item-body").innerHTML = `${snapshot(item.project)}${sourceLine(item.project, item.source || "attention")}${fields(item.observation)}${sectionDetails(item.project, "review", id => id === item.runId)}${controls("attention")}`; document.getElementById("item-actions").innerHTML = `<button class="btn" data-close-item>Close</button><a class="btn" href="${href("run", item.project.key, item.runId)}" data-nav>Open Run</a>${githubLink(item.project, item.runId)}`; document.getElementById("item-dialog").showModal(); requestAnimationFrame(() => document.getElementById("item-title").focus()); }
     function installDocument(value) {
       if (!object(value) || value.schema_version !== 1 || !Array.isArray(value.rooms) || value.rooms.some(item => !object(item.metadata) || !object(item.view?.identity))) throw new Error("Unsupported Manager view");
-      live = value; closeDrawer(false); closeItem(false); render();
+      live = value; closeDrawer(false); closeItem(false); if (page() !== "library-settings" || !document.getElementById("app").innerHTML) render();
     }
+    document.addEventListener("input", event => {
+      const input = event.target;
+      if (settingsDraft && !settingsBusy && !settingsPending && input.dataset?.settingGroup && own(settingsDraft[input.dataset.settingGroup],input.dataset.settingKey)) settingsDraft[input.dataset.settingGroup][input.dataset.settingKey] = input.dataset.settingGroup === "limits" ? Number(input.value) : input.value;
+    });
     document.addEventListener("click", event => {
+      if (event.target.closest("[data-settings-refresh]")) return refreshLibrarySettings();
+      if (event.target.closest("[data-settings-save]")) return saveLibrarySettings();
+      if (event.target.closest("[data-settings-reconcile]")) return reconcileLibrarySettings();
       if (event.target.closest('[data-inspect-outcome]')) { event.preventDefault(); inspectHumanOutcome(); return; }
       const target = event.target;
       const human = target.closest('[data-human-action]'); if (human) return submitHumanAction(human.dataset.humanAction);
@@ -877,10 +962,10 @@
     if (bootstrap) { try { installDocument(JSON.parse(bootstrap)); } catch (_) { document.getElementById("app").textContent = "Manager data unavailable — unsupported or invalid view. No actions are available."; } }
     else render();
     // A retained page must age out even if its authorized host stops refreshing.
-    let lastStaleness = stateFor().projects.map(project => `${project.key}:${stale(project)}`).join("|");
+    let lastStaleness = stateFor().projects.map(project => `${project.key}:${stale(project)}:${libraryQuality(project, fact(project, "library"))}`).join("|");
     setInterval(() => {
-      const marker = stateFor().projects.map(project => `${project.key}:${stale(project)}`).join("|");
-      if (marker !== lastStaleness) { lastStaleness = marker; closeDrawer(false); closeItem(false); render(); }
+      const marker = stateFor().projects.map(project => `${project.key}:${stale(project)}:${libraryQuality(project, fact(project, "library"))}`).join("|");
+      if (marker !== lastStaleness) { lastStaleness = marker; closeDrawer(false); closeItem(false); if (page() !== "library-settings") render(); }
     }, 1000);
   </script>
 </body>

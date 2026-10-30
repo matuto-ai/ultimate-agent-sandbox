@@ -52,14 +52,15 @@ INITIAL_FILTERS = {"high_confidence": "block", "heuristic": "observe"}
 # else reaches the service, so a caller cannot assert a commit, outcome or path.
 HUMAN_PAYLOADS = {
     "register": ((), ()),
-    "import-preview": (("source_commit", "paths"), ()),
-    "import-confirm": (("preview_id", "source_commit", "paths", "observed_version"), ()),
+    "relocate": ((), ()),
+    "import-preview": (("source_commit", "paths"), ("types",)),
+    "import-confirm": (("preview_id", "source_commit", "paths", "observed_version"), ("types",)),
     "inspect": (("queue_id", "observed_version"), ("drain_id",)),
     "drain": (("observed_version",), ()),
     "retry": (("drain_id", "observed_version"), ()),
-    "defer": (("drain_id", "observed_version"), ()),
+    "defer": (("observed_version",), ()),
     "requeue": (("drain_id", "observed_version"), ()),
-    "resume": (("drain_id", "observed_version"), ("queue_ids",)),
+    "resume": (("drain_id", "observed_version"), ()),
     "reject": (("drain_id", "queue_id", "reason", "observed_version"), ()),
     "adjudicate": (("drain_id", "queue_id", "conclusion", "rationale",
                     "observed_version"), ()),
@@ -77,6 +78,9 @@ CONCEPT_DIRECTORIES = ("context", "decisions", "research")
 # Fixed crash-protection maxima. They are constants, not settings: an operator
 # cannot raise them and admission refuses any value above them.
 MAXIMA = {
+    "request_files": 512,
+    "request_bytes": 2097152,
+    "request_tokens": 524288,
     "title_chars": 512,
     "body_bytes": 262144,
     "sources": 64,
@@ -87,6 +91,7 @@ MAXIMA = {
     "coalesce_seconds": 3600,
     "warning_seconds": 2592000,
     "inspection_bytes": 262144,
+    "inspection_context_bytes": 1048576,
     "document_bytes": 1048576,
     "scan_documents": 4096,
     "projection_bytes": 1048576,
@@ -95,6 +100,9 @@ MAXIMA = {
 # Published starting values. Admission never substitutes them for a missing
 # setting; a deployment supplies every one of them explicitly.
 INITIAL_LIMITS = {
+    "request_files": 64,
+    "request_bytes": 131072,
+    "request_tokens": 32768,
     "title_chars": 200,
     "body_bytes": 16384,
     "sources": 16,
@@ -105,6 +113,7 @@ INITIAL_LIMITS = {
     "coalesce_seconds": 10,
     "warning_seconds": 86400,
     "inspection_bytes": 16384,
+    "inspection_context_bytes": 32768,
     "document_bytes": 65536,
     "scan_documents": 256,
     "projection_bytes": 65536,
@@ -128,10 +137,16 @@ CONTENT_KEYS = frozenset({
 
 
 class LibraryError(ValueError):
-    """Stable code plus safe field path; never echoes input values or secrets."""
+    """Stable code plus safe field path; never echoes input values or secrets.
 
-    def __init__(self, code: str, field: str = "$"):
+    ``evidence`` carries optional rule/location/hash facts about the refusal
+    (for example a credential rule name, its document line and a digest of the
+    matched bytes) so a record can correlate refusals without the secret.
+    """
+
+    def __init__(self, code: str, field: str = "$", evidence=None):
         self.code, self.field = code, field
+        self.evidence = evidence
         super().__init__(f"{code}: {field}")
 
 
@@ -404,6 +419,20 @@ def egress_approval(settings, project_id):
     _fail("EGRESS_NOT_AUTHORIZED", "project_id")
 
 
+@dataclass(frozen=True)
+class CaptureResult:
+    outcome: str
+    request_id: str | None
+    reason: str | None
+    retryable: bool
+    queue_id: str | None = None
+    path: str | None = None  # bundle-relative; never a caller-selected path
+    published_sha: str | None = None
+    projection_sha: str | None = None
+    visible: bool = False
+
+
+
 # --- Trusted scope ---------------------------------------------------------
 
 _SCOPE_SEAL = object()
@@ -546,6 +575,52 @@ def human_scope(session, *, binding, kind):
                         human_id=session.manager_id)
 
 
+@dataclass(frozen=True)
+class LocalHuman:
+    """Host-authenticated human, never deserialized from a request.
+
+    The installation supplies this principal after OS peer authentication. Its
+    current grants explicitly name immutable Project identity or None (settings).
+    Owning the Unix socket is not a Project grant. No Room session is required.
+    """
+    human_id: str
+    actor_id: str
+    authority_version: str
+    authorized: object
+    connected: object
+
+    def __post_init__(self):
+        for name in ('human_id','actor_id','authority_version'):
+            _token(getattr(self, name), name)
+        if not callable(self.authorized) or not callable(self.connected):
+            _fail('LIBRARY_AUTHENTICATION_REQUIRED')
+
+    def allowed(self, project_identity, action):
+        return self.connected() is True and self.authorized(self, project_identity, action) is True
+
+
+def local_human_scope(principal, *, binding, kind):
+    """Shared Project admission for authenticated local human actions."""
+    if type(principal) is not LocalHuman: _fail('LIBRARY_AUTHENTICATION_REQUIRED')
+    if kind not in HUMAN_KINDS: _fail('UNKNOWN_OPERATION')
+    action = 'library-' + kind
+    if not principal.allowed(binding['project_identity'], action): _fail('FORBIDDEN')
+    return LibraryScope(seal=_SCOPE_SEAL, subject='human', actor_id=principal.actor_id,
+        authority_version=principal.authority_version, capabilities=(action,),
+        project_id=binding['project_id'], project_identity=binding['project_identity'],
+        project_path=binding['project_path'], reference_root=binding['reference_root'],
+        human_id=principal.human_id)
+
+
+def local_settings_scope(principal):
+    """Separate installation grant; never grants access to any Project."""
+    if type(principal) is not LocalHuman: _fail('LIBRARY_AUTHENTICATION_REQUIRED')
+    if not principal.allowed(None, SETTINGS_CAPABILITY): _fail('FORBIDDEN')
+    return LibraryScope(seal=_SCOPE_SEAL, subject='operator', actor_id=principal.actor_id,
+        authority_version=principal.authority_version, capabilities=(SETTINGS_CAPABILITY,),
+        human_id=principal.human_id)
+
+
 def installation_scope(origin):
     """Shared-settings authority: installation scope, no Project content."""
     if type(origin) is not Origin:
@@ -572,6 +647,7 @@ class Operation:
     provenance: dict
     queue_id: str | None = None
     drain_id: str | None = None
+    manifest: dict | None = None
 
     def digest(self):
         return _digest(self.payload)
@@ -581,12 +657,15 @@ class Operation:
         # deduplication identity for the same immutable Project identity.
         scope = self.scope.canonical()
         scope.pop("project_path", None)
-        return {"version": CONTRACT_VERSION, "kind": self.kind,
+        result = {"version": CONTRACT_VERSION, "kind": self.kind,
                 "operation_id": self.operation_id, "request_id": self.request_id,
                 "queue_id": self.queue_id, "drain_id": self.drain_id,
                 "settings_id": self.settings_id,
                 "at": self.at, "payload_digest": self.digest(),
                 "scope": scope, "provenance": self.provenance}
+        if self.manifest is not None:
+            result["manifest"] = operation_manifest(self.kind, self.manifest)
+        return result
 
     def audit_metadata(self):
         """Safe, content-free record for ledger/audit/replay surfaces."""
@@ -678,10 +757,21 @@ def _capture_payload(value, limits):
     for index, item in enumerate(_array(value.get("sources", []), "capture.sources",
                                         limits["sources"])):
         field = f"capture.sources[{index}]"
-        _object(item, field, ("resource",), ("title",))
+        _object(item, field, ("resource",), ("title", "range", "sha256"))
         sources.append({"resource": _text(item["resource"], field + ".resource")})
         if "title" in item:
             sources[-1]["title"] = _text(item["title"], field + ".title", limits["title_chars"])
+        if ("range" in item) != ("sha256" in item):
+            _fail("INCOMPLETE_EXCERPT", field)
+        if "range" in item:
+            span = _text(item["range"], field + ".range", 24)
+            if not re.fullmatch(r"[1-9][0-9]*-[1-9][0-9]*", span):
+                _fail("INVALID_EXCERPT_RANGE", field)
+            first, last = map(int, span.split("-"))
+            if not first <= last <= 2**31-1 or last-first+1 > 200:
+                _fail("INVALID_EXCERPT_RANGE", field)
+            _digest_value(item["sha256"], field + ".sha256")
+            sources[-1].update(range=span, sha256=item["sha256"])
     if value["type"] == "research" and not sources:
         _fail("SOURCE_REQUIRED", "capture.sources")
     hints = []
@@ -691,7 +781,7 @@ def _capture_payload(value, limits):
             "sources": sources, "hints": hints}
 
 
-def capture(scope, settings, *, operation_id, request_id, value, at):
+def capture(scope, settings, *, operation_id, request_id, value, at, run_id=None):
     """One Participant enqueue attempt. Scope comes from the trusted badge only."""
     _settings(settings)
     _require_scope(scope, "participant", ENQUEUE_CAPABILITY)
@@ -699,8 +789,11 @@ def capture(scope, settings, *, operation_id, request_id, value, at):
     queue_id = _digest({"version": CONTRACT_VERSION, "kind": "enqueue",
                         "project_identity": scope.project_identity,
                         "request_id": request_id, "payload": payload})
-    return _operation("enqueue", scope, settings, operation_id, request_id,
-                      payload, at, queue_id=queue_id)
+    operation = _operation("enqueue", scope, settings, operation_id, request_id,
+                           payload, at, queue_id=queue_id)
+    if run_id is not None:
+        operation.provenance["run_id"] = _token(run_id, "run_id")
+    return operation
 
 
 def _human_payload(kind, payload, limits):
@@ -712,12 +805,15 @@ def _human_payload(kind, payload, limits):
         _commit(payload["source_commit"], "payload.source_commit")
     if "preview_id" in payload:
         _token(payload["preview_id"], "payload.preview_id")
-    if "drain_id" in payload:
+    if "drain_id" in payload and not (kind in ("retry", "reject", "adjudicate") and payload["drain_id"] is None):
         _token(payload["drain_id"], "payload.drain_id")
     if "queue_id" in payload:
         _digest_value(payload["queue_id"], "payload.queue_id")
     if "reason" in payload:
-        _token(payload["reason"], "payload.reason")
+        if kind == "reject":
+            reason = _text(payload["reason"], "payload.reason", limits["body_bytes"], multiline=True)
+            if len(reason.encode("utf-8")) > limits["body_bytes"]: _fail("PAYLOAD_TOO_LARGE")
+        else: _token(payload["reason"], "payload.reason")
     for key in ("conclusion", "rationale"):
         if key in payload:
             text = _text(payload[key], "payload." + key, 2**31 - 1, multiline=True)
@@ -731,10 +827,10 @@ def _human_payload(kind, payload, limits):
                     or ".." in path.split("/") or posixpath.normpath(path) != path
                     or any(ord(c) < 32 or ord(c) == 127 for c in path)):
                 _fail("UNSAFE_PATH", field)
-    if "queue_ids" in payload:
-        for index, queue_id in enumerate(_array(payload["queue_ids"], "payload.queue_ids",
-                                                limits["batch_drafts"], nonempty=True)):
-            _digest_value(queue_id, f"payload.queue_ids[{index}]")
+    if "types" in payload:
+        types = _array(payload["types"], "payload.types", limits["scan_documents"], nonempty=True)
+        if len(types) != len(payload["paths"]) or any(item not in CAPTURE_TYPES for item in types):
+            _fail("INVALID_IMPORT_TYPES", "payload.types")
     return payload
 
 
@@ -831,7 +927,7 @@ def queue_path(project_path, queue_id):
 
 
 def receipt(operation, outcome, *, at, publication=None, projection=None,
-            configuration=None, acknowledgement=None, reason=None, retryable=None):
+            configuration=None, acknowledgement=None, reason=None, retryable=None, evidence=None):
     """Build the typed result for one operation; no content or secret fields.
 
     Success evidence is outcome-specific: content publication for
@@ -847,14 +943,17 @@ def receipt(operation, outcome, *, at, publication=None, projection=None,
         retryable = False
     if outcome == "NOT_DURABLE":
         retryable = True
-    return admit_receipt({
+    value = {
         "version": CONTRACT_VERSION, "operation_id": operation.operation_id,
         "kind": operation.kind, "request_id": operation.request_id,
         "queue_id": operation.queue_id, "drain_id": operation.drain_id,
         "settings_id": operation.settings_id, "outcome": outcome, "at": at,
         "publication": publication, "projection": projection,
         "configuration": configuration, "acknowledgement": acknowledgement,
-        "reason": reason, "retryable": retryable})
+        "reason": reason, "retryable": retryable}
+    if evidence is not None:
+        value["evidence"] = list(evidence)
+    return admit_receipt(value)
 
 
 def admit_receipt(value):
@@ -862,7 +961,7 @@ def admit_receipt(value):
     _object(value, "$", ("version", "operation_id", "kind", "request_id", "queue_id",
                          "drain_id", "settings_id", "outcome", "at", "publication",
                          "projection", "configuration", "acknowledgement",
-                         "reason", "retryable"))
+                         "reason", "retryable"), ("evidence", "detail_expired"))
     if type(value["version"]) is not int or value["version"] != CONTRACT_VERSION:
         _fail("UNSUPPORTED_CONTRACT_VERSION", "$.version")
     _token(value["kind"], "kind")
@@ -931,6 +1030,16 @@ def admit_receipt(value):
             _fail("INVALID_PROJECTION", "projection.visible")
         if projection["visible"] and projection["commit_sha"] is None:
             _fail("INVALID_PROJECTION", "projection.commit_sha")
+    if "detail_expired" in value and (value["detail_expired"] is not True or "evidence" in value):
+        _fail("INVALID_RECEIPT", "detail_expired")
+    if "evidence" in value:
+        for index, fact in enumerate(_array(value["evidence"], "evidence", 64)):
+            field = "evidence[%d]" % index
+            _object(fact, field, ("rule", "path", "line", "sha256"))
+            _token(fact["rule"], field + ".rule")
+            _text(fact["path"], field + ".path", 1024)
+            _integer(fact["line"], field + ".line", maximum=2**31-1)
+            _digest_value(fact["sha256"], field + ".sha256")
     if _size(value) > MAX_AUDIT_BYTES * 8:
         _fail("RECEIPT_TOO_LARGE")
     return value
@@ -1110,3 +1219,122 @@ def _reject_content(value, field="$", depth=0):
             _reject_content(item, f"{field}[{index}]", depth + 1)
     elif not (value is None or type(value) in (bool, int, float, str)):
         _fail("INVALID_CONTRACT", field)
+
+
+def synthesis_manifest(value):
+    """Strict metadata-only durable T19 input identity, never model bytes."""
+    _object(value, 'manifest', ('attempt', 'input_sha', 'selected', 'accepted', 'indexes',
+        'request_sha256', 'request_bytes', 'request_files', 'request_tokens', 'inputs',
+        'batch_drafts', 'batch_bytes', 'attempt_seconds'))
+    _integer(value['attempt'], 'attempt')
+    _commit(value['input_sha'], 'input_sha')
+    for key in ('request_bytes', 'request_files', 'request_tokens', 'batch_drafts', 'batch_bytes', 'attempt_seconds'):
+        _integer(value[key], key, maximum=MAXIMA.get(key, 2097152))
+    _digest_value(value['request_sha256'], 'request_sha256')
+    for q in _array(value['selected'], 'selected', 64): _digest_value(q, 'selected')
+    if not value['selected'] or len(set(value['selected'])) != len(value['selected']): _fail('INVALID_BATCH')
+    for ref in _array(value['accepted'], 'accepted', 512):
+        if type(ref) is not str or not ref.startswith('concept-') or not DIGEST.fullmatch(ref[8:]): _fail('INVALID_CONCEPT_REFERENCE')
+    for ref in _array(value['indexes'], 'indexes', 4):
+        if ref not in ('index.md','context/index.md','decisions/index.md','research/index.md'): _fail('INVALID_REQUEST_SELECTION')
+    for item in _array(value['inputs'], 'inputs', 1024):
+        _object(item, 'inputs', ('name_sha256', 'bytes_sha256'))
+        for v in item.values(): _digest_value(v, 'inputs')
+    _reject_content(value)
+    if _size(value) > 262144: _fail("ATTEMPT_MANIFEST_TOO_LARGE")
+    return json.loads(_canonical(value))
+
+
+def batch_manifest(value):
+    """Recoverable fixed batch identity before assembly or contact."""
+    _object(value, 'manifest', ('selected',))
+    for queue in _array(value['selected'], 'selected', 64): _digest_value(queue, 'selected')
+    if not value['selected'] or len(set(value['selected'])) != len(value['selected']): _fail('INVALID_BATCH')
+    return json.loads(_canonical(value))
+
+
+def operation_manifest(kind, value):
+    if kind == 'library-observation':
+        from .manager_projection import (library_observation as observation, library_ObservationError as ObservationError)
+        try: return observation(value)
+        except ObservationError: _fail('INVALID_LIBRARY_OBSERVATION')
+    if kind == 'library-attention':
+        from .manager_projection import attention_sample, ProjectionError
+        try: return attention_sample(value)
+        except ProjectionError: _fail('INVALID_LIBRARY_ATTENTION')
+    if kind == 'synthesis-batch': return batch_manifest(value)
+    if kind in ('scheduler-state','archive-final'): return scheduler_manifest(value)
+    if kind == 'source-park': return source_manifest(value)
+    if kind == 'synthesis-attempt': return synthesis_manifest(value)
+    _fail('INVALID_RECORD', 'manifest')
+
+
+def scheduler_manifest(value):
+    """Bounded durable scheduling metadata, never draft or model content."""
+    _object(value, 'schedule', ('sequence', 'served', 'state', 'due', 'drain_id',
+        'selected', 'attempt', 'failures', 'model_failures', 'wake', 'reason'), ('transition',))
+    for key in ('sequence', 'served', 'attempt', 'failures', 'model_failures'):
+        if type(value[key]) is not int or not 0 <= value[key] <= 2**53 - 1: _fail('INVALID_SCHEDULE', key)
+    if value['state'] not in ('IDLE','READY','ACTIVE','BACKOFF','BLOCKED','DISPOSED'): _fail('INVALID_SCHEDULE')
+    if type(value['wake']) is not bool: _fail('INVALID_SCHEDULE')
+    if value['due'] is not None: _timestamp(value['due'], 'due')
+    if value['drain_id'] is not None: _token(value['drain_id'], 'drain_id')
+    if value['reason'] is not None: _token(value['reason'], 'reason')
+    for queue in _array(value['selected'], 'selected', 64): _digest_value(queue, 'selected')
+    if len(value['selected']) != len(set(value['selected'])): _fail('INVALID_SCHEDULE')
+    if bool(value['selected']) != bool(value['drain_id']): _fail('INVALID_SCHEDULE')
+    _reject_content(value)
+    if _size({k:v for k,v in value.items() if k != 'transition'}) > 8192: _fail('INVALID_SCHEDULE')
+    if 'transition' in value:
+        transition = drain_transition(value['transition'])
+        if transition['sequence'] != value['sequence']: _fail('INVALID_SCHEDULE')
+    return json.loads(_canonical(value))
+
+
+def drain_transition(value):
+    """Closed, bounded metadata-only T21 report. Never document or model bytes."""
+    _object(value, 'transition', ('drain_id', 'sequence', 'phase', 'attempt',
+        'outcomes', 'resulting_sha', 'reason', 'due'))
+    _token(value['drain_id'], 'drain_id')
+    for name in ('sequence', 'attempt'):
+        if type(value[name]) is not int or not 0 <= value[name] <= 2**53-1: _fail('INVALID_TRANSITION')
+    if value['sequence']==0 or (value['attempt']==0 and value['phase'] not in ('BLOCKED','OPERATOR_DISPOSED')): _fail('INVALID_TRANSITION')
+    if value['phase'] not in ('STARTED','RETRY_SCHEDULED','COMMITTED','BLOCKED','OPERATOR_DISPOSED'):
+        _fail('INVALID_TRANSITION')
+    if value['reason'] is not None: _token(value['reason'], 'reason')
+    if value['due'] is not None: _timestamp(value['due'], 'due')
+    if value['resulting_sha'] is not None: _commit(value['resulting_sha'], 'resulting_sha')
+    if (value['phase'] in ('COMMITTED','OPERATOR_DISPOSED')) != (value['resulting_sha'] is not None): _fail('INVALID_TRANSITION')
+    if (value['phase'] == 'RETRY_SCHEDULED') != (value['due'] is not None): _fail('INVALID_TRANSITION')
+    seen = set()
+    for item in _array(value['outcomes'], 'outcomes', 64):
+        _object(item, 'outcome', ('queue_id', 'kind'), ('targets','reason'))
+        queue = _digest_value(item['queue_id'], 'queue_id')
+        if queue in seen: _fail('INVALID_TRANSITION')
+        seen.add(queue)
+        if item['kind'] in ('integrated', 'merged'):
+            if set(item) != {'queue_id','kind','targets'}: _fail('INVALID_TRANSITION')
+            for path in _array(item['targets'], 'targets', 64):
+                if (type(path) is not str or len(path)>1024 or '..' in path.split('/')
+                        or not path.startswith(('context/','decisions/','research/'))): _fail('INVALID_TRANSITION')
+        elif item['kind'] in ('parked','rejected','adjudicated','retained'):
+            if set(item) != {'queue_id','kind','reason'}: _fail('INVALID_TRANSITION')
+            _token(item['reason'], 'reason')
+        else: _fail('INVALID_TRANSITION')
+    if value['phase'] not in ('COMMITTED','OPERATOR_DISPOSED') and value['outcomes']: _fail('INVALID_TRANSITION')
+    if value['phase'] != 'OPERATOR_DISPOSED' and any(x['kind'] in ('rejected','adjudicated','retained') for x in value['outcomes']):
+        _fail('INVALID_TRANSITION')
+    _reject_content(value)
+    if _size(value)>262144: _fail('INVALID_TRANSITION')
+    return json.loads(_canonical(value))
+
+
+def source_manifest(value):
+    _object(value,'source_manifest',('basis','selected','accepted','indexes','attempt'))
+    _commit(value['basis'],'basis'); _integer(value['attempt'],'attempt')
+    for queue in _array(value['selected'],'selected',64): _digest_value(queue,'queue_id')
+    for ref in _array(value['accepted'],'accepted',64): _token(ref,'reference')
+    for name in _array(value['indexes'],'indexes',4):
+        if name not in ('index.md','context/index.md','decisions/index.md','research/index.md'): _fail('INVALID_RECORD')
+    if _size(value)>32768: _fail('INVALID_RECORD')
+    return json.loads(_canonical(value))
