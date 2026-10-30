@@ -39,7 +39,11 @@ INTEGRATION_MODULES = frozenset({'test_context', 'test_library_registration',
 # Existing additional lane measured 18s hosted; move rather than exclude.
 # #158 real-Git projection module measured 3.9s locally. Keep it off the
 # previously tight remainder; additional has ~26s hosted baseline headroom.
+# #165 remainder reached 60s tests + setup/smoke. Move the ~8s local
+# enqueue module into the additional lane measured 28s hosted, preserving
+# every discovered test and existing one-minute job budgets.
 ADDITIONAL_MODULES = frozenset({
+    'test_library_enqueue',
     'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
     'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
     'test_native_claude_checks', 'test_native_git_operations',

@@ -56,6 +56,14 @@ class EnqueueTests(unittest.TestCase):
     def contents(self, path, sha=None):
         return git(self.target, 'show', (sha or self.head())+':projects/'+self.scope.project_path+'/'+path)
 
+    def test_escaped_markdown_title_publishes_through_real_gate(self):
+        for index, title in enumerate(('PRIVATE_TITLE_MARKER', 'A [nested] title', r'A \ path', 'Use *stars* and `code`')):
+            with self.subTest(title=title):
+                result = self.enqueue('title-op-'+str(index), 'title-request-'+str(index), support.value(title=title))
+                self.assertEqual(result.outcome, 'DURABLY_QUEUED', result)
+                meta, _ = library_bundle.frontmatter(self.contents(result.path), result.path)
+                self.assertEqual(meta['title'], title)
+
     def test_real_publication_metadata_and_separate_visibility(self):
         result = self.enqueue()
         self.assertEqual(result.outcome, 'DURABLY_QUEUED', result)
