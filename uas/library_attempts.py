@@ -123,6 +123,41 @@ class Attempts:
         library._reject_content({'outcomes': values})
         if len(library._canonical(values).encode()) > 262144: fail('ATTEMPT_CANONICAL_EVIDENCE_INVALID')
 
+    def recover(self, drain_id):
+        """Reconcile canonical prior attempts without dispatch or new attempt identity."""
+        settings = self.assembler._settings(); scope = self.assembler._scope()
+        def current():
+            fresh = self.assembler._scope()
+            library._require_scope(fresh, 'participant', library.ENQUEUE_CAPABILITY)
+            if type(scope) is not library.LibraryScope or fresh.canonical() != scope.canonical(): fail('LIBRARY_AUTHENTICATION_REQUIRED')
+            if self.assembler._settings()['settings_id'] != settings['settings_id']: fail('CONFIGURATION_CHANGED')
+        current()
+        with library_deadline.bounded(settings['limits']['attempt_seconds']):
+            for record in self._prior_records(drain_id, scope.project_identity):
+                op = self.operation(scope, {**settings,'settings_id':record['settings_id']},
+                    drain_id, record['manifest']['attempt'], record['at'], record['manifest'])
+                result = self._recover(op, settings, current)
+                if result is not None: return result
+            with self.records() as records:
+                sources = [r for r in records.iter_drain(drain_id,project_identity=scope.project_identity) if r['kind']=='source-park']
+            for record in sources:
+                manifest = record.get('manifest')
+                if manifest is None: fail('SOURCE_CANONICAL_EVIDENCE_INVALID')
+                op = library._operation('source-park',scope,{**settings,'settings_id':record['settings_id']},
+                    record['operation_id'],record['request_id'],manifest,record['at'],drain_id=drain_id)
+                op = replace(op,manifest=manifest)
+                publication = self.publisher.publication_for(op,current=current)
+                if publication is not None:
+                    assembly = self.assembler.recover_park(op,admitted=settings,publication=publication,current=current)
+                    with self.records() as records:
+                        records.finish(op,library.receipt(op,'COMMITTED',at=op.at,
+                            publication={'commit_sha':publication.resulting_sha,
+                                'path':'projects/'+record['project_path']+'/pending/index.md'},reason='SOURCE_FAILURES_PARKED'))
+                    return AttemptResult('COMMITTED',drain_id,manifest['attempt'],manifest['basis'],
+                        publication.previous_sha,publication.resulting_sha,
+                        tuple(dict(queue_id=q,kind='parked',reason=why) for q,why in assembly.parked))
+        return None
+
     def run(self, **arguments):
         if not self.publisher.synthesis_lock.acquire(blocking=False): fail("ATTEMPT_BUSY")
         try:
