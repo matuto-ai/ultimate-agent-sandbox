@@ -77,11 +77,14 @@ class DeploymentLibrary:
     ``ledger_for`` must open its own connection in the calling process: report
     ingress runs inside the existing bounded report worker.
     ``operator`` enables the independent host-local human path when supplied.
+    ``settings_owner`` is the existing durable shared-settings owner; when
+    supplied it is the only source of current settings for new operations.
     """
 
     def __init__(self, state_root, *, deployment_id, settings, credentials, rooms,
                  scope_for, runner_for, ledger_for, authenticate, qualification=None,
-                 operator=None, egress_approvals=(), audit=None, publisher_factory=LibraryGit,
+                 operator=None, settings_owner=None, egress_approvals=(), audit=None,
+                 publisher_factory=LibraryGit,
                  now=lambda: datetime.now(timezone.utc)):
         library._token(deployment_id, 'deployment_id')
         if type(credentials) is not dict or type(rooms) is not dict:
@@ -92,6 +95,10 @@ class DeploymentLibrary:
             if value is not None and not callable(value):
                 fail('DEPLOYMENT_AUTHENTICATION_REQUIRED' if name == 'authenticate'
                      else 'DEPLOYMENT_DEPENDENCY_REQUIRED')
+        if settings_owner is not None:
+            from .library_settings import SettingsOwner
+            if type(settings_owner) is not SettingsOwner:
+                fail('DEPLOYMENT_DEPENDENCY_REQUIRED')
         if not callable(publisher_factory) or not callable(now):
             fail('DEPLOYMENT_DEPENDENCY_REQUIRED')
         self.deployment_id = deployment_id
@@ -104,6 +111,7 @@ class DeploymentLibrary:
         self.credentials, self.rooms_inventory = credentials, rooms
         self.scope_for, self.runner_for, self.ledger_for = scope_for, runner_for, ledger_for
         self.authenticate, self.qualification, self.operator = authenticate, qualification, operator
+        self.settings_owner = settings_owner
         self.audit, self.publisher_factory, self.now = audit, publisher_factory, now
         self.failure = None
         self._started = False
@@ -114,11 +122,32 @@ class DeploymentLibrary:
     # --- admission: no clone or other external effect ----------------------
 
     def _state(self):
+        """The service child validated as a real directory before any clone work."""
         root = self.state_root
         if not library._absolute(str(root)):
             fail('INVALID_DEPLOYMENT_STATE')
-        _directory(root if os.path.lexists(root) else root.parent, 'INVALID_DEPLOYMENT_STATE')
-        return root / 'library'
+        if os.path.lexists(root):
+            _directory(root, 'INVALID_DEPLOYMENT_STATE')
+            if root.resolve() != root:
+                fail('INVALID_DEPLOYMENT_STATE')
+        else:
+            parent = root.parent
+            _directory(parent if os.path.lexists(parent) else parent.parent,
+                       'INVALID_DEPLOYMENT_STATE')
+        state = root / 'library'
+        # A symlinked or writable child could place the private clone inside a
+        # Room reference root, so reject it before the publisher exists.
+        if os.path.lexists(state):
+            _directory(state, 'INVALID_DEPLOYMENT_STATE')
+        return state
+
+    def _current_settings(self):
+        """Fresh settings for one new write; invalid input fails closed."""
+        self._qualify()
+        settings = self.settings if self.settings_owner is None else self.settings_owner()
+        if type(self.credentials.get(settings['repository']['credential_ref'])) is not dict:
+            fail('CREDENTIAL_REFERENCE_UNAVAILABLE')
+        return settings
 
     def _credential(self):
         reference = self.settings['repository']['credential_ref']
@@ -186,9 +215,13 @@ class DeploymentLibrary:
                 fail('DEPLOYMENT_ALREADY_STARTED')
             self._stopping.clear()
             self.failure = None
+            if self.settings_owner is not None:
+                self.settings = self.settings_owner()
             service_root = self._state()
             environment = self._credential()
             self._qualify()
+            # The publisher constructor makes no external effect; the lease and
+            # clone work start only in Service.startup, after full admission.
             self._publisher = self.publisher_factory(
                 service_root, records_path=service_root / 'records.db',
                 deployment_id=self.deployment_id, target=self.settings['repository']['target'],
@@ -224,8 +257,13 @@ class DeploymentLibrary:
         fail('INVALID_PROJECT_BINDING')
 
     def _run(self):
+        checked = 0.0
         while not self._stopping.is_set():
             try:
+                # Writes are admitted at most one second after revocation.
+                if time.monotonic() - checked >= 0.5:
+                    checked = time.monotonic()
+                    self._current_settings()
                 self._service.tick()
             except library.LibraryError as error:
                 if error.code == 'SERVICE_BUSY':
@@ -271,7 +309,8 @@ class DeploymentLibrary:
             node = endpoint.lstat()
             if stat.S_ISSOCK(node.st_mode) and node.st_uid == os.geteuid():
                 endpoint.unlink()
-        controls = library_controls.Controls(self._service)
+        controls = library_controls.Controls(self._service, settings_owner=self.settings_owner,
+                                            guard=self._current_settings)
         self._operator_thread = threading.Thread(
             target=library_controls.serve, name='library-operator', daemon=True,
             args=(root, controls), kwargs={'authenticate': self.operator,
@@ -354,7 +393,7 @@ class DeploymentLibrary:
                 fail('ROOM_NOT_BOUND')
             if room in self._hubs:
                 fail('ROOM_HUB_ALREADY_ATTACHED')
-            endpoint = EnqueueEndpoint(self._publisher, settings=lambda: self.settings,
+            endpoint = EnqueueEndpoint(self._publisher, settings=self._current_settings,
                                        projection=bound.projection)
             ledger = self.ledger_for(room)
             hub = LibraryHub(ledger, room_id=room, project=bound.item.project,

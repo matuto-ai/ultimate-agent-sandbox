@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -165,6 +166,15 @@ class DeploymentLibraryTests(unittest.TestCase):
             self.make_deployment().start()
         self.assertFalse((self.state / 'library').exists())
 
+    def test_symlinked_service_state_is_refused_before_any_clone(self):
+        service = self.state / 'library'
+        service.symlink_to(self.base / 'alpha' / 'reference')
+        with self.assertRaisesRegex(library.LibraryError, 'INVALID_DEPLOYMENT_STATE'):
+            self.make_deployment().start()
+        reference = self.base / 'alpha' / 'reference'
+        self.assertFalse((reference / 'clone.git').exists())
+        self.assertEqual(list(reference.iterdir()), [])
+
     def test_second_instance_is_refused_before_clone_work(self):
         first = self.make_deployment()
         first.start()
@@ -175,6 +185,29 @@ class DeploymentLibraryTests(unittest.TestCase):
         self.assertFalse(second.running)
         self.assertTrue(first.running)
         self.assertEqual(self.register(first, 'alpha').commit_sha, self.head())
+
+    def test_invalidated_qualification_blocks_capture_and_stops_writes(self):
+        allowed = [True]
+        deployment = self.make_deployment(qualification=lambda _settings: allowed[0])
+        deployment.start()
+        self.register(deployment, 'alpha')
+        self.assertTrue(deployment.wait_idle('alpha'))
+        self.enqueue(deployment, 'alpha', 'QUALIFIED_MARKER')
+        self.assertTrue(deployment.wait_idle('alpha'))
+        head = self.head()
+        allowed[0] = False
+        result = self.enqueue(deployment, 'alpha', 'BLOCKED_MARKER', suffix='blocked')
+        self.assertNotEqual(result['outcome'], 'DURABLY_QUEUED')
+        self.assertEqual(self.head(), head)
+        self.assertTrue(self.wait_for(lambda: not deployment.running, seconds=3))
+        with self.assertRaises(library.LibraryError):
+            deployment.hub('alpha')
+        deployment.stop()
+        allowed[0] = True
+        restarted = self.make_deployment(qualification=lambda _settings: allowed[0])
+        restarted.start()
+        self.assertTrue(restarted.wait_idle('alpha'))
+        self.assertEqual(restarted.read('alpha').manifest['commit_sha'], head)
 
     # --- bounded Room projections -----------------------------------------
 
@@ -265,6 +298,43 @@ class DeploymentLibraryTests(unittest.TestCase):
                    'for_action': 'drain'})
         self.assertEqual(refused['outcome'], 'unknown')
         self.assertEqual(refused['error'], 'FORBIDDEN')
+
+    def test_current_shared_settings_apply_to_new_operations_and_fail_closed(self):
+        from uas.library_settings import SettingsOwner, canonical
+        root = self.base / 'config'
+        root.mkdir(mode=0o700)
+        owner = SettingsOwner(
+            root / 'settings.db', 'deployment-1',
+            lambda: support.settings(deepcopy(self.document)),
+            now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc))
+        owner.initialize({key: deepcopy(self.document[key]) for key in ('limits', 'filters')})
+        principal = library.LocalHuman(
+            'human', 'actor', 'grant-1',
+            lambda _principal, key, action: (
+                key is None and action == library.SETTINGS_CAPABILITY),
+            lambda: True)
+        deployment = self.make_deployment(settings_owner=owner)
+        deployment.start()
+        self.register(deployment, 'alpha')
+        self.assertTrue(deployment.wait_idle('alpha'))
+        self.assertEqual(self.enqueue(deployment, 'alpha', 'Long title')['outcome'], 'DURABLY_QUEUED')
+        observed = owner.handle(canonical(dict(
+            version=1, action='settings-observe', deployment='deployment-1')).encode(), principal)
+        shared = observed['shared']
+        shared['limits']['title_chars'] = 3
+        changed = owner.handle(canonical(dict(
+            version=1, action='settings-update', deployment='deployment-1',
+            request_id='lower', configuration_version=observed['configuration_version'],
+            settings_id=observed['settings_id'], shared=shared)).encode(), principal)
+        self.assertEqual(changed['outcome'], 'CONFIGURED')
+        self.assertEqual(self.enqueue(deployment, 'alpha', 'Longer title', suffix='two')['outcome'],
+                         'REJECTED')
+        self.assertEqual(self.enqueue(deployment, 'alpha', 'Yes', suffix='three')['outcome'],
+                         'DURABLY_QUEUED')
+        owner.path.unlink()
+        failed = self.enqueue(deployment, 'alpha', 'Yes', suffix='four')
+        self.assertNotEqual(failed['outcome'], 'DURABLY_QUEUED')
+        self.assertTrue(self.wait_for(lambda: not deployment.running, seconds=3))
 
     # --- service-to-Room ingress ------------------------------------------
 

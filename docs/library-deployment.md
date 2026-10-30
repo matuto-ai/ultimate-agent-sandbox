@@ -19,8 +19,9 @@ credential, container, mount, network route, host/LAN exemption or proxy.
 | `runner_for` | External model composition: returns the T19 `Attempts` runner and the fixed batch context for a Project. Model profile/qualification remain T17/T42 concerns. |
 | `ledger_for` | The Room Hub store owner; returns a `RoomLedger` for an approved Room. |
 | `authenticate` | Transport-bound service authentication for service-to-Room report ingress. |
-| `qualification` | Externally established target qualification evidence. Absent or false evidence refuses startup. |
+| `qualification` | Externally established target qualification evidence. Absent, false or later-revoked evidence refuses new writes. |
 | `operator` | Optional host-local human principal resolver for the T22 operator interface. |
+| `settings_owner` | Optional existing T22/#179 durable shared-settings owner. When supplied it is the only source of current settings, so a validated update applies to new operations without restart and a missing or invalid store refuses them. |
 
 `audit` is forwarded to the existing operational-retention owner. This composition
 adds no endpoint exposure: the T09 Hub route inside the Room Hub and the T22
@@ -29,10 +30,16 @@ interfaces, and the existing Host/Room boundary still owns their publication.
 
 ## Ordering and lifetime
 
-`start()` validates the deployment state root, the credential reference, target
-qualification, every Room binding, reference-mount ownership and disjointness,
-and every model runner's Project/target binding. Only then does
-`Service.startup()` take the host-local lease and reconstruct the working clone.
+`start()` validates the deployment state root, its `library` child (a symlink,
+foreign owner or writable child is refused before any clone work), the credential
+reference, target qualification, every Room binding, reference-mount ownership
+and real-path disjointness, and every model runner's Project/target binding. Only
+then does `Service.startup()` take the host-local lease and reconstruct the
+working clone. Every new capture also revalidates qualification, the credential
+reference and current settings; the service loop rechecks them at least twice a
+second and fails closed, and operator controls run the same guard, so revoked
+qualification or an unavailable settings store blocks drain/retry/observe writes
+instead of continuing on the startup values.
 A second instance is refused by that lease before it reads or writes the clone.
 Configuration is never silently repaired and no fallback target, credential or
 Room binding exists.
@@ -79,8 +86,12 @@ or Room binding is selected in the meantime.
 operational records, Room ledgers, Unix operator socket and Room projections. It
 covers two Projects with distinct markers, Room stop/destroy/restart, a second
 definition instance refused by the lease, missing credential, qualification and
-reference-mount refusal before any clone, an operator observation for a stopped
-Room with no Hub, and service reports reaching only the reporting Room's ledger.
+reference-mount refusal before any clone, a symlinked service-state child refused
+before clone work, qualification revocation blocking capture and stopping writes,
+a current durable settings owner applying a validated update to the next
+operation and refusing an unavailable store, an operator observation for a
+stopped Room with no Hub, and service reports reaching only the reporting Room's
+ledger.
 The model runner is a deterministic fixture adapter; no live provider, installed
 daemon, actual target qualification, split-process Room Hub transport, VM,
 account, backup or deployment evidence is claimed here.

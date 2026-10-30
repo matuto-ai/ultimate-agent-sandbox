@@ -98,13 +98,16 @@ class Controls:
     A transport calls handle only with its freshly authenticated LocalHuman. The
     same typed principal and version contract can be used by future trusted UI
     transports. Configuration/Project authority is rechecked under selection lock.
+    ``guard`` is the trusted owner's current write-admission check.
     """
-    def __init__(self, service, *, settings_owner=None):
+    def __init__(self, service, *, settings_owner=None, guard=None):
         if type(service) is not Service or service.scheduler is None: fail('SERVICE_NOT_STARTED')
         from .library_settings import SettingsOwner
         if settings_owner is not None and type(settings_owner) is not SettingsOwner:
             fail('LOCAL_SETTINGS_DEPENDENCY')
+        if guard is not None and not callable(guard): fail('LOCAL_CONTROL_DEPENDENCY')
         self.settings_owner = settings_owner
+        self.guard = guard
         self.service = service
 
     def _entry(self, project_id):
@@ -150,6 +153,7 @@ class Controls:
         value = decode(raw)
         if value['action'] not in ('reject', 'adjudicate', 'repair'):
             fail('INVALID_CONTROL_REQUEST')
+        if self.guard is not None: self.guard()
         with self.service.scheduler._lock:
             entry = self._entry(value['project_id'])
             scope = self._scope(principal, entry, value['action'])
@@ -166,6 +170,9 @@ class Controls:
             if self.service._closed or self.service._stop.is_set(): fail('SERVICE_NOT_AVAILABLE')
             if self.settings_owner is None: fail('SETTINGS_UNAVAILABLE')
             return self.settings_owner.handle(raw, principal)
+        # Every current content/scheduling control rechecks live qualification.
+        if value['action'] not in ('observe', 'inspect') and self.guard is not None:
+            self.guard()
         scheduler = self.service.scheduler
         with scheduler._lock:
             entry = self._entry(value['project_id'])
