@@ -697,7 +697,7 @@ def _capture_payload(value, limits):
             "sources": sources, "hints": hints}
 
 
-def capture(scope, settings, *, operation_id, request_id, value, at):
+def capture(scope, settings, *, operation_id, request_id, value, at, run_id=None):
     """One Participant enqueue attempt. Scope comes from the trusted badge only."""
     _settings(settings)
     _require_scope(scope, "participant", ENQUEUE_CAPABILITY)
@@ -705,8 +705,11 @@ def capture(scope, settings, *, operation_id, request_id, value, at):
     queue_id = _digest({"version": CONTRACT_VERSION, "kind": "enqueue",
                         "project_identity": scope.project_identity,
                         "request_id": request_id, "payload": payload})
-    return _operation("enqueue", scope, settings, operation_id, request_id,
-                      payload, at, queue_id=queue_id)
+    operation = _operation("enqueue", scope, settings, operation_id, request_id,
+                           payload, at, queue_id=queue_id)
+    if run_id is not None:
+        operation.provenance["run_id"] = _token(run_id, "run_id")
+    return operation
 
 
 def _human_payload(kind, payload, limits):
@@ -837,7 +840,7 @@ def queue_path(project_path, queue_id):
 
 
 def receipt(operation, outcome, *, at, publication=None, projection=None,
-            configuration=None, acknowledgement=None, reason=None, retryable=None):
+            configuration=None, acknowledgement=None, reason=None, retryable=None, evidence=None):
     """Build the typed result for one operation; no content or secret fields.
 
     Success evidence is outcome-specific: content publication for
@@ -853,14 +856,17 @@ def receipt(operation, outcome, *, at, publication=None, projection=None,
         retryable = False
     if outcome == "NOT_DURABLE":
         retryable = True
-    return admit_receipt({
+    value = {
         "version": CONTRACT_VERSION, "operation_id": operation.operation_id,
         "kind": operation.kind, "request_id": operation.request_id,
         "queue_id": operation.queue_id, "drain_id": operation.drain_id,
         "settings_id": operation.settings_id, "outcome": outcome, "at": at,
         "publication": publication, "projection": projection,
         "configuration": configuration, "acknowledgement": acknowledgement,
-        "reason": reason, "retryable": retryable})
+        "reason": reason, "retryable": retryable}
+    if evidence is not None:
+        value["evidence"] = list(evidence)
+    return admit_receipt(value)
 
 
 def admit_receipt(value):
@@ -868,7 +874,7 @@ def admit_receipt(value):
     _object(value, "$", ("version", "operation_id", "kind", "request_id", "queue_id",
                          "drain_id", "settings_id", "outcome", "at", "publication",
                          "projection", "configuration", "acknowledgement",
-                         "reason", "retryable"))
+                         "reason", "retryable"), ("evidence",))
     if type(value["version"]) is not int or value["version"] != CONTRACT_VERSION:
         _fail("UNSUPPORTED_CONTRACT_VERSION", "$.version")
     _token(value["kind"], "kind")
@@ -937,6 +943,14 @@ def admit_receipt(value):
             _fail("INVALID_PROJECTION", "projection.visible")
         if projection["visible"] and projection["commit_sha"] is None:
             _fail("INVALID_PROJECTION", "projection.commit_sha")
+    if "evidence" in value:
+        for index, fact in enumerate(_array(value["evidence"], "evidence", 64)):
+            field = "evidence[%d]" % index
+            _object(fact, field, ("rule", "path", "line", "sha256"))
+            _token(fact["rule"], field + ".rule")
+            _text(fact["path"], field + ".path", 1024)
+            _integer(fact["line"], field + ".line", maximum=2**31-1)
+            _digest_value(fact["sha256"], field + ".sha256")
     if _size(value) > MAX_AUDIT_BYTES * 8:
         _fail("RECEIPT_TOO_LARGE")
     return value

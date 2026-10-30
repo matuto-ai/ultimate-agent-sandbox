@@ -126,11 +126,13 @@ def _origin(scope):
 def _submission_origin(operation):
     """Immutable first-submission provenance supplied by the contract seam."""
     origin = dict(operation.provenance)
-    if set(origin) != _SUBMISSION_ORIGIN:
+    if set(origin) not in (_SUBMISSION_ORIGIN, _SUBMISSION_ORIGIN | {"run_id"}):
         raise LibraryError("INVALID_RECORD", "provenance")
     for key in ("actor_id", "participant_id", "subject", "request_id"):
         if origin[key] is not None or key != "participant_id":
             _token(origin[key], "provenance." + key)
+    if "run_id" in origin:
+        _token(origin["run_id"], "provenance.run_id")
     _timestamp(origin["at"])
     _digest(origin["payload_sha256"], "provenance.payload_sha256")
     if origin["request_id"] != operation.request_id:
@@ -372,7 +374,7 @@ class LibraryRecords:
                 _timestamp(row["submitted_at"])
                 if (row["origin"] != _canonical(origin)
                         or row["identity"] != _canonical(identity)
-                        or set(origin) != _SUBMISSION_ORIGIN
+                        or set(origin) not in (_SUBMISSION_ORIGIN, _SUBMISSION_ORIGIN | {"run_id"})
                         or origin.get("request_id") != request_id
                         or set(identity) != _SUBMISSION_IDENTITY
                         or identity.get("payload_sha256") != origin.get("payload_sha256")):
