@@ -64,6 +64,12 @@ can report visible. Unknown/unreadable projections return null SHA/false. No
 refresh is awaited, no warning is injected into Runtime context, and no caller
 path selects a projection. Operational receipts and diagnostics contain only
 identity/digest/provenance/outcome references, never capture bodies or titles.
+Blocking and observe-only credential findings are stored as bounded rule, path,
+line and digest facts in the optional receipt evidence field, never matched
+bytes. A lost response preserves already-observed facts. After a receipt crash,
+the exact original draft can be scanned observation-only with the same policy
+scanner to reconstruct current recovery findings; this does not claim the old
+policy verdict or reapply a blocking decision to historical publication.
 Canonical Git is the content store; these tests make no claim about unrelated
 Runtime/provider storage.
 

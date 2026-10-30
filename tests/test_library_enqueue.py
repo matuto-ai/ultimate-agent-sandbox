@@ -387,6 +387,40 @@ class EnqueueTests(unittest.TestCase):
             record=records.record('recover',project_identity=self.scope.project_identity)
         self.assertTrue(record['receipt']['evidence'])
 
+    def test_two_registered_projects_same_request_stay_distinct(self):
+        first=self.enqueue()
+        human=self.make_scope('beta','acme/beta','2002')
+        Registrar(self.publisher,current_scope=lambda:human).register(
+            library.action(human,self.settings,kind='register',operation_id='register-beta',
+                           request_id='register-beta',payload={},at=support.AT),self.settings)
+        self.fresh=library.participant_scope(support.OTHER,binding=support.binding('beta','acme/beta','2002'))
+        second=self.enqueue('beta-command')
+        self.assertEqual(second.outcome,'DURABLY_QUEUED',second)
+        self.assertNotEqual(first.queue_id,second.queue_id)
+        alpha=self.contents(first.path)
+        beta=git(self.target,'show',self.head()+':projects/'+self.fresh.project_path+'/'+second.path)
+        self.assertIn('Submission Actor: actor-alpha',alpha)
+        self.assertIn('Submission Actor: actor-beta',beta)
+        with LibraryRecords(self.records,'deployment-1') as records:
+            a=records.submission(self.scope.project_identity,'request-1')
+            b=records.submission(self.fresh.project_identity,'request-1')
+            self.assertIsNone(records.record('command-1',project_identity=self.fresh.project_identity))
+        self.assertNotEqual(a['origin']['actor_id'],b['origin']['actor_id'])
+        self.fresh=self.scope
+        self.assertEqual(self.enqueue('alpha-retry').published_sha,first.published_sha)
+        self.assertEqual(self.count(),4)
+
+    def test_receipt_evidence_bounds_and_tamper_rejected(self):
+        operation=library.capture(self.scope,self.settings,operation_id='test',request_id='test',
+                                  value=support.value(),at=support.AT)
+        fact={'rule':'assigned-secret','path':'pending/example.md','line':1,'sha256':'a'*64}
+        receipt=library.receipt(operation,'REJECTED',at=support.AT,reason='SECRET_DETECTED',evidence=[fact])
+        self.assertEqual(library.admit_receipt(receipt),receipt)
+        for evidence in ([fact]*65,[dict(fact,body='sensitive')],[dict(fact,sha256='bad')],
+                         [dict(fact,line=0)],[dict(fact,path='x'*1025)]):
+            with self.assertRaises(library.LibraryError):
+                library.receipt(operation,'REJECTED',at=support.AT,reason='SECRET_DETECTED',evidence=evidence)
+
     def test_invalid_id_not_reflected_and_no_fallback_files(self):
         result=self.enqueue(request='../secret\ntext')
         self.assertEqual(result.outcome,'REJECTED')
