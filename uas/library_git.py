@@ -33,6 +33,8 @@ from dataclasses import dataclass
 import fcntl
 import json
 import os
+import selectors
+import time
 from pathlib import Path
 import shutil
 import stat
@@ -42,7 +44,7 @@ import uuid
 
 from . import library
 from .library import LibraryError, Operation
-from .library_bundle import Bundle
+from .library_bundle import Bundle, Tree, _prefix as project_prefix
 from .library_records import LibraryRecords
 
 
@@ -269,9 +271,97 @@ class LibraryGit:
             raise LibraryError("NOT_READY", "lease")
         return self._head
 
+    def project_snapshot(self, scope, settings, *, current):
+        """Fetch one bounded, regular-file Project tree at one canonical SHA.
+
+        This is the canonical reader for content operations, not a source or
+        Participant read route. Authority is rechecked around every local read.
+        The publisher's compatibility check fences later writes against races.
+        """
+        if not self._started:
+            raise LibraryError("NOT_READY", "lease")
+        prefix = project_prefix(scope)
+        limits = library.admit_settings_value(settings)["limits"]
+        with self._lock:
+            current()
+            self._fetch()
+            current()
+            head = self._head
+            if head is None:
+                return None, Tree({})
+            # A file/gitlink at a parent coordinate must not be silently
+            # displaced by update-index while creating the Project directory.
+            for index in range(1, len(prefix.split('/')) + 1):
+                ancestor = '/'.join(prefix.split('/')[:index])
+                node = self._bounded_read(['ls-tree', '-z', head, '--', ancestor], 1400, current)
+                if node and not node.startswith(b'040000 tree '):
+                    raise LibraryError('UNSUPPORTED_PROJECT_ENTRY', 'project')
+            listing = self._bounded_read(
+                ["ls-tree", "-r", "-l", "-z", head, "--", prefix],
+                (limits["scan_documents"] + 1) * 1200, current)
+            rows = listing.split(b"\0")[:-1]
+            if len(rows) > limits["scan_documents"]:
+                raise LibraryError("TOO_MANY_DOCUMENTS", "project")
+            files, total = {}, 0
+            for row in rows:
+                header, tab, path = row.partition(b"\t")
+                parts = header.split()
+                if (not tab or len(parts) != 4 or parts[0] not in (b"100644", b"100755")
+                        or parts[1] != b"blob"):
+                    raise LibraryError("UNSUPPORTED_PROJECT_ENTRY", "project")
+                try:
+                    name, oid, size = path.decode("utf-8"), parts[2].decode("ascii"), int(parts[3])
+                except (ValueError, UnicodeError):
+                    raise LibraryError("INVALID_PROJECT_TREE", "project") from None
+                if not name.startswith(prefix + "/") or not library.COMMIT.fullmatch(oid):
+                    raise LibraryError("INVALID_PROJECT_TREE", "project")
+                total += size
+                if size > limits["document_bytes"] or total > limits["projection_bytes"]:
+                    raise LibraryError("BUNDLE_TOO_LARGE", "project")
+                files[name] = self._bounded_read(["cat-file", "blob", oid], size, current)
+                if len(files[name]) != size:
+                    raise LibraryError("INVALID_PROJECT_TREE", "project")
+            return head, Tree(files)
+
+    def _bounded_read(self, arguments, limit, current):
+        """No lazy network read, hooks, content stderr, or unbounded blob buffer."""
+        current()
+        environment = self._environment()
+        environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""})
+        command = ["git", "--no-replace-objects", "--git-dir", str(self._clone), *arguments]
+        try:
+            with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, env=environment) as process:
+                data = bytearray()
+                deadline = time.monotonic() + min(self.timeout, 5)
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(process.stdout, selectors.EVENT_READ)
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0 or not selector.select(remaining):
+                                raise LibraryError("PUBLICATION_UNAVAILABLE", "project")
+                            current()
+                            chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(data)))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                            if len(data) > limit:
+                                raise LibraryError("BUNDLE_TOO_LARGE", "project")
+                        if process.wait(timeout=max(.001, deadline-time.monotonic())) != 0:
+                            raise LibraryError("PUBLICATION_UNAVAILABLE", "project")
+                    current()
+                    return bytes(data)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+        except (OSError, subprocess.TimeoutExpired):
+            raise LibraryError("PUBLICATION_UNAVAILABLE", "project") from None
+
     # --- publication ------------------------------------------------------
 
-    def publish(self, operation, bundle, *, input_sha):
+    def publish(self, operation, bundle, *, input_sha, current=None):
         """Publish one validated complete Project bundle as one fast-forward commit.
 
         ``bundle`` is the T04/T05 complete result; this seam replaces exactly
@@ -305,7 +395,11 @@ class LibraryGit:
             raise LibraryError("INVALID_COMMIT", "input_sha")
 
         with self._lock:
+            if current is not None:
+                current()
             self._fetch()
+            if current is not None:
+                current()
             located = self._locate(operation.operation_id, operation.request_id,
                                    operation.kind, operation.queue_id)
             # The stable operation identity is durable before any publication.
@@ -314,19 +408,23 @@ class LibraryGit:
             if located is not None:
                 self._reset_local()
                 return located
-            return self._publish(operation, prefix, files, input_sha)
+            return self._publish(operation, prefix, files, input_sha, current=current)
 
-    def _publish(self, operation, prefix, files, input_sha):
+    def _publish(self, operation, prefix, files, input_sha, current=None):
         previous = self._head
         self._compatible(input_sha, previous, prefix)
         input_identity = input_sha or previous
-        current = self._tree_paths(previous, prefix)
-        tree = self._tree(previous, files, current - set(files))
+        current_paths = self._tree_paths(previous, prefix)
+        tree = self._tree(previous, files, current_paths - set(files))
         if tree == self._tree_of(previous):
             # Nothing to publish: the proposal is already the canonical content.
             return Publication(operation.operation_id, input_identity, previous,
                                previous, False)
+        if current is not None:
+            current()
         commit = self._commit(tree, previous, operation, input_identity)
+        if current is not None:
+            current()
         rejected = self._push(commit, operation)
         if rejected is not None:
             return rejected
