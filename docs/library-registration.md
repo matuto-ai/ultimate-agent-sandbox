@@ -24,7 +24,7 @@ partial or malformed bundles fail closed. Unknown tolerated reader content stays
 byte-for-byte intact. New content cannot displace a file at a parent coordinate.
 Publisher compatibility checking rechecks ancestor kinds and identity locations
 under its write lock, refusing a concurrent Project creation rather than
-overwriting it; the same registration can then reconcile by reading again.
+overwriting it; a new attempt can reconcile by reading again after a terminal refusal.
 
 The optional root-body line `Library state: archived` records a write-frozen
 bundle; `Library state: active` or no line means active. Multiple declarations or
@@ -45,10 +45,12 @@ registration prerequisite or completed feature here.
 Operation identity is recorded before publication, and its terminal metadata-only
 receipt is durable before acknowledgement. Lost push acknowledgement and a
 crash between publication and receipt are reconciled using canonical Git; neither
-creates another initialization. Definite pre-publication refusals finish with a safe terminal refusal, so they
+creates another initialization. New-attempt definite pre-publication refusals finish with a safe terminal refusal, so they
 do not consume pending capacity indefinitely; an exact retry retains that
-refusal and corrected work needs a new identity. Truly uncertain publication
-attempts retain their pending record for reconciliation rather than fabricating
+refusal and corrected work needs a new identity. Preexisting pending attempts and transient read outages preserve uncertainty.
+Registration admission and receipts are serialized per singleton publisher,
+including concurrent exact retries. Truly uncertain publication attempts retain
+their pending record for reconciliation rather than fabricating
 success. A recovered historical publication is rechecked against current
 canonical content and cannot report success for a deleted bundle.
 Current authorization is rechecked before reads and within the publisher before

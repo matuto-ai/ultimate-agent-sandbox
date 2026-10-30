@@ -185,6 +185,8 @@ class LibraryGit:
         self._clone = self.root / CLONE_DIR
         self._lease = None
         self._lock = threading.Lock()
+        # Registration admission/receipt must not race another same-ID call.
+        self.registration_lock = threading.Lock()
         self._head = None
         self._started = False
 

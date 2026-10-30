@@ -69,6 +69,10 @@ class Registrar:
         self.current_scope = current_scope
 
     def register(self, operation, settings):
+        with self.publisher.registration_lock:
+            return self._register(operation, settings)
+
+    def _register(self, operation, settings):
         if type(operation) is not library.Operation or operation.kind != 'register':
             raise library.LibraryError('INVALID_OPERATION', 'operation')
         admitted = library.admit_settings_value(settings)
@@ -93,6 +97,8 @@ class Registrar:
         current()
         prefix = library_bundle._prefix(operation.scope)
         with LibraryRecords(self.publisher.records_path, self.publisher.deployment_id) as records:
+            existing = records.record(operation.operation_id,
+                                      project_identity=operation.scope.project_identity)
             prior = records.begin(operation)['record']
             if prior['receipt'] is not None and prior['receipt']['outcome'] != 'COMMITTED':
                 raise library.LibraryError(prior['receipt']['reason'], 'registration')
@@ -140,7 +146,9 @@ class Registrar:
                 definitely_refused = (not publication_started[0] or error.code in (
                     'INCOMPATIBLE_HEAD', 'UNSUPPORTED_PROJECT_ENTRY',
                     'PROJECT_COORDINATE_CONFLICT'))
-                if definitely_refused and prior['receipt'] is None:
+                if (definitely_refused and existing is None
+                        and error.code not in ('PUBLICATION_UNAVAILABLE', 'GIT_UNAVAILABLE', 'GIT_FAILED')
+                        and prior['receipt'] is None):
                     refused = library.receipt(operation, 'REFUSED', at=operation.at,
                                               reason=error.code)
                     records.finish(operation, refused)

@@ -293,6 +293,33 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 'POLICY_REFUSED')
             self.assertTrue(self.register(self.operation('new')).created)
 
+    def test_transient_read_failure_does_not_terminalize_uncertain_publication(self):
+        with patch.object(LibraryRecords, 'finish', side_effect=OSError('crash')):
+            with self.assertRaises(OSError): self.register()
+        sha = self.head()
+        with patch.object(self.publisher, 'project_snapshot',
+                          side_effect=library.LibraryError('PUBLICATION_UNAVAILABLE')):
+            with self.assertRaises(library.LibraryError): self.register()
+        with LibraryRecords(self.records, 'deployment-1') as records:
+            self.assertIsNone(records.record('op-1', project_identity=self.scope.project_identity)['receipt'])
+        self.assertEqual(self.register().commit_sha, sha)
+        self.assertEqual(self.count(), 1)
+
+    def test_concurrent_same_request_uses_one_commit_and_receipt(self):
+        import threading
+        outcomes, failures = [], []
+        def run():
+            try: outcomes.append(self.register())
+            except Exception as error: failures.append(error)
+        workers = [threading.Thread(target=run) for _ in range(4)]
+        for worker in workers: worker.start()
+        for worker in workers: worker.join(10)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(failures, [])
+        self.assertEqual(len(outcomes), 4)
+        self.assertEqual({result.commit_sha for result in outcomes}, {self.head()})
+        self.assertEqual(self.count(), 1)
+
     def test_target_mismatch_rejected(self):
         self.register()
         self.publisher.target = '/elsewhere'
