@@ -51,10 +51,10 @@ INTEGRATION_MODULES = frozenset({'test_library_assembly', 'test_context', 'test_
 ADDITIONAL_MODULES = frozenset({
     'test_library_hub',
     'test_library_enqueue',
-    'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
+    'test_local_three_runs',
     'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
     'test_native_claude_checks', 'test_native_git_operations',
-    'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
+    'test_forge_mutation_audit', 'test_manager_read_model',
     'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
     'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
     'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
@@ -69,7 +69,9 @@ SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import', '
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'})
 # #175 controls adds ~20s real Git/service/socket proofs; prior scheduler44s
 # and remaining lanes~50s cannot absorb it inside unchanged one-minute jobs.
-OPERATOR_MODULES = frozenset({'test_library_controls'})
+# First hosted additional reached60s; move measured terminal9s/stop1.5s/records3s
+# into operator19.4s, not exclusions or enlarged limits.
+OPERATOR_MODULES = frozenset({'test_library_controls', 'test_local_native_terminal', 'test_local_native_stop', 'test_library_records'})
 assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 PARTITIONS = ('operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
@@ -149,7 +151,7 @@ def main(argv=None):
     selected = cases if args.partition == 'all' else groups[args.partition]
     print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
-          f'scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
+          f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
     return 0 if result.wasSuccessful() else 1

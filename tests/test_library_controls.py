@@ -10,7 +10,7 @@ import sqlite3
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import library_support as support
 import test_library_service as service_fixture
@@ -210,8 +210,9 @@ class SocketControlsTests(ControlsTests):
                 if probe is not None: probe.close()
         super().setUp()
         self.stop = threading.Event();self.errors=[]
+        self.authenticate = Mock(side_effect=lambda uid:self.principal)
         def run():
-            try: serve(self.root,self.controls,authenticate=lambda uid:self.principal,stopped=self.stop.is_set)
+            try: serve(self.root,self.controls,authenticate=self.authenticate,stopped=self.stop.is_set)
             except BaseException as error:self.errors.append(error)
         self.thread=threading.Thread(target=run);self.thread.start()
         self.addCleanup(self.close)
@@ -233,12 +234,19 @@ class SocketControlsTests(ControlsTests):
         self.assertEqual(self.state(),state)
     def test_peer_owner_checked_before_human_resolver(self):
         value=self.value()
+        self.authenticate.reset_mock();before=self.state()
         with patch('uas.library_controls.peer_owner',side_effect=library.LibraryError('LOCAL_OPERATOR_REQUIRED')):
             # Raw client avoids replacing its own verification while exercising server.
             with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as channel:
-                channel.connect(str(self.root/'library-operator.sock'));channel.sendall(canonical(value))
-                result=json.loads(channel.recv(16385))
-        self.assertEqual(result['error'],'LOCAL_OPERATOR_REQUIRED')
+                channel.connect(str(self.root/'library-operator.sock'))
+                try:
+                    channel.sendall(canonical(value))
+                    data=channel.recv(16385)
+                except (ConnectionResetError, BrokenPipeError):
+                    data=b''  # kernel refusal may close with an unread queued packet
+                if data: self.assertEqual(json.loads(data)['error'],'LOCAL_OPERATOR_REQUIRED')
+        self.authenticate.assert_not_called()
+        self.assertEqual(self.state(),before)
     def test_private_root_and_existing_endpoint_not_adopted(self):
         public=self.source.base/'public';public.mkdir(mode=0o755)
         with self.assertRaisesRegex(library.LibraryError,'ROOT_UNSAFE'):

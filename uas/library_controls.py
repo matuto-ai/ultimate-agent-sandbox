@@ -213,9 +213,12 @@ def _serve(root, controls, *, authenticate, stopped):
                 channel.settimeout(2)
                 try:
                     peer_owner(channel, os.geteuid())
+                    # Read only after kernel peer admission; drain the bounded packet
+                    # before human refusal so closing does not reset a queued request.
+                    raw = channel.recv(MAX_REQUEST+1)
                     principal = authenticate(os.geteuid())
                     if type(principal) is not library.LocalHuman: fail('LIBRARY_AUTHENTICATION_REQUIRED')
-                    result = controls.handle(channel.recv(MAX_REQUEST+1), principal)
+                    result = controls.handle(raw, principal)
                     response = {'outcome':'observed','result':result}
                 except Exception as error:
                     # A transport error cannot promise no scheduling effect.
