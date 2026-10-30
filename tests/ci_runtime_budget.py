@@ -14,8 +14,7 @@ GROWTH_PERCENT = 10
 BASELINE_SAMPLES = 5
 UNIT_JOBS = frozenset(('validate', 'unit-slow', 'unit-integration', 'unit-additional',
                        'unit-synthesis', 'unit-scheduler', 'unit-operator', 'unit-inspection',
-                       'unit-lifecycle', 'unit-disposition', 'unit-maintenance', 'unit-archive',
-                       'unit-requeue'))
+                       'unit-lifecycle', 'unit-disposition', 'unit-maintenance', 'unit-archive'))
 SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle',
                        'git-native-seams', 'gate-linux-smoke', 'gate-command-native',
                        'gate-artifact-native', 'room-control-plane', 'manager-mtls',
@@ -46,15 +45,13 @@ def critical_path(workflow, jobs, *, historical=False):
     if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
         stages = (frozenset(names),)
     expected = set().union(*stages)
-    # Recognize only complete historical graphs; current runs require every root.
-    # A lane introduced after a baseline landed is absent from that older graph.
+    # Recognize only complete historical graphs; current runs require all twelve roots.
     if historical and workflow == 'validate.yml':
-        newer = (set(), {'unit-requeue'})
-        for absent in (set(), {'unit-archive'}, {'unit-archive', 'unit-maintenance'},
+        for absent in ({'unit-archive'}, {'unit-archive', 'unit-maintenance'},
                        {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition'},
                        {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
-            if any(set(names) == expected - absent - added for added in newer):
-                expected -= absent | ({'unit-requeue'} if 'unit-requeue' not in names else set())
+            if set(names) == expected - absent:
+                expected -= absent
                 break
     require(len(names) == len(set(names)) and set(names) == expected,
             'Missing, duplicate or unexpected validation jobs; update the measured graph')
