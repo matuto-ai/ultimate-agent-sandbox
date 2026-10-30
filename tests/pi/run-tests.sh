@@ -10,5 +10,6 @@ node -e 'const fs=require("node:fs"); const p=process.env.UAS_PI_INSTALL+"/node_
 node tests/pi/auth-contract.mjs
 node tests/pi/resume-contract.mjs
 node tests/pi/library-scan-contract.mjs
+node tests/pi/library-capture-contract.mjs
 python3 tests/pi/parallel-tests.py
 cat "$UAS_PI_EVIDENCE"
