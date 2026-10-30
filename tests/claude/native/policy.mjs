@@ -76,3 +76,5 @@ const absent=JSON.parse((await invokeProfile(null,'library_enqueue',{request_id:
 assert.equal(absent.status,'TRANSPORT_UNAVAILABLE');assert.equal(Object.hasOwn(absent,'outcome'),false);
 const noPath=JSON.parse((await invokeProfile(channel,'library_enqueue',{request_id:'stable-request',capture,project:'/elsewhere'},'library-capture-v1')).content[0].text);
 assert.equal(noPath.status,'ADAPTER_REJECTED');assert.equal(requests.length,2);
+
+await import('./library-read-policy.mjs');

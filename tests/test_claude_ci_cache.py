@@ -19,15 +19,16 @@ class ClaudeCICacheTests(unittest.TestCase):
         workflow=(ROOT/'.github/workflows/claude-native.yml').read_text()
         cli=workflow.index('run: sh tests/claude/install-dependencies.sh')
         sdk=workflow.index('run: sh tests/claude/sdk/install-dependencies.sh')
+        parser=workflow.index('run: sh tests/claude/library/install-dependencies.sh')
         save=workflow.index('uses: actions/cache/save@')
         tests=workflow.index('sh "$2/tests/claude/run-tests.sh"')
-        self.assertTrue(cli<sdk<save<tests)
+        self.assertTrue(cli<sdk<parser<save<tests)
         self.assertEqual(workflow.count('        if:'),1)
         self.assertIn("if: ${{ steps.claude-npm-cache.outputs.cache-hit != 'true' }}",workflow)
         self.assertIn('timeout-minutes: 2',workflow)
         self.assertNotIn('continue-on-error',workflow)
     def test_both_installs_keep_scrubbed_configuration_lock_checks_and_integrity_path(self):
-        for name in ('tests/claude/install-dependencies.sh','tests/claude/sdk/install-dependencies.sh'):
+        for name in ('tests/claude/install-dependencies.sh','tests/claude/sdk/install-dependencies.sh','tests/claude/library/install-dependencies.sh'):
             script=(ROOT/name).read_text()
             self.assertIn('check-lock.mjs',script);self.assertIn('exec env -i',script)
             self.assertIn('"$npm_path" ci ',script);self.assertIn('--ignore-scripts',script)
