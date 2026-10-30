@@ -22,7 +22,10 @@ SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_run_review', 'test_staged_source_closure',
                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-INTEGRATION_MODULES = frozenset({'test_context',
+# #155 hosted remainder reached its one-minute job boundary despite passing
+# tests (49s + setup/smoke). Move the ~7s registration module to the measured
+# 24s integration partition; no exclusions, new jobs or enlarged timeouts.
+INTEGRATION_MODULES = frozenset({'test_context', 'test_library_registration',
     'test_native_pi_reset_adversarial', 'test_git_payload', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
@@ -31,8 +34,13 @@ INTEGRATION_MODULES = frozenset({'test_context',
     'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
 # Run 40958947508: remainder took 60.833s before its process smoke.
 # Move ~23s of measured remainder work and ~7.5s from integration to a sibling.
+# #155 final graph: remainder 48s plus setup reached 62s. These four
+# modules measured 4.34s locally out of 24.05s remainder (~8.7s hosted).
+# Existing additional lane measured 18s hosted; move rather than exclude.
 ADDITIONAL_MODULES = frozenset({
     'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
+    'test_library_git', 'test_native_combined_image_package',
+    'test_native_claude_checks', 'test_native_git_operations',
     'test_forge_mutation_audit', 'test_manager_read_model', 'test_library_records',
     'test_gate_diff_hub', 'test_artifact_connected', 'test_native_broker_audit_source',
     'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',

@@ -33,6 +33,8 @@ from dataclasses import dataclass
 import fcntl
 import json
 import os
+import selectors
+import time
 from pathlib import Path
 import shutil
 import stat
@@ -42,7 +44,7 @@ import uuid
 
 from . import library
 from .library import LibraryError, Operation
-from .library_bundle import Bundle
+from .library_bundle import Bundle, Tree, frontmatter, _prefix as project_prefix
 from .library_records import LibraryRecords
 
 
@@ -183,6 +185,8 @@ class LibraryGit:
         self._clone = self.root / CLONE_DIR
         self._lease = None
         self._lock = threading.Lock()
+        # Registration admission/receipt must not race another same-ID call.
+        self.registration_lock = threading.Lock()
         self._head = None
         self._started = False
 
@@ -269,9 +273,137 @@ class LibraryGit:
             raise LibraryError("NOT_READY", "lease")
         return self._head
 
+    def project_snapshot(self, scope, settings, *, current, registration=False):
+        """Fetch one bounded, regular-file Project tree at one canonical SHA.
+
+        This is the canonical reader for content operations, not a source or
+        Participant read route. Authority is rechecked around every local read.
+        The publisher's compatibility check fences later writes against races.
+        """
+        if not self._started:
+            raise LibraryError("NOT_READY", "lease")
+        prefix = project_prefix(scope)
+        limits = library.admit_settings_value(settings)["limits"]
+        with self._lock:
+            current()
+            self._fetch()
+            current()
+            head = self._head
+            if head is None:
+                return None, Tree({})
+            if registration:
+                self._registration_identity(scope, current)
+            # A file/gitlink at a parent coordinate must not be silently
+            # displaced by update-index while creating the Project directory.
+            for index in range(1, len(prefix.split('/')) + 1):
+                ancestor = '/'.join(prefix.split('/')[:index])
+                node = self._bounded_read(['ls-tree', '-z', head, '--', ancestor], 1400, current)
+                if node and not node.startswith(b'040000 tree '):
+                    raise LibraryError('UNSUPPORTED_PROJECT_ENTRY', 'project')
+            listing = self._bounded_read(
+                ["ls-tree", "-r", "-l", "-z", head, "--", prefix],
+                (limits["scan_documents"] + 1) * 1200, current)
+            rows = listing.split(b"\0")[:-1]
+            if len(rows) > limits["scan_documents"]:
+                raise LibraryError("TOO_MANY_DOCUMENTS", "project")
+            files, total = {}, 0
+            for row in rows:
+                header, tab, path = row.partition(b"\t")
+                parts = header.split()
+                if (not tab or len(parts) != 4 or parts[0] not in (b"100644", b"100755")
+                        or parts[1] != b"blob"):
+                    raise LibraryError("UNSUPPORTED_PROJECT_ENTRY", "project")
+                try:
+                    name, oid, size = path.decode("utf-8"), parts[2].decode("ascii"), int(parts[3])
+                except (ValueError, UnicodeError):
+                    raise LibraryError("INVALID_PROJECT_TREE", "project") from None
+                if not name.startswith(prefix + "/") or not library.COMMIT.fullmatch(oid):
+                    raise LibraryError("INVALID_PROJECT_TREE", "project")
+                total += size
+                if size > limits["document_bytes"] or total > limits["projection_bytes"]:
+                    raise LibraryError("BUNDLE_TOO_LARGE", "project")
+                files[name] = self._bounded_read(["cat-file", "blob", oid], size, current)
+                if len(files[name]) != size:
+                    raise LibraryError("INVALID_PROJECT_TREE", "project")
+            return head, Tree(files)
+
+    def _registration_identity(self, scope, current):
+        """Bounded service-only root identity catalog; no source/concept scan.
+
+        Coordinates are not identity. Registration cannot duplicate an existing
+        immutable source identity at a new path; the atomic move owner does that.
+        Fixed catalog bounds fail closed rather than silently checking a prefix.
+        """
+        if self._head is None:
+            return
+        raw = self._bounded_read(['ls-tree', '-r', '-z', '--name-only', self._head,
+                                  '--', 'projects'], 4 * 1024 * 1024, current)
+        paths = raw.split(b'\0')[:-1]
+        if len(paths) > 16384:
+            raise LibraryError('REGISTRATION_CATALOG_TOO_LARGE', 'project')
+        roots = [path for path in paths if len(path.split(b'/')) == 5
+                 and path.endswith(b'/index.md')]
+        if len(roots) > 1024:
+            raise LibraryError('REGISTRATION_CATALOG_TOO_LARGE', 'project')
+        deadline = time.monotonic() + min(self.timeout, 5)
+        expected = ('projects/' + scope.project_path + '/index.md').encode()
+        for path in roots:
+            if time.monotonic() >= deadline:
+                raise LibraryError('PUBLICATION_UNAVAILABLE', 'project')
+            if path == expected:
+                continue  # The complete Project gate checks the selected root.
+            try:
+                name = path.decode('utf-8')
+                raw = self._bounded_read(['show', self._head + ':' + name],
+                                         library.MAXIMA['document_bytes'], current)
+                _, body = frontmatter(raw.decode('utf-8'), 'project.identity')
+            except UnicodeError:
+                raise LibraryError('INVALID_PROJECT_IDENTITY', 'project') from None
+            identities = [line.strip()[len('Source identity:'):].strip()
+                          for line in body.splitlines()
+                          if line.strip().startswith('Source identity:')]
+            if scope.project_identity in identities:
+                raise LibraryError('PROJECT_COORDINATE_CONFLICT', 'project')
+
+    def _bounded_read(self, arguments, limit, current):
+        """No lazy network read, hooks, content stderr, or unbounded blob buffer."""
+        current()
+        environment = self._environment()
+        environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""})
+        command = ["git", "--no-replace-objects", "--git-dir", str(self._clone), *arguments]
+        try:
+            with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, env=environment) as process:
+                data = bytearray()
+                deadline = time.monotonic() + min(self.timeout, 5)
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(process.stdout, selectors.EVENT_READ)
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0 or not selector.select(remaining):
+                                raise LibraryError("PUBLICATION_UNAVAILABLE", "project")
+                            current()
+                            chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(data)))
+                            if not chunk:
+                                break
+                            data.extend(chunk)
+                            if len(data) > limit:
+                                raise LibraryError("BUNDLE_TOO_LARGE", "project")
+                        if process.wait(timeout=max(.001, deadline-time.monotonic())) != 0:
+                            raise LibraryError("PUBLICATION_UNAVAILABLE", "project")
+                    current()
+                    return bytes(data)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+        except (OSError, subprocess.TimeoutExpired):
+            raise LibraryError("PUBLICATION_UNAVAILABLE", "project") from None
+
     # --- publication ------------------------------------------------------
 
-    def publish(self, operation, bundle, *, input_sha):
+    def publish(self, operation, bundle, *, input_sha, current=None):
         """Publish one validated complete Project bundle as one fast-forward commit.
 
         ``bundle`` is the T04/T05 complete result; this seam replaces exactly
@@ -305,7 +437,13 @@ class LibraryGit:
             raise LibraryError("INVALID_COMMIT", "input_sha")
 
         with self._lock:
+            if current is not None:
+                current()
             self._fetch()
+            if current is not None:
+                current()
+            if operation.kind == 'register':
+                self._registration_identity(operation.scope, current or (lambda: None))
             located = self._locate(operation.operation_id, operation.request_id,
                                    operation.kind, operation.queue_id)
             # The stable operation identity is durable before any publication.
@@ -314,19 +452,23 @@ class LibraryGit:
             if located is not None:
                 self._reset_local()
                 return located
-            return self._publish(operation, prefix, files, input_sha)
+            return self._publish(operation, prefix, files, input_sha, current=current)
 
-    def _publish(self, operation, prefix, files, input_sha):
+    def _publish(self, operation, prefix, files, input_sha, current=None):
         previous = self._head
         self._compatible(input_sha, previous, prefix)
         input_identity = input_sha or previous
-        current = self._tree_paths(previous, prefix)
-        tree = self._tree(previous, files, current - set(files))
+        current_paths = self._tree_paths(previous, prefix)
+        tree = self._tree(previous, files, current_paths - set(files))
         if tree == self._tree_of(previous):
             # Nothing to publish: the proposal is already the canonical content.
             return Publication(operation.operation_id, input_identity, previous,
                                previous, False)
+        if current is not None:
+            current()
         commit = self._commit(tree, previous, operation, input_identity)
+        if current is not None:
+            current()
         rejected = self._push(commit, operation)
         if rejected is not None:
             return rejected
@@ -340,6 +482,12 @@ class LibraryGit:
         missing basis is only acceptable while the Project has no bundle.
         """
         if input_sha is None:
+            if previous is not None:
+                for index in range(1, len(prefix.split('/')) + 1):
+                    ancestor = '/'.join(prefix.split('/')[:index])
+                    oid = self._rev(previous + ':' + ancestor)
+                    if oid is not None and self._run('cat-file', '-t', oid) != 'tree':
+                        raise LibraryError('UNSUPPORTED_PROJECT_ENTRY', 'project')
             if previous is not None and self._subtree(previous, prefix) is not None:
                 raise LibraryError("INCOMPATIBLE_HEAD", "input_sha")
             return
