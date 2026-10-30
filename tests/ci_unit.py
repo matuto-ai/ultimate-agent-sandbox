@@ -34,7 +34,7 @@ SLOW_MODULES = frozenset({'test_library_import', 'test_library_dispatch', 'test_
 # #177 run41038439439: scheduler45 tests passed52.913s but job timed out.
 # Service measured23.69s; integration27.108s has room. Move the entire
 # module, preserving exhaustive disjoint inventory and one-minute limits.
-INTEGRATION_MODULES = frozenset({'test_library_disposition', 'test_library_service', 'test_participant',
+INTEGRATION_MODULES = frozenset({'test_library_adjudication', 'test_library_disposition', 'test_library_service', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
     'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
@@ -78,8 +78,8 @@ ADDITIONAL_MODULES = frozenset({'test_library_observations',
 # Repeated passing suites still exhausted setup headroom in seven lanes.
 # One parallel matrix lane retains the same 60s roots and <=180s graph.
 # Inspection+relocation ~34s; synthesis+context/reset ~33s; integration ~40s.
-INSPECTION_MODULES = frozenset({'test_library_inspection', 'test_library_relocation', 'test_library_disposition_native'})
-SYNTHESIS_MODULES = frozenset({'test_library_disposition_recovery', 'test_library_attempts', 'test_staged_source_closure',
+INSPECTION_MODULES = frozenset({'test_library_inspection', 'test_library_relocation', 'test_library_disposition_native', 'test_library_adjudication_native'})
+SYNTHESIS_MODULES = frozenset({'test_library_adjudication_recovery', 'test_library_disposition_recovery', 'test_library_attempts', 'test_staged_source_closure',
     'test_context', 'test_native_pi_reset_adversarial'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.

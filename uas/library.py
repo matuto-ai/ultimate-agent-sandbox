@@ -805,7 +805,7 @@ def _human_payload(kind, payload, limits):
         _commit(payload["source_commit"], "payload.source_commit")
     if "preview_id" in payload:
         _token(payload["preview_id"], "payload.preview_id")
-    if "drain_id" in payload and not (kind in ("retry", "reject") and payload["drain_id"] is None):
+    if "drain_id" in payload and not (kind in ("retry", "reject", "adjudicate") and payload["drain_id"] is None):
         _token(payload["drain_id"], "payload.drain_id")
     if "queue_id" in payload:
         _digest_value(payload["queue_id"], "payload.queue_id")
