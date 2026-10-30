@@ -46,13 +46,15 @@ def critical_path(workflow, jobs, *, historical=False):
     if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
         stages = (frozenset(names),)
     expected = set().union(*stages)
-    # Recognize only complete historical graphs; current runs require all twelve roots.
+    # Recognize only complete historical graphs; current runs require every root.
+    # A lane introduced after a baseline landed is absent from that older graph.
     if historical and workflow == 'validate.yml':
-        for absent in ({'unit-archive'}, {'unit-archive', 'unit-maintenance'},
+        newer = (set(), {'unit-requeue'})
+        for absent in (set(), {'unit-archive'}, {'unit-archive', 'unit-maintenance'},
                        {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition'},
                        {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
-            if set(names) == expected - absent:
-                expected -= absent
+            if any(set(names) == expected - absent - added for added in newer):
+                expected -= absent | ({'unit-requeue'} if 'unit-requeue' not in names else set())
                 break
     require(len(names) == len(set(names)) and set(names) == expected,
             'Missing, duplicate or unexpected validation jobs; update the measured graph')

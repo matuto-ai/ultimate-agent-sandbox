@@ -224,7 +224,8 @@ class RuntimeBudgetTests(unittest.TestCase):
         self.assertIn('baseline median: 100.0s', self.check(self.evidence(samples=[60, 95, 100, 105, 145])))
 
     def test_old_seven_lane_measurement_is_eligible_only_as_historical_evidence(self):
-        for absent in ({'unit-archive'}, {'unit-archive', 'unit-maintenance'},
+        for absent in ({'unit-requeue'}, {'unit-requeue', 'unit-archive'},
+                       {'unit-archive'}, {'unit-archive', 'unit-maintenance'},
                        {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition'},
                        {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
             jobs = [job for job in self.jobs() if job['name'] not in absent]
