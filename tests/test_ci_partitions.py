@@ -82,7 +82,7 @@ class CIPartitionTests(unittest.TestCase):
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
         self.assertEqual(ci.OPERATOR_MODULES, {'test_library_retention', 'test_library_controls', 'test_git_payload'})
-        self.assertEqual(ci.LIFECYCLE_MODULES, {'test_library_records', 'test_library_service', 'test_manager_library_transport'})
+        self.assertEqual(ci.LIFECYCLE_MODULES, {'test_library_records', 'test_library_service', 'test_manager_library_transport', 'test_library_deployment'})
         self.assertEqual(ci.DISPOSITION_MODULES, {'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
@@ -134,7 +134,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['scheduler']), 2)
         self.assertEqual(len(groups['operator']), 3)
         self.assertEqual(len(groups['inspection']), 3)
-        self.assertEqual(len(groups['lifecycle']), 3)
+        self.assertEqual(len(groups['lifecycle']), 4)
         self.assertEqual(len(groups['disposition']), 6)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
