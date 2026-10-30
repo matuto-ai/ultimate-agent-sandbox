@@ -100,9 +100,12 @@ class Scanner:
         units = 0
         # Units and names are fixed before examining content. Locations are hashes,
         # not attacker-controlled filenames or exception strings.
-        areas = ['tree', *('document:' + p for p in sorted(files)), 'relationships']
+        areas = ['tree', *(('document:' + p + ':' + phase) for p in sorted(files)
+                            for phase in ('structure', 'links', 'sources')), 'relationships']
         completed = set()
         parsed, links, concepts = {}, {}, {}
+        accepted = set()
+        graph_complete = True
 
         def location(path):
             return digest(path)
@@ -160,28 +163,32 @@ class Scanner:
                 area = 'document:' + path
                 if not path.startswith(prefix):
                     finding('violation', 'FOREIGN_PROJECT', path, raw)
-                    completed.add(area)
+                    completed.add(area + ':structure')
                     continue
                 relative = path[len(prefix):]
                 if len(raw) > limits['document_bytes']:
+                    graph_complete = False
                     finding('violation', 'DOCUMENT_TOO_LARGE', path, raw)
                     continue
                 if path.casefold() in folded:
                     finding('violation', 'PATH_COLLISION', path, raw)
                 folded.add(path.casefold())
                 if check(path, raw, lambda: bundle._path(path, 'diagnostics')) is None:
-                    completed.add(area)
+                    graph_complete = False
+                    completed.add(area + ':structure')
                     continue
                 text = check(path, raw, lambda: bundle._canonical(path, raw, 'diagnostics'))
                 if text is None:
-                    completed.add(area)
+                    graph_complete = False
+                    completed.add(area + ':structure')
                     continue
                 kind, directory, name = bundle._classify(relative)
                 meta, body = {}, text
                 if relative == 'index.md' or kind == 'concept':
                     value = check(path, raw, lambda: bundle.frontmatter(text, relative))
                     if value is None:
-                        completed.add(area)
+                        graph_complete = False
+                        completed.add(area + ':structure')
                         continue
                     meta, body = value
                 parsed[relative] = (meta, body, raw)
@@ -192,8 +199,14 @@ class Scanner:
                 elif kind == 'index':
                     check(path, raw, lambda: bundle._index(relative, text, False))
                 elif kind == 'concept':
-                    check(path, raw, lambda: bundle._concept(relative, directory, name, text,
-                                                              text, set(), limits, gate.SOURCE_FIELDS))
+                    tick()
+                    try:
+                        bundle._concept(relative, directory, name, text, text, set(), limits, gate.SOURCE_FIELDS)
+                    except library.LibraryError as error:
+                        finding('violation', error.code, path, raw)
+                    else:
+                        if directory in bundle.DIRECTORIES:
+                            accepted.add(relative)
                     concepts[relative] = meta
                     if not meta.get('sources') and meta.get('type') != 'research':
                         finding('observation', 'OPTIONAL_SOURCE_MISSING', path, raw)
@@ -203,11 +216,14 @@ class Scanner:
                                 finding('observation', 'FRESHNESS_ELAPSED', path, raw)
                         except (ValueError, TypeError, OverflowError):
                             finding('observation', 'FRESHNESS_UNCHECKED', path, raw)
+                    completed.add(area + ':structure')
                     self._sources(meta, relative, raw, tick, finding, report, files, prefix)
+                completed.add(area + ':structure')
+                completed.add(area + ':sources')
                 # Unknown existing files/metadata stay tolerated reader data.
                 targets = set()
                 try:
-                    for event, target in gate.scan(body, relative):
+                    for event, target in gate.scan(body, relative, include_definitions=False, include_image_children=False):
                         tick()
                         if event == 'link':
                             try:
@@ -217,9 +233,12 @@ class Scanner:
                             if resolved:
                                 targets.add(resolved)
                 except library.LibraryError as error:
+                    graph_complete = False
                     finding('violation', error.code, path, raw)
+                else:
+                    completed.add(area + ':links')
                 links[relative] = targets
-                completed.add(area)
+                completed.add(area + ':structure')
             tick()
             for relative, (meta, body, raw) in parsed.items():
                 tick()
@@ -239,16 +258,20 @@ class Scanner:
                     elif meta.get('title') is not None and entries[relative] != meta['title']:
                         finding('violation', 'INDEX_TITLE_MISMATCH', prefix + index,
                                 parsed[index][2], relative)
-                if directory in bundle.DIRECTORIES:
-                    incoming = any(other != relative and other.split('/')[0] in bundle.DIRECTORIES
-                                   and relative in links.get(other, ()) for other in concepts)
+                if relative in accepted and graph_complete:
+                    incoming = any(other != relative and relative in links.get(other, ())
+                                   for other in accepted)
                     if not incoming:
                         finding('observation', 'ISOLATED_CONCEPT', prefix + relative, parsed[relative][2])
-            completed.add('relationships')
+            if graph_complete:
+                completed.add('relationships')
         except _Stop:
             pass
         report['coverage']['checked'] = [location(area) for area in areas if area in completed]
         report['coverage']['unchecked'] = [location(area) for area in areas if area not in completed]
+        report['coverage']['unchecked'].extend(
+            item['location_sha256'] for item in report['coverage']['sources']
+            if item['state'] in ('not_checked', 'unavailable'))
         report['complete'] = not report['coverage']['unchecked']
         report['no_findings'] = not report['findings'] if report['complete'] else None
         self.current()

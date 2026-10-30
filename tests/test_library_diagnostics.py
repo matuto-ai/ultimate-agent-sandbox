@@ -104,6 +104,42 @@ class ScanTests(unittest.TestCase):
         first = digest(self.prefix+'context/first.md')
         self.assertFalse(any(x['code']=='ISOLATED_CONCEPT' and x['location_sha256']==first for x in result['findings']))
 
+    def test_invalid_draft_in_accepted_directory_does_not_count_incoming(self):
+        self.concept()
+        self.concept('decisions/second.md', body='[First](/context/first.md)')
+        path=self.prefix+'decisions/second.md'
+        self.files[path]=self.files[path].replace(b'status: stable', b'status: draft')
+        result=self.run_scan()
+        self.assertIn('INCOHERENT_STATUS',self.codes(result))
+        first=digest(self.prefix+'context/first.md')
+        self.assertTrue(any(x['code']=='ISOLATED_CONCEPT' and x['location_sha256']==first for x in result['findings']))
+
+    def test_malformed_documents_leave_dependencies_unchecked_and_graph_uncertain(self):
+        self.concept()
+        self.files[self.prefix+'decisions/bad.md']=b'\xff'
+        result=self.run_scan()
+        self.assertFalse(result['complete']); self.assertIsNone(result['no_findings'])
+        self.assertTrue(result['coverage']['unchecked'])
+        self.assertNotIn('ISOLATED_CONCEPT',self.codes(result))
+        self.files[self.prefix+'decisions/bad.md']=b'not frontmatter'
+        result=self.run_scan(); self.assertFalse(result['complete'])
+        self.assertNotIn('ISOLATED_CONCEPT',self.codes(result))
+
+    def test_unused_reference_definition_is_not_an_edge_or_broken_link(self):
+        self.concept()
+        self.concept('decisions/second.md', body='No link.\n\n[unused]: /context/first.md\n[also]: missing.md')
+        result=self.run_scan()
+        first=digest(self.prefix+'context/first.md')
+        self.assertTrue(any(x['code']=='ISOLATED_CONCEPT' and x['location_sha256']==first for x in result['findings']))
+        self.assertNotIn('BROKEN_INTERNAL_LINK',self.codes(result))
+
+    def test_image_alt_children_do_not_count_as_incoming_links(self):
+        self.concept()
+        self.concept('decisions/second.md', body='![alt [nested](/context/first.md)](image.png)')
+        result=self.run_scan()
+        first=digest(self.prefix+'context/first.md')
+        self.assertTrue(any(x['code']=='ISOLATED_CONCEPT' and x['location_sha256']==first for x in result['findings']))
+
     def test_unknown_reader_metadata_types_and_external_links_tolerated(self):
         self.concept(extra='unknown_key: value\n',body='[old](https://example.test/doc)')
         p=self.prefix+'context/first.md'; self.files[p]=self.files[p].replace(b'type: context', b'type: existing')
@@ -115,6 +151,8 @@ class ScanTests(unittest.TestCase):
         self.concept(sources=[decl])
         result=self.run_scan()
         self.assertIn('SOURCE_NOT_CHECKED', self.codes(result, 'unchecked'))
+        self.assertFalse(result['complete']); self.assertIsNone(result['no_findings'])
+        self.assertTrue(result['coverage']['unchecked'])
         source=CapturedSource(resource=resource,content=raw,project_identity=self.scope.project_identity)
         allowed=True
         resolver=Resolver(source=source,current_scope=lambda:self.fresh,source_allowed=lambda *a:allowed)
@@ -123,6 +161,7 @@ class ScanTests(unittest.TestCase):
         allowed=False
         result=self.run_scan(sources={resource:resolver})
         self.assertIn('SOURCE_UNAVAILABLE',self.codes(result,'unavailable'))
+        self.assertFalse(result['complete']); self.assertIsNone(result['no_findings'])
         self.assertFalse(self.codes(result,'mismatch'))
         allowed=True
         p=self.prefix+'context/first.md'; self.files[p]=self.files[p].replace(decl['sha256'].encode(),b'0'*64)

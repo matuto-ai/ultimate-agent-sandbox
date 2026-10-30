@@ -38,11 +38,14 @@ No scan creates resulting content references.
 
 Interruption, unit/deadline exhaustion, oversized snapshots or unregistered
 Projects preserve explicit unchecked coverage. `no_findings` is null for partial
-reports. Completed scans still distinguish unchecked/unavailable provenance.
+reports. Unchecked/unavailable provenance also makes overall coverage partial; verified
+mismatches remain completed source checks, not unavailability.
 Reports never clear findings from earlier reports, including unchecked areas.
 Old-SHA reports remain historical, not promises about current canonical content.
 The service history is a bounded observation window (default 32, maximum 256);
-operators can persist metadata-only reports with `sink`. It is not an active
+operators can persist metadata-only reports with `sink`. Like the fresh-scope
+callback, this trusted callback must return within an owner-enforced bound;
+Python cannot forcibly stop arbitrary callback code. It is not an active
 findings database or a durable audit-storage claim. Sink failures expose only
 `SCAN_UNAVAILABLE` and cannot change canonical publication outcomes.
 

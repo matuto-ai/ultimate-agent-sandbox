@@ -130,7 +130,7 @@ MAX_MARKDOWN_NESTING = 32
 PIN_KEYWORDS = ("blob", "raw", "tree", "commit", "commits", "src", "objects")
 
 
-def scan(body, relative):
+def scan(body, relative, *, include_definitions=True, include_image_children=True):
     """Apply policy to CommonMark tokens, never rendered HTML or guessed blocks."""
     parser = MarkdownIt("commonmark", {"maxNesting": MAX_MARKDOWN_NESTING + 8,
                                         "inline_definitions": True})
@@ -155,10 +155,10 @@ def scan(body, relative):
             yield "image", ""
         elif token.type == "link_open":
             yield "link", token.attrGet("href")
-        elif token.type == "definition":
+        elif token.type == "definition" and include_definitions:
             # Include unused and duplicate definitions, not only resolved links.
             yield "link", token.meta["url"]
-        if token.children:
+        if token.children and (include_image_children or token.type != "image"):
             pending.extend(reversed(token.children))
 
 
