@@ -81,6 +81,7 @@ COPY --from=compiler /out/ /opt/uas/bin/
 COPY runtime/pi/ /opt/uas/runtime/pi/
 COPY runtime/claude/ /opt/uas/runtime/claude/
 COPY runtime/provider-auth.mjs /opt/uas/runtime/provider-auth.mjs
+COPY runtime/library-capture.mjs /opt/uas/runtime/library-capture.mjs
 COPY runtime/native/write-payload.mjs /build/write-payload.mjs
 COPY native-inventory.json /build/native-inventory.json
 RUN mkdir -p /opt/uas/node/bin /opt/uas/claude && cp /usr/local/bin/node /opt/uas/node/bin/node && cp /opt/uas/claude-install/node_modules/@anthropic-ai/claude-code-linux-x64/claude /opt/uas/claude/claude && echo 'b73676430af12f97316a798b8371f81d640f90a58bdcb8f3ce56a835bb47df56  /opt/uas/claude/claude' | sha256sum -c - && node /build/write-payload.mjs && chmod -R go-w /opt/uas && rm -rf /build /root/.npm

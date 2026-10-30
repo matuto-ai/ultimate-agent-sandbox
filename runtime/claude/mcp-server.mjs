@@ -1,7 +1,10 @@
 // Fixed SDK stdio MCP server; bridge FD3 was admitted before this same-task exec.
 import {readSync} from 'node:fs';
 import {seqpacketChannel} from '../pi/channel.mjs';
-import {TOOLS,invoke,negotiateProtocol} from './mcp-tools.mjs';
+import {toolsForProfile,invokeProfile,negotiateProtocol} from './mcp-tools.mjs';
+const profile=process.argv[2] ?? 'native-v1';
+if (process.argv.length > 3) throw Error('invalid-profile-arguments');
+const tools=toolsForProfile(profile);
 const channel=seqpacketChannel(3,{maxQueued:1});
 const forgeChannel=seqpacketChannel(4,{maxQueued:1});
 let buffer=Buffer.alloc(0), initialized=false, active=false, closed=false, pendingOutput=0;
@@ -34,13 +37,13 @@ async function handle(r) {
   }
   if (!initialized) return error(id,-32000,'not initialized');
   if (r.method==='ping') return write({jsonrpc:'2.0',id,result:{}});
-  if (r.method==='tools/list') return write({jsonrpc:'2.0',id,result:{tools:TOOLS}});
+  if (r.method==='tools/list') return write({jsonrpc:'2.0',id,result:{tools}});
   if (r.method!=='tools/call') return error(id,-32601,'unsupported method');
   if (!admitted) return error(id,-32000,'native helper not admitted');
   if (active) return error(id,-32000,'tool call in progress');
   if (!r.params || Object.keys(r.params).some(k=>!['name','arguments','_meta'].includes(k))) return error(id,-32602,'invalid call');
   active=true;
-  try { write({jsonrpc:'2.0',id,result:await invoke(['gh','uas_review'].includes(r.params.name) ? forgeChannel : channel,r.params.name,r.params.arguments)}); }
+  try { write({jsonrpc:'2.0',id,result:await invokeProfile(['gh','uas_review'].includes(r.params.name) ? forgeChannel : channel,r.params.name,r.params.arguments,profile)}); }
   catch { error(id,-32000,(channel.fenced || forgeChannel.fenced) ? 'channel outcome uncertain; reconcile through canonical owner' : 'invalid tool request'); }
   finally { active=false; if (channel.fenced || forgeChannel.fenced) stop(); }
 }

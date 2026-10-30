@@ -2,13 +2,20 @@
 import {NativeState, CLI_VERSION} from './sdk-policy.mjs';
 export const SERVER = 'uas';
 export const TOOL_NAMES = Object.freeze(['mcp__uas__uas_peer', 'mcp__uas__uas_review', 'mcp__uas__gh']);
+export const LIBRARY_TOOL_NAMES = Object.freeze(['mcp__uas__library_enqueue']);
+export function profileTools(profile = 'native-v1') {
+  if (profile === 'native-v1') return TOOL_NAMES;
+  if (profile === 'library-capture-v1') return LIBRARY_TOOL_NAMES;
+  throw Error('unqualified-native-profile');
+}
 const exact = (actual, wanted) => Array.isArray(actual) && actual.length === wanted.length
   && new Set(actual).size === actual.length && actual.every(x => wanted.includes(x));
 export function requireMcp(statuses) {
   if (!Array.isArray(statuses) || statuses.length !== 1 || statuses[0]?.name !== SERVER
       || statuses[0]?.status !== 'connected') throw Error('native-mcp-unavailable');
 }
-export function nativeOptions({binary, cwd, home, model, sessionId, helper, endpoint, resume = false, providerToken}) {
+export function nativeOptions({binary, cwd, home, model, sessionId, helper, endpoint, resume = false, providerToken, profile = 'native-v1'}) {
+  const names = profileTools(profile);
   if (binary !== '/opt/uas/claude/claude' || helper !== '/opt/uas/bin/claude-mcp-connector'
       || typeof model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)
       || ![cwd, home, endpoint].every(x => typeof x === 'string' && x.startsWith('/')
@@ -19,19 +26,19 @@ export function nativeOptions({binary, cwd, home, model, sessionId, helper, endp
     env: {PATH:'/opt/uas/node/bin:/usr/bin:/bin', HOME:home, CLAUDE_CONFIG_DIR:home + '/config',
       ...(providerToken === undefined ? {} : {CLAUDE_CODE_OAUTH_TOKEN:providerToken}),
       LANG:'C.UTF-8', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1', CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS:'1'},
-    tools:[], mcpServers:{uas:{type:'stdio',command:helper,args:[endpoint],env:{PATH:'/opt/uas/node/bin:/usr/bin:/bin',LANG:'C.UTF-8'}}},
-    strictMcpConfig:true, settingSources:[], allowedTools:[...TOOL_NAMES], permissionMode:'default', maxTurns:16, model,
+    tools:[], mcpServers:{uas:{type:'stdio',command:helper,args:[endpoint,...(profile === 'native-v1' ? [] : [profile])],env:{PATH:'/opt/uas/node/bin:/usr/bin:/bin',LANG:'C.UTF-8'}}},
+    strictMcpConfig:true, settingSources:[], allowedTools:[...names], permissionMode:'default', maxTurns:16, model,
     ...(resume ? {resume:sessionId} : {sessionId}),
     extraArgs:{bare:null, restricted:null, 'replay-user-messages':null}};
 }
 export class NativeToolState extends NativeState {
-  constructor(sessionId) { super(sessionId); this.tools = new Set(); this.seenTools=new Set(); this.turnBound=false; this.frames=0; }
+  constructor(sessionId, profile = 'native-v1') { super(sessionId); this.allowed = profileTools(profile); this.tools = new Set(); this.seenTools=new Set(); this.turnBound=false; this.frames=0; }
   begin(uuid,content) { super.begin(uuid,content); this.turnBound=false; this.frames=0; this.seenTools.clear(); }
   event(e) {
     if (this.fenced) return;
     if (!e || e.session_id !== this.sessionId) return this.hold('native-identity');
     if (e.type === 'system' && e.subtype === 'init') {
-      if (e.claude_code_version !== CLI_VERSION || !exact(e.tools, TOOL_NAMES)
+      if (e.claude_code_version !== CLI_VERSION || !exact(e.tools, this.allowed)
           || e.mcp_server_errors?.length || e.plugin_errors?.length) return this.hold('unsupported-native-profile');
       try { requireMcp(e.mcp_servers); } catch { return this.hold('unsupported-native-profile'); }
       this.initialized = true; this.revision++; return;
@@ -47,13 +54,13 @@ export class NativeToolState extends NativeState {
       if (!Array.isArray(content)) return this.hold('invalid-assistant-content');
       for (const block of content) {
         if (block.type !== 'tool_use') continue;
-        if (!TOOL_NAMES.includes(block.name) || typeof block.id !== 'string' || !block.id || this.seenTools.has(block.id)
+        if (!this.allowed.includes(block.name) || typeof block.id !== 'string' || !block.id || this.seenTools.has(block.id)
             || this.tools.size >= 8) return this.hold('unsupported-tool-call');
         this.tools.add(block.id); this.seenTools.add(block.id);
       }
       this.revision++; return; // Subsequent frames need no repeated SDK first-frame stamp.
     } else if (e.type === 'tool_progress') {
-      if (!this.pending || !this.tools.has(e.tool_use_id) || !TOOL_NAMES.includes(e.tool_name) || e.parent_tool_use_id!==null) return this.hold('unmatched-tool-progress');
+      if (!this.pending || !this.tools.has(e.tool_use_id) || !this.allowed.includes(e.tool_name) || e.parent_tool_use_id!==null) return this.hold('unmatched-tool-progress');
       this.revision++; return;
     } else if (e.type === 'tool_use_summary') {
       if (!this.pending || !Array.isArray(e.preceding_tool_use_ids) || e.preceding_tool_use_ids.length>8 || !e.preceding_tool_use_ids.every(id=>this.seenTools.has(id))) return this.hold('unmatched-tool-summary');

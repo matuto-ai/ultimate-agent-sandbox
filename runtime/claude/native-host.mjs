@@ -12,7 +12,11 @@ import {readProviderAuth} from '../provider-auth.mjs';
 import {nativeOptions, NativeToolState, requireMcp} from './native-policy.mjs';
 import {writeHostDiagnostic, nativeDiagnostic, lifecycleDiagnostic} from './sdk-diagnostics.mjs';
 
-const [cwd, home, endpoint, model, sessionId, resume, manifestFile, manifestDigest, authPath] = process.argv.slice(2);
+const [cwd, home, endpoint, model, sessionId, resume, manifestFile, manifestDigest, ...optional] = process.argv.slice(2);
+const libraryProfile = optional.at(-1) === 'library-capture-v1';
+if (libraryProfile) optional.pop();
+const authPath = optional[0];
+const profile = libraryProfile ? 'library-capture-v1' : 'native-v1';
 const sdkRoot='/opt/uas/claude-sdk', binary='/opt/uas/claude/claude';
 const bootstrap='/opt/uas/bin/claude-native-bootstrap', helper='/opt/uas/bin/claude-mcp-connector';
 
@@ -106,7 +110,7 @@ async function sample(env) {
     liveness: 'fresh-public-mcpServerStatus', revision: state.revision};
 }
 async function main() {
-  if (![10,11].includes(process.argv.length) || !UUID.test(sessionId) || !['0','1'].includes(resume)
+  if (![10,11,12].includes(process.argv.length) || optional.length > 1 || !UUID.test(sessionId) || !['0','1'].includes(resume)
       || !/^[0-9a-f]{64}$/.test(manifestDigest)) throw Error('invalid-native-configuration');
   if (manifestFile!=='/opt/uas/claude-manifest.json') throw Error('invalid-manifest-path');
   const fd=openSync(manifestFile,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
@@ -128,7 +132,7 @@ async function main() {
       '/opt/uas/runtime/claude/native-host.mjs','/opt/uas/runtime/claude/native-policy.mjs',
       '/opt/uas/runtime/claude/mcp-server.mjs','/opt/uas/runtime/claude/mcp-tools.mjs',
       '/opt/uas/runtime/claude/sdk-policy.mjs','/opt/uas/runtime/claude/sdk-resources.mjs',
-      '/opt/uas/runtime/claude/sdk-diagnostics.mjs','/opt/uas/runtime/pi/channel.mjs','/opt/uas/runtime/provider-auth.mjs']) {
+      '/opt/uas/runtime/claude/sdk-diagnostics.mjs','/opt/uas/runtime/pi/channel.mjs','/opt/uas/runtime/library-capture.mjs','/opt/uas/runtime/provider-auth.mjs']) {
     if (realpathSync(file)!==file || !lstatSync(file).isFile() || lstatSync(file).mode & 0o022)
       throw Error('mutable-native-payload');
     const digest=createHash('sha256'); for await (const data of createReadStream(file)) digest.update(data);
@@ -156,9 +160,9 @@ async function main() {
   mkdirSync(home,{mode:0o700}); // EEXIST (including symlinks) is terminal for this attempt.
   const {query: createQuery} = await import(pathToFileURL(path.join(packageRoot, 'sdk.mjs')));
   const providerToken=authPath === undefined ? undefined : readProviderAuth(authPath,'claude-oauth-token');
-  const options=nativeOptions({binary,cwd,home,model,sessionId,helper,endpoint,resume:resume==='1',providerToken});
+  const options=nativeOptions({binary,cwd,home,model,sessionId,helper,endpoint,resume:resume==='1',providerToken,profile});
   const env=options.env;
-  state=new NativeToolState(sessionId); input=makeInput();
+  state=new NativeToolState(sessionId,profile); input=makeInput();
   phase='native-initialize'; initializationStart=performance.now();
   query=createQuery({prompt:input,options:{...options,
     canUseTool: async () => { state.hold('needs-input'); return {behavior:'deny',message:'Tool outside fixed native profile'}; },
