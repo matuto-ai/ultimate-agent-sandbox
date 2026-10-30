@@ -21,7 +21,7 @@ import unittest
 # out at61s. Existing slow lane43s hosted has headroom; no excluded tests.
 SLOW_MODULES = frozenset({'test_library_import', 'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_forge_mutations', 'test_artifact_manual_source',
-                          'test_run_review', 'test_staged_source_closure',
+                          'test_run_review',
                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
 # #155 hosted remainder reached its one-minute job boundary despite passing
@@ -74,7 +74,9 @@ ADDITIONAL_MODULES = frozenset({'test_library_observations',
 # Postmerge #178 synthesis117 tests passed64.044s and55.701s but exceeded
 # unchanged job budget with setup. Move measured observations8.9s to additional
 # (29.7s), import6.6s to slow(35.3s): worst synthesis~48.5s, no exclusions.
-SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_inspection'})
+# Next measured run: slow331passed50.413s plus setup exceeded60s. Move
+# staged-source-closure8cases8.2s to synthesis34.429s (~42.2/42.6s).
+SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_inspection', 'test_staged_source_closure'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 # #177 second hosted run: integration60.174s/remainder49.460s hit job budget.

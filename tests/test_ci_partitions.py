@@ -24,7 +24,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(ci.SLOW_MODULES, {'test_library_import', 'test_library_dispatch', 'test_peer', 'test_checkouts',
                                           'test_gate_evaluation', 'test_forge_mutations',
                                           'test_artifact_manual_source',
-                                          'test_run_review', 'test_staged_source_closure',
+                                          'test_run_review',
                                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
         self.assertEqual(ci.INTEGRATION_MODULES, {'test_library_relocation', 'test_library_service', 'test_context',
@@ -45,7 +45,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
             'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
         })
-        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_attempts', 'test_library_inspection'})
+        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_attempts', 'test_library_inspection', 'test_staged_source_closure'})
         self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_library_retention', 'test_library_records', 'test_git_payload'})
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly', 'test_library_registration'})
@@ -78,10 +78,10 @@ class CIPartitionTests(unittest.TestCase):
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
-        self.assertEqual(len(groups['slow']), 17)
+        self.assertEqual(len(groups['slow']), 16)
         self.assertEqual(len(groups['integration']), 21)
         self.assertEqual(len(groups['additional']), 21)
-        self.assertEqual(len(groups['synthesis']), 2)
+        self.assertEqual(len(groups['synthesis']), 3)
         self.assertEqual(len(groups['scheduler']), 3)
         self.assertEqual(len(groups['operator']), 4)
         self.assertEqual(len(groups['remainder']), 2)
