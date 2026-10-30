@@ -38,7 +38,8 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| disposition |43.0|All six rejection/adjudication functional, recovery and native modules plus T27 requeue|
+| maintenance |31.8|Retention, repair and native repair plus T27 requeue|
+| disposition |38.4|All six rejection/adjudication functional, recovery and native modules|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -66,20 +67,31 @@ repair (21 tests), its native transport (4), and the existing retention module.
 Hosted timestamp deltas estimate10.7s +3.2s +9.3s =23.2s suite time, leaving
 roughly27s for setup/cleanup and variance under the unchanged60s deadline.
 `operator` retains controls and Git-payload tests (about30s suite time);
-`disposition` retains its original six modules plus T27's requeue release module. No existing test is removed,
+`disposition` retains its original six modules and `maintenance` gains T27's requeue release module. No existing test is removed,
 weakened, or duplicated; future modules still default to remainder. The exact
 partition/workflow contract checks include this lane and all downstream jobs
 still require every matrix member. No timeout, permission, or runtime-budget
 policy changes accompany this test-capacity adjustment.
 
 ## T27 requeue capacity (#191)
+The requeue release module measured54.8 seconds locally for nine real
+Git/SQLite/Service cases: the mixed release, later release of a retained draft,
+an unresolved contradiction, model parking whose reason token names a source
+failure, stale/archived/busy/revoked refusals, a blocked Project, exact retry
+after a settings change, lost acknowledgement and an unknown pre-push outcome.
 
-The requeue release module measured40.9 seconds locally for seven real
-Git/SQLite/Service cases, including the added BLOCKED-Project release case.
-Scaled by the ratio this document derives from hosted logs, that adds about7.2
-seconds to the existing disposition family, so the disposition lane estimate
-rises from35.8 to43.0 seconds: roughly17 seconds below the unchanged deadline.
-Keeping the rejection, adjudication, recovery, native and requeue proofs in one
-behavioural family avoids opening a near-full sibling lane; no test was moved
-out or excluded to make room. The next hosted run must confirm this estimate or
-rebalance the lane.
+The first placement put it beside the rejection/adjudication family. The hosted
+[validate run41055347618](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41055347618)
+at that head measured the `disposition` partition suite at46.0 seconds and the
+whole job at54.0 seconds, while its seven local modules summed246.5 seconds:
+about0.19 hosted seconds per local second for these fixture-heavy suites. Two
+further cases add roughly3 seconds, so the job would finish near57 of its 60
+seconds with setup and cleanup, against this document's planning margin.
+
+The module therefore moves to `maintenance` instead of opening a twelfth lane:
+disposition returns to its original six modules,205.5 local seconds and a38.4
+second estimate, and maintenance becomes170.2 local seconds and a31.8 second
+estimate, joining a lane whose own hosted measurement was21.0 suite seconds in a
+29.0 second job. No test was moved out of discovery, excluded or weakened, and
+the exact-partition contract still runs every ID once. The next hosted run must
+confirm these estimates or rebalance the lanes again.

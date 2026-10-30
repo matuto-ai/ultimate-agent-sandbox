@@ -84,7 +84,11 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
 
 # #182 measured repair+native+retention ~23s; keep setup/variance margin.
-MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native'})
+# #191 T27 requeue measured54.8s locally (9 real Git/SQLite/Service cases) and
+# 10.2s hosted; it joins this lane because disposition's 7-module job already
+# measured54.0s hosted and must keep its 60s budget.
+MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native',
+ 'test_library_requeue'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
@@ -92,16 +96,14 @@ INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', '
 # leaves margin in the existing60s lane, without changing discovery or limits.
 LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service', 'test_manager_library_transport'})
 
-# #191 T27 requeue measured40.9s locally (7 real Git/SQLite/Service cases) beside
-# the existing rejection/adjudication modules; keep the disposition family in
-# one lane rather than opening a near-full sibling.
+# The rejection/adjudication family; T27 requeue left for maintenance when its
+# 54.8s local module pushed this lane past its hosted margin.
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
  'test_library_disposition_native',
- 'test_library_disposition_recovery',
- 'test_library_requeue'})
+ 'test_library_disposition_recovery'})
 
 PARTITIONS = ('maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')

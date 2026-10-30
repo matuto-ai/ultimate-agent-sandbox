@@ -1,5 +1,8 @@
 """T27 real Git/SQLite/service requeue of parked work; no live user data."""
 from copy import deepcopy
+import json
+from pathlib import Path
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -149,6 +152,55 @@ class RequeueTests(unittest.TestCase):
         self.assertEqual(self.entry()['state'], blocked)
         self.assertIsNone(self.service.tick())
         self.assertFalse(self.fx.fx.fixture.marker.exists())
+
+    def test_model_parked_work_is_never_released(self):
+        good, resolver = self.source.source(b'Resolvable source quotation.\n')
+        queue = self.source.capture('model', sources=[good])
+        self.entry()['runner'].assembler.resolve_source = lambda scope, declaration: resolver
+        attempts = self.fx.fx.fixture
+        entry = self.entry(); original = entry['context']
+        def context(selected):
+            result = original(selected)
+            # The model picks a reason token that also names a source failure.
+            state = self.service.scheduler.state(self.source.scope.project_identity)
+            reply = dict(version=1, drain_id=state['drain_id'], attempt=state['attempt'],
+                operations=[], outcomes=[dict(queue_id=q, kind='parked',
+                    reason='SOURCE_UNRESOLVED') for q in selected])
+            entry['runner'].dispatcher.gateway.routes[attempts.profile.identity()] = (
+                sys.executable, str(Path(__file__).with_name('fixture_library_provider.py')),
+                str(attempts.marker), 'success', json.dumps(reply))
+            return result
+        entry['context'] = context
+        result = self.service.tick()
+        self.assertEqual(result['state'], 'COMMITTED')
+        self.assertIn('* **Synthesis**: ' + result['drain_id'], self.contents('log.md'))
+        self.assertIn('DRAFT PARKED: SOURCE_UNRESOLVED', self.contents('pending/index.md'))
+        self.assertNotIn(requeue.SOURCE_RECEIPT, self.contents('log.md'))
+        # Resolving the same source does not prove the recorded prerequisite.
+        self.entry()['runner'].assembler.resolve_source = lambda scope, declaration: resolver
+        before = self.source.count()
+        self.refused(self.value(result['drain_id']), 'NO_ELIGIBLE_PARKED_WORK')
+        self.assertEqual(self.source.count(), before)
+        self.assertIn('DRAFT PARKED: SOURCE_UNRESOLVED', self.contents('pending/index.md'))
+
+    def test_a_recorded_release_reconciles_after_a_settings_change(self):
+        first, second, drain = self.parked()
+        value = self.value(drain); before = self.source.count()
+        with patch.object(requeue, 'finish', side_effect=RuntimeError('crash')):
+            with self.assertRaises(RuntimeError):
+                self.send(value)
+        self.assertEqual(self.source.count(), before + 1)
+        document = support.document()
+        document['repository'] = deepcopy(self.source.settings['repository'])
+        document['limits']['coalesce_seconds'] += 1
+        self.source.settings = support.settings(document)
+        self.restart()
+        # An unchanged historical request still reconciles its pushed commit.
+        result = self.send(value)
+        self.assertEqual(result['outcome'], 'COMMITTED')
+        self.assertEqual(result['publication']['commit_sha'], self.source.head())
+        self.assertEqual(self.source.count(), before + 1)
+        self.assertIn(first + '.md) - context; draft;', self.contents('pending/index.md'))
 
     def test_lost_acknowledgement_reconciles_without_repeating_the_release(self):
         first, second, drain = self.parked()

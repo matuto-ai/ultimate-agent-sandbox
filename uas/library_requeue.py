@@ -1,13 +1,15 @@
 """T27: release parked work whose recorded prerequisite is resolved.
 
 A parked draft stays pending but the pending index marks it ``DRAFT PARKED``, so
-selection skips it. Requeue removes that marker only for the parked outcomes one
-drain recorded in canonical history, and only where the trusted source resolver
-now confirms the recorded prerequisite. A model- or human-declared contradiction,
+selection skips it. Requeue removes that marker only for the parked outcomes the
+trusted source-failure handler recorded for that drain, and only where the
+trusted source resolver now confirms the recorded prerequisite. A model-chosen
+reason token is never such evidence, even when it names a source code. A model- or human-declared contradiction,
 a still-unresolved source, an archived Project and a Project block are never
 bypassed: scheduling state is untouched, so no drain is invented or resumed.
 """
 from copy import deepcopy
+import json
 
 from . import library, library_bundle as bundle, library_gate as gate
 from .library_assembly import DETERMINISTIC as PREREQUISITES
@@ -17,6 +19,7 @@ from .library_disposition import finish
 from .library_sources import Excerpt, Resolver
 
 SYNTHESIS = '* **Synthesis**: '
+SOURCE_RECEIPT = 'Library source receipt '
 PARKED = 'DRAFT PARKED: '
 MARKER = 'Library requeue receipt '
 
@@ -34,22 +37,37 @@ def token(value):
     return True
 
 
-def history(tree, prefix, drain_id):
-    """The drain's canonical parked outcomes: queue -> recorded reason.
+def source_parked(tree, prefix, drain_id):
+    """Parked queues this drain recorded through trusted source handling.
 
-    The trusted writer appends one PARKED line per parked draft under that
-    drain's synthesis heading, so canonical Git—not expiring operational
-    details—carries the prerequisite this action rechecks. Later attempts of the
-    same drain may supersede an earlier outcome; the last record wins.
+    Only the source-failure handler appends a ``Library source receipt`` line,
+    immediately after that drain's synthesis block, and the model proposal path
+    never does. So this canonical evidence—not a model-chosen reason token that
+    happens to look like a source code—establishes that a recorded source
+    prerequisite parked the draft. A later receipt for the same queue wins.
     """
     found, current = {}, None
     for line in tree.files[prefix + '/log.md'].decode('utf-8').splitlines():
         if line.startswith(SYNTHESIS):
             current = line[len(SYNTHESIS):].split(';', 1)[0].strip()
-        elif current == drain_id and line.startswith('* '):
-            queue, separator, rest = line[2:].partition(': PARKED; ')
-            if separator and rest.endswith('.') and token(rest[:-1]):
-                found[queue] = rest[:-1]
+            continue
+        if current != drain_id or not line.startswith(SOURCE_RECEIPT):
+            continue
+        parts = line[len(SOURCE_RECEIPT):].split(': ', 1)
+        if len(parts) != 2:
+            continue
+        try:
+            outcomes = json.loads(parts[1], object_pairs_hook=library._unique_pairs)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            continue
+        if type(outcomes) is not list:
+            continue
+        for outcome in outcomes:
+            if (type(outcome) is dict and set(outcome) == {'queue_id', 'kind', 'reason'}
+                    and outcome['kind'] == 'parked' and type(outcome['queue_id']) is str
+                    and library.DIGEST.fullmatch(outcome['queue_id']) is not None
+                    and token(outcome['reason'])):
+                found[outcome['queue_id']] = outcome['reason']
     return found
 
 
@@ -112,6 +130,20 @@ def resolves(assembler, scope, settings, tree, prefix, queue):
     return True
 
 
+def historic_operation(scope, settings, settings_id, identity, request, payload, at):
+    """Re-admit the recorded request under its original settings identity.
+
+    Current authority and configuration stay separate fences; they are not new
+    identity evidence, so an unchanged historical request must still reconcile
+    its pushed commit after a settings change instead of conflicting.
+    """
+    library._require_scope(scope, 'human', 'library-requeue')
+    limits = {**settings['limits'], 'payload_bytes': 8192}
+    library._human_payload('requeue', payload, limits)
+    return library._operation('requeue', scope, {**settings, 'settings_id': settings_id,
+        'limits': limits}, identity, request, payload, at, drain_id=payload['drain_id'])
+
+
 def apply(controls, value, principal, entry, scope, settings):
     scheduler, publisher = controls.service.scheduler, controls.service.publisher
 
@@ -138,9 +170,8 @@ def apply(controls, value, principal, entry, scope, settings):
         historic = dict(prior['scope'])
         historic['project_path'] = prior['project_path']
         historic['capabilities'] = tuple(historic['capabilities'])
-        operation = library.action(library.LibraryScope(seal=library._SCOPE_SEAL, **historic),
-            settings, kind='requeue', operation_id=identity, request_id=value['request_id'],
-            payload=payload, at=prior['at'])
+        operation = historic_operation(library.LibraryScope(seal=library._SCOPE_SEAL, **historic),
+            settings, prior['settings_id'], identity, value['request_id'], payload, prior['at'])
         publication = publisher.publication_for(operation, current=current)
         if publication is None:
             fail('CONTROL_OUTCOME_UNKNOWN')
@@ -160,7 +191,7 @@ def apply(controls, value, principal, entry, scope, settings):
         if content(tree.files) != target:
             fail('STALE_CONTROL_STATE')
         prefix = bundle._prefix(scope)
-        recorded, currently = history(tree, prefix, value['drain_id']), parked(tree, prefix)
+        recorded, currently = source_parked(tree, prefix, value['drain_id']), parked(tree, prefix)
         released, retained = {}, {}
         for queue in sorted(recorded):
             reason = currently.get(queue)

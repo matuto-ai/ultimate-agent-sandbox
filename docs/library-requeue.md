@@ -12,15 +12,18 @@ admitted; the existing 8192-byte transport bound and typed envelope apply.
 Parking leaves a draft in `pending/` with draft status and a pending-index entry
 labelled `DRAFT PARKED: <REASON>`, so ordinary selection skips it. Requeue
 rewrites that entry back to its ordinary draft form for the parked outcomes the
-named drain recorded in canonical `log.md`, and appends one `Library requeue
-receipt` line naming the released and retained queue IDs with their safe reason
-tokens. The draft file itself is byte-identical; only the pending index and the
+named drain recorded through trusted source handling, and appends one `Library
+requeue receipt` line naming the released and retained queue IDs with their safe
+reason tokens. The draft file itself is byte-identical; only the pending index and the
 log change in one canonical commit. Nothing is deleted, reinterpreted or
 re-verified.
 
-A queue is released only when both checks pass. Its recorded reason must be a
-service source prerequisite (`SOURCE_*`/`SECRET_DETECTED`), so a model- or
-human-declared contradiction is never released. Its recorded source pins must
+A queue is released only when all three checks pass. The drain must carry a
+canonical `Library source receipt` outcome for that queue, which only the
+source-failure handler writes, so model-declared or human-declared parking is
+never released even when its reason token happens to name a source code. That
+recorded reason must be a service source prerequisite
+(`SOURCE_*`/`SECRET_DETECTED`). Its recorded source pins must
 resolve now through the same trusted resolver and secret policy assembly uses;
 a missing, still-failing or uncertain pin keeps the draft parked. A draft with no
 recheckable pinned source therefore stays parked rather than being guessed at:
@@ -54,7 +57,9 @@ under a changed payload or identity is a conflict. An accepted request returns
 its recorded receipt without a second commit.
 
 Only a pushed commit establishes success, and its receipt cites that commit and
-`log.md`; no receipt invents a Git commit for a scheduling-only effect and none
+`log.md`; an unchanged historical request reconciles that commit under its own
+recorded settings identity, so a later configuration change fences new writes
+without turning the original request into conflicting identity evidence; no receipt invents a Git commit for a scheduling-only effect and none
 retains a draft body. A crash after push but before the receipt reconciles
 against canonical publication, returning the original commit without another
 write. An unresolved pre-push operation remains `CONTROL_OUTCOME_UNKNOWN` until
@@ -66,10 +71,11 @@ payload, so the human refreshes and uses a new request ID.
 `tests/test_library_requeue.py` uses disposable real Git repositories, SQLite and
 the started Service: a mixed resolved/unresolved drain released in one commit
 with the draft preserved, a retained draft released later, a model-declared
-contradiction left parked, stale/archived/busy/revoked refusals, a `BLOCKED`
-Project that neither clears nor executes the release, exact retry,
-changed-payload conflict, restart eligibility, lost acknowledgement and an
-unknown pre-push outcome. These are deterministic fixture proofs. Manager/Hub
+contradiction left parked, model parking whose reason token names a source
+failure left parked, stale/archived/busy/revoked refusals, a `BLOCKED` Project
+that neither clears nor executes the release, exact retry, changed-payload
+conflict, restart eligibility, reconciliation after a settings change, lost
+acknowledgement and an unknown pre-push outcome. These are deterministic fixture proofs. Manager/Hub
 transport for this action (T32), real deployment authority (T31), the separate
 disposed-batch resume (T26) and any live-provider or target qualification remain
 outside this slice.
