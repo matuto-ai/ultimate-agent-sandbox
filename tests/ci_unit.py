@@ -31,7 +31,10 @@ SLOW_MODULES = frozenset({'test_library_dispatch', 'test_peer', 'test_checkouts'
 # Move hosted5.70s Hub to45s slow job; Git payload3.03s to45s remainder.
 # Preserve every test and timeout; new assembly stays integration.
 # #162 kernel/Git route module measured ~3.5s locally; keep off tight remainder.
-INTEGRATION_MODULES = frozenset({'test_library_assembly', 'test_context', 'test_library_registration',
+# #177 run41038439439: scheduler45 tests passed52.913s but job timed out.
+# Service measured23.69s; integration27.108s has room. Move the entire
+# module, preserving exhaustive disjoint inventory and one-minute limits.
+INTEGRATION_MODULES = frozenset({'test_library_service', 'test_library_assembly', 'test_context', 'test_library_registration',
     'test_native_pi_reset_adversarial', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
@@ -66,7 +69,7 @@ ADDITIONAL_MODULES = frozenset({
 SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_relocation'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
-SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_service'})
+SCHEDULER_MODULES = frozenset({'test_library_scheduler'})
 # #175 controls adds ~20s real Git/service/socket proofs; prior scheduler44s
 # and remaining lanes~50s cannot absorb it inside unchanged one-minute jobs.
 # Additional reached60s; terminal/stop/records now belong to remainder.
