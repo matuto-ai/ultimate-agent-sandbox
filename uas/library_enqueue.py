@@ -137,6 +137,9 @@ class Enqueuer:
                 if publication is None:
                     head, tree = self.publisher.project_snapshot(scope, admitted, current=current)
                     phase = 'gate'
+                    from .library_lifecycle import frozen
+                    if frozen(self.publisher, scope.project_identity):
+                        raise library.LibraryError('PROJECT_ARCHIVING', 'project')
                     prefix = library_bundle._prefix(scope)
                     if not tree.files:
                         raise library.LibraryError('PROJECT_NOT_REGISTERED', 'project')

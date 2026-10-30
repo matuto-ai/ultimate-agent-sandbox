@@ -60,7 +60,8 @@ def decode(raw):
     if action == 'observe':
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
-        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect','repair','requeue'):
+        if set(value) != keys or value['for_action'] not in (
+                'drain','retry','inspect','repair','archive','restore','requeue'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
     elif action in ('reject', 'adjudicate'):
@@ -85,7 +86,7 @@ def decode(raw):
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
-    elif action in ('drain','retry','repair','requeue'):
+    elif action in ('drain','retry','repair','archive','restore','requeue'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
         if action in ('retry','requeue'): keys.add('drain_id')
         if set(value) != keys: fail('INVALID_CONTROL_REQUEST')
@@ -156,8 +157,11 @@ class Controls:
         duplicate path. That path may finish operational receipts, not republish.
         """
         value = decode(raw)
-        if value['action'] not in ('reject', 'adjudicate', 'repair'):
+        if value['action'] not in ('reject', 'adjudicate', 'repair', 'archive', 'restore'):
             fail('INVALID_CONTROL_REQUEST')
+        if value['action'] in ('archive','restore'):
+            from .library_lifecycle import handle
+            return handle(self, value, principal, reconcile_only=True)
         with self.service.scheduler._lock:
             entry = self._entry(value['project_id'])
             scope = self._scope(principal, entry, value['action'])
@@ -175,6 +179,9 @@ class Controls:
             if self.settings_owner is None: fail('SETTINGS_UNAVAILABLE')
             return self.settings_owner.handle(raw, principal)
         scheduler = self.service.scheduler
+        if value.get('for_action', value['action']) in ('archive','restore'):
+            from .library_lifecycle import handle
+            return handle(self, value, principal)
         with scheduler._lock:
             entry = self._entry(value['project_id'])
             kind = value.get('for_action', value['action'])

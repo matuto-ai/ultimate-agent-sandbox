@@ -59,3 +59,5 @@ than skipping on EPERM. This is deterministic fixture evidence, not live-provide
 production-host authentication integration, account, VM or deployment evidence.
 
 Explicit index-only repair and its conservative uncertainty/recovery contract are documented in [library-repair.md](library-repair.md).
+
+Archive and restore are documented in [library-lifecycle.md](library-lifecycle.md).
