@@ -81,21 +81,23 @@ class CIPartitionTests(unittest.TestCase):
  'test_library_attempts',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
-        self.assertEqual(ci.OPERATOR_MODULES, {'test_library_retention', 'test_library_controls', 'test_git_payload', 'test_library_repair_native'})
+        self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_git_payload'})
         self.assertEqual(ci.LIFECYCLE_MODULES, {'test_library_records', 'test_library_service', 'test_manager_library_transport'})
         self.assertEqual(ci.DISPOSITION_MODULES, {'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
  'test_library_disposition_native',
- 'test_library_disposition_recovery', 'test_library_repair'})
+ 'test_library_disposition_recovery'})
+        self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_retention', 'test_library_repair', 'test_library_repair_native'})
+        self.assertEqual('maintenance', ci.partition_for('test_library_repair.Case.test_one'))
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual('inspection', ci.partition_for('test_library_inspection.Case.test_one'))
         workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/validate.yml').read_text()
         self.assertIn('- {partition: inspection, name: unit-inspection}', workflow)
         matrix=workflow.split('  unit-integration:',1)[1].split('  forge-broker-smoke:',1)[0]
         self.assertIn('timeout-minutes: 1', matrix)
-        self.assertEqual(matrix.count('- {partition:'), 8)
+        self.assertEqual(matrix.count('- {partition:'), 9)
         self.assertNotIn('needs:', matrix)
         self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly'})
         self.assertEqual('scheduler', ci.partition_for('test_library_scheduler.Case.test_one'))
@@ -116,13 +118,13 @@ class CIPartitionTests(unittest.TestCase):
         slow, future = case('test_peer.Case.test_one'), case('test_future.Case.test_one')
         cases, groups = ci.partition_suite(unittest.TestSuite([unittest.TestSuite([slow]), future]))
         self.assertEqual([slow, future], cases)
-        self.assertEqual({'lifecycle': [], 'disposition': [], 'inspection': [], 'operator': [], 'slow': [slow], 'integration': [], 'additional': [], 'scheduler': [], 'synthesis': [],
+        self.assertEqual({'maintenance': [], 'lifecycle': [], 'disposition': [], 'inspection': [], 'operator': [], 'slow': [slow], 'integration': [], 'additional': [], 'scheduler': [], 'synthesis': [],
                           'remainder': [future]}, groups)
         slow.run.assert_not_called(); future.run.assert_not_called()
 
     def test_rebalanced_modules_each_run_once_without_changing_total_inventory(self):
         identifiers = [module + '.Case.test_one' for module in sorted(
-            ci.LIFECYCLE_MODULES | ci.DISPOSITION_MODULES | ci.SLOW_MODULES | ci.INTEGRATION_MODULES | ci.ADDITIONAL_MODULES | ci.SYNTHESIS_MODULES | ci.SCHEDULER_MODULES | ci.OPERATOR_MODULES | ci.INSPECTION_MODULES)]
+            ci.MAINTENANCE_MODULES | ci.LIFECYCLE_MODULES | ci.DISPOSITION_MODULES | ci.SLOW_MODULES | ci.INTEGRATION_MODULES | ci.ADDITIONAL_MODULES | ci.SYNTHESIS_MODULES | ci.SCHEDULER_MODULES | ci.OPERATOR_MODULES | ci.INSPECTION_MODULES)]
         identifiers += ['test_future.Case.test_one', 'test_ci_partitions.Case.test_one']
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
@@ -132,10 +134,11 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['additional']), 20)
         self.assertEqual(len(groups['synthesis']), 4)
         self.assertEqual(len(groups['scheduler']), 2)
-        self.assertEqual(len(groups['operator']), 4)
+        self.assertEqual(len(groups['operator']), 2)
         self.assertEqual(len(groups['inspection']), 3)
         self.assertEqual(len(groups['lifecycle']), 3)
-        self.assertEqual(len(groups['disposition']), 7)
+        self.assertEqual(len(groups['disposition']), 6)
+        self.assertEqual(len(groups['maintenance']), 3)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
@@ -156,10 +159,10 @@ class CIPartitionTests(unittest.TestCase):
                    ({'slow': [slow], 'remainder': [rest], 'extra': []})]
         for groups in invalid:
             with self.subTest(groups=groups), self.assertRaises(ValueError):
-                ci.verify_partition_ids([slow, rest], dict(lifecycle=[], disposition=[], inspection=[], integration=[], additional=[], synthesis=[], scheduler=[], operator=[], **groups))
+                ci.verify_partition_ids([slow, rest], dict(maintenance=[], lifecycle=[], disposition=[], inspection=[], integration=[], additional=[], synthesis=[], scheduler=[], operator=[], **groups))
         integration = 'test_participant.Case.test_one'
         additional = 'test_local_three_runs.Case.test_one'
-        valid = {'lifecycle': [], 'disposition': [], 'inspection': [], 'operator': [], 'slow': [slow], 'integration': [integration],
+        valid = {'maintenance': [], 'lifecycle': [], 'disposition': [], 'inspection': [], 'operator': [], 'slow': [slow], 'integration': [integration],
                  'additional': [additional], 'scheduler': [], 'synthesis': [], 'remainder': [rest]}
         ci.verify_partition_ids([slow, integration, additional, rest], valid)
         for broken in ({'slow': [slow], 'remainder': [rest]},
@@ -184,8 +187,9 @@ class CIPartitionTests(unittest.TestCase):
             synthesis = case('test_library_attempts.Case.test_one')
             lifecycle = case('test_library_service.Case.test_one')
             disposition = case('test_library_adjudication.Case.test_one')
+            maintenance = case('test_library_repair.Case.test_one')
             loader = Mock(errors=[], discover=Mock(return_value=unittest.TestSuite(
-                [lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest])))
+                [maintenance, lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest])))
             runner = Mock()
             runner.run.return_value.wasSuccessful.return_value = True
             with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
@@ -194,10 +198,10 @@ class CIPartitionTests(unittest.TestCase):
                 self.assertEqual(0, ci.main([partition]))
             loader.discover.assert_called_once_with(str(Path(__file__).resolve().parent), pattern='test*.py')
             self.assertEqual(list(runner.run.call_args.args[0]),
-                             [lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest] if partition == 'all' else {
-                                 'lifecycle': [lifecycle], 'disposition': [disposition], 'inspection': [inspection], 'operator': [operator], 'slow': [slow], 'integration': [integration],
+                             [maintenance, lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest] if partition == 'all' else {
+                                 'maintenance': [maintenance], 'lifecycle': [lifecycle], 'disposition': [disposition], 'inspection': [inspection], 'operator': [operator], 'slow': [slow], 'integration': [integration],
                                  'additional': [additional], 'synthesis': [synthesis], 'scheduler': [scheduler], 'remainder': [rest]}[partition])
-            for item in (lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest):
+            for item in (maintenance, lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest):
                 item.run.assert_not_called()
 
     def test_discovery_and_selected_test_failures_are_required_failures(self):
@@ -210,7 +214,7 @@ class CIPartitionTests(unittest.TestCase):
         loader.errors = []
         loader.discover.return_value = unittest.TestSuite([case('test_peer.Case.test_one'),
                                                           case('test_future.Case.test_one'), case('test_participant.Case.test_one'),
-                                                          case('test_local_three_runs.Case.test_one'), case('test_library_attempts.Case.test_one'), case('test_library_scheduler.Case.test_one'), case('test_library_controls.Case.test_one'), case('test_library_inspection.Case.test_one'), case('test_library_service.Case.test_one'), case('test_library_adjudication.Case.test_one')])
+                                                          case('test_local_three_runs.Case.test_one'), case('test_library_attempts.Case.test_one'), case('test_library_scheduler.Case.test_one'), case('test_library_controls.Case.test_one'), case('test_library_inspection.Case.test_one'), case('test_library_service.Case.test_one'), case('test_library_adjudication.Case.test_one'), case('test_library_repair.Case.test_one')])
         runner = Mock(); runner.run.return_value.wasSuccessful.return_value = False
         with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
                 patch.object(ci.unittest, 'TextTestRunner', return_value=runner), \
