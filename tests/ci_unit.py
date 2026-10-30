@@ -84,15 +84,16 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
 
 # #182 measured repair+native+retention ~23s; keep setup/variance margin.
-MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native'})
+MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair',
+ 'test_library_repair_native', 'test_library_deployment'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
 # #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
 # leaves margin in the existing60s lane, without changing discovery or limits.
-# Attention and deployment composition both reuse the service/records Git fixtures.
+# Deployment's 9.6s hosted suite uses maintenance headroom instead of this critical lane.
 LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
- 'test_library_service', 'test_manager_library_transport', 'test_library_deployment'})
+ 'test_library_service', 'test_manager_library_transport'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
