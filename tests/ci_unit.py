@@ -84,29 +84,28 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
 
 # #182 measured repair+native+retention ~23s; keep setup/variance margin.
-# #191 T27 requeue measured61.8s locally (10 real Git/SQLite/Service cases) and
-# about16s hosted: 39.0 suite seconds in a48.0 second job beside these three.
-# A twelfth lane measured slower for the whole graph, so it stays here.
-MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native',
- 'test_library_requeue'})
+# #191 requeue joins the existing retention/repair/deployment lane.
+# Keep main's recovery/archive and attention/lifecycle assignments intact.
+MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair',
+ 'test_library_repair_native', 'test_library_deployment', 'test_library_requeue'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
 # #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
 # leaves margin in the existing60s lane, without changing discovery or limits.
-# #185 deployment composition measured9.5s locally over real Git/SQLite/socket;
-# lifecycle keeps one-minute roots and changes no inventory, timeout or exclusion.
-LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service',
-    'test_manager_library_transport', 'test_library_deployment'})
+# Deployment's 9.6s hosted suite uses maintenance headroom instead of this critical lane.
+LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
+ 'test_library_service', 'test_manager_library_transport'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
- 'test_library_disposition_native',
- 'test_library_disposition_recovery'})
+ 'test_library_disposition_native'})
 
-ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration', 'test_library_archive_native'})
+# Run 41129393214: disposition recovery took 16.7s; archive's 30s job has room.
+ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration',
+ 'test_library_archive_native', 'test_library_disposition_recovery'})
 
 PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')

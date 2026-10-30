@@ -1,6 +1,10 @@
-"""Pure fixed public acquisition-cache policy, no npm/actions execution."""
+"""Public acquisition-cache policy and fixture worker checks; no npm or native runtime."""
 from pathlib import Path
+import os
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -36,3 +40,52 @@ class ClaudeCICacheTests(unittest.TestCase):
             self.assertIn('NPM_CONFIG_USERCONFIG="$PWD/.home/empty-user.npmrc"',script)
             self.assertIn('NPM_CONFIG_GLOBALCONFIG="$PWD/.home/empty-global.npmrc"',script)
             self.assertLess(script.index('check-lock.mjs'),script.index('"$npm_path" ci '))
+
+
+class ClaudeCIRunnerTests(unittest.TestCase):
+    def run_fixture(self, *, fail=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'tests/claude').mkdir(parents=True)
+            (root/'tests/pi').mkdir()
+            script = root/'tests/claude/run-tests.sh'
+            script.write_text((ROOT/'tests/claude/run-tests.sh').read_text())
+            (root/'tests/pi/library-scan-contract.mjs').write_text(
+                "from pathlib import Path\nPath('events').write_text('scan\\n')\n")
+            (root/'tests/claude/probe.py').write_text(
+                "with open('events', 'a') as output: output.write('probe\\n')\n")
+            names = ('first', 'sdk_receiver', 'future')
+            for name in names:
+                (root/f'tests/test_claude_{name}.py').write_text(
+                    'import time, unittest\n'
+                    'class Fixture(unittest.TestCase):\n'
+                    ' def test_payload(self):\n'
+                    f"  with open('events', 'a') as output: output.write('start:{name}\\n')\n"
+                    '  time.sleep(.15)\n'
+                    f"  with open('events', 'a') as output: output.write('end:{name}\\n')\n"
+                    f'  self.assertFalse({fail and name == "first"!r})\n')
+            result = subprocess.run(['sh', str(script)], cwd=root,
+                env={**os.environ, 'UAS_CLAUDE_INSTALL':'fixture',
+                     'UAS_CLAUDE_SDK_INSTALL':'fixture', 'UAS_CLAUDE_NODE':sys.executable},
+                capture_output=True, text=True, timeout=10)
+            events = (root/'events').read_text().splitlines()
+        self.assertEqual(['scan', 'probe'], events[:2])
+        self.assertCountEqual([f'{phase}:{name}' for phase in ('start', 'end')
+                              for name in names], events[2:])
+        active = peak = 0
+        for event in events[2:]:
+            active += 1 if event.startswith('start:') else -1
+            self.assertTrue(0 <= active <= 2)
+            peak = max(peak, active)
+        self.assertEqual(0, active)
+        self.assertEqual(2, peak)
+        return result
+
+    def test_all_modules_execute_with_two_workers_after_serial_contracts(self):
+        result = self.run_fixture()
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_worker_failure_cannot_be_hidden_by_other_successes(self):
+        result = self.run_fixture(fail=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('FAILED', result.stderr)

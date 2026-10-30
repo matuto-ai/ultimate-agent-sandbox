@@ -64,9 +64,12 @@ def validate_projection(value, room_id):
     if (type(value) is not dict or set(value) != {'schema_version', 'room_id', 'room_seq',
             'captured_at', 'sections'} or type(value['schema_version']) is not int
             or value['schema_version'] not in {1, SCHEMA_VERSION} or value['room_id'] != room_id
-            or type(value['sections']) is not dict
-            or set(value['sections']) not in (SECTION_NAMES | ({'journey'} if value['schema_version'] == 2 else set()),
-                    (SECTION_NAMES - {'library'}) | ({'journey'} if value['schema_version'] == 2 else set()))):
+            or type(value['sections']) is not dict):
+        raise StreamError('INVALID_PROJECTION')
+    # library and library_attention stay optional for older read-only source frames.
+    expected = SECTION_NAMES | ({'journey'} if value['schema_version'] == 2 else set())
+    if frozenset(value['sections']) not in {frozenset(expected - absent) for absent in
+            (set(), {'library'}, {'library_attention'}, {'library', 'library_attention'})}:
         raise StreamError('INVALID_PROJECTION')
     sequence(value['room_seq']); timestamp(value['captured_at'])
     for section, fact in value['sections'].items():
@@ -455,6 +458,12 @@ class ManagerReadModel:
             source_age = None if observed is None else (current_time - datetime.fromisoformat(observed)).total_seconds()
             if not connected or pending is not None or source_age is None or source_age < 0 or source_age > self.stale_after_seconds:
                 library_fact['freshness'] = 'stale'
+        attention_fact = projection['sections'].get('library_attention')
+        if attention_fact and attention_fact['status'] == 'known':
+            observed = attention_fact['observed_at']
+            source_age = None if observed is None else (current_time - datetime.fromisoformat(observed)).total_seconds()
+            if not connected or pending is not None or source_age is None or source_age < 0 or source_age > self.stale_after_seconds:
+                attention_fact['freshness'] = 'stale'
         return {'identity': identity.document(), 'status': 'connected' if connected else 'disconnected',
                 'catching_up': pending is not None,
                 'projection_stale': not connected or pending is not None or age > self.stale_after_seconds or age < 0,

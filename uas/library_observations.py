@@ -175,11 +175,47 @@ class HubObservations:
         self.ledger.apply(Command(ident,'library.observation',self.project_identity,None,data),_RESULT_ORIGIN,
             authorize=lambda *_:self.authenticate() is True,decide=decide)
         return True
+    def receive_attention(self, value):
+        """Authenticated Project-bound attention cut; no content or send effect."""
+        from .ledger import Command,Event,Transition,LedgerError
+        from .library_hub import _RESULT_ORIGIN
+        from .manager_projection import attention_sample
+        if self.authenticate() is not True:raise LedgerError('FORBIDDEN')
+        data=attention_sample(value)
+        if data['project_identity']!=self.project_identity:
+            raise LedgerError('STALE_LIBRARY_ATTENTION')
+        ident='library-attention-'+library._digest([self.project_identity,data['sequence'],library._digest(data)])
+        def decide(state,_):
+            old=state.get('library_attention')
+            if old is not None and old['sequence']>=data['sequence']:
+                raise LedgerError('STALE_LIBRARY_ATTENTION')
+            state=deepcopy(state);state['library_attention']=data
+            return Transition(state,(Event('library.attention.recorded',data),),{'recorded':True})
+        self.ledger.apply(Command(ident,'library.attention',self.project_identity,None,data),_RESULT_ORIGIN,
+            authorize=lambda *_:self.authenticate() is True,decide=decide)
+        return True
     def manager_observations(self):
-        from .manager_projection import SourceObservation
-        data=self.ledger.snapshot()['state'].get('library_observation')
-        if data is None:return (SourceObservation('library','library-service',None,None,None,status='unknown',reason='SOURCE_NOT_OBSERVED'),)
-        data=observation(data)
-        if data['row']['project_identity']!=self.project_identity:fail()
-        return (SourceObservation('library','library-service',data['sequence'],data['observed_at'],
-             {self.project_identity:data['row']},freshness='unknown',source_committed_at=None),)
+        """Library source fact plus its derived attention cut; never an empty health claim."""
+        from .manager_projection import SourceObservation, attention_sample
+        state=self.ledger.snapshot()['state']
+        data=state.get('library_observation')
+        if data is None:
+            facts=[SourceObservation('library','library-service',None,None,None,
+                status='unknown',reason='SOURCE_NOT_OBSERVED')]
+        else:
+            data=observation(data)
+            if data['row']['project_identity']!=self.project_identity:fail()
+            facts=[SourceObservation('library','library-service',data['sequence'],data['observed_at'],
+                {self.project_identity:data['row']},freshness='unknown',source_committed_at=None)]
+        attention=state.get('library_attention')
+        if attention is None:
+            facts.append(SourceObservation('library_attention','library-service',None,None,None,
+                status='unknown',reason='SOURCE_NOT_OBSERVED'))
+        else:
+            attention=attention_sample(attention)
+            known=attention['state']=='known'
+            facts.append(SourceObservation('library_attention','library-service',attention['sequence'],
+                attention['observed_at'],deepcopy(attention['rows']) if known else None,
+                status='known' if known else 'unknown',freshness='unknown',
+                reason=None if known else 'SOURCE_STATE_UNKNOWN'))
+        return tuple(facts)

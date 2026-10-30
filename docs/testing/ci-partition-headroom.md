@@ -123,3 +123,9 @@ membership, one-minute deadlines, complete discovery, and all-root dependency
 gates remain unchanged. This avoids spending maintenance's measured headroom
 and is not the separately proposed dispatch-capacity correction or unmerged
 runtime-budget policy. Exact hosted total graph timing remains authoritative.
+
+## T38 measured runtime rebalance
+
+[Run 41129393214](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41129393214) passed every functional job but failed the unchanged moving runtime budget: 118 seconds versus a 115.5-second allowance. Its disposition job took 65 seconds, including 16.7 seconds in `test_library_disposition_recovery`, while archive took 30 seconds. Move that one recovery module to the archive lane, retaining the same tests, discovery, all-root dependencies, watchdogs, and measured-budget policy. The resulting planning estimates are roughly 48 seconds for disposition and 47 seconds for archive; the next exact-head hosted graph determines acceptance.
+
+After composing #185, [run 41131079099](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41131079099) passed every functional job but measured 116 seconds against the same 115.5-second limit. Lifecycle took 63 seconds, including 9.6 seconds for `test_library_deployment`; maintenance took 31 seconds. Place the ten deployment cases in maintenance instead, keeping all discovered cases and the original acceptance limits. This avoids making the merged lifecycle lane the critical path.
