@@ -81,7 +81,7 @@ SYNTHESIS_MODULES = frozenset({'test_context',
 
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'})
 
-OPERATOR_MODULES = frozenset({'test_library_retention', 'test_library_controls', 'test_git_payload', 'test_library_repair', 'test_library_repair_native'})
+OPERATOR_MODULES = frozenset({'test_library_retention', 'test_library_controls', 'test_git_payload', 'test_library_repair_native'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
@@ -94,7 +94,7 @@ DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_recovery',
  'test_library_disposition',
  'test_library_disposition_native',
- 'test_library_disposition_recovery'})
+ 'test_library_disposition_recovery', 'test_library_repair'})
 
 PARTITIONS = ('lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
