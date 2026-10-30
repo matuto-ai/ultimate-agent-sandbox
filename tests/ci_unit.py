@@ -90,9 +90,9 @@ INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', '
 
 # #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
 # leaves margin in the existing60s lane, without changing discovery or limits.
-# #183 attention fixtures reuse the service/records Git composition here.
+# Attention and deployment composition both reuse the service/records Git fixtures.
 LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
- 'test_library_service', 'test_manager_library_transport'})
+ 'test_library_service', 'test_manager_library_transport', 'test_library_deployment'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
