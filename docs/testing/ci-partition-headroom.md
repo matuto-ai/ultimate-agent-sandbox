@@ -51,3 +51,23 @@ checks the actual workflow matrix and unchanged all-root dependency gates. Each
 run prints its complete inventory digest. Hosted validation and postmerge runs,
 not these estimates, establish the observed complete graph duration (target2–3
 minutes). Later growth must be measured again without relaxing coverage.
+
+## T37 repair capacity (#182)
+
+The composed repair run
+[41051466124](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41051466124)
+finished all94 operator tests successfully in53.039s, including four actual
+private-socket repair cases, but crossed the unchanged one-minute job limit
+including setup/cleanup (63s). This is not a qualifying green graph; dependent
+jobs were skipped. A prior59s green operator job was insufficient margin.
+
+An eleventh, explicit `maintenance` matrix lane contains only deterministic
+repair (21 tests), its native transport (4), and the existing retention module.
+Hosted timestamp deltas estimate10.7s +3.2s +9.3s =23.2s suite time, leaving
+roughly27s for setup/cleanup and variance under the unchanged60s deadline.
+`operator` retains controls and Git-payload tests (about30s suite time);
+`disposition` retains its original six modules. No existing test is removed,
+weakened, or duplicated; future modules still default to remainder. The exact
+partition/workflow contract checks include this lane and all downstream jobs
+still require every matrix member. No timeout, permission, or runtime-budget
+policy changes accompany this test-capacity adjustment.

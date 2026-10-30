@@ -55,7 +55,7 @@ def decode(raw):
     if action == 'observe':
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
-        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect'):
+        if set(value) != keys or value['for_action'] not in ('drain','retry','inspect','repair'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
     elif action in ('reject', 'adjudicate'):
@@ -80,7 +80,7 @@ def decode(raw):
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
-    elif action in ('drain','retry'):
+    elif action in ('drain','retry','repair'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
         if action == 'retry': keys.add('drain_id')
         if set(value) != keys: fail('INVALID_CONTROL_REQUEST')
@@ -148,7 +148,7 @@ class Controls:
         duplicate path. That path may finish operational receipts, not republish.
         """
         value = decode(raw)
-        if value['action'] not in ('reject', 'adjudicate'):
+        if value['action'] not in ('reject', 'adjudicate', 'repair'):
             fail('INVALID_CONTROL_REQUEST')
         with self.service.scheduler._lock:
             entry = self._entry(value['project_id'])
@@ -174,6 +174,9 @@ class Controls:
             key = scope.project_identity
             # Fresh configured authority/settings; no authority inferred from UID.
             settings = self._settings(entry)
+            if kind == 'repair':
+                from .library_repair import handle
+                return handle(self, value, principal, entry, scope, settings)
             if kind in ('reject', 'adjudicate'):
                 from .library_disposition import apply
                 return apply(self, value, principal, entry, scope, settings)
