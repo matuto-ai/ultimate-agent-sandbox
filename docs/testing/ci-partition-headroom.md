@@ -38,7 +38,7 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| disposition |42.3|All six rejection/adjudication functional, recovery and native modules plus T27 requeue|
+| disposition |43.0|All six rejection/adjudication functional, recovery and native modules plus T27 requeue|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -74,11 +74,12 @@ policy changes accompany this test-capacity adjustment.
 
 ## T27 requeue capacity (#191)
 
-The requeue release module measured36.6 seconds locally for seven real
-Git/SQLite/Service cases. Scaled by the ratio this document derives from hosted
-logs, that adds about6.5 seconds to the existing disposition family, so the
-disposition lane estimate rises from35.8 to42.3 seconds: roughly18 seconds below
-the unchanged deadline. Keeping the rejection, adjudication, recovery, native and
-requeue proofs in one behavioural family avoids opening a near-full sibling lane;
-no test was moved out or excluded to make room. The next hosted run must confirm
-this estimate or rebalance the lane.
+The requeue release module measured40.9 seconds locally for seven real
+Git/SQLite/Service cases, including the added BLOCKED-Project release case.
+Scaled by the ratio this document derives from hosted logs, that adds about7.2
+seconds to the existing disposition family, so the disposition lane estimate
+rises from35.8 to43.0 seconds: roughly17 seconds below the unchanged deadline.
+Keeping the rejection, adjudication, recovery, native and requeue proofs in one
+behavioural family avoids opening a near-full sibling lane; no test was moved
+out or excluded to make room. The next hosted run must confirm this estimate or
+rebalance the lane.

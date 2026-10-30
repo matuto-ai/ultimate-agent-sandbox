@@ -92,7 +92,7 @@ INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', '
 # leaves margin in the existing60s lane, without changing discovery or limits.
 LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service', 'test_manager_library_transport'})
 
-# #191 T27 requeue measured36.6s locally (6 real Git/SQLite/Service cases) beside
+# #191 T27 requeue measured40.9s locally (7 real Git/SQLite/Service cases) beside
 # the existing rejection/adjudication modules; keep the disposition family in
 # one lane rather than opening a near-full sibling.
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
