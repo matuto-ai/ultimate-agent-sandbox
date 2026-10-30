@@ -84,11 +84,12 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
 
 # #182 measured repair+native+retention ~23s; keep setup/variance margin.
+MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native'})
+
 # #191 T27 requeue measured61.8s locally (10 real Git/SQLite/Service cases) and
-# 11.5s hosted; it joins this lane because disposition's 7-module job already
-# measured54.0s hosted and must keep its 60s budget.
-MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair', 'test_library_repair_native',
- 'test_library_requeue'})
+# about16s hosted beside the maintenance modules, which put that job at48.0s.
+# Its own lane keeps every affected job under the60s budget with room.
+REQUEUE_MODULES = frozenset({'test_library_requeue'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
@@ -107,9 +108,10 @@ DISPOSITION_MODULES = frozenset({'test_library_adjudication',
 
 ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration', 'test_library_archive_native'})
 
-PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
-              'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
-MODULE_GROUPS = (ARCHIVE_MODULES, MAINTENANCE_MODULES, LIFECYCLE_MODULES, DISPOSITION_MODULES, INSPECTION_MODULES,
+PARTITIONS = ('archive', 'maintenance', 'requeue', 'lifecycle', 'disposition', 'inspection', 'operator',
+              'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
+MODULE_GROUPS = (ARCHIVE_MODULES, MAINTENANCE_MODULES, REQUEUE_MODULES, LIFECYCLE_MODULES, DISPOSITION_MODULES,
+                INSPECTION_MODULES,
                 OPERATOR_MODULES, SLOW_MODULES, INTEGRATION_MODULES,
                 ADDITIONAL_MODULES, SYNTHESIS_MODULES, SCHEDULER_MODULES)
 assert sum(map(len, MODULE_GROUPS)) == len(set().union(*MODULE_GROUPS))
@@ -123,6 +125,8 @@ def partition_for(identifier):
         return 'archive'
     if module in MAINTENANCE_MODULES:
         return 'maintenance'
+    if module in REQUEUE_MODULES:
+        return 'requeue'
     if module in LIFECYCLE_MODULES:
         return 'lifecycle'
     if module in DISPOSITION_MODULES:
@@ -194,7 +198,7 @@ def main(argv=None):
         raise ValueError('empty discovered unit partition')
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
-    print(f'Unit inventory: total={len(cases)} maintenance={len(groups["maintenance"])} lifecycle={len(groups["lifecycle"])} disposition={len(groups["disposition"])} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
+    print(f'Unit inventory: total={len(cases)} maintenance={len(groups["maintenance"])} requeue={len(groups["requeue"])} lifecycle={len(groups["lifecycle"])} disposition={len(groups["disposition"])} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
           f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)

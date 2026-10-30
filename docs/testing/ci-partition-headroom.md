@@ -38,8 +38,9 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| maintenance |33.0|Retention, repair and native repair plus T27 requeue|
-| disposition |38.4|All six rejection/adjudication functional, recovery and native modules|
+| maintenance |23.2|Retention, repair and native repair|
+| requeue |16.0|T27 parked-work release|
+| disposition |35.0|All six rejection/adjudication functional, recovery and native modules|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -63,17 +64,21 @@ including setup/cleanup (63s). This is not a qualifying green graph; dependent
 jobs were skipped. A prior59s green operator job was insufficient margin.
 
 An eleventh, explicit `maintenance` matrix lane contains only deterministic
-repair (21 tests), its native transport (4), and the existing retention module.
+repair (21 tests), its native transport (4), and the existing retention module;
+a twelfth `requeue` lane isolates T27's parked-work release module and is
+measured in the section below.
 Hosted timestamp deltas estimate10.7s +3.2s +9.3s =23.2s suite time, leaving
 roughly27s for setup/cleanup and variance under the unchanged60s deadline.
 `operator` retains controls and Git-payload tests (about30s suite time);
-`disposition` retains its original six modules and `maintenance` gains T27's requeue release module. No existing test is removed,
-weakened, or duplicated; future modules still default to remainder. The exact
+`disposition` retains its original six modules and T27's requeue release module
+has its own lane. No existing test is removed, weakened, or duplicated; future
+modules still default to remainder. The exact
 partition/workflow contract checks include this lane and all downstream jobs
 still require every matrix member. No timeout, permission, or runtime-budget
 policy changes accompany this test-capacity adjustment.
 
 ## T27 requeue capacity (#191)
+
 The requeue release module measured61.8 seconds locally for ten real
 Git/SQLite/Service cases: the mixed release, later release of a retained draft,
 an unresolved contradiction, model parking whose reason token names a source
@@ -81,21 +86,22 @@ failure, a released source park followed by a model park of the same queue,
 stale/archived/busy/revoked refusals, a blocked Project, exact retry after a
 settings change, lost acknowledgement and an unknown pre-push outcome.
 
-The first placement put it beside the rejection/adjudication family. The hosted
+Finding it a lane took two measured steps. The hosted
 [validate run41055347618](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41055347618)
-at that head measured the `disposition` partition suite at46.0 seconds and the
-whole job at54.0 seconds, while its seven local modules summed246.5 seconds:
-about0.19 hosted seconds per local second for these fixture-heavy suites. Two
-further cases add roughly3 seconds, so the job would finish near57 of its 60
-seconds with setup and cleanup, against this document's planning margin.
+first placed it beside the rejection/adjudication family and measured that
+`disposition` job at54.0 seconds with46.0 seconds of suite time, while its seven
+local modules summed246.5 seconds. Placing it in `maintenance` instead, the next
+hosted run [41063700322](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41063700322)
+measured35.0 suite seconds for the six-module `disposition` job and39.0 suite
+seconds in a48.0 second job for the four-module `maintenance` lane, so that lane
+lost the margin this document plans for even though it stayed inside the
+deadline.
 
-The module therefore moves to `maintenance` instead of opening a twelfth lane:
-disposition returns to its original six modules,205.5 local seconds and a38.4
-second estimate, and maintenance becomes177.1 local seconds and a33.0 second
-estimate, joining a lane whose own hosted measurement was21.0 suite seconds in a
-29.0 second job. No test was moved out of discovery, excluded or weakened, and
-the exact-partition contract still runs every ID once. The next hosted run must
-confirm these estimates or rebalance the lanes again.
+The module therefore has its own `requeue` lane: one module, about16 seconds of
+hosted suite time by the measured ratio, leaving every affected job well under
+the unchanged60s deadline. No test was moved out of discovery, excluded or
+weakened, and the exact-partition contract still runs every ID once. The next
+hosted run must confirm the new lane's timing.
 
 ## T35 archive acceptance capacity (#181)
 
