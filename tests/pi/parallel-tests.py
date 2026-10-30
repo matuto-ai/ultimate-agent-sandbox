@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Two disjoint native Pi suites; no shared sessions, fixtures or evidence writers.
+"""Three disjoint native Pi suites; no shared sessions, fixtures or evidence writers.
 
-CI runs one existing partition per runner; local invocations run both in parallel.
+CI runs one partition per runner; local invocations run all three in parallel.
 The shell runs the official auth/resume contracts first. This runner never changes
 network/provider guards or skips discovered tests. Work is bounded to 125 seconds
 plus two seconds of owned process-group cleanup inside the existing CI job.
@@ -19,7 +19,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PRIMARY = frozenset(('test_pi_runtime', 'test_pi_forge', 'test_pi_assignment'))
+PRIMARY = frozenset(('test_pi_runtime', 'test_pi_forge'))
+RECOVERY = frozenset(('test_pi_assignment', 'test_pi_reset', 'test_pi_library_capture'))
 WORK_SECONDS = 125
 CANCELLED = None
 
@@ -38,12 +39,14 @@ def partition(inventory):
         raise ValueError('empty or duplicate Pi inventory')
     if any(not name.startswith('test_pi_') for name in inventory):
         raise ValueError('non-Pi test or discovery error')
-    if not PRIMARY <= {name.split('.')[0] for name in inventory}:
-        raise ValueError('measured primary modules missing')
-    groups = [[], []]
+    if not (PRIMARY | RECOVERY) <= {name.split('.')[0] for name in inventory}:
+        raise ValueError('measured native modules missing')
+    groups = [[], [], []]
     for name in inventory:
-        groups[0 if name.split('.')[0] in PRIMARY else 1].append(name)
-    if not all(groups) or set(groups[0]) & set(groups[1]) or sorted(sum(groups, [])) != sorted(inventory):
+        module = name.split('.')[0]
+        index = 0 if module in PRIMARY else 2 if module in RECOVERY else 1
+        groups[index].append(name)
+    if not all(groups) or sorted(sum(groups, [])) != sorted(inventory):
         raise ValueError('invalid Pi partition')
     return groups
 
@@ -155,7 +158,7 @@ def check_cancelled():
 
 def run(selected=None):
     global CANCELLED
-    if selected is not None and (type(selected) is not int or selected not in (0, 1)):
+    if selected is not None and (type(selected) is not int or selected not in (0, 1, 2)):
         raise ValueError('invalid Pi partition')
     CANCELLED = None
     deadline = time.monotonic() + WORK_SECONDS
@@ -213,7 +216,7 @@ def run(selected=None):
                     for line in output:
                         print(line, end='')
                     output.close()
-                # Append once, after both workers exit, including partial failure evidence.
+                # Append once, after all workers exit, including partial failure evidence.
                 with open(os.environ['UAS_PI_EVIDENCE'], 'a') as destination:
                     for proof in evidence:
                         destination.write(proof.read_text())
@@ -229,6 +232,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--worker')
-    mode.add_argument('--partition', type=int, choices=(0, 1))
+    mode.add_argument('--partition', type=int, choices=(0, 1, 2))
     args = parser.parse_args()
     raise SystemExit(worker(args.worker) if args.worker else run(args.partition))

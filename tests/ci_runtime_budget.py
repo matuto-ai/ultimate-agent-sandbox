@@ -21,7 +21,7 @@ SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lif
                        'manager-field-notes'))
 STAGES = {
     'validate.yml': (UNIT_JOBS, SEAM_JOBS),
-    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1')),),
+    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2')),),
     'claude-native.yml': (frozenset(('official-claude-fixture',)),),
 }
 

@@ -16,7 +16,7 @@ spec = importlib.util.spec_from_file_location('pi_partition_runner', ROOT / 'tes
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 NAMES = ['test_pi_runtime.C.test_a', 'test_pi_forge.C.test_b', 'test_pi_assignment.C.test_c',
-         'test_pi_future.C.test_new']
+         'test_pi_reset.C.test_d', 'test_pi_library_capture.C.test_e', 'test_pi_future.C.test_new']
 
 
 class PiPartitionRunnerTests(unittest.TestCase):
@@ -70,7 +70,7 @@ class PiPartitionRunnerTests(unittest.TestCase):
                 self.assertEqual(0, runner.worker(path))
 
     def test_partition_exact_unique_union_and_future_default(self):
-        self.assertEqual([NAMES[:3], NAMES[3:]], runner.partition(NAMES))
+        self.assertEqual([NAMES[:2], NAMES[5:], NAMES[2:5]], runner.partition(NAMES))
         for bad in ([], NAMES + NAMES[:1], NAMES[1:], NAMES + ['other.C.test']):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 runner.partition(bad)
@@ -177,18 +177,19 @@ class PiPartitionRunnerTests(unittest.TestCase):
             self.assertTrue(kwargs['start_new_session'])
             self.assertEqual(ROOT, kwargs['cwd'])
             self.assertEqual(str(ROOT / 'tests/pi/parallel-tests.py'), argv[1])
-        if len(launch) == 2:
-            self.assertNotEqual(launch[0][1]['env']['TMPDIR'], launch[1][1]['env']['TMPDIR'])
-            self.assertNotEqual(launch[0][1]['env']['UAS_PI_EVIDENCE'], launch[1][1]['env']['UAS_PI_EVIDENCE'])
+        for key in ('TMPDIR', 'UAS_PI_EVIDENCE'):
+            self.assertEqual(len(launch), len({kwargs['env'][key] for _, kwargs in launch}))
         return payloads
 
     def test_hosted_partitions_deliver_the_exact_disjoint_payloads_to_workers(self):
         first = self.exercise(selected=0)
         second = self.exercise(selected=1)
-        self.assertEqual([NAMES[:3]], first)
-        self.assertEqual([NAMES[3:]], second)
-        self.assertEqual(first + second, self.exercise())
-        for invalid in (-1, 2, True, '0'):
+        third = self.exercise(selected=2)
+        self.assertEqual([NAMES[:2]], first)
+        self.assertEqual([NAMES[5:]], second)
+        self.assertEqual([NAMES[2:5]], third)
+        self.assertEqual(first + second + third, self.exercise())
+        for invalid in (-1, 3, True, '0'):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 runner.run(invalid)
         self.exercise(selected=1, wait_failure=True)
@@ -197,7 +198,7 @@ class PiPartitionRunnerTests(unittest.TestCase):
     def test_signal_during_spawn_return_retains_child_before_cleanup(self):
         self.exercise(cancel_during_spawn=True)
 
-    def test_two_workers_isolated_joined_evidence(self):
+    def test_workers_isolated_joined_evidence(self):
         self.exercise()
 
     def test_partial_launch_failure_cleans_first(self):

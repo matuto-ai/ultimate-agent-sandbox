@@ -153,11 +153,11 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertNotIn('--no-sandbox', browser)
                 self.assertLessEqual(max(actual), 3)
                 if name == 'pi-native.yml':
-                    self.assertIn('partition: [0, 1]', text)
+                    self.assertIn('partition: [0, 1, 2]', text)
                     self.assertIn('name: official-pi-native-${{ matrix.partition }}', text)
                     self.assertIn('needs: [official-pi-native]', gate)
                     self.assertIn('--partition "${{ matrix.partition }}"', text)
-                    self.assertEqual(budget.STAGES[name], (frozenset(('official-pi-native-0', 'official-pi-native-1')),))
+                    self.assertEqual(budget.STAGES[name], (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2')),))
 
     def test_feasibility_has_only_manual_or_exact_review_label_triggers(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/vm-feasibility.yml').read_text()
