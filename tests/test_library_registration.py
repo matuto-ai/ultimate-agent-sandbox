@@ -247,6 +247,52 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 'LIBRARY_AUTHENTICATION_REQUIRED')
         self.assertEqual(git(self.target, 'for-each-ref', '--format=%(refname)'), '')
 
+    def test_immutable_identity_cannot_be_registered_at_second_coordinates(self):
+        self.register()
+        moved = self.make_scope('alpha', 'other/alpha', '1001')
+        self.fresh = moved
+        self.refusal('PROJECT_COORDINATE_CONFLICT', self.operation('move', moved))
+        self.assertEqual(self.count(), 1)
+
+    def test_parent_file_collision_after_snapshot_cannot_be_destroyed(self):
+        self.register()
+        other = self.make_scope('beta', 'other/beta', '2002')
+        self.fresh = other
+        snapshot = self.publisher.project_snapshot
+        def raced(*args, **kwargs):
+            result = snapshot(*args, **kwargs)
+            self.mutate({'projects/github.com/other': b'valuable\n'})
+            return result
+        with patch.object(self.publisher, 'project_snapshot', side_effect=raced):
+            with self.assertRaises(library.LibraryError) as raised:
+                self.register(self.operation('other', other))
+        self.assertEqual(raised.exception.code, 'UNSUPPORTED_PROJECT_ENTRY')
+        self.assertEqual(git(self.target, 'show', self.head()+':projects/github.com/other'), 'valuable\n')
+
+    def test_missing_bundle_after_lost_receipt_is_not_historical_success(self):
+        with patch.object(LibraryRecords, 'finish', side_effect=OSError('crash')):
+            with self.assertRaises(OSError): self.register()
+        self.mutate({**{path: None for path in self.files()}, 'README.md': b'valuable\n'})
+        self.refusal('REGISTRATION_MISSING')
+        self.assertEqual(self.files(), ['README.md'])
+
+    def test_definite_refusals_finish_and_do_not_exhaust_pending_capacity(self):
+        with patch('uas.library_records.MAX_PENDING', 2):
+            for number in range(4):
+                with patch('uas.library_registration.library_gate.validate',
+                           side_effect=library.LibraryError('POLICY_REFUSED')):
+                    with self.assertRaises(library.LibraryError) as raised:
+                        self.register(self.operation('refused-'+str(number)))
+                self.assertEqual(raised.exception.code, 'POLICY_REFUSED')
+            with LibraryRecords(self.records, 'deployment-1') as records:
+                self.assertEqual(records.pending(), [])
+            # Exact retry retains the same refusal, rather than re-executing
+            # corrected input under an already terminal identity.
+            with self.assertRaises(library.LibraryError) as raised:
+                self.register(self.operation('refused-0'))
+            self.assertEqual(raised.exception.code, 'POLICY_REFUSED')
+            self.assertTrue(self.register(self.operation('new')).created)
+
     def test_target_mismatch_rejected(self):
         self.register()
         self.publisher.target = '/elsewhere'

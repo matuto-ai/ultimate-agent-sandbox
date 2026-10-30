@@ -94,30 +94,54 @@ class Registrar:
         prefix = library_bundle._prefix(operation.scope)
         with LibraryRecords(self.publisher.records_path, self.publisher.deployment_id) as records:
             prior = records.begin(operation)['record']
-            head, tree = self.publisher.project_snapshot(operation.scope, admitted, current=current)
-            if tree.files:
-                checked = library_gate.validate(operation.scope, admitted, proposed=tree, current=tree)
-                state = project_state(tree, prefix)
-                created, sha = False, head
-            else:
-                if prior['receipt'] is not None:
-                    raise library.LibraryError('REGISTRATION_MISSING', 'project')
-                checked = library_gate.validate(operation.scope, admitted,
-                                                 proposed=skeleton(operation.scope, operation.at))
-                state = 'active'
+            if prior['receipt'] is not None and prior['receipt']['outcome'] != 'COMMITTED':
+                raise library.LibraryError(prior['receipt']['reason'], 'registration')
+            publication_started = [False]
+
+            def execute():
+                head, tree = self.publisher.project_snapshot(operation.scope, admitted, current=current, registration=True)
+                if tree.files:
+                    checked = library_gate.validate(operation.scope, admitted, proposed=tree, current=tree)
+                    state = project_state(tree, prefix)
+                    created, sha = False, head
+                else:
+                    if prior['receipt'] is not None:
+                        raise library.LibraryError('REGISTRATION_MISSING', 'project')
+                    checked = library_gate.validate(operation.scope, admitted,
+                                                     proposed=skeleton(operation.scope, operation.at))
+                    state = 'active'
+                    current()
+                    publication_started[0] = True
+                    result = self.publisher.publish(operation, checked.bundle, input_sha=None, current=current)
+                    created, sha = result.created, result.resulting_sha
+                    # A historical recovered operation is not proof that its
+                    # bundle still exists in the current canonical tree.
+                    head, confirmed = self.publisher.project_snapshot(
+                        operation.scope, admitted, current=current, registration=True)
+                    if not confirmed.files:
+                        raise library.LibraryError('REGISTRATION_MISSING', 'project')
+                    library_gate.validate(operation.scope, admitted, proposed=confirmed, current=confirmed)
+                    state = project_state(confirmed, prefix)
                 current()
-                result = self.publisher.publish(operation, checked.bundle, input_sha=None, current=current)
-                created, sha = result.created, result.resulting_sha
-                head = sha
-            current()
-            receipt = prior['receipt']
-            if receipt is None:
-                receipt = library.receipt(operation, 'COMMITTED', at=operation.at,
-                                           publication={'commit_sha': sha, 'path': prefix},
-                                           reason='archived' if state == 'archived' else None)
-                records.finish(operation, receipt)
-            # Existing receipts remain immutable historical evidence. Current
-            # observed state is separately reported, never a silent restoration.
-            return Registration(operation.scope.project_identity, prefix,
-                                receipt['publication']['commit_sha'], head,
-                                state, created, receipt)
+                receipt = prior['receipt']
+                if receipt is None:
+                    receipt = library.receipt(operation, 'COMMITTED', at=operation.at,
+                                               publication={'commit_sha': sha, 'path': prefix},
+                                               reason='archived' if state == 'archived' else None)
+                    records.finish(operation, receipt)
+                # Existing receipts remain immutable historical evidence. Current
+                # observed state is separately reported, never a silent restoration.
+                return Registration(operation.scope.project_identity, prefix,
+                                    receipt['publication']['commit_sha'], head,
+                                    state, created, receipt)
+            try:
+                return execute()
+            except library.LibraryError as error:
+                definitely_refused = (not publication_started[0] or error.code in (
+                    'INCOMPATIBLE_HEAD', 'UNSUPPORTED_PROJECT_ENTRY',
+                    'PROJECT_COORDINATE_CONFLICT'))
+                if definitely_refused and prior['receipt'] is None:
+                    refused = library.receipt(operation, 'REFUSED', at=operation.at,
+                                              reason=error.code)
+                    records.finish(operation, refused)
+                raise

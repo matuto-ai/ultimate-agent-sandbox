@@ -6,8 +6,12 @@ contract with an empty payload, admitted settings, and a current-scope callback.
 The trusted service binds that callback to live human authority, not caller
 claims. The configured target and branch must match its started `LibraryGit`.
 
-Registration reads the requested Project only, at one freshly fetched canonical
-SHA. The Git reader accepts bounded regular files and refuses symlinks, gitlinks,
+Registration reads the requested Project at one freshly fetched canonical SHA.
+A service-only root-index identity catalog rejects an existing immutable source
+identity at different coordinates; registration is not the rename/transfer
+operation. This bounded catalog reads no concept or source-document content.
+It fails closed beyond 1,024 root indexes, 16,384 Project paths, 4 MiB of path
+listing, or its five-second scan window, rather than checking only a prefix. The Git reader accepts bounded regular files and refuses symlinks, gitlinks,
 parent-file collisions and oversized trees. It neither scans source documentation
 nor invokes a model. A new Project gets exactly the six-file skeleton, including
 the deterministic reference-data notices, trusted source identity/coordinates
@@ -18,8 +22,9 @@ An existing healthy matching bundle is validated unchanged. Exact retries and
 new registration requests create no commit or log entry; conflicting identity,
 partial or malformed bundles fail closed. Unknown tolerated reader content stays
 byte-for-byte intact. New content cannot displace a file at a parent coordinate.
-Publisher compatibility checking refuses a concurrent Project creation rather
-than overwriting it; the same registration can then reconcile by reading again.
+Publisher compatibility checking rechecks ancestor kinds and identity locations
+under its write lock, refusing a concurrent Project creation rather than
+overwriting it; the same registration can then reconcile by reading again.
 
 The optional root-body line `Library state: archived` records a write-frozen
 bundle; `Library state: active` or no line means active. Multiple declarations or
@@ -40,8 +45,12 @@ registration prerequisite or completed feature here.
 Operation identity is recorded before publication, and its terminal metadata-only
 receipt is durable before acknowledgement. Lost push acknowledgement and a
 crash between publication and receipt are reconciled using canonical Git; neither
-creates another initialization. Refused/uncertain attempts retain their pending
-record for reconciliation rather than fabricating successful publication.
+creates another initialization. Definite pre-publication refusals finish with a safe terminal refusal, so they
+do not consume pending capacity indefinitely; an exact retry retains that
+refusal and corrected work needs a new identity. Truly uncertain publication
+attempts retain their pending record for reconciliation rather than fabricating
+success. A recovered historical publication is rechecked against current
+canonical content and cannot report success for a deleted bundle.
 Current authorization is rechecked before reads and within the publisher before
 commit/push. A revoked request can fail after publication; a later authorized
 retry reconciles rather than undoing published content.
