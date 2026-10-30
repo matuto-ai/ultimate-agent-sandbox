@@ -58,3 +58,5 @@ production credentials, real provider access or user-machine isolation proof.
 
 New images must be built from this source: both runtime manifests now bind the
 shared `runtime/library-capture.mjs` artifact. Do not relabel an older image.
+
+Native reference lookup uses the separate [Claude Library read profile](claude-library-read.md); capture authority does not enable native filesystem tools.
