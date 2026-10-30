@@ -27,7 +27,7 @@ class CIPartitionTests(unittest.TestCase):
                                           'test_run_review', 'test_staged_source_closure',
                                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-        self.assertEqual(ci.INTEGRATION_MODULES, {'test_library_service', 'test_context',
+        self.assertEqual(ci.INTEGRATION_MODULES, {'test_library_relocation', 'test_library_service', 'test_context',
             'test_native_pi_reset_adversarial', 'test_participant',
             'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
             'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
@@ -79,7 +79,7 @@ class CIPartitionTests(unittest.TestCase):
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
         self.assertEqual(len(groups['slow']), 17)
-        self.assertEqual(len(groups['integration']), 20)
+        self.assertEqual(len(groups['integration']), 21)
         self.assertEqual(len(groups['additional']), 21)
         self.assertEqual(len(groups['synthesis']), 2)
         self.assertEqual(len(groups['scheduler']), 3)

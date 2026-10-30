@@ -34,7 +34,7 @@ SLOW_MODULES = frozenset({'test_library_import', 'test_library_dispatch', 'test_
 # #177 run41038439439: scheduler45 tests passed52.913s but job timed out.
 # Service measured23.69s; integration27.108s has room. Move the entire
 # module, preserving exhaustive disjoint inventory and one-minute limits.
-INTEGRATION_MODULES = frozenset({'test_library_service', 'test_context',
+INTEGRATION_MODULES = frozenset({'test_library_relocation', 'test_library_service', 'test_context',
     'test_native_pi_reset_adversarial', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
@@ -69,6 +69,8 @@ ADDITIONAL_MODULES = frozenset({'test_library_observations',
 # #178 hosted inspection46cases22.7s nearly fills remainder53.8s. Move it
 # to synthesis30.5s and relocation4.8s back to remainder: ~48/36s; retain
 # every ID, seven lanes, one-minute job ceilings and aggregate dependency graph.
+# #234 remainder3585passed47.137s but setup/smoke exceeded60s; move
+# relocation23cases6.788s to integration38.858s (~40.3/45.6s).
 # Postmerge #178 synthesis117 tests passed64.044s and55.701s but exceeded
 # unchanged job budget with setup. Move measured observations8.9s to additional
 # (29.7s), import6.6s to slow(35.3s): worst synthesis~48.5s, no exclusions.
