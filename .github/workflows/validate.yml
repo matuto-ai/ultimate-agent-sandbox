@@ -173,6 +173,7 @@ jobs:
         include:
           - {partition: integration, name: unit-integration}
           - {partition: additional, name: unit-additional}
+          - {partition: synthesis, name: unit-synthesis}
     outputs:
       skip_tests: ${{ steps.changes.outputs.skip_tests }}
     if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}

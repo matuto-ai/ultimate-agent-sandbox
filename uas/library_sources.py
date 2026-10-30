@@ -21,6 +21,7 @@ import time
 
 from . import library as contracts
 from . import library_gate as gate
+from . import library_deadline
 
 MAX_SOURCE_BYTES = contracts.MAXIMA['document_bytes']
 MAX_PATH_BYTES = 1024
@@ -154,10 +155,10 @@ class GitSource:
             command = ['/usr/bin/git', '--no-replace-objects', '--git-dir=/proc/self/fd/'+str(fd),
                        '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
                        '-c', 'protocol.allow=never', *arguments]
+            deadline = time.monotonic() + library_deadline.remaining(READ_SECONDS)
             with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, env=env, pass_fds=(fd,)) as process:
                 data = bytearray()
-                deadline = time.monotonic() + READ_SECONDS
                 try:
                     with selectors.DefaultSelector() as selector:
                         selector.register(process.stdout, selectors.EVENT_READ)

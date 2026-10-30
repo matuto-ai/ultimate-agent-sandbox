@@ -20,12 +20,13 @@ an exact retry reconciles while a reused Command ID or a changed request in the
 same Project or installation scope is refused for every operation kind.
 """
 from datetime import datetime, timezone
+from . import library_deadline
 import json
 from pathlib import Path
 import re
 import sqlite3
 
-from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata
+from .library import LibraryError, LibraryScope, Operation, admit_receipt, audit_metadata, synthesis_manifest, batch_manifest, _digest as value_digest
 
 
 RECORD_VERSION = 1
@@ -183,7 +184,14 @@ def _identity(operation):
     if (identity["kind"] == "enqueue") != (identity["queue_id"] is not None):
         raise LibraryError("INVALID_RECORD", "queue_id")
     _origin(operation.scope)  # validate the authenticated origin fields
-    return _safe(identity, "identity")
+    _safe(identity, "identity")
+    if operation.manifest is not None:
+        if operation.kind not in ("synthesis-attempt", "synthesis-batch"):
+            raise LibraryError("INVALID_RECORD", "manifest")
+        identity["manifest"] = (batch_manifest(operation.manifest) if operation.kind == "synthesis-batch" else synthesis_manifest(operation.manifest))
+        expected = identity["manifest"] if operation.kind == "synthesis-batch" else {"manifest_sha256": value_digest(identity["manifest"])}
+        if operation.payload != expected: raise LibraryError("INVALID_RECORD", "manifest")
+    return identity
 
 
 def _submission(identity):
@@ -211,7 +219,7 @@ class LibraryRecords:
             path = Path(path)
             if str(path) == ":memory:":
                 raise LibraryError("INVALID_STORE")
-            self._db = sqlite3.connect(path, timeout=5, isolation_level=None)
+            self._db = sqlite3.connect(path, timeout=library_deadline.remaining(5), isolation_level=None)
             self._db.row_factory = sqlite3.Row
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.execute("PRAGMA synchronous=FULL")
@@ -437,7 +445,7 @@ class LibraryRecords:
 
     # --- writes ----------------------------------------------------------
 
-    def begin(self, operation):
+    def begin(self, operation, *, exclusive=False):
         """Durably record one attempt intent; no acknowledgement before commit.
 
         An exact repeat returns the committed record unchanged. Reusing a
@@ -459,6 +467,8 @@ class LibraryRecords:
             if prior is not None:
                 if _canonical(_equality(_identity_like(prior))) != equality:
                     raise LibraryError("ID_CONFLICT", "operation_id")
+                if exclusive:
+                    raise LibraryError("ATTEMPT_ALREADY_RESERVED", "operation_id")
                 return {"state": prior["state"], "record": prior}
             row = db.execute("SELECT identity FROM submissions WHERE scope_key=? "
                              "AND request_id=?",
@@ -537,7 +547,13 @@ class LibraryRecords:
 
 def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
-    return {key: value[key] for key in _ATTEMPT_KEYS}
+    result = {key: value[key] for key in _ATTEMPT_KEYS}
+    if "manifest" in value:
+        if value["kind"] not in ("synthesis-attempt", "synthesis-batch"): raise LibraryError("INVALID_RECORD")
+        result["manifest"] = (batch_manifest(value["manifest"]) if value["kind"] == "synthesis-batch" else synthesis_manifest(value["manifest"]))
+        expected = result["manifest"] if value["kind"] == "synthesis-batch" else {"manifest_sha256": value_digest(result["manifest"])}
+        if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")
+    return result
 
 
 def _equality(value):

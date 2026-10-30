@@ -1,4 +1,4 @@
-"""Standard discovery, four complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, five complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -59,7 +59,12 @@ ADDITIONAL_MODULES = frozenset({
     'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
     'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
 })
-PARTITIONS = ('slow', 'integration', 'additional', 'remainder')
+# #170 actual process interruption/recovery suite measured20s locally. Existing
+# hosted lanes51-53s cannot absorb it; one parallel one-minute lane preserves
+# all tests and the overall2-3min graph, with no timeout increase.
+SYNTHESIS_MODULES = frozenset({'test_library_attempts', 'test_library_import'})
+PARTITIONS = ('slow', 'integration', 'additional', 'synthesis', 'remainder')
+assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES
             or INTEGRATION_MODULES & ADDITIONAL_MODULES)
 
@@ -68,6 +73,8 @@ def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in SYNTHESIS_MODULES:
+        return 'synthesis'
     if module in SLOW_MODULES:
         return 'slow'
     if module in INTEGRATION_MODULES:
@@ -129,7 +136,7 @@ def main(argv=None):
     selected = cases if args.partition == 'all' else groups[args.partition]
     print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
-          f'remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
+          f'synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
     return 0 if result.wasSuccessful() else 1
