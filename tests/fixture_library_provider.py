@@ -12,6 +12,11 @@ assert json.loads(wire['request'])['tools'] == []
 if mode == 'closed-output':
     sys.stdout.close(); os.close(1); time.sleep(5)
 if mode == 'sleep':time.sleep(5)
+if mode == 'release':
+    deadline = time.monotonic() + 5
+    while not Path(marker + '.release').exists():
+        if time.monotonic() >= deadline:raise RuntimeError('FIXTURE_RELEASE_TIMEOUT')
+        time.sleep(.01)
 if mode == 'error':raise RuntimeError('PRIVATE_PROVIDER_EXCEPTION')
 if mode == 'oversize':reply='x'*(wire['response_limit']+1)
 sys.stdout.write(reply)

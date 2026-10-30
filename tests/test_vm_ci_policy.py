@@ -16,7 +16,7 @@ class VMCITriggerTests(unittest.TestCase):
                 self.assertEqual(expected, actual)
                 if name == 'validate.yml':
                     # All disjoint unit shards must pass before any integration.
-                    # The integration root has two parallel, one-minute matrix jobs.
+                    # The integration root has three parallel, one-minute matrix jobs.
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
@@ -57,6 +57,7 @@ class VMCITriggerTests(unittest.TestCase):
         include:
           - {partition: integration, name: unit-integration}
           - {partition: additional, name: unit-additional}
+          - {partition: synthesis, name: unit-synthesis}
 """
                     self.assertEqual(jobs['unit-integration'].count(matrix), 1)
                     self.assertEqual(jobs['unit-integration'].replace(matrix, '', 1)

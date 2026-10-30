@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from . import library, library_gate as gate
 from .library_assembly import Request, INSTRUCTIONS
 from .library_records import LibraryRecords
+from . import library_deadline
 
 MAX_RESPONSE = 1048576
 
@@ -126,6 +127,7 @@ class Gateway:
             if profile.shared_interactive and self.interactive():
                 fail('INTERACTIVE_PRIORITY')
             before_contact()
+            seconds = library_deadline.remaining(seconds)
             wire = library._canonical({'profile': vars(profile),
                 'request': request.decode('utf-8'), 'response_limit': response_limit,
                 'timeout_seconds': seconds}).encode()
@@ -201,7 +203,7 @@ class Dispatcher:
         self.audit, self.now = audit, now
         self.records_path, self.deployment_id = records_path, deployment_id
 
-    def dispatch(self, request):
+    def dispatch(self, request, *, max_seconds=None):
         profile_id = None
         metadata = {}
         try:
@@ -214,6 +216,8 @@ class Dispatcher:
                     or hashlib.sha256(request.encoded).hexdigest() != request.sha256):
                 fail('INVALID_MODEL_REQUEST')
             limits = settings['limits']
+            if max_seconds is not None and (type(max_seconds) not in (int, float) or not 0 < max_seconds <= limits['attempt_seconds']):
+                fail('MODEL_TIMEOUT')
             if (len(request.encoded) > limits['request_bytes'] or type(request.files) is not int
                     or not 1 <= request.files <= limits['request_files']):
                 fail('REQUEST_TOO_LARGE')
@@ -307,7 +311,7 @@ class Dispatcher:
                 fresh()  # audit may block while permission changes
             raw = self.gateway.call(profile, request.encoded,
                 response_limit=min(MAX_RESPONSE, limits['document_bytes']),
-                seconds=limits['attempt_seconds'], before_contact=contact)
+                seconds=limits['attempt_seconds'] if max_seconds is None else max_seconds, before_contact=contact)
             fresh()
             try:
                 proposal = json.loads(raw, object_pairs_hook=library._unique_pairs, parse_constant=_constant)

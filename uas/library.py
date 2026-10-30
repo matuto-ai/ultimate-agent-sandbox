@@ -598,6 +598,7 @@ class Operation:
     provenance: dict
     queue_id: str | None = None
     drain_id: str | None = None
+    manifest: dict | None = None
 
     def digest(self):
         return _digest(self.payload)
@@ -607,12 +608,15 @@ class Operation:
         # deduplication identity for the same immutable Project identity.
         scope = self.scope.canonical()
         scope.pop("project_path", None)
-        return {"version": CONTRACT_VERSION, "kind": self.kind,
+        result = {"version": CONTRACT_VERSION, "kind": self.kind,
                 "operation_id": self.operation_id, "request_id": self.request_id,
                 "queue_id": self.queue_id, "drain_id": self.drain_id,
                 "settings_id": self.settings_id,
                 "at": self.at, "payload_digest": self.digest(),
                 "scope": scope, "provenance": self.provenance}
+        if self.manifest is not None:
+            result["manifest"] = (batch_manifest(self.manifest) if self.kind == "synthesis-batch" else synthesis_manifest(self.manifest))
+        return result
 
     def audit_metadata(self):
         """Safe, content-free record for ledger/audit/replay surfaces."""
@@ -1165,3 +1169,35 @@ def _reject_content(value, field="$", depth=0):
             _reject_content(item, f"{field}[{index}]", depth + 1)
     elif not (value is None or type(value) in (bool, int, float, str)):
         _fail("INVALID_CONTRACT", field)
+
+
+def synthesis_manifest(value):
+    """Strict metadata-only durable T19 input identity, never model bytes."""
+    _object(value, 'manifest', ('attempt', 'input_sha', 'selected', 'accepted', 'indexes',
+        'request_sha256', 'request_bytes', 'request_files', 'request_tokens', 'inputs',
+        'batch_drafts', 'batch_bytes', 'attempt_seconds'))
+    _integer(value['attempt'], 'attempt')
+    _commit(value['input_sha'], 'input_sha')
+    for key in ('request_bytes', 'request_files', 'request_tokens', 'batch_drafts', 'batch_bytes', 'attempt_seconds'):
+        _integer(value[key], key, maximum=MAXIMA.get(key, 2097152))
+    _digest_value(value['request_sha256'], 'request_sha256')
+    for q in _array(value['selected'], 'selected', 64): _digest_value(q, 'selected')
+    if not value['selected'] or len(set(value['selected'])) != len(value['selected']): _fail('INVALID_BATCH')
+    for ref in _array(value['accepted'], 'accepted', 512):
+        if type(ref) is not str or not ref.startswith('concept-') or not DIGEST.fullmatch(ref[8:]): _fail('INVALID_CONCEPT_REFERENCE')
+    for ref in _array(value['indexes'], 'indexes', 4):
+        if ref not in ('index.md','context/index.md','decisions/index.md','research/index.md'): _fail('INVALID_REQUEST_SELECTION')
+    for item in _array(value['inputs'], 'inputs', 1024):
+        _object(item, 'inputs', ('name_sha256', 'bytes_sha256'))
+        for v in item.values(): _digest_value(v, 'inputs')
+    _reject_content(value)
+    if _size(value) > 262144: _fail("ATTEMPT_MANIFEST_TOO_LARGE")
+    return json.loads(_canonical(value))
+
+
+def batch_manifest(value):
+    """Recoverable fixed batch identity before assembly or contact."""
+    _object(value, 'manifest', ('selected',))
+    for queue in _array(value['selected'], 'selected', 64): _digest_value(queue, 'selected')
+    if not value['selected'] or len(set(value['selected'])) != len(value['selected']): _fail('INVALID_BATCH')
+    return json.loads(_canonical(value))

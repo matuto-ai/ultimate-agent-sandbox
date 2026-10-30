@@ -29,6 +29,8 @@ instead of silently repointing a clone.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from . import library_deadline
 from dataclasses import dataclass
 import fcntl
 import json
@@ -218,10 +220,18 @@ class LibraryGit:
         self._lock = threading.Lock()
         # Registration admission/receipt must not race another same-ID call.
         self.registration_lock = threading.Lock()
+        self.synthesis_lock = threading.Lock()
         self._head = None
         self._started = False
         self._subscriptions = set()
         self._subscriptions_lock = threading.Lock()
+
+    @contextmanager
+    def _locked(self):
+        if not self._lock.acquire(timeout=library_deadline.remaining(self.timeout)):
+            raise LibraryError('ATTEMPT_TIMEOUT', 'git-lock')
+        try: yield
+        finally: self._lock.release()
 
     def _records(self):
         """One store per call: the T02 owner binds its connection to one thread."""
@@ -334,7 +344,7 @@ class LibraryGit:
         """Reconcile after transport restoration; projection work stays asynchronous."""
         if not self._started:
             raise LibraryError('NOT_READY', 'lease')
-        with self._lock:
+        with self._locked():
             self._fetch()
             settled, absent = self._settle()
             self._reset_local()
@@ -354,7 +364,7 @@ class LibraryGit:
             raise LibraryError("NOT_READY", "lease")
         prefix = project_prefix(scope)
         limits = library.admit_settings_value(settings)["limits"]
-        with self._lock:
+        with self._locked():
             current()
             self._fetch()
             current()
@@ -364,6 +374,17 @@ class LibraryGit:
             if registration:
                 self._registration_identity(scope, current)
             return self._project_tree(scope, limits, current, head)
+
+    def project_snapshot_at(self, scope, settings, commit, *, current):
+        """Bounded historical Project read only from current canonical ancestry."""
+        if not self._started: raise LibraryError('NOT_READY', 'lease')
+        library._commit(commit, 'commit')
+        limits = library.admit_settings_value(settings)['limits']
+        with self._locked():
+            current(); self._fetch(); current()
+            if self._head is None or not self._ancestor(commit, self._head):
+                raise LibraryError('INCOMPATIBLE_HEAD', 'commit')
+            return self._project_tree(scope, limits, current, commit)
 
     def projection_snapshot(self, scope, settings, *, current):
         """Read canonical immutable objects without taking the publisher lock.
@@ -443,7 +464,7 @@ class LibraryGit:
                  and path.endswith(b'/index.md')]
         if len(roots) > 1024:
             raise LibraryError('REGISTRATION_CATALOG_TOO_LARGE', 'project')
-        deadline = time.monotonic() + min(self.timeout, 5)
+        deadline = time.monotonic() + library_deadline.remaining(min(self.timeout, 5))
         expected = ('projects/' + scope.project_path + '/index.md').encode()
         for path in roots:
             if time.monotonic() >= deadline:
@@ -470,10 +491,10 @@ class LibraryGit:
         environment.update({"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""})
         command = ["git", "--no-replace-objects", "--git-dir", str(self._clone), *arguments]
         try:
+            deadline = time.monotonic() + library_deadline.remaining(min(self.timeout, 5))
             with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, env=environment) as process:
                 data = bytearray()
-                deadline = time.monotonic() + min(self.timeout, 5)
                 try:
                     with selectors.DefaultSelector() as selector:
                         selector.register(process.stdout, selectors.EVENT_READ)
@@ -512,7 +533,7 @@ class LibraryGit:
             raise LibraryError('NOT_READY', 'lease')
         if type(operation) is not Operation or not callable(current):
             raise LibraryError('INVALID_OPERATION', 'operation')
-        with self._lock:
+        with self._locked():
             current()
             with self._records() as records:
                 records.begin(operation)  # exact identity/current Project fence
@@ -523,7 +544,7 @@ class LibraryGit:
             self._reset_local()
             return result
 
-    def publish(self, operation, bundle, *, input_sha, current=None):
+    def publish(self, operation, bundle, *, input_sha, current=None, original_input_sha=None):
         """Publish one validated complete Project bundle as one fast-forward commit.
 
         ``bundle`` is the T04/T05 complete result; this seam replaces exactly
@@ -556,7 +577,9 @@ class LibraryGit:
                                       or not library.COMMIT.fullmatch(input_sha)):
             raise LibraryError("INVALID_COMMIT", "input_sha")
 
-        with self._lock:
+        if original_input_sha is not None:
+            library._commit(original_input_sha, "original_input_sha")
+        with self._locked():
             if current is not None:
                 current()
             self._fetch()
@@ -573,14 +596,16 @@ class LibraryGit:
                 self._reset_local()
                 result = located
             else:
-                result = self._publish(operation, prefix, files, input_sha, current=current)
+                result = self._publish(operation, prefix, files, input_sha, current=current, original_input_sha=original_input_sha)
         self._notify(operation.scope, result)
         return result
 
-    def _publish(self, operation, prefix, files, input_sha, current=None):
+    def _publish(self, operation, prefix, files, input_sha, current=None, original_input_sha=None):
         previous = self._head
         self._compatible(input_sha, previous, prefix)
-        input_identity = input_sha or previous
+        input_identity = original_input_sha or input_sha or previous
+        if original_input_sha is not None and (input_sha is None or not self._ancestor(original_input_sha, input_sha)):
+            raise LibraryError("INCOMPATIBLE_HEAD", "original_input_sha")
         current_paths = self._tree_paths(previous, prefix)
         tree = self._tree(previous, files, current_paths - set(files))
         if tree == self._tree_of(previous):
@@ -917,7 +942,7 @@ class LibraryGit:
             result = subprocess.run(command, env=environment, input=data,
                                     stdin=None if data is not None else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    timeout=self.timeout)
+                                    timeout=library_deadline.remaining(self.timeout))
         except (OSError, subprocess.TimeoutExpired) as error:
             raise LibraryError("GIT_UNAVAILABLE", "git") from error
         return result.returncode, result.stdout, result.stderr
