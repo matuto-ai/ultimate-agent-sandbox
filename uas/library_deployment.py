@@ -201,10 +201,17 @@ class DeploymentLibrary:
         if type(runner) is not Attempts or not callable(context):
             fail('SCHEDULER_DEPENDENCY_REQUIRED')
         current, settings = runner.assembler._scope(), runner.assembler._settings()
+        active = self._current_settings()
         if (type(current) is not library.LibraryScope or current.canonical() != scope.canonical()
-                or settings['repository']['target'] != self.settings['repository']['target']
-                or settings['repository']['branch'] != self.settings['repository']['branch']):
+                or settings['repository']['target'] != active['repository']['target']
+                or settings['repository']['branch'] != active['repository']['branch']):
             fail('SCHEDULER_TARGET_MISMATCH')
+        # The composed runner and its dispatcher must read this owner's live
+        # authority/settings at their own admission and publication fences, so a
+        # revoked qualification or unavailable active configuration blocks the
+        # write even mid-attempt. Each attempt still pins its starting limits.
+        runner.assembler.settings = self._current_settings
+        runner.dispatcher.settings = self._current_settings
         return runner, context
 
     # --- lifetime ----------------------------------------------------------
@@ -394,7 +401,8 @@ class DeploymentLibrary:
             if room in self._hubs:
                 fail('ROOM_HUB_ALREADY_ATTACHED')
             endpoint = EnqueueEndpoint(self._publisher, settings=self._current_settings,
-                                       projection=bound.projection)
+                                       projection=bound.projection,
+                                       guard=self._current_settings)
             ledger = self.ledger_for(room)
             hub = LibraryHub(ledger, room_id=room, project=bound.item.project,
                              source_identity=bound.item.source_identity, contact=endpoint.contact,
