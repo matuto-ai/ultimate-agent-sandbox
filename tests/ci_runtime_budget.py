@@ -20,7 +20,7 @@ SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lif
                        'manager-field-notes'))
 STAGES = {
     'validate.yml': (UNIT_JOBS, SEAM_JOBS),
-    'pi-native.yml': (frozenset(('official-pi-native',)),),
+    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1')),),
     'claude-native.yml': (frozenset(('official-claude-fixture',)),),
 }
 
@@ -40,7 +40,10 @@ def critical_path(workflow, jobs, *, historical=False):
     measured = [job for job in jobs if job['name'] != accounting]
     require(len(jobs) - len(measured) <= 1, 'Duplicate runtime accounting job')
     names = [job['name'] for job in measured]
-    expected = set().union(*STAGES[workflow])
+    stages = STAGES[workflow]
+    if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
+        stages = (frozenset(names),)
+    expected = set().union(*stages)
     # The inspection lane was added before this policy; older full runs had seven roots.
     if historical and workflow == 'validate.yml' and 'unit-inspection' not in names:
         expected.remove('unit-inspection')
@@ -64,7 +67,7 @@ def critical_path(workflow, jobs, *, historical=False):
         seconds = (end - start).total_seconds()
         require(seconds > 0, f'{name} has invalid timing evidence')
         durations[name] = seconds
-    return sum(max(durations[name] for name in stage & expected) for stage in STAGES[workflow])
+    return sum(max(durations[name] for name in stage & expected) for stage in stages)
 
 
 def allowed_seconds(baseline):

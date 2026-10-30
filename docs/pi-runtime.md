@@ -36,13 +36,9 @@ sh tests/pi/run-tests.sh             # requires installed exact Pi, never silent
 UAS_PI_INSTALL="$PWD/tests/pi" ./validate.sh  # aggregate including native suite
 ```
 
-The dedicated `pi-native / official-pi-native` CI job always acquires the exact
-registry lock and runs the actual CLI in a child network namespace. Test processes
-receive a fresh HOME/agent directory, no provider keys, no ambient extensions,
-no built-in tools (only the fixed `uas_peer` extension tool in the process-bound
-suite), offline mode and a Node network-API denial guard. The guard is test
-instrumentation, **not** an OS security boundary. No global installs, account
-settings, host routes, daemon configuration, or other workspaces are changed.
+The `pi-native` CI matrix runs the two existing exhaustive, disjoint partitions as `official-pi-native-0` and `official-pi-native-1` on separate runners, rather than making their native processes compete on one runner. Both jobs must pass; each acquires the exact registry lock, runs the serial contracts, and invokes its selected partition through `sh tests/pi/run-tests.sh --partition 0` or `--partition 1`. Ordinary invocations without a selector still run both partitions locally. The runtime budget measures the slower complete job, including setup and cleanup, against the historical workflow baseline.
+
+The actual CLI runs in a child network namespace. Test processes receive a fresh HOME/agent directory, no provider keys, no ambient extensions, no built-in tools (only the fixed `uas_peer` extension tool in the process-bound suite), offline mode and a Node network-API denial guard. The guard is test instrumentation, **not** an OS security boundary. No global installs, account settings, host routes, daemon configuration, or other workspaces are changed.
 
 `tests/pi/provider.mjs` registers the official `pi-ai` faux provider through the
 supported extension provider API. It scripts responses/delay and real native tool

@@ -140,8 +140,8 @@ class PiPartitionRunnerTests(unittest.TestCase):
                 text.return_value.run.return_value = result
                 self.assertEqual(1, runner.worker(path))
 
-    def exercise(self, *, launch_failure=False, wait_failure=False, cleanup_failure=False, cancel_during_spawn=False):
-        processes, launch = [], []
+    def exercise(self, *, selected=None, launch_failure=False, wait_failure=False, cleanup_failure=False, cancel_during_spawn=False):
+        processes, launch, payloads = [], [], []
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / 'joined.jsonl'
             evidence.write_text('serial-contract\n')
@@ -151,6 +151,7 @@ class PiPartitionRunnerTests(unittest.TestCase):
                 process = Mock(pid=100 + len(processes))
                 processes.append(process)
                 launch.append((argv, kwargs))
+                payloads.append(json.loads(Path(argv[-1]).read_text()))
                 if cancel_during_spawn:
                     runner.interrupted(signal.SIGTERM, None)
                 Path(kwargs['env']['UAS_PI_EVIDENCE']).write_text(str(process.pid) + '\n')
@@ -165,9 +166,9 @@ class PiPartitionRunnerTests(unittest.TestCase):
                 if launch_failure or wait_failure or cleanup_failure or cancel_during_spawn:
                     expected = 'interrupted' if cancel_during_spawn else 'second launch' if launch_failure else 'suite failed' if wait_failure else 'cleanup failure'
                     with self.assertRaisesRegex(Exception, expected):
-                        runner.run()
+                        runner.run(selected)
                 else:
-                    self.assertEqual(0, runner.run())
+                    self.assertEqual(0, runner.run(selected))
             cleanup.assert_called_once_with(processes)
             if cancel_during_spawn:
                 self.assertEqual(1, len(processes))
@@ -179,6 +180,19 @@ class PiPartitionRunnerTests(unittest.TestCase):
         if len(launch) == 2:
             self.assertNotEqual(launch[0][1]['env']['TMPDIR'], launch[1][1]['env']['TMPDIR'])
             self.assertNotEqual(launch[0][1]['env']['UAS_PI_EVIDENCE'], launch[1][1]['env']['UAS_PI_EVIDENCE'])
+        return payloads
+
+    def test_hosted_partitions_deliver_the_exact_disjoint_payloads_to_workers(self):
+        first = self.exercise(selected=0)
+        second = self.exercise(selected=1)
+        self.assertEqual([NAMES[:3]], first)
+        self.assertEqual([NAMES[3:]], second)
+        self.assertEqual(first + second, self.exercise())
+        for invalid in (-1, 2, True, '0'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                runner.run(invalid)
+        self.exercise(selected=1, wait_failure=True)
+        self.exercise(selected=0, cleanup_failure=True)
 
     def test_signal_during_spawn_return_retains_child_before_cleanup(self):
         self.exercise(cancel_during_spawn=True)
@@ -199,4 +213,5 @@ class PiPartitionRunnerTests(unittest.TestCase):
         text = (ROOT / 'tests/pi/run-tests.sh').read_text()
         self.assertLess(text.index('node tests/pi/auth-contract.mjs'), text.index('python3 tests/pi/parallel-tests.py'))
         self.assertLess(text.index('node tests/pi/resume-contract.mjs'), text.index('python3 tests/pi/parallel-tests.py'))
+        self.assertIn('python3 tests/pi/parallel-tests.py "$@"', text)
         self.assertEqual(125, runner.WORK_SECONDS)

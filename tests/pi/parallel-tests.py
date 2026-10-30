@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Two disjoint native Pi suites; no shared sessions, fixtures or evidence writers.
 
+CI runs one existing partition per runner; local invocations run both in parallel.
 The shell runs the official auth/resume contracts first. This runner never changes
 network/provider guards or skips discovered tests. Work is bounded to 125 seconds
 plus two seconds of owned process-group cleanup inside the existing CI job.
@@ -152,13 +153,16 @@ def check_cancelled():
         raise InterruptedError('Pi runner interrupted by signal ' + str(CANCELLED))
 
 
-def run():
+def run(selected=None):
     global CANCELLED
+    if selected is not None and (type(selected) is not int or selected not in (0, 1)):
+        raise ValueError('invalid Pi partition')
     CANCELLED = None
     deadline = time.monotonic() + WORK_SECONDS
     inventory = discover()
     groups = partition(inventory)
     print(json.dumps({'pi_inventory_count': len(inventory), 'partitions': [len(g) for g in groups],
+                      'selected_partition': selected,
                       'inventory_sha256': hashlib.sha256('\n'.join(sorted(inventory)).encode()).hexdigest(),
                       'test_ids': inventory}), flush=True)
     children, logs, evidence = [], [], []
@@ -169,6 +173,8 @@ def run():
             base = Path(directory)
             try:
                 for index, names in enumerate(groups):
+                    if selected is not None and index != selected:
+                        continue
                     check_cancelled()
                     home = base / str(index)
                     home.mkdir()
@@ -203,7 +209,7 @@ def run():
                         print('Cleanup error: ' + str(exc), file=sys.stderr)
                 for index, output in enumerate(logs):
                     output.seek(0)
-                    print('=== Pi partition ' + str(index) + ' ===', flush=True)
+                    print('=== Pi partition ' + str(index if selected is None else selected) + ' ===', flush=True)
                     for line in output:
                         print(line, end='')
                     output.close()
@@ -221,6 +227,8 @@ def run():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--worker')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--worker')
+    mode.add_argument('--partition', type=int, choices=(0, 1))
     args = parser.parse_args()
-    raise SystemExit(worker(args.worker) if args.worker else run())
+    raise SystemExit(worker(args.worker) if args.worker else run(args.partition))

@@ -150,6 +150,12 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertNotIn('npm ', browser)
                     self.assertNotIn('--no-sandbox', browser)
                 self.assertLessEqual(max(actual), 3)
+                if name == 'pi-native.yml':
+                    self.assertIn('partition: [0, 1]', text)
+                    self.assertIn('name: official-pi-native-${{ matrix.partition }}', text)
+                    self.assertIn('needs: [official-pi-native]', gate)
+                    self.assertIn('--partition "${{ matrix.partition }}"', text)
+                    self.assertEqual(budget.STAGES[name], (frozenset(('official-pi-native-0', 'official-pi-native-1')),))
 
     def test_feasibility_has_only_manual_or_exact_review_label_triggers(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/vm-feasibility.yml').read_text()
@@ -217,6 +223,12 @@ class RuntimeBudgetTests(unittest.TestCase):
         self.assertEqual(80, budget.critical_path('validate.yml', jobs, historical=True))
         with self.assertRaises(budget.BudgetError):
             budget.critical_path('validate.yml', jobs)
+        jobs = [dict(self.jobs('pi-native.yml')[0], name='official-pi-native')]
+        self.assertEqual(40, budget.critical_path('pi-native.yml', jobs, historical=True))
+        with self.assertRaises(budget.BudgetError):
+            budget.critical_path('pi-native.yml', jobs)
+        with self.assertRaises(budget.BudgetError):
+            budget.critical_path('pi-native.yml', self.jobs('pi-native.yml')[:1])
 
     def test_failed_skipped_missing_duplicate_or_unexpected_jobs_cannot_pass(self):
         for defect in ('failure', 'cancelled', 'skipped', 'missing', 'duplicate', 'unexpected', 'zero'):
@@ -297,7 +309,7 @@ class RuntimeBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(budget.BudgetError, 'Need five distinct'):
             self.check(routes)
         routes = self.evidence()
-        routes['actions/runs/30/attempts/1/jobs?per_page=100']['total_count'] = 2
+        routes['actions/runs/30/attempts/1/jobs?per_page=100']['total_count'] += 1
         with self.assertRaisesRegex(budget.BudgetError, 'Incomplete job inventory'):
             self.check(routes)
         with self.assertRaisesRegex(budget.BudgetError, 'Baseline is outside'):
