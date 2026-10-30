@@ -1,3 +1,5 @@
+import {libraryCaptureTool} from '../library-capture.mjs';
+import {profileTools} from './native-policy.mjs';
 export function negotiateProtocol(version) {
   if (typeof version !== 'string' || version.length > 64) throw Error('invalid-protocol-version');
   return ['2025-11-25','2025-06-18','2025-03-26','2024-11-05'].includes(version) ? version : '2025-11-25';
@@ -64,4 +66,18 @@ export async function invoke(channel, name, input) {
       ? !(reply.receipt?.mutation?.status === 'OK' || ['ASSIGNED','ALREADY_ASSIGNED'].includes(reply.receipt?.assignment?.status))
       : reply.receipt?.observation?.completeness !== 'complete';
   return {content:[{type:'text',text:JSON.stringify(reply)}],isError:failed};
+}
+
+// Profile is selected by the immutable native recipe, never tool arguments.
+export function toolsForProfile(profile = 'native-v1') {
+  profileTools(profile);
+  if (profile === 'native-v1') return TOOLS;
+  const tool = libraryCaptureTool(null);
+  return [{name:tool.name, description:tool.description, inputSchema:tool.parameters}];
+}
+export async function invokeProfile(channel, name, input, profile = 'native-v1') {
+  if (!toolsForProfile(profile).some(tool => tool.name === name)) throw Error('unqualified-tool');
+  if (profile === 'native-v1') return invoke(channel,name,input);
+  const {content,isError} = await libraryCaptureTool(channel).execute(null,input);
+  return {content,isError};
 }

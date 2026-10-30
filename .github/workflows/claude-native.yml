@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.22.1'
+      - name: Install hash-pinned Library parser for real capture fixture
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
       # Only public npm content-addressed acquisition bytes, never installed
       # modules, HOME, npm configuration, logs, or account/session files.
       - name: Restore exact locked public npm acquisition cache
@@ -55,4 +59,4 @@ jobs:
           node_path="$(command -v node)"
           # This modifies only a disposable child network namespace. No host
           # routes, firewall, interfaces, managed policy, or credentials change.
-          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH=/usr/bin:/bin UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" sh "$2/tests/claude/run-tests.sh"' sh "$runner_user" "$PWD" "$node_path"
+          sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH="$4/bin:/usr/bin:/bin" UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" sh "$2/tests/claude/run-tests.sh"' sh "$runner_user" "$PWD" "$node_path" "$RUNNER_TEMP/uas-python"

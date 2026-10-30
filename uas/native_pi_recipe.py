@@ -25,7 +25,7 @@ ARTIFACTS = frozenset(('/opt/uas/runtime/pi/provider-store.mjs',
     '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/package.json',
     '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
     '/opt/uas/runtime/pi/extension.mjs', '/opt/uas/runtime/pi/library-scan.mjs', '/opt/uas/runtime/pi/channel.mjs',
-    '/opt/uas/runtime/pi/native-entry.mjs', '/opt/uas/runtime/provider-auth.mjs',
+    '/opt/uas/runtime/pi/native-entry.mjs', '/opt/uas/runtime/provider-auth.mjs', '/opt/uas/runtime/library-capture.mjs',
     '/opt/uas/pi/node_modules/@earendil-works/pi-coding-agent/dist/index.js'))
 SHA = re.compile(r'[0-9a-f]{64}\Z')
 CHOICE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
