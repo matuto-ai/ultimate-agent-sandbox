@@ -19,6 +19,7 @@ an exact retry reconciles while a reused Command ID or a changed request in the
 same Project or installation scope is refused for every operation kind.
 """
 from datetime import datetime, timezone, timedelta
+from .library import receipt as library_receipt
 from contextlib import contextmanager
 import fcntl
 import os
@@ -828,6 +829,25 @@ class LibraryRecords:
             return self._attempt(db, operation.operation_id)
 
         return work
+
+    def inspection_identity(self, operation):
+        """Atomically reserve only a read's identity; never its content/response.
+
+        Exact retries compare even compacted identity, but callers must freshly
+        authorize and read. The acknowledgement is not an inspection replay.
+        """
+        if operation.kind != 'inspect' or operation.scope.subject != 'human':
+            raise LibraryError('INVALID_OPERATION')
+        receipt = library_receipt(
+            operation, 'ACKNOWLEDGED', at=operation.at,
+            acknowledgement=operation.digest())
+        begin = self._begin_work(operation)
+        finish = self._finish_work(operation, receipt)
+        def work(db):
+            prior = begin(db)['record']
+            if prior['receipt'] is not None: return
+            finish(db)
+        self._write(work)
 
     def schedule_control(self, operation, receipt, schedule, schedule_receipt):
         """One durable transaction for a human acknowledgement and schedule intent.

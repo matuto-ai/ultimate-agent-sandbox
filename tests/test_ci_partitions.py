@@ -45,7 +45,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
             'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
         })
-        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_relocation'})
+        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_inspection'})
         self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_library_retention', 'test_library_records', 'test_git_payload'})
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly', 'test_library_registration'})
