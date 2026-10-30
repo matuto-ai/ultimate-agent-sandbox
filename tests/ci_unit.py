@@ -85,7 +85,9 @@ OPERATOR_MODULES = frozenset({'test_library_retention', 'test_library_controls',
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
-LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service'})
+# #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
+# leaves margin in the existing60s lane, without changing discovery or limits.
+LIFECYCLE_MODULES = frozenset({'test_library_records', 'test_library_service', 'test_manager_library_transport'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',
