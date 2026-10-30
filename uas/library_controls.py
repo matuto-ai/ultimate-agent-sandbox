@@ -58,15 +58,21 @@ def decode(raw):
         if set(value) != keys or value['for_action'] not in ('drain','retry','inspect'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
-    elif action == 'reject':
-        if set(value) != {'version','action','project_id','queue_id','drain_id','reason','request_id','settings_id','observed_version'}:
+    elif action in ('reject', 'adjudicate'):
+        content = ('reason',) if action == 'reject' else ('conclusion', 'rationale')
+        if set(value) != {'version','action','project_id','queue_id','drain_id','request_id','settings_id','observed_version', *content}:
             fail('INVALID_CONTROL_REQUEST')
         library._digest_value(value['queue_id'], 'queue_id')
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
         if value['drain_id'] is not None: library._token(value['drain_id'], 'drain_id')
-        library._text(value['reason'], 'reason', MAX_REQUEST, multiline=True)
+        for key in content:
+            if action == 'adjudicate' and type(value[key]) is str:
+                import unicodedata
+                value[key] = unicodedata.normalize('NFC', value[key].replace('\r\n', '\n').replace('\r', '\n'))
+            library._text(value[key], key, MAX_REQUEST, multiline=True)
+            if not value[key].strip(): fail('INVALID_TEXT')
     elif action == 'inspect':
         if set(value) != {'version','action','project_id','queue_id','request_id','settings_id','observed_version'}:
             fail('INVALID_CONTROL_REQUEST')
@@ -149,9 +155,9 @@ class Controls:
             key = scope.project_identity
             # Fresh configured authority/settings; no authority inferred from UID.
             settings = self._settings(entry)
-            if kind == 'reject':
-                from .library_disposition import reject
-                return reject(self, value, principal, entry, scope, settings)
+            if kind in ('reject', 'adjudicate'):
+                from .library_disposition import apply
+                return apply(self, value, principal, entry, scope, settings)
             if kind == 'inspect':
                 return self._inspect(value, principal, entry, scope, settings)
             if value['action'] == 'observe':
