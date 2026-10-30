@@ -1,28 +1,47 @@
 """Cheap contracts: expensive VM qualification must be a deliberate action."""
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 import unittest
+from unittest.mock import patch
+
+import ci_runtime_budget as budget
 
 
 class VMCITriggerTests(unittest.TestCase):
-    def test_automatic_execution_budgets_do_not_exceed_three_minutes(self):
+    def test_automatic_job_watchdogs_and_measured_budget_are_required(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [1, 1, 1, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1], 'claude-native.yml': [2],
-                   'pi-native.yml': [3], 'pi-durable-fit.yml': [2]}
+        budgets = {'validate.yml': [3, 3, 3, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1, 1], 'claude-native.yml': [3, 1],
+                   'pi-native.yml': [3, 1], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
                 text = (workflows / name).read_text()
                 actual = list(map(int, re.findall(r'^    timeout-minutes: (\d+)$', text, re.MULTILINE)))
                 self.assertEqual(expected, actual)
+                if name in budget.STAGES:
+                    self.assertIn('  actions: read\n', text)
+                    gate = text.split('\n  runtime-budget:\n', 1)[1]
+                    self.assertIn('always()', gate)
+                    self.assertIn('name: ${{ github.workflow }} runtime budget', gate)
+                    self.assertNotIn('continue-on-error:', gate)
+                    self.assertIn('fetch-depth: 0', gate)
+                    self.assertIn('persist-credentials: false', gate)
+                    self.assertIn(f'python3 -B tests/ci_runtime_budget.py {name} --base "$BASE_SHA"', gate)
+                    self.assertNotIn('write', text.split('\npermissions:\n')[1].split('\n\n')[0])
                 if name == 'validate.yml':
                     # All disjoint unit shards must pass before any integration.
-                    # The integration root owns parallel, one-minute matrix jobs.
+                    # The matrix shares the same measured first stage as the other roots.
                     jobs = dict(re.findall(
                         r'^  ([a-z][a-z0-9-]*):\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)',
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
                     integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams', 'gate-linux-smoke', 'gate-command-native', 'gate-artifact-native', 'room-control-plane', 'manager-mtls', 'manager-field-notes'}
                     roots = {'validate', 'unit-slow', 'unit-integration'}
-                    self.assertEqual(set(jobs), roots | integrations)
+                    self.assertEqual(set(jobs), roots | integrations | {'runtime-budget'})
+                    dependencies = re.search(r'^    needs: \[(.+)\]$', jobs['runtime-budget'], re.MULTILINE)
+                    self.assertEqual(set(dependencies[1].split(', ')), roots | integrations)
+                    self.assertEqual(budget.STAGES['validate.yml'][1], integrations)
+                    matrix_names = set(re.findall(r'partition: \w+, name: ([\w-]+)', text))
+                    self.assertEqual(budget.STAGES['validate.yml'][0], {'validate', 'unit-slow'} | matrix_names)
                     for root in roots:
                         self.assertEqual(re.findall(r'^    needs: (.+)$', jobs[root], re.MULTILINE), [])
                         self.assertNotIn('continue-on-error:', jobs[root])
@@ -35,8 +54,7 @@ class VMCITriggerTests(unittest.TestCase):
         if: steps.changes.outputs.skip_tests != 'true'
         env:
           UAS_LOCAL_PROCESS_SMOKE: "1"
-        # Existing fast lane: observed remainder ~28s + bounded smoke15s;
-        # unchanged1min job and unchanged aggregate<=180s dependency graph.
+        # Keep the bounded process smoke in the measured remainder lane.
         run: timeout --signal=TERM --kill-after=1s 15s python3 tests/linux/local_process_smoke.py --run
 
 """
@@ -135,9 +153,13 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertNotIn('sudo', browser)
                     self.assertNotIn('npm ', browser)
                     self.assertNotIn('--no-sandbox', browser)
-                    self.assertLessEqual(max(actual[:3]) + max(actual[3:]), 3)
-                else:
-                    self.assertLessEqual(sum(actual), 3)
+                self.assertLessEqual(max(actual), 3)
+                if name == 'pi-native.yml':
+                    self.assertIn('partition: [0, 1, 2]', text)
+                    self.assertIn('name: official-pi-native-${{ matrix.partition }}', text)
+                    self.assertIn('needs: [official-pi-native]', gate)
+                    self.assertIn('--partition "${{ matrix.partition }}"', text)
+                    self.assertEqual(budget.STAGES[name], (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2')),))
 
     def test_feasibility_has_only_manual_or_exact_review_label_triggers(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/vm-feasibility.yml').read_text()
@@ -149,3 +171,165 @@ class VMCITriggerTests(unittest.TestCase):
         self.assertIn('permissions:\n  contents: read', workflow)
         self.assertNotIn('pull_request_target', workflow)
         self.assertNotIn('secrets.', workflow)
+
+
+class RuntimeBudgetTests(unittest.TestCase):
+    def jobs(self, workflow='validate.yml', seconds=40, run_id=30):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return [dict(name=name, run_id=run_id, run_attempt=1, status='completed', conclusion='success', steps=[],
+                     started_at=start.isoformat(), completed_at=(start + timedelta(seconds=seconds)).isoformat())
+                for stage in budget.STAGES[workflow] for name in sorted(stage)]
+
+    def evidence(self, *, current=110, previous=100, workflow='pi-native.yml', samples=None):
+        # Distinct commits and payloads expose retry weighting and self-baselining.
+        current_jobs = self.jobs(workflow, current, 30)
+        rows = []
+        routes = {
+            'actions/runs/30': dict(path=f'.github/workflows/{workflow}', event='pull_request'),
+            'actions/runs/30/attempts/1/jobs?per_page=100': dict(total_count=len(current_jobs), jobs=current_jobs),
+            f'actions/workflows/{workflow}/runs?event=push&branch=main&per_page=100': dict(workflow_runs=rows),
+        }
+        for number, seconds in zip(range(20, 15, -1), samples or [previous] * 5):
+            rows.append(dict(id=number, run_attempt=1, path=f'.github/workflows/{workflow}', event='push',
+                             head_branch='main', head_sha=f'{number:040x}', status='completed', conclusion='success'))
+            jobs = self.jobs(workflow, seconds, number)
+            routes[f'actions/runs/{number}/attempts/1/jobs?per_page=100'] = dict(total_count=len(jobs), jobs=jobs)
+        return routes
+
+    def check(self, routes, workflow='pi-native.yml'):
+        with patch.object(budget, 'api', side_effect=lambda repo, path: routes[path]), \
+                patch.object(budget, 'ancestor', return_value=True):
+            return budget.check('owner/repo', workflow, 'main', 'b' * 40, 30)
+
+    def test_parallel_path_counts_setup_cleanup_but_not_queue_delay(self):
+        jobs = self.jobs()
+        next(job for job in jobs if job['name'] == 'unit-synthesis')['completed_at'] = '2026-01-01T00:01:00+00:00'
+        # Moving an entire downstream stage later must not add queue time.
+        for job in jobs:
+            if job['name'] in budget.SEAM_JOBS:
+                job['started_at'] = '2026-01-01T01:00:00+00:00'
+                job['completed_at'] = '2026-01-01T01:00:45+00:00'
+        jobs.append(dict(name='validate runtime budget', status='in_progress'))
+        self.assertEqual(105, budget.critical_path('validate.yml', jobs))
+
+    def test_growth_boundary_and_absolute_ceiling_through_check(self):
+        self.assertIn('limit: 110.0s', self.check(self.evidence(current=110)))
+        with self.assertRaisesRegex(budget.BudgetError, 'growth exceeds'):
+            self.check(self.evidence(current=111))
+        self.assertIn('limit: 150.0s', self.check(self.evidence(current=150, previous=140)))
+        with self.assertRaisesRegex(budget.BudgetError, 'absolute 150'):
+            self.check(self.evidence(current=151, previous=140))
+        self.assertIn('limit: 88.0s', self.check(self.evidence(current=88, previous=80)))
+        self.assertIn('baseline median: 100.0s', self.check(self.evidence(samples=[60, 95, 100, 105, 145])))
+
+    def test_old_seven_lane_measurement_is_eligible_only_as_historical_evidence(self):
+        for absent in ({'unit-archive'}, {'unit-archive', 'unit-maintenance'},
+                       {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition'},
+                       {'unit-archive', 'unit-maintenance', 'unit-lifecycle', 'unit-disposition', 'unit-inspection'}):
+            jobs = [job for job in self.jobs() if job['name'] not in absent]
+            self.assertEqual(80, budget.critical_path('validate.yml', jobs, historical=True))
+            with self.assertRaises(budget.BudgetError):
+                budget.critical_path('validate.yml', jobs)
+        with self.assertRaises(budget.BudgetError):
+            budget.critical_path('validate.yml', self.jobs()[:-1], historical=True)
+        jobs = [dict(self.jobs('pi-native.yml')[0], name='official-pi-native')]
+        self.assertEqual(40, budget.critical_path('pi-native.yml', jobs, historical=True))
+        with self.assertRaises(budget.BudgetError):
+            budget.critical_path('pi-native.yml', jobs)
+        with self.assertRaises(budget.BudgetError):
+            budget.critical_path('pi-native.yml', self.jobs('pi-native.yml')[:1])
+
+    def test_failed_skipped_missing_duplicate_or_unexpected_jobs_cannot_pass(self):
+        for defect in ('failure', 'cancelled', 'skipped', 'missing', 'duplicate', 'unexpected', 'zero'):
+            with self.subTest(defect=defect), self.assertRaises(budget.BudgetError):
+                jobs = self.jobs()
+                if defect == 'missing':
+                    jobs.pop()
+                elif defect == 'duplicate':
+                    jobs.append(dict(jobs[0]))
+                elif defect == 'unexpected':
+                    jobs.append(dict(jobs[0], name='new-unmeasured-job'))
+                elif defect == 'zero':
+                    jobs[0]['completed_at'] = jobs[0]['started_at']
+                else:
+                    jobs[0]['conclusion'] = defect
+                budget.critical_path('validate.yml', jobs)
+
+    def test_docs_only_runs_neither_fail_growth_nor_become_a_full_baseline(self):
+        jobs = self.jobs()
+        for job in jobs:
+            if job['name'] in budget.UNIT_JOBS:
+                job['steps'] = [dict(name='Report tests not applicable', conclusion='success')]
+            else:
+                job['conclusion'] = 'skipped'
+        self.assertIsNone(budget.critical_path('validate.yml', jobs))
+        routes = self.evidence(workflow='validate.yml', previous=50)
+        routes['actions/runs/30/attempts/1/jobs?per_page=100']['jobs'] = jobs
+        self.assertIn('Documentation-only', self.check(routes, 'validate.yml'))
+        key = 'actions/workflows/validate.yml/runs?event=push&branch=main&per_page=100'
+        rows = routes[key]['workflow_runs']
+        rows.append(dict(rows[0], id=25, head_sha='c' * 40))
+        routes['actions/runs/25/attempts/1/jobs?per_page=100'] = dict(total_count=len(jobs),
+                                                                   jobs=[dict(j, run_id=25) for j in jobs])
+        routes['actions/runs/30/attempts/1/jobs?per_page=100']['jobs'] = self.jobs(seconds=50)
+        summary = self.check(routes, 'validate.yml')
+        self.assertIn('run 20', summary)
+        self.assertNotIn('run 25', summary)
+
+    def test_baseline_uses_five_distinct_main_commits_not_repushes_current_or_pr(self):
+        routes = self.evidence()
+        key = 'actions/workflows/pi-native.yml/runs?event=push&branch=main&per_page=100'
+        rows = routes[key]['workflow_runs']
+        row = rows[0]
+        rows.extend([dict(row, id=25), dict(row, id=30)])
+        summary = self.check(routes)
+        self.assertIn('run 20', summary)
+        self.assertNotIn('run 25', summary)
+        self.assertNotIn('run 30', summary)
+        row['event'] = 'pull_request'
+        with self.assertRaisesRegex(budget.BudgetError, 'identity mismatch'):
+            self.check(routes)
+        row['event'] = 'push'
+        with patch.object(budget, 'api', side_effect=lambda repo, path: routes[path]), \
+                patch.object(budget, 'ancestor', return_value=False), \
+                self.assertRaisesRegex(budget.BudgetError, 'Need five distinct'):
+            budget.check('owner/repo', 'pi-native.yml', 'main', 'b' * 40, 30)
+
+    def test_reruns_cannot_replace_first_attempt_or_turn_failure_into_baseline(self):
+        routes = self.evidence()
+        key = 'actions/workflows/pi-native.yml/runs?event=push&branch=main&per_page=100'
+        row = routes[key]['workflow_runs'][0]
+        routes['actions/runs/20/attempts/1'] = dict(row)
+        row['run_attempt'] = 3
+        self.assertIn('baseline median: 100.0s', self.check(routes))
+        routes['actions/runs/20/attempts/1']['conclusion'] = 'failure'
+        with self.assertRaisesRegex(budget.BudgetError, 'Need five distinct'):
+            self.check(routes)
+        # Current PR retries also retain the first measurement, not a lucky faster run.
+        routes = self.evidence(current=111)
+        routes['actions/runs/30']['run_attempt'] = 2
+        with self.assertRaisesRegex(budget.BudgetError, 'growth exceeds'):
+            self.check(routes)
+
+    def test_missing_baseline_partial_inventory_and_invalid_baseline_fail_closed(self):
+        routes = self.evidence()
+        key = 'actions/workflows/pi-native.yml/runs?event=push&branch=main&per_page=100'
+        routes[key]['workflow_runs'].pop()
+        with self.assertRaisesRegex(budget.BudgetError, 'Need five distinct'):
+            self.check(routes)
+        routes = self.evidence()
+        routes['actions/runs/30/attempts/1/jobs?per_page=100']['total_count'] += 1
+        with self.assertRaisesRegex(budget.BudgetError, 'Incomplete job inventory'):
+            self.check(routes)
+        with self.assertRaisesRegex(budget.BudgetError, 'Baseline is outside'):
+            self.check(self.evidence(previous=151))
+
+    def test_unavailable_or_malformed_evidence_makes_cli_fail_without_leaking_it(self):
+        from contextlib import redirect_stderr
+        import io
+        environment = dict(GITHUB_REPOSITORY='owner/repo', DEFAULT_BRANCH='main', GITHUB_RUN_ID='30')
+        for error in (OSError('private response'), ValueError('private response'), KeyError('private response')):
+            with self.subTest(error=type(error).__name__), patch.dict(budget.os.environ, environment), \
+                    patch.object(budget, 'api', side_effect=error), redirect_stderr(io.StringIO()) as output:
+                self.assertEqual(1, budget.main(['pi-native.yml', '--base', 'b' * 40]))
+                self.assertNotIn('private response', output.getvalue())
