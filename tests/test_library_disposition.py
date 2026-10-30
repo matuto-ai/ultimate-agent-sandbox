@@ -181,3 +181,26 @@ class ResumeTests(DispositionBase):
         self.assertEqual(self.entry()['state'],disposed)
         self.restart();self.assertEqual(self.entry()['state'],disposed)
         self.assertEqual(self.send(self.resume(request='resume-after-failure'))['outcome'],'ACKNOWLEDGED')
+
+    def test_lost_resume_response_reconciles_without_second_release(self):
+        import sqlite3
+        self.disposed();value=self.resume()
+        original=LibraryRecords._commit;lost=[False]
+        def commit(records):
+            original(records)
+            if not lost[0]:lost[0]=True;raise sqlite3.OperationalError('lost commit ack')
+        with patch.object(LibraryRecords,'_commit',commit):self.refused(value,'RECORD_UNCERTAIN')
+        self.assertTrue(self.service.scheduler._failed)
+        # The committed release is durable but unacknowledged: the exact request
+        # reconciles its receipt and a later turn is fenced until restart.
+        replay=self.send(value)
+        self.assertEqual(replay['outcome'],'ACKNOWLEDGED')
+        self.assertEqual(self.entry()['state']['state'],'DISPOSED')
+        self.assertEqual(self.send(value),replay)
+        self.restart()
+        released=deepcopy(self.entry()['state'])
+        self.assertEqual(released['state'],'READY')
+        self.assertEqual(self.send(value),replay)
+        with LibraryRecords(self.source.records,'deployment-1') as records:
+            self.assertEqual(records.latest_schedule(self.source.scope.project_identity)['manifest']['sequence'],
+                released['sequence'])

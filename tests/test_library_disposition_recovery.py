@@ -163,3 +163,23 @@ class RecoveryTests(fixture.DispositionBase):
         self.assertNotEqual(continued['drain_id'],old['drain_id'])
         self.restart();self.assertEqual(self.entry()['state']['state'],'READY')
         self.assertEqual(self.service.tick()['state'],'EMPTY')
+
+    def test_receiptless_old_disposition_replay_after_resume_does_not_re_dispose(self):
+        self.blocked();value=self.value()
+        with patch.object(disposition,'finish',side_effect=RuntimeError('crash')):
+            with self.assertRaises(RuntimeError):self.send(value)
+        self.restart();self.assertEqual(self.entry()['state']['state'],'DISPOSED')
+        self.assertEqual(self.send(self.resume(request='resume-after-crash'))['outcome'],'ACKNOWLEDGED')
+        self.assertEqual(self.entry()['state']['state'],'READY')
+        self.assertEqual(self.send(value)['outcome'],'COMMITTED')
+        self.assertEqual((self.entry()['state']['state'],self.entry()['state']['drain_id']),('READY',None))
+        self.assertEqual(self.service.tick()['state'],'COMMITTED')
+
+    def test_registered_cross_project_resume_is_forbidden(self):
+        self.disposed();value=self.resume()
+        import test_library_scheduler as scheduler_tests
+        fx=self.fx.fx;fx.scheduler=self.service.scheduler;fx.runner=fx.fixture.runner();fx.replies=[]
+        fx.register=lambda runner:scheduler_tests.SchedulerTests.register(fx,runner)
+        scheduler_tests.SchedulerTests.second(fx)
+        self.refused({**value,'project_id':'beta'},'FORBIDDEN')
+        self.assertEqual(self.entry()['state']['state'],'DISPOSED')
