@@ -146,6 +146,8 @@ class DeploymentLibraryTests(unittest.TestCase):
     # --- fail closed -------------------------------------------------------
 
     def test_missing_credential_qualification_and_mount_fail_closed_untouched(self):
+        with self.assertRaisesRegex(library.LibraryError, 'MISSING_FIELD'):
+            self.make_deployment(settings={'version': 1}).start()
         with self.assertRaisesRegex(library.LibraryError, 'CREDENTIAL_REFERENCE_UNAVAILABLE'):
             self.make_deployment(credentials={}).start()
         with self.assertRaisesRegex(library.LibraryError, 'TARGET_NOT_QUALIFIED'):

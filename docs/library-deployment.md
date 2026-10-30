@@ -65,7 +65,10 @@ entrypoint's installation selection for the external Library settings document,
 the split-process Room Hub to host transport that would carry these typed
 endpoints across process boundaries, the actual target qualification of #157,
 the model/version qualification of T42, provider and backup provisioning, and a
-real two-Room VM proof all remain with their own owners. Until they supply
+real two-Room VM proof all remain with their own owners. Shared-settings update
+routing and the Manager Settings page stay with #192: this composition admits
+the authority document it is given, and a changed canonical target or branch is
+refused by the existing publisher pin instead of silently repointing a clone. Until they supply
 qualification evidence and the external configuration, a real host startup is
 expected to fail closed at `TARGET_NOT_QUALIFIED`; no fallback target, credential
 or Room binding is selected in the meantime.

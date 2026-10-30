@@ -245,6 +245,7 @@ class DeploymentLibrary:
         for bound in list(self._bound.values()):
             bound.projection.close()
         self._bound.clear()
+        self._hubs.clear()
         operator = getattr(self, '_operator_thread', None)
         if operator is not None:
             operator.join(timeout=2)
