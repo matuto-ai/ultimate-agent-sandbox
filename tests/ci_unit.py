@@ -17,11 +17,13 @@ import unittest
 # existing parallel jobs (19.815s / 27.673s), not new jobs or larger limits.
 # Estimates become 37.396 / 38.896 / 43.763s; timings vary, not a guarantee.
 # Keep module ownership stable; new modules default to remainder, never disappear.
-SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
+# #168 dispatch real-process/Git suite measured9.4s locally; remainder timed
+# out at61s. Existing slow lane43s hosted has headroom; no excluded tests.
+SLOW_MODULES = frozenset({'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_forge_mutations', 'test_artifact_manual_source',
                           'test_run_review', 'test_staged_source_closure',
                           'test_claude_permission_policy', 'test_artifact_native_source',
-                          'test_library_hub', 'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
+                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
 # #155 hosted remainder reached its one-minute job boundary despite passing
 # tests (49s + setup/smoke). Move the ~7s registration module to the measured
 # 24s integration partition; no exclusions, new jobs or enlarged timeouts.
@@ -44,7 +46,10 @@ INTEGRATION_MODULES = frozenset({'test_library_assembly', 'test_context', 'test_
 # #158 real-Git projection module measured 3.9s locally. Keep it off the
 # previously tight remainder; additional has ~26s hosted baseline headroom.
 # #165 moved the measured enqueue module to this parallel lane.
+# #168 follow-up: slow lane hit60s; move existing Hub (~5.7shosted)
+# to additional lane (46s) without changing total inventory/limits.
 ADDITIONAL_MODULES = frozenset({
+    'test_library_hub',
     'test_library_enqueue',
     'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
     'test_library_git', 'test_library_projection', 'test_native_combined_image_package',

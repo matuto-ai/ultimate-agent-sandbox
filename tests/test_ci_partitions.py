@@ -21,12 +21,12 @@ def case(identifier):
 
 class CIPartitionTests(unittest.TestCase):
     def test_fixed_measured_modules_and_every_future_module_default_to_remainder(self):
-        self.assertEqual(ci.SLOW_MODULES, {'test_peer', 'test_checkouts',
+        self.assertEqual(ci.SLOW_MODULES, {'test_library_dispatch', 'test_peer', 'test_checkouts',
                                           'test_gate_evaluation', 'test_forge_mutations',
                                           'test_artifact_manual_source',
                                           'test_run_review', 'test_staged_source_closure',
                                           'test_claude_permission_policy', 'test_artifact_native_source',
-                          'test_library_hub', 'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
+                          'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
         self.assertEqual(ci.INTEGRATION_MODULES, {'test_library_assembly', 'test_context', 'test_library_registration',
             'test_native_pi_reset_adversarial', 'test_participant',
             'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
@@ -35,6 +35,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_manager_action_host', 'test_forge_assignment',
     'test_native_reviewer_recruitment_adversarial', 'test_native_gate_completion', 'test_native_session_driver', 'test_ledger', 'test_run_admission', 'test_forge_projections'})
         self.assertEqual(ci.ADDITIONAL_MODULES, {
+            'test_library_hub',
             'test_library_enqueue',
             'test_local_native_terminal', 'test_local_native_stop', 'test_local_three_runs',
             'test_library_git', 'test_library_projection', 'test_native_combined_image_package',
@@ -73,7 +74,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual([item.id() for item in cases], identifiers)
         self.assertEqual(len(groups['slow']), 16)
         self.assertEqual(len(groups['integration']), 21)
-        self.assertEqual(len(groups['additional']), 22)
+        self.assertEqual(len(groups['additional']), 23)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
