@@ -59,7 +59,7 @@ def passive_dependencies():
 class ManagerSourceClosureTests(unittest.TestCase):
     def test_every_fixed_owner_stage_contains_exact_passive_dependency_closure(self):
         dependencies = passive_dependencies()
-        self.assertEqual(dependencies, {'uas/manager_owner.py', 'uas/manager_projection.py',
+        self.assertEqual(dependencies, {'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/library_observation_schema.py',
                                        'uas/manager_journey.py'})
         for relative in STAGES:
             with self.subTest(stage=relative):

@@ -44,7 +44,7 @@ SOURCES = (
     'tests/vm/guest_artifacts.py', 'tests/vm/guest_boundary.py',
     'tests/vm/artifact_supervisor.py', 'tests/vm/artifact_hub.py', 'tests/vm/artifact_diagnostics.py',
     'uas/__init__.py', 'uas/config.py', 'uas/gate_policy.py', 'uas/ledger.py', 'uas/typed_json.py',
-    'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/manager_journey.py', 'uas/lifecycle.py', 'uas/checkouts.py', 'uas/checkout_scope.py', 'uas/artifact_protocol.py', 'uas/artifact_paths.py',
+    'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/library_observation_schema.py', 'uas/manager_journey.py', 'uas/lifecycle.py', 'uas/checkouts.py', 'uas/checkout_scope.py', 'uas/artifact_protocol.py', 'uas/artifact_paths.py',
     'uas/artifact_target.py', 'uas/artifact_helper.py', 'uas/gate_evaluation.py',
     'uas/docker_exec_api.py', 'uas/kernel_origin.py', 'uas/workstation_exec.py', 'uas/workstation_probe.py')
 

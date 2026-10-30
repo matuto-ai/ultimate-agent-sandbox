@@ -1205,6 +1205,10 @@ def batch_manifest(value):
 
 
 def operation_manifest(kind, value):
+    if kind == 'library-observation':
+        from .library_observation_schema import observation, ObservationError
+        try: return observation(value)
+        except ObservationError: _fail('INVALID_LIBRARY_OBSERVATION')
     if kind == 'synthesis-batch': return batch_manifest(value)
     if kind == 'scheduler-state': return scheduler_manifest(value)
     if kind == 'source-park': return source_manifest(value)

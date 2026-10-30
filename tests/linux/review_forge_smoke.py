@@ -24,7 +24,7 @@ PHASES=('prepare','stale','outage','changes','pass','comment','repass','merged')
 SOURCES = (
     'uas/__init__.py',
     'uas/manager_owner.py',
-    'uas/manager_projection.py', 'uas/manager_journey.py',
+    'uas/manager_projection.py', 'uas/library_observation_schema.py', 'uas/manager_journey.py',
     'uas/artifact_protocol.py',
     'uas/config.py',
     'uas/context.py',

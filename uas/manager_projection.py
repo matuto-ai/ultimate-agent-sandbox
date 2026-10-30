@@ -78,7 +78,7 @@ def _fields(row, fields):
                     or '..' in value.split('/') or any(ord(c) < 32 or ord(c) == 127 for c in value)):
                 raise ProjectionError('INVALID_CHECKOUT_PATH')
             result[key] = value
-        elif key in {'working_tree_observed_at', 'observation_time', 'updated_at'}:
+        elif key in {'working_tree_observed_at', 'observation_time', 'updated_at', 'window_start', 'window_end', 'next_retry_at', 'projected_at', 'provider_observed_at'}:
             result[key] = None if row[key] is None else timestamp(row[key])
         elif key == 'review_reference':
             value = row[key]
@@ -122,7 +122,10 @@ def fact(owner, version, *, value=None, observed_at=None, source_committed_at=No
 
 # These owners have no universal versioned passive snapshot API in the current
 # source. This is a finite extension seam, not a caller-defined owner registry.
+from .library_observation_schema import FIELDS as LIBRARY_FIELDS
+
 EXTERNAL_FIELDS = {
+    'library': ('library-service', LIBRARY_FIELDS),
     'room_lifecycle': ('supervisor', ('phase', 'desired', 'authority', 'error')),
     'seats': ('supervisor', ('participant_id', 'actor_id', 'profile_id', 'runtime', 'enabled')),
     'processes': ('supervisor', ('participant_id', 'incarnation_id', 'epoch', 'state', 'reason')),
@@ -181,6 +184,14 @@ class SourceObservation:
         if self.observed_version is None and self.status == 'known':
             raise ProjectionError('KNOWN_FACT_WITHOUT_SOURCE_VERSION')
         rows = _rows(self.rows, definition[1]) if self.status == 'known' else None
+        if self.section == 'library' and rows is not None:
+            from .library_observation_schema import validate_row, ObservationError
+            if type(self.rows) is not dict or len(self.rows) != 1 or any(key != row.get('project_identity') for key,row in self.rows.items()):
+                raise ProjectionError('INVALID_LIBRARY_BINDING')
+            for row in self.rows.values():
+                if row.get('window_end') != self.observed_at: raise ProjectionError('LIBRARY_SAMPLE_TIME_MISMATCH')
+                try: validate_row(row)
+                except ObservationError as error: raise ProjectionError('INVALID_LIBRARY_OBSERVATION') from error
         if self.status != 'known' and self.rows is not None:
             raise ProjectionError('UNKNOWN_FACT_HAS_VALUE')
         # Quota semantics are not inferred from a number or native readiness.
@@ -352,6 +363,13 @@ HUB_FIELDS = {
 
 def validate_section_value(section, value):
     """Also enforce the disclosure allowlist on the receiving side."""
+    if section == 'library':
+        from .library_observation_schema import validate_row, ObservationError
+        if type(value) is not dict or len(value) != 1: raise ProjectionError('INVALID_LIBRARY_BINDING')
+        for key,row in value.items():
+            try: validate_row(row)
+            except ObservationError as error: raise ProjectionError('INVALID_LIBRARY_OBSERVATION') from error
+            if key != row['project_identity']: raise ProjectionError('INVALID_LIBRARY_BINDING')
     if section == 'journey':
         from .manager_journey import validate_journey
         validate_journey(value)

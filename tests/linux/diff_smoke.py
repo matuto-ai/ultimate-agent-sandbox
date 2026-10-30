@@ -105,7 +105,7 @@ SOURCES = (
     'uas/manager_action_protocol.py', 'uas/manager_actions.py', 'uas/manager_lifecycle.py',
     'tests/linux/mapped_namespace.py',
     'uas/__init__.py',
-    'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/manager_journey.py',
+    'uas/manager_owner.py', 'uas/manager_projection.py', 'uas/library_observation_schema.py', 'uas/manager_journey.py',
     'uas/run_review.py', 'uas/gate_hub.py',
     'uas/gate_command_hub.py',
     'uas/artifact_helper.py',
