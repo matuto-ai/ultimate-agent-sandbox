@@ -111,7 +111,8 @@ class NativeSession:
             for line in iter(lambda:self.process.stderr.readline(4096),b''):self.errors.append(line.decode(errors='replace'))
         self.readers=[threading.Thread(target=read,daemon=True),threading.Thread(target=errors,daemon=True)]
         for thread in self.readers:thread.start()
-        test.assertTrue(select.select([self.listener],[],[],10)[0],list(self.errors))
+        test.assertTrue(select.select([self.listener],[],[],10)[0],
+            {'errors':list(self.errors),'startup':list(self.events)})
         self.channel,_=self.listener.accept();enable(self.channel);self.channel.settimeout(3)
         with receive(self.channel) as record:
             test.assertEqual(record.data,b'CLAUDE-LIBRARY-FIXTURE')

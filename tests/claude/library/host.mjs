@@ -5,6 +5,7 @@ import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {createInterface} from 'node:readline';
 import {spawn} from 'node:child_process';
+import {setTimeout as delay} from 'node:timers/promises';
 import {nativeOptions,NativeToolState,requireMcp} from '../../../runtime/claude/native-policy.mjs';
 import {BINARY_SHA256,CLI_VERSION,SDK_VERSION} from '../../../runtime/claude/sdk-policy.mjs';
 const [sdk,binary,root,home,url,key,session,endpoint,python,node,repo]=process.argv.slice(2);
@@ -39,7 +40,19 @@ query=createQuery({prompt,options:{...options,pathToClaudeCodeExecutable:binary,
   catch{write({type:'failure',reason:'native-stream'});}finally{close();}})();
 const init=await query.initializationResult();
 if(init.claude_code_version!==CLI_VERSION)throw Error('wrong CLI initialization');
-requireMcp(await query.mcpServerStatus());
+// initializationResult acknowledges the CLI control channel, not asynchronous
+// MCP startup. Keep the exact production readiness check; never promote pending.
+const startupDeadline=performance.now()+5000;
+for (;;) {
+  const statuses=await query.mcpServerStatus();
+  write({type:'mcp-startup',servers:statuses.map(x=>({name:x.name,status:x.status}))});
+  if(statuses.length===1 && statuses[0].name==='uas' && statuses[0].status==='connected'){
+    requireMcp(statuses);break;
+  }
+  if(performance.now()>=startupDeadline || statuses.some(x=>x.name!=='uas'
+      || !['pending','connected'].includes(x.status)))throw Error('fixture-mcp-startup-failed');
+  await delay(50);
+}
 write({type:'ready',pid:child.pid,profile,allowedTools:options.allowedTools,tools:options.tools,session});
 const reader=createInterface({input:process.stdin});
 for await(const line of reader){
