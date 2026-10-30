@@ -61,7 +61,9 @@ first success both commit and time are null. Unchanged commits do not refresh
 the timestamp. Pre-switch failures preserve the entire old publication. A sync
 failure **after** the pointer is already visible is reported as
 `PROJECTION_SYNC_UNCERTAIN`, not a false refresh failure or a rollback; visibility
-is real but power-loss durability is uncertain. Cleanup failures likewise do not
+is real but power-loss durability is uncertain. The previous generation is
+retained until pointer synchronization succeeds, so crash recovery cannot restore
+a pointer to a reclaimed target. Cleanup failures likewise do not
 undo an already visible publication.
 
 `visibility(commit_sha)` reports the current projected SHA and conservative

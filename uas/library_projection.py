@@ -53,6 +53,7 @@ def _directory(path, *, create=False):
     if create:
         try:
             path.mkdir(mode=0o755)
+            os.chmod(path, 0o755)
         except FileExistsError:
             pass
     info = path.lstat()
@@ -82,6 +83,7 @@ def _bytes(path, limit):
 def _write(path, data, mode=0o444):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, mode)
     try:
+        os.fchmod(fd, mode)  # service umask must not make the public projection unreadable
         with os.fdopen(fd, 'wb', closefd=False) as out:
             out.write(data)
             out.flush()
@@ -225,6 +227,8 @@ class ProjectProjection:
     def _initialize(self):
         state = self.root / STATE
         _directory(state, create=True)
+        if stat.S_IMODE(state.stat().st_mode) != 0o755:
+            _fail()
         staging = state / 'staging'
         try:
             staging.mkdir(mode=0o700)
@@ -265,6 +269,7 @@ class ProjectProjection:
                 generation = self._stage(manifest, {})
                 self._switch(generation)
             _read(self.root, self.scope, self.settings['limits'])
+            _sync(self.root)
             self._reclaim(_selected(self.root))
 
     def _reclaim(self, keep):
@@ -356,7 +361,17 @@ class ProjectProjection:
                 files = {name: tree.files[path] for name, (path, _) in parsed.items()}
                 prior = self.read()
                 if prior.manifest['commit_sha'] == sha:
-                    self.last_error = None
+                    with _guard(self.root, True):
+                        try:
+                            _sync(self.root)
+                        except OSError:
+                            self.last_error = 'PROJECTION_SYNC_UNCERTAIN'
+                            return True
+                        self.last_error = None
+                        try:
+                            self._reclaim(_selected(self.root))
+                        except (OSError, library.LibraryError):
+                            self.last_error = 'PROJECTION_CLEANUP_PENDING'
                     return True
                 manifest = self._manifest(sha, self.clock())
                 generation = self._stage(manifest, files)
@@ -364,16 +379,17 @@ class ProjectProjection:
                 with _guard(self.root, True):
                     self._current()
                     _links(self.root)
-                    previous = _selected(self.root)
+                    _selected(self.root)
                     self.last_error = None
                     self._switch(generation)
                     generation = None
                     # All pinned readers have released the shared lock. Retain
                     # just the new generation; no historical content accumulates.
-                    try:
-                        self._discard(previous)
-                    except OSError:
-                        self.last_error = 'PROJECTION_CLEANUP_PENDING'
+                    if self.last_error != 'PROJECTION_SYNC_UNCERTAIN':
+                        try:
+                            self._reclaim(_selected(self.root))
+                        except (OSError, library.LibraryError):
+                            self.last_error = 'PROJECTION_CLEANUP_PENDING'
                 return True
             except (library.LibraryError, OSError, ValueError, UnicodeError) as error:
                 self.last_error = error.code if isinstance(error, library.LibraryError) else 'PROJECTION_UNAVAILABLE'

@@ -269,6 +269,10 @@ class ProjectionTests(unittest.TestCase):
         with patch.object(module,'_sync',side_effect=sync):self.assertTrue(worker.refresh())
         self.assertEqual(worker.read().manifest['commit_sha'],self.head())
         self.assertEqual(worker.last_error,'PROJECTION_SYNC_UNCERTAIN')
+        self.assertEqual(len(list((worker.root/STATE).glob('?'*32))),2)
+        self.assertTrue(worker.refresh())
+        self.assertEqual(len(list((worker.root/STATE).glob('?'*32))),1)
+        self.assertIsNone(worker.last_error)
 
     def test_bounded_latest_identity_mailbox_and_recovered_publication_signal(self):
         subscription=self.publisher.subscribe(self.scope);self.addCleanup(lambda:self.publisher.unsubscribe(subscription))
@@ -380,6 +384,30 @@ class ProjectionTests(unittest.TestCase):
             thread.join(3)
         self.assertFalse(thread.is_alive());self.assertEqual(out,[False])
         self.assertEqual(worker.read(),before)
+
+    def test_post_switch_cleanup_refusal_never_turns_visibility_into_failure(self):
+        self.register();worker=self.projection()
+        with patch.object(worker,'_reclaim',side_effect=library.LibraryError('UNSAFE_PROJECTION')):
+            self.assertTrue(worker.refresh())
+            self.assertEqual(worker.read().manifest['commit_sha'],self.head())
+            self.assertEqual(worker.last_error,'PROJECTION_CLEANUP_PENDING')
+            self.assertTrue(worker.refresh())
+            self.assertEqual(worker.last_error,'PROJECTION_CLEANUP_PENDING')
+        self.assertTrue(worker.refresh());self.assertIsNone(worker.last_error)
+
+    def test_restrictive_service_umask_does_not_break_participant_read_permissions(self):
+        self.register()
+        prior=os.umask(0o077)
+        try:
+            worker=self.projection();self.assertTrue(worker.refresh())
+        finally:
+            os.umask(prior)
+        self.assertEqual(stat.S_IMODE((worker.root/STATE).stat().st_mode),0o755)
+        self.assertEqual(stat.S_IMODE((worker.root/STATE/'read.lock').stat().st_mode),0o444)
+        self.assertEqual(stat.S_IMODE((worker.root/STATE/'staging').stat().st_mode),0o700)
+        for path in Path(self.scope.reference_root).rglob('*'):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode),0o555 if path.is_dir() else 0o444)
+        self.assertEqual(stat.S_IMODE((worker.root/MANIFEST).stat().st_mode),0o444)
 
     def test_second_supervisor_refused_and_close_stops_background_worker(self):
         worker=self.projection(start=True)
