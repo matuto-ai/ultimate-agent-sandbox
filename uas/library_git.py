@@ -545,6 +545,23 @@ class LibraryGit:
 
     # --- publication ------------------------------------------------------
 
+    def publication_evidence(self, operation, *, current):
+        """Read canonical publication identity without admitting a record.
+
+        Used to verify untrusted historical content before backfilling its
+        operational identity. The fresh trusted current callback grants access;
+        the operation itself grants no authority and causes no store writes.
+        """
+        if not self._started: raise LibraryError('NOT_READY', 'lease')
+        if type(operation) is not Operation or not callable(current):
+            raise LibraryError('INVALID_OPERATION', 'operation')
+        with self._locked():
+            current(); self._fetch(); current()
+            result = self._locate(operation.operation_id, operation.request_id,
+                                  operation.kind, operation.queue_id)
+            self._reset_local()
+            return result
+
     def publication_for(self, operation, *, current):
         """Reconcile one already-recorded operation under fresh service authority.
 

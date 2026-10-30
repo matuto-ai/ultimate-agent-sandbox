@@ -805,12 +805,15 @@ def _human_payload(kind, payload, limits):
         _commit(payload["source_commit"], "payload.source_commit")
     if "preview_id" in payload:
         _token(payload["preview_id"], "payload.preview_id")
-    if "drain_id" in payload and not (kind == "retry" and payload["drain_id"] is None):
+    if "drain_id" in payload and not (kind in ("retry", "reject") and payload["drain_id"] is None):
         _token(payload["drain_id"], "payload.drain_id")
     if "queue_id" in payload:
         _digest_value(payload["queue_id"], "payload.queue_id")
     if "reason" in payload:
-        _token(payload["reason"], "payload.reason")
+        if kind == "reject":
+            reason = _text(payload["reason"], "payload.reason", limits["body_bytes"], multiline=True)
+            if len(reason.encode("utf-8")) > limits["body_bytes"]: _fail("PAYLOAD_TOO_LARGE")
+        else: _token(payload["reason"], "payload.reason")
     for key in ("conclusion", "rationale"):
         if key in payload:
             text = _text(payload[key], "payload." + key, 2**31 - 1, multiline=True)
@@ -1295,13 +1298,13 @@ def drain_transition(value):
     _token(value['drain_id'], 'drain_id')
     for name in ('sequence', 'attempt'):
         if type(value[name]) is not int or not 0 <= value[name] <= 2**53-1: _fail('INVALID_TRANSITION')
-    if value['sequence']==0 or (value['attempt']==0 and value['phase']!='BLOCKED'): _fail('INVALID_TRANSITION')
+    if value['sequence']==0 or (value['attempt']==0 and value['phase'] not in ('BLOCKED','OPERATOR_DISPOSED')): _fail('INVALID_TRANSITION')
     if value['phase'] not in ('STARTED','RETRY_SCHEDULED','COMMITTED','BLOCKED','OPERATOR_DISPOSED'):
         _fail('INVALID_TRANSITION')
     if value['reason'] is not None: _token(value['reason'], 'reason')
     if value['due'] is not None: _timestamp(value['due'], 'due')
     if value['resulting_sha'] is not None: _commit(value['resulting_sha'], 'resulting_sha')
-    if (value['phase'] == 'COMMITTED') != (value['resulting_sha'] is not None): _fail('INVALID_TRANSITION')
+    if (value['phase'] in ('COMMITTED','OPERATOR_DISPOSED')) != (value['resulting_sha'] is not None): _fail('INVALID_TRANSITION')
     if (value['phase'] == 'RETRY_SCHEDULED') != (value['due'] is not None): _fail('INVALID_TRANSITION')
     seen = set()
     for item in _array(value['outcomes'], 'outcomes', 64):
@@ -1314,12 +1317,12 @@ def drain_transition(value):
             for path in _array(item['targets'], 'targets', 64):
                 if (type(path) is not str or len(path)>1024 or '..' in path.split('/')
                         or not path.startswith(('context/','decisions/','research/'))): _fail('INVALID_TRANSITION')
-        elif item['kind'] in ('parked','rejected','adjudicated'):
+        elif item['kind'] in ('parked','rejected','adjudicated','retained'):
             if set(item) != {'queue_id','kind','reason'}: _fail('INVALID_TRANSITION')
             _token(item['reason'], 'reason')
         else: _fail('INVALID_TRANSITION')
     if value['phase'] not in ('COMMITTED','OPERATOR_DISPOSED') and value['outcomes']: _fail('INVALID_TRANSITION')
-    if value['phase'] != 'OPERATOR_DISPOSED' and any(x['kind'] in ('rejected','adjudicated') for x in value['outcomes']):
+    if value['phase'] != 'OPERATOR_DISPOSED' and any(x['kind'] in ('rejected','adjudicated','retained') for x in value['outcomes']):
         _fail('INVALID_TRANSITION')
     _reject_content(value)
     if _size(value)>262144: _fail('INVALID_TRANSITION')

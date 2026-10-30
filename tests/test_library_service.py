@@ -201,7 +201,7 @@ class ServiceTests(unittest.TestCase):
         entry=self.service.scheduler._entries[self.source.scope.project_identity]
         state=entry['state']
         self.service.scheduler._save(entry,{**state,'state':'DISPOSED','due':None,'reason':'HUMAN_DISPOSITION'},self.now,
-            transition=dict(phase='OPERATOR_DISPOSED',outcomes=[dict(queue_id=self.fixture.q,kind='rejected',reason='HUMAN_REJECTED')]))
+            transition=dict(phase='OPERATOR_DISPOSED',resulting_sha=self.source.head(),outcomes=[dict(queue_id=self.fixture.q,kind='rejected',reason='HUMAN_REJECTED')]))
         self.restart()
         self.assertEqual(self.service.scheduler.state(self.source.scope.project_identity)['state'],'DISPOSED')
         self.source.fresh=None

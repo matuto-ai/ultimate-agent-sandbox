@@ -132,6 +132,8 @@ class Attempts:
             if type(scope) is not library.LibraryScope or fresh.canonical() != scope.canonical(): fail('LIBRARY_AUTHENTICATION_REQUIRED')
             if self.assembler._settings()['settings_id'] != settings['settings_id']: fail('CONFIGURATION_CHANGED')
         current()
+        from .library_disposition import find
+        if find(self.publisher,scope,settings,current,drain_id) is not None: fail('DRAIN_DISPOSED')
         with library_deadline.bounded(settings['limits']['attempt_seconds']):
             for record in self._prior_records(drain_id, scope.project_identity):
                 if record['state']=='DETAIL_EXPIRED': fail('DETAIL_EXPIRED')
@@ -190,6 +192,9 @@ class Attempts:
             if not 0 < left <= settings['limits']['attempt_seconds']: fail('ATTEMPT_TIMEOUT')
             return left
         authority()
+        from .library_disposition import find
+        head, tree = self.publisher.project_snapshot(scope, settings, current=authority)
+        if find(self.publisher,scope,settings,authority,drain_id,tree=tree) is not None: fail('DRAIN_DISPOSED')
         # Fix the ordered batch even if source assembly parks before model work.
         batch_id = 'batch-' + library._digest([scope.project_identity, drain_id])
         with self.records() as records:
@@ -237,7 +242,6 @@ class Attempts:
             with self.records() as records:
                 contact = records.record(identity + '-contact', project_identity=scope.project_identity)
             if contact is not None: fail('NEW_ATTEMPT_REQUIRED')
-        head, tree = self.publisher.project_snapshot(scope, settings, current=authority)
         if prior is not None and head != prior['manifest']['input_sha']: fail('NEW_ATTEMPT_REQUIRED')
         remaining()
         assembler = copy(self.assembler)

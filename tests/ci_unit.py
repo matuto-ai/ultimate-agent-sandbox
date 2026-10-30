@@ -1,4 +1,4 @@
-"""Standard discovery, seven complete/disjoint unit partitions, no test exclusions.
+"""Standard discovery, eight complete/disjoint unit partitions, no test exclusions.
 
 Measured modules share work between the parallel one-minute unit jobs. Every
 other module (including future additions) belongs to the remainder. Discovery
@@ -19,9 +19,9 @@ import unittest
 # Keep module ownership stable; new modules default to remainder, never disappear.
 # #168 dispatch real-process/Git suite measured9.4s locally; remainder timed
 # out at61s. Existing slow lane43s hosted has headroom; no excluded tests.
-SLOW_MODULES = frozenset({'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
+SLOW_MODULES = frozenset({'test_library_import', 'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_forge_mutations', 'test_artifact_manual_source',
-                          'test_run_review', 'test_staged_source_closure',
+                          'test_run_review',
                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
 # #155 hosted remainder reached its one-minute job boundary despite passing
@@ -34,8 +34,7 @@ SLOW_MODULES = frozenset({'test_library_dispatch', 'test_peer', 'test_checkouts'
 # #177 run41038439439: scheduler45 tests passed52.913s but job timed out.
 # Service measured23.69s; integration27.108s has room. Move the entire
 # module, preserving exhaustive disjoint inventory and one-minute limits.
-INTEGRATION_MODULES = frozenset({'test_library_service', 'test_context',
-    'test_native_pi_reset_adversarial', 'test_participant',
+INTEGRATION_MODULES = frozenset({'test_library_disposition', 'test_library_service', 'test_participant',
     'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
     'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
     'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
@@ -51,7 +50,7 @@ INTEGRATION_MODULES = frozenset({'test_library_service', 'test_context',
 # #165 moved the measured enqueue module to this parallel lane.
 # #168 follow-up: slow lane hit60s; move existing Hub (~5.7shosted)
 # to additional lane (46s) without changing total inventory/limits.
-ADDITIONAL_MODULES = frozenset({
+ADDITIONAL_MODULES = frozenset({'test_library_observations', 
     'test_library_hub',
     'test_library_enqueue',
     'test_local_three_runs',
@@ -69,7 +68,19 @@ ADDITIONAL_MODULES = frozenset({
 # #178 hosted inspection46cases22.7s nearly fills remainder53.8s. Move it
 # to synthesis30.5s and relocation4.8s back to remainder: ~48/36s; retain
 # every ID, seven lanes, one-minute job ceilings and aggregate dependency graph.
-SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_inspection'})
+# #234 remainder3585passed47.137s but setup/smoke exceeded60s; move
+# relocation23cases6.788s to integration38.858s (~40.3/45.6s).
+# Postmerge #178 synthesis117 tests passed64.044s and55.701s but exceeded
+# unchanged job budget with setup. Move measured observations8.9s to additional
+# (29.7s), import6.6s to slow(35.3s): worst synthesis~48.5s, no exclusions.
+# Next measured run: slow331passed50.413s plus setup exceeded60s. Move
+# staged-source-closure8cases8.2s to synthesis34.429s (~42.2/42.6s).
+# Repeated passing suites still exhausted setup headroom in seven lanes.
+# One parallel matrix lane retains the same 60s roots and <=180s graph.
+# Inspection+relocation ~34s; synthesis+context/reset ~33s; integration ~40s.
+INSPECTION_MODULES = frozenset({'test_library_inspection', 'test_library_relocation', 'test_library_disposition_native'})
+SYNTHESIS_MODULES = frozenset({'test_library_disposition_recovery', 'test_library_attempts', 'test_staged_source_closure',
+    'test_context', 'test_native_pi_reset_adversarial'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 # #177 second hosted run: integration60.174s/remainder49.460s hit job budget.
@@ -82,8 +93,9 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 # Native controls varied19.4–44s, so leave operator alone; the three modules
 # measured5.2s on latest run and remainder37s leaves room without exclusions.
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_library_retention', 'test_library_records', 'test_git_payload'})
+assert not INSPECTION_MODULES & (OPERATOR_MODULES | SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 assert not OPERATOR_MODULES & (SCHEDULER_MODULES | SYNTHESIS_MODULES | SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
-PARTITIONS = ('operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
+PARTITIONS = ('inspection', 'operator', 'slow', 'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
 assert not SCHEDULER_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES | SYNTHESIS_MODULES)
 assert not SYNTHESIS_MODULES & (SLOW_MODULES | INTEGRATION_MODULES | ADDITIONAL_MODULES)
 assert not (SLOW_MODULES & INTEGRATION_MODULES or SLOW_MODULES & ADDITIONAL_MODULES
@@ -94,6 +106,8 @@ def partition_for(identifier):
     if type(identifier) is not str or not identifier:
         raise ValueError('invalid discovered test ID')
     module = identifier.split('.', 1)[0]
+    if module in INSPECTION_MODULES:
+        return 'inspection'
     if module in OPERATOR_MODULES:
         return 'operator'
     if module in SCHEDULER_MODULES:
@@ -159,7 +173,7 @@ def main(argv=None):
         raise ValueError('empty discovered unit partition')
     digest = hashlib.sha256('\n'.join(sorted(case.id() for case in cases)).encode()).hexdigest()
     selected = cases if args.partition == 'all' else groups[args.partition]
-    print(f'Unit inventory: total={len(cases)} slow={len(groups["slow"])} '
+    print(f'Unit inventory: total={len(cases)} inspection={len(groups["inspection"])} slow={len(groups["slow"])} '
           f'integration={len(groups["integration"])} additional={len(groups["additional"])} '
           f'operator={len(groups["operator"])} scheduler={len(groups["scheduler"])} synthesis={len(groups["synthesis"])} remainder={len(groups["remainder"])} selected={args.partition}:{len(selected)} '
           f'ids_sha256={digest}', flush=True)
