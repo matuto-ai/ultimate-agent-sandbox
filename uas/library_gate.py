@@ -431,7 +431,7 @@ class Result:
     observations: tuple = ()
 
 
-def validate(scope, settings, *, proposed, current=None, selected=()):
+def validate(scope, settings, *, proposed, current=None, selected=(), repair=False):
     """Validate the complete proposed Project result, or refuse all of it.
 
     ``proposed`` and ``current`` are ``library_bundle.Tree`` views, and
@@ -444,7 +444,7 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
     filters = contracts.admit_settings_value(settings)["filters"]
     bundle = library_bundle.validate(scope, settings, proposed=proposed,
                                      current=current, selected=selected,
-                                     source_fields=SOURCE_FIELDS)
+                                     source_fields=SOURCE_FIELDS, repair=repair)
     observations = []
     for relative in sorted(set(bundle.added) | set(bundle.updated)):
         text = bundle.files[bundle.prefix + "/" + relative].decode("utf-8")
