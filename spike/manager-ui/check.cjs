@@ -5,21 +5,21 @@ const assert = require('node:assert/strict'), {pathToFileURL} = require('node:ur
 const args = process.argv.slice(2);
 if (!args.includes('--fixtures') || !args[args.indexOf('--fixtures')+1]) throw Error('--fixtures DIRECTORY is required');
 const root = path.resolve(args[args.indexOf('--fixtures')+1]);
-const documents = Object.fromEntries(['connected','disconnected','catching-up','reconnected'].map(name=>[name,fs.readFileSync(path.join(root,name+'.html'),'utf8')]));
+const documents = Object.fromEntries(['connected','disconnected','catching-up','reconnected','library-current','library-stale','library-stale-reconnected'].map(name=>[name,fs.readFileSync(path.join(root,name+'.html'),'utf8')]));
 const dataFor = html=>JSON.parse(html.match(/<script type="application\/json" id="manager-data">([\s\S]*?)<\/script>/)[1]);
 const data = dataFor(documents.connected), project = 'deployment/alpha/stream-alpha', run = 'run-alpha';
 const routes = ['projects','inbox','health','project','room','run'];
 
-function boot(theme,page,name='connected',replacement=null) {
+function boot(theme,page,name='connected',replacement=null,selectedProject=project) {
   const elements=new Map(), listeners=new Map();
   const get=id=>{if(!elements.has(id))elements.set(id,{id,innerHTML:'',textContent:'',hidden:id==='drawer',open:false,isConnected:true,
     focus(){document.activeElement=this;},showModal(){this.open=true;},close(){this.open=false;},addEventListener(type,fn){listeners.set(id+':'+type,fn);}});return elements.get(id);};
   get('manager-data').textContent=JSON.stringify(replacement||dataFor(documents[name]));
-  let url=new URL('file:///manager.html?'+new URLSearchParams({variant:theme,page,project,run}));
+  let url=new URL('file:///manager.html?'+new URLSearchParams({variant:theme,page,project:selectedProject,run}));
   const location={get href(){return url.href;},get search(){return url.search;}};
   const document={body:{className:''},title:'',activeElement:null,getElementById:get,querySelector(){return get('h1');},addEventListener(type,fn){listeners.set(type,fn);}};
-  class FixedDate extends Date {static now(){return Date.parse(data.generated_at);}}
-  const context={URL,URLSearchParams,location,document,Date:FixedDate,history:{pushState(_,__,value){url=new URL(value,url);},replaceState(_,__,value){url=new URL(value,url);}},window:{addEventListener(type,fn){listeners.set(type,fn);}},requestAnimationFrame(fn){fn();},setInterval(){return 1;}};
+  class FixedDate extends Date {static now(){return Date.parse((replacement||dataFor(documents[name])).generated_at);}}
+  const context={URL,URLSearchParams,location,document,Date:FixedDate,history:{pushState(_,__,value){url=new URL(value,url);},replaceState(_,__,value){url=new URL(value,url);}},window:{addEventListener(type,fn){listeners.set(type,fn);}},requestAnimationFrame(fn){fn();},setInterval(fn){listeners.set("interval",fn);return 1;}};
   vm.createContext(context);
   vm.runInContext(documents[name].match(/<script>([\s\S]*?)<\/script>/)[1],context,{filename:'manager-ui-prototype.html',timeout:1000});
   return {context,get,document,listeners};
@@ -41,6 +41,30 @@ for(const name of ['disconnected','catching-up']){
   assert(html.includes('data-status="stale"')&&html.includes(`data-status="${name==='catching-up'?'catching-up':'disconnected'}"`));
   assert(!html.includes('class="status good" data-status="disconnected"'));
 }
+// Library metadata stays attached to the selected authenticated Room only.
+for(const name of Object.keys(documents)){
+  const ui=boot('C','project',name),html=ui.get('app').innerHTML;
+  assert(html.includes('Library operations')&&html.includes('library-service')&&html.includes('BLOCKED'));
+  assert(html.includes('data-library-actions')&&html.includes('data-library-settings'));
+  assert(!html.includes('data-status="healthy"'));
+  const expected=name==='library-current'?'current':['disconnected','catching-up','library-stale','library-stale-reconnected'].includes(name)?'stale':'unknown';
+  assert(ui.context.sourceLine(ui.context.stateFor().project,"library").includes(`data-status="${expected}"`),name+': literal Library freshness');
+  const isolated=structuredClone(dataFor(documents[name]));isolated.rooms=isolated.rooms.filter(room=>room.metadata.project_id==='beta');
+  const missing=boot('D','project',name,isolated,'deployment/beta/stream-beta').get('app').innerHTML;
+  assert(missing.includes('Library observation unknown or unavailable'));
+  assert(!missing.includes('github.com/1001')&&!missing.includes('drain-alpha'),'cross-Project metadata leaked');
+}
+const aging=boot('C','project','library-current');
+const agingProject=aging.context.stateFor().project,agingSource=agingProject.view.projection.sections.library;
+agingSource.observed_at=new Date(Date.parse(data.generated_at)-29000).toISOString();
+assert.equal(aging.context.libraryQuality(agingProject,agingSource),'current');
+vm.runInContext('Date.now = () => '+(Date.parse(data.generated_at)+2000),aging.context);
+assert.equal(aging.context.libraryQuality(agingProject,agingSource),'stale','source TTL expires before fresh Hub TTL');
+aging.listeners.get('interval')();
+assert(aging.get('app').innerHTML.match(/<section class="library-operations"[\s\S]*?data-status="stale"/),'retained visible Library provenance must age without a new document');
+const metadataOnly=structuredClone(data);
+metadataOnly.rooms[0].view.projection.sections.library.value['github.com/1001'].title='CONTENT_SENTINEL_180';
+assert(!boot('C','project','connected',metadataOnly).get('app').innerHTML.includes('CONTENT_SENTINEL_180'),'render must whitelist metadata');
 const interaction=boot('C','run');
 interaction.context.projectDetail(project);assert(interaction.get('drawer-body').innerHTML.includes('Configured Project binding'));
 interaction.context.personDetail('alice',project);assert(interaction.get('drawer-body').innerHTML.includes('remaining')&&interaction.get('drawer-body').innerHTML.includes('capabilities'));
@@ -474,7 +498,7 @@ async function browserCheck(){
       const accessibility=await send('Accessibility.getFullAXTree');
       assert(accessibility.nodes.some(node=>node.role?.value==='heading'&&node.name?.value===measured.heading));
       assert(accessibility.nodes.some(node=>node.role?.value==='navigation'&&node.name?.value==='Project and Run hierarchy'));
-      if(route==='projects'||route==='run'){const name=`${theme}-${route}.png`,shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);}
+      if(route==='projects'||route==='run'||route==='project'){const name=`${theme}-${route}.png`,shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);}
       receipts.push({theme,route,...measured,accessibility:'heading-and-navigation-present'});
     }
     await evaluate(`document.querySelector('[data-gate-index]').click();new Promise(resolve=>requestAnimationFrame(resolve))`);
@@ -502,7 +526,21 @@ async function browserCheck(){
     await evaluate(`installDocument(${JSON.stringify(dataFor(documents.disconnected))})`);
     assert(await evaluate(`!document.getElementById('item-dialog').open&&document.querySelector('[data-action-panel]').disabled`));
     await evaluate(`installActionHost(${JSON.stringify(project)},null)`);
-    proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
+    // Repeated real navigation and interrupted refresh on the existing Project route.
+    await evaluate(`document.querySelector('a[data-nav][href*="page=project&"]').click()`);
+    for(const name of ['library-current','library-stale','disconnected','library-stale-reconnected','reconnected','reconnected']){
+      await evaluate(`installDocument(${JSON.stringify(dataFor(documents[name]))})`);
+      const library=await evaluate(`({text:document.querySelector('.library-operations').textContent,controls:document.querySelectorAll('.library-operations button,.library-operations input').length})`);
+      assert(library.text.includes('BLOCKED')&&library.text.includes('library-service')&&library.controls===0);
+      const expected=name==='library-current'?'current':['library-stale','disconnected','library-stale-reconnected'].includes(name)?'stale':'unknown';
+      assert(library.text.includes('data '+expected),name+': Library freshness after refresh');
+    }
+    await evaluate(`document.querySelector('.library-operations').scrollIntoView()`);
+    const libraryShot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library.png'),Buffer.from(libraryShot.data,'base64'));screenshots.push('D-library.png');
+    await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+    assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'mobile Library overflow');
+    const libraryMobile=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(output,'D-library-mobile.png'),Buffer.from(libraryMobile.data,'base64'));screenshots.push('D-library-mobile.png');
+    proof={status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
     failure=error;failureElapsed=Math.max(0,Date.now()-started);
     const observed=current?.captureFailure(error);

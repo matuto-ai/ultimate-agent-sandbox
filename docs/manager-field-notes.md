@@ -172,3 +172,30 @@ The unresolved-action panel also offers explicit read-only inspection of the
 unchanged original packet. It clears uncertainty only when the owner confirms a
 matching durable receipt. Failed navigation or inspection cannot overwrite that
 original uncertain mutation, and neither operation repeats the mutation.
+
+## Library operations — issue #180
+
+The existing Project page now exposes the authenticated Room's `library`
+observation. It is a metadata-only view, not a bundle/content browser. Explicit
+field groups cover queue/drain state, publication/projection identities, bounded
+measurement windows, literal provider observations and classified failures.
+Source owner, version, observation/commit times, status, freshness and reason
+remain visible through the existing provenance renderer. Nulls stay unknown;
+missing feedback/effectiveness stays unmeasured. BLOCKED, disconnected, unknown,
+and stale are not flattened into one health indicator. An empty queue, current
+projection or successful publication never implies healthy inference or quality.
+
+Library action and installation-wide settings attachment points are separate,
+inert sections. This slice adds no mutation, lifecycle control or operator API.
+All displayed values come from an explicit metadata field allowlist; there is no
+arbitrary row enumeration, title/body/prompt display or browser-side fetch.
+
+The existing Field Notes fixture/check covers validated Library-owned rows through
+RoomStream, ManagerSession, ManagerReadModel and FieldNotesDocument: explicit
+current, unknown, stale under a newer Hub cut, disconnected/catching-up, and
+repeated reconnection (including an unchanged stale source). The second authorized
+Room cannot inherit the first Room's Library metadata. The one existing guarded
+Chrome proof additionally captures Project/Library desktop and mobile layouts and
+exercises refresh interruption/repetition, without adding a suite or live account.
+The fixture is a typed owner-contract sample; actual Library Owner/Hub production
+and authenticated binding are covered by `tests/test_library_observations.py`.

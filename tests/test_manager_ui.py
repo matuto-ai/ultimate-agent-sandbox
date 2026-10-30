@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from uas.ledger import Command, Event, Origin, RoomLedger, Transition
 from uas.manager_journey import JOURNEY_WINDOW, project_journey
-from uas.manager_projection import ProjectionError, SourceObservation
+from uas.manager_projection import ProjectionError, SourceObservation, LIBRARY_FIELDS
 from uas.manager_stream import ManagerReadModel, RoomIdentity, RoomStream, StreamError, validate_projection
 from uas.manager_transport import ManagerSession
 from uas.manager_ui import BOOTSTRAP, FieldNotesDocument, ProjectBinding
@@ -67,6 +67,29 @@ def initial_state():
             'gate_evaluations': evaluations}
 
 
+def library_observation(now, *, freshness='unknown', status='known', project='github.com/1001'):
+    """Validated Library-owned metadata fixture, through real stream/cache/render.
+
+    Owner generation, Git and authenticated Hub binding are separately covered by
+    test_library_observations; no content or source fetch enters this UI fixture.
+    """
+    if status != 'known':
+        return SourceObservation('library', 'library-service', None, None, None,
+                                 status=status, reason='SOURCE_NOT_OBSERVED')
+    row = dict.fromkeys(LIBRARY_FIELDS)
+    row.update(project_identity=project, active_depth=2, parked_depth=1,
+        oldest_age_seconds=120, adjudication_wait_seconds=60, published_drafts=3,
+        completed_outcomes=None, drain_state='BLOCKED', drain_id='drain-alpha', attempt=1,
+        retry_count=0, queue_status='known', projection_state='current',
+        canonical_sha='c' * 40, projected_sha='c' * 40, projected_at=now, replay_lag=0,
+        window_start=now, window_end=now, coverage='complete', provider_state='unknown',
+        provider_mode='unknown', effectiveness='unmeasured', feedback='unmeasured',
+        capture_failures=0, source_failures=1, model_failures=0, validation_failures=0,
+        transport_failures=0, audit_failures=0, recovery_failures=0)
+    return SourceObservation('library', 'library-service', 1, now, {project: row},
+                             freshness=freshness)
+
+
 def observations(now):
     values = {
         'seats': ('supervisor', {'alice': {'participant_id': 'alice', 'actor_id': 'alice',
@@ -84,7 +107,7 @@ def observations(now):
             'semantics': 'remaining', 'amount': 0, 'unit': 'requests', 'state': 'known'}}),
     }
     return tuple(SourceObservation(section, owner, 1, now, rows, freshness='unknown')
-                 for section, (owner, rows) in values.items())
+                 for section, (owner, rows) in values.items()) + (library_observation(now),)
 
 
 def browser_documents(root, now):
@@ -112,6 +135,38 @@ def browser_documents(root, now):
             session.handle({'kind': 'finish', 'transfer_id': transfer.transfer_id})
             connected = ui.render(now=now)
             connected_data = ui.capture(now=now)
+            # A fresh Hub cut never renews the older Library owner's sample.
+            later = (datetime.fromisoformat(now) + timedelta(seconds=60)).isoformat()
+            # Explicit producer freshness is distinct from current transport.
+            current_observations = tuple(item for item in observations(now) if item.section != 'library') + (library_observation(now, freshness='current'),)
+            current_stream = RoomStream(ledger, identity)
+            current_transfer = current_stream.capture(None, captured_at=now, observations=current_observations)
+            # Separate cache/stream to avoid changing a same-version observation.
+            current_model = ManagerReadModel(root / 'current.sqlite3', stale_after_seconds=30)
+            current_session = ManagerSession(current_model, identity)
+            try:
+                current_session.handle({'kind':'begin','transfer':current_transfer.begin()})
+                current_session.handle({'kind':'finish','transfer_id':current_transfer.transfer_id})
+                current_ui = FieldNotesDocument(current_model, (binding, idle))
+                library_current = current_ui.render(now=now)
+                # A later Hub capture carries the unchanged owner observation.
+                current_session.close(); current_model.close()
+                current_model = ManagerReadModel(root / 'stale.sqlite3', stale_after_seconds=30)
+                current_session = ManagerSession(current_model, identity)
+                current_ui = FieldNotesDocument(current_model, (binding, idle))
+                older = current_stream.capture(None, captured_at=later, observations=current_observations)
+                current_session.handle({'kind':'begin','transfer':older.begin()})
+                current_session.handle({'kind':'finish','transfer_id':older.transfer_id})
+                library_stale = current_ui.render(now=later)
+                older = current_stream.capture(5, captured_at=later, observations=current_observations)
+                current_session.close()
+                current_session = ManagerSession(current_model, identity)
+                current_session.handle({'kind':'begin','transfer':older.begin()})
+                current_session.handle({'kind':'finish','transfer_id':older.transfer_id})
+                library_stale_reconnected = current_ui.render(now=later)
+            finally:
+                current_session.close(); current_model.close()
+
             session.close()
             disconnected = ui.render(now=now)
             append(ledger, 'run.resumed', {'run_id': 'run-alpha', 'generation': 1, 'status': 'ACTIVE'})
@@ -123,7 +178,7 @@ def browser_documents(root, now):
             session.handle({'kind': 'finish', 'transfer_id': resumed.transfer_id})
             reconnected = ui.render(now=now)
             return {'connected': connected, 'disconnected': disconnected, 'catching-up': catching_up,
-                    'reconnected': reconnected}, connected_data
+                    'reconnected': reconnected, 'library-current': library_current, 'library-stale': library_stale, 'library-stale-reconnected': library_stale_reconnected}, connected_data
         finally:
             session.close(); model.close()
 
@@ -150,6 +205,22 @@ class ManagerUITests(unittest.TestCase):
         self.assertEqual('unknown', next(iter(data['rooms'][0]['view']['projection']['sections']['gate_truth']['value'].values()))['state'])
         self.assertIn('"status":"disconnected"', documents['disconnected'])
         self.assertIn('"catching_up":true', documents['catching-up'])
+
+    def test_library_fixture_is_strict_metadata_and_keeps_own_source_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            documents, data = browser_documents(Path(directory), TIME)
+        source = data['rooms'][0]['view']['projection']['sections']['library']
+        self.assertEqual(source['source_owner'], 'library-service')
+        self.assertEqual(source['freshness'], 'unknown')
+        self.assertEqual(source['observed_at'], TIME)
+        self.assertEqual(source['value']['github.com/1001']['drain_state'], 'BLOCKED')
+        self.assertIn('"freshness":"stale"', documents['library-stale'])
+        for marker in ('PRIVATE_TITLE', 'PRIVATE_BODY', 'RAW_PROMPT', 'SECRET_MATCH'):
+            self.assertNotIn(marker, json.dumps(data))
+        bad = library_observation(TIME)
+        bad.rows['github.com/1001']['title'] = 'PRIVATE_TITLE'
+        with self.assertRaises(ProjectionError):
+            bad.document()
 
     def test_v1_upgrade_same_cut_restart_and_replay_keep_old_event_shape(self):
         old = RoomStream(self.ledger, self.identity, schema_version=1)
