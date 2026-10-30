@@ -68,7 +68,9 @@ class DispatchTests(unittest.TestCase):
     def hosted(self):
         doc=support.document();doc['repository'].update(self.settings['repository']);doc['model']['placement']='hosted'
         self.settings=support.settings(doc,egress=({'project_id':'alpha','model_profile_ref':'synth-local','approval_ref':'egress-v1'},))
-        self.request=replace(self.request,settings_id=self.settings['settings_id'])
+        self.source.settings=self.settings
+        self.request=self.source.assemble(list(self.request.selected),attempt=2).request
+        self.reply=json.dumps(dict(version=1,drain_id='drain-1',attempt=2,operations=[],outcomes=[])).encode()
         self.profile=replace(self.profile,placement='hosted',endpoint='https://provider.example/selected',region='eu',retention='shortest-accepted')
         self.refresh();self.selection=replace(self.selection,hosted_approval=Evidence('egress-v1',self.profile.identity(),self.scope.project_identity,'2030-01-01T00:00:00+00:00'))
     def test_hosted_approved(self):
@@ -169,4 +171,12 @@ class DispatchTests(unittest.TestCase):
     def test_rehashed_changed_material_is_not_prepared(self):
         raw=self.request.encoded.replace(b'PRIVATE_DATA_MARKER',b'CHANGED_PRIVATE_DATA')
         self.request=replace(self.request,encoded=raw,sha256=hashlib.sha256(raw).hexdigest(),tokens=len(raw))
+        self.refuse('MODEL_REQUEST_NOT_PREPARED')
+
+    def test_same_bytes_cannot_claim_new_canonical_input(self):
+        self.request=replace(self.request,input_sha='a'*40);self.refuse('MODEL_REQUEST_NOT_PREPARED')
+    def test_same_bytes_cannot_claim_new_settings(self):
+        doc=support.document();doc['repository'].update(self.settings['repository'])
+        doc['limits']['attempt_seconds']=60;self.settings=support.settings(doc)
+        self.request=replace(self.request,settings_id=self.settings['settings_id'])
         self.refuse('MODEL_REQUEST_NOT_PREPARED')

@@ -21,7 +21,7 @@ def case(identifier):
 
 class CIPartitionTests(unittest.TestCase):
     def test_fixed_measured_modules_and_every_future_module_default_to_remainder(self):
-        self.assertEqual(ci.SLOW_MODULES, {'test_peer', 'test_checkouts',
+        self.assertEqual(ci.SLOW_MODULES, {'test_library_dispatch', 'test_peer', 'test_checkouts',
                                           'test_gate_evaluation', 'test_forge_mutations',
                                           'test_artifact_manual_source',
                                           'test_run_review', 'test_staged_source_closure',
@@ -71,7 +71,7 @@ class CIPartitionTests(unittest.TestCase):
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
-        self.assertEqual(len(groups['slow']), 16)
+        self.assertEqual(len(groups['slow']), 17)
         self.assertEqual(len(groups['integration']), 21)
         self.assertEqual(len(groups['additional']), 22)
         self.assertEqual(len(groups['remainder']), 2)

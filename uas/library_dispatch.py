@@ -284,7 +284,15 @@ class Dispatcher:
                     payload['drain_id'], payload['attempt']])
                 with LibraryRecords(self.records_path, self.deployment_id) as records:
                     prepared = records.record(operation_id, project_identity=scope.project_identity)
+                preparation = {'basis': request.input_sha, 'selected': list(request.selected),
+                    'accepted': [item['reference'] for item in payload['data']['concepts']],
+                    'indexes': [item['reference'] for item in payload['data']['indexes']],
+                    'attempt': payload['attempt']}
                 if (prepared is None or prepared['receipt'] is None
+                        or prepared['kind'] != 'source-park'
+                        or prepared['settings_id'] != settings['settings_id']
+                        or prepared['payload_sha256'] != digest(preparation)
+                        or prepared['receipt']['reason'] != 'REQUEST_PREPARED'
                         or prepared['receipt']['outcome'] != 'ACKNOWLEDGED'
                         or prepared['receipt']['acknowledgement'] != request.sha256):
                     fail('MODEL_REQUEST_NOT_PREPARED')

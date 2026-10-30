@@ -17,7 +17,9 @@ import unittest
 # existing parallel jobs (19.815s / 27.673s), not new jobs or larger limits.
 # Estimates become 37.396 / 38.896 / 43.763s; timings vary, not a guarantee.
 # Keep module ownership stable; new modules default to remainder, never disappear.
-SLOW_MODULES = frozenset({'test_peer', 'test_checkouts', 'test_gate_evaluation',
+# #168 dispatch real-process/Git suite measured9.4s locally; remainder timed
+# out at61s. Existing slow lane43s hosted has headroom; no excluded tests.
+SLOW_MODULES = frozenset({'test_library_dispatch', 'test_peer', 'test_checkouts', 'test_gate_evaluation',
                           'test_forge_mutations', 'test_artifact_manual_source',
                           'test_run_review', 'test_staged_source_closure',
                           'test_claude_permission_policy', 'test_artifact_native_source',

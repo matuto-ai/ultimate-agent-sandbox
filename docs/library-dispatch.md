@@ -31,7 +31,8 @@ mandatory `current(request)` checker are revalidated. That checker owns current
 input SHA and batch/source grants in service composition;
 it must return literal true only for the exact request. Separately, the consumer
 reads the Project-fenced T16 preparation receipt from the configured operational
-store and compares its acknowledged digest with the exact request digest. A
+store and compares its acknowledged digest with the exact request digest, its
+settings version and preparation-intent hash (input SHA and selected material). A
 self-hash or boolean callback alone cannot authenticate prepared material. Settings alone cannot
 supply those facts. The exact payload hash, Project/settings identity, count,
 selected draft IDs, token count, fixed instructions, empty tools and disabled
