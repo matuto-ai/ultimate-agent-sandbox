@@ -58,6 +58,8 @@ class LocalController:
     def ledger(self, room):
         """The running Room's canonical ledger; no guessed instance or path."""
         from .ledger import RoomLedger
+        if self.native is None:
+            raise LocalInstallationError('LIBRARY_LEDGER_UNAVAILABLE')
         path = self._ledgers.get(room)
         if path is None:
             owner, backend, state = self.native.resources(room)
@@ -81,19 +83,22 @@ class LocalController:
         if action == 'start':
             if self.host_lock_fd is not None:
                 self.native.prepare_start(room, owner_lock_fd=self.host_lock_fd)
-            # The Project projection is published before the Room runs, so a
-            # refused bind starts no container and a failed start unbinds it.
+            # A Room whose projection this request bound must not keep it when
+            # the Room itself fails to start; a projection the host published at
+            # startup is left to the lease, which removes no content.
+            bound = False
             if self.library is not None and not self.library.bound(room):
                 self.library.start_room(room)
+                bound = True
             try:
                 result = self.native.start(room)
+                owner, backend, state = self.native.resources(room)
+                self._ledgers.pop(room, None)  # a restarted Room owns a new ledger path
+                service = self.services.ensure(room, owner, backend, state)
             except BaseException:
-                if self.library is not None:
+                if bound:
                     self.library.stop_room(room)
                 raise
-            owner, backend, state = self.native.resources(room)
-            self._ledgers.pop(room, None)  # a restarted Room owns a new ledger path
-            service = self.services.ensure(room, owner, backend, state)
             manager = ({'status':'owned-by-runtime-child'} if service.get('manager_owner') in {'runtime','unknown'} else
                        self.manager.ensure(room, owner, backend, state) if self.manager else {'status':'not-configured'})
             return {**result, 'services': service, 'manager':manager}

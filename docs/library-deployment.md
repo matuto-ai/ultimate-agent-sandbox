@@ -115,9 +115,9 @@ The selected document is version 1 with these fields:
 | Field | Content |
 | --- | --- |
 | `settings` | The complete Library settings document, admitted by the existing validator. Hosted egress needs an approval this document cannot grant. |
-| `credentials` | Maps each referenced credential to the exact host environment variable names that carry its Git transport environment. Each reference must be a configured `git` credential; a missing variable fails the host closed. |
-| `rooms` | Approved Rooms and their immutable source identity. The Project binding itself stays in the closed installation configuration, so paths, repository coordinates and Room ownership cannot drift from it. |
-| `qualification` | Externally established target qualification evidence: target, branch and the `qualified` flag it establishes. False, absent or mismatched evidence fails startup at `TARGET_NOT_QUALIFIED` before any clone work. |
+| `credentials` | Maps each referenced credential to the exact host environment variable names that carry its Git transport environment, limited to the admitted Git transport variables. Each reference must be a configured `git` credential; a missing variable fails the host closed. |
+| `rooms` | Approved Rooms and their immutable source identity. Every configured Room must be bound, so no Room is left without an admitted Library by omission. The Project binding itself stays in the closed installation configuration, so paths, repository coordinates and Room ownership cannot drift from it. |
+| `qualification` | Operator-supplied evidence for the exact target and branch it names: the target, the branch and the `qualified` flag. Establishing that evidence stays with #157; this wiring only refuses to run when it is absent, false or inconsistent. Failure happens at `TARGET_NOT_QUALIFIED` before any clone work. |
 | `model` | The fixed synthesis route: one qualified profile identity plus the exact adapter argv. The adapter inherits only the host environment; it never receives Library content on its command line. |
 | `operator` | Optional host-local human principal (`human_id`, `actor_id`). Omitted, it is the installation owner, which grants the Library human actions over the approved Projects only; an explicit `null` disables the T22 endpoint. |
 
@@ -128,16 +128,19 @@ The selected document is version 1 with these fields:
 - `library.start()` runs before any Room binds. Absent, unsafe, unqualified or
   credential-less configuration raises there, so the host refuses to serve
   instead of running without its Library.
-- Room Start publishes that Room's read-only projection through
-  `DeploymentLibrary.start_room` before the Room's container starts, and unbinds
-  it if the native start fails. Room Stop calls `stop_room` after the native
-  stop, which releases only that projection; canonical content and the singleton
-  keep running.
+- The composition publishes every approved Room's read-only projection when the
+  Library starts, so the first Room Start finds its projection current. A Room
+  Start whose projection an earlier Stop released binds it again before the
+  Room's container starts, and if that start or its Hub service fails the
+  binding is released again; releasing a binding removes no content.
+- Room Stop calls `stop_room` after the native stop, which releases only that
+  projection; canonical content and the singleton keep running.
 - The T22 operator endpoint in `<installation root>/library/operator` serves the
   authenticated installation owner with no Hub and no bound Room, including
   after a Room stopped.
 - Host shutdown stops the remaining Rooms, then the Library singleton, then the
-  Hub service owner.
+  Hub service owner. A refused Library selection runs the same shutdown
+  accounting, so a failed start cannot skip it.
 
 The supervisor mints `scope_for` from an installation-authority origin over the
 exact approved binding. That origin is used only inside the host service for
@@ -173,11 +176,17 @@ controlled fixtures. It covers:
   stopped Room;
 - a missing referenced credential variable refusing to serve at all;
 - false qualification evidence stopping the host before any clone exists;
-- a document naming a foreign Room, an unknown credential or malformed
+- a Room restart after Stop republishing the same canonical generation;
+- an unsafe, group-writable service-state directory stopping the host before any
+  clone exists;
+- host shutdown stopping the Rooms it still owned, then the singleton, with the
+  operator path still serving a Room that is not bound;
+- a document naming a foreign Room, a Room outside the configured set, an
+  unknown credential, a non-Git-transport environment name or malformed
   qualification evidence refused by the closed selection schema.
 
-It also covers the default installation-owner operator path and an explicit
-`null` that disables only the operator endpoint while the host and Rooms keep
-running. It proves installed wiring and projection boundaries. It does not prove a VM,
+It also covers the default installation-owner operator path, an explicit `null`
+that disables only the operator endpoint while the host and Rooms keep running,
+and both Rooms' published roots so neither carries the other's Project. It proves installed wiring and projection boundaries. It does not prove a VM,
 Docker or live native Room, a live model provider, actual target qualification,
 or the split-process Hub enqueue route above.

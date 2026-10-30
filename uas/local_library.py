@@ -26,7 +26,7 @@ from .library_assembly import Assembler
 from .library_attempts import Attempts
 from .library_deployment import DeploymentLibrary
 from .library_dispatch import Dispatcher, Gateway, Profile
-from .library_git import LibraryGit
+from .library_git import _ENVIRONMENT, LibraryGit
 from .local_installation import LocalInstallationError, require
 
 FIELDS = ('version', 'settings', 'credentials', 'rooms', 'qualification', 'model', 'operator')
@@ -44,9 +44,10 @@ def fail(code):
 
 
 def _names(value):
+    """Only the admitted Git transport variables; admission is the closed check."""
     require(type(value) is list and 0 < len(value) <= 16, 'LIBRARY_DOCUMENT_CREDENTIALS')
     for name in value:
-        require(type(name) is str and name.isidentifier() and name.isupper(),
+        require(type(name) is str and name in _ENVIRONMENT,
                 'LIBRARY_DOCUMENT_CREDENTIALS')
     require(len(set(value)) == len(value), 'LIBRARY_DOCUMENT_CREDENTIALS')
     return tuple(value)
@@ -81,6 +82,9 @@ def _rooms(value, config):
     """Approved Rooms plus their immutable source identity; Project stays configured."""
     require(type(value) is dict and 0 < len(value) <= 64, 'LIBRARY_DOCUMENT_ROOMS')
     configured = {room['id']: room for room in config['rooms']}
+    # Partial adoption would leave a configured Room without a Library and only
+    # fail on its first Start, so the document must bind every Room.
+    require(set(value) == set(configured), 'LIBRARY_DOCUMENT_ROOMS')
     result = {}
     for room, entry in value.items():
         require(room in configured, 'LIBRARY_DOCUMENT_ROOMS')
@@ -163,6 +167,11 @@ def admit(raw, config):
             'operator': _operator(raw['operator'] if 'operator' in raw else INSTALLATION_OWNER)}
 
 
+def _in_process_ingress():
+    """Supervisor ingress seam: only this host's own Service queue reports."""
+    return True
+
+
 def _environment(names):
     """Referred host variables only; a missing one refuses the whole startup."""
     if any(name not in os.environ for name in names):
@@ -218,7 +227,7 @@ def composition(admitted, *, deployment_id, state_root, ledger_for,
         rooms={room: {'project': entry['project'], 'source_identity': entry['source_identity']}
                for room, entry in admitted['rooms'].items()},
         scope_for=scope_for, runner_for=runner_for, ledger_for=ledger_for,
-        authenticate=lambda: True,
+        authenticate=_in_process_ingress,
         qualification=lambda settings: (
             admitted['qualification']['qualified'] is True
             and admitted['qualification']['target'] == settings['repository']['target']

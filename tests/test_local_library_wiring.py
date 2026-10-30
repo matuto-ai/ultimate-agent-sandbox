@@ -159,7 +159,7 @@ class LocalLibraryWiringTests(unittest.TestCase):
                            operation_id='register-' + room, request_id='register-' + room,
                            payload={}, at=support.AT), settings)
 
-    def host(self, driver):
+    def host(self, driver, *, stop_rooms=()):
         """The real ``run_host`` with a controlled native backend, Hub and Manager."""
         native = self.backend()
         services = Mock()
@@ -168,6 +168,8 @@ class LocalLibraryWiringTests(unittest.TestCase):
 
         def serve(_installation, controller, **_):
             driver(controller)
+            # Rooms the fixture reports as still running when host shutdown starts.
+            services.rooms = stop_rooms
 
         with patch('uas.local_library.open_library', side_effect=self.open_library), \
              patch('uas.local_native.LocalNativeHost', return_value=native), \
@@ -239,19 +241,89 @@ class LocalLibraryWiringTests(unittest.TestCase):
             for room in ('alpha', 'beta'):
                 self.register(room)
             controller.handle(self.packet('start', 'alpha'))
-            reference, bundle, snapshot = self.projection('alpha')
-            observed['names'] = sorted(path.name for path in reference.iterdir()
-                                       if not path.name.startswith('.'))
-            files = [path for path in bundle.rglob('*')] + [snapshot]
-            observed['text'] = '\n'.join(path.read_text(errors='replace')
-                                         for path in files if path.is_file())
+            observed['published'] = {}
+            observed['text'] = []
+            for room in ('alpha', 'beta'):
+                reference, bundle, snapshot = self.projection(room)
+                observed['published'][room] = sorted(
+                    path.name for path in reference.iterdir()
+                    if not path.name.startswith('.'))
+                files = [path for path in bundle.rglob('*')] + [snapshot]
+                observed['text'].append('\n'.join(path.read_text(errors='replace')
+                                                   for path in files if path.is_file()))
             observed['private'] = str(Path(self.install.root) / 'library')
 
         self.host(driver)
-        self.assertEqual(observed['names'], ['library', 'library.snapshot.json'])
-        self.assertNotIn('.git', observed['names'])
-        self.assertNotIn(observed['private'], observed['text'])
-        self.assertNotIn('example/beta', observed['text'])
+        for room in ('alpha', 'beta'):
+            self.assertEqual(observed['published'][room], ['library', 'library.snapshot.json'])
+            self.assertNotIn('.git', observed['published'][room])
+        self.assertNotIn(observed['private'], '\n'.join(observed['text']))
+        self.assertNotIn('clone.git', '\n'.join(observed['text']))
+        # Each Room's published content carries only its own Project identity.
+        self.assertIn('example/alpha', observed['text'][0])
+        self.assertNotIn('example/beta', observed['text'][0])
+        self.assertIn('example/beta', observed['text'][1])
+        self.assertNotIn('example/alpha', observed['text'][1])
+
+    def test_room_restart_after_stop_republishes_the_same_canonical_generation(self):
+        self.selected()
+        observed = {}
+
+        def driver(controller):
+            self.register('alpha')
+            controller.handle(self.packet('start', 'alpha'))
+            _, _bundle, snapshot = self.projection('alpha')
+            observed['first'] = json.loads(snapshot.read_text())['commit_sha']
+            observed['bound'] = self.deployment.bound('alpha')
+            controller.handle(self.packet('stop', 'alpha'))
+            observed['unbound'] = self.deployment.bound('alpha')
+            controller.handle(self.packet('start', 'alpha'))
+            observed['second'] = json.loads(self.projection('alpha')[2].read_text())['commit_sha']
+            observed['rebound'] = self.deployment.bound('alpha')
+            observed['head'] = self.deployment.publisher.head()
+
+        self.host(driver)
+        self.assertTrue(observed['bound'])
+        self.assertFalse(observed['unbound'])
+        self.assertTrue(observed['rebound'])
+        self.assertEqual(observed['second'], observed['first'])
+        self.assertEqual(observed['head'], observed['first'])
+
+    def test_unsafe_service_state_root_stops_the_host_before_any_clone(self):
+        self.selected()
+        state = Path(self.install.root) / 'library'
+        state.mkdir(mode=0o700)
+        os.chmod(state, 0o777)  # group/other-writable service state
+        served = []
+        with self.assertRaises(library.LibraryError) as raised:
+            self.host(served.append)
+        self.assertEqual(raised.exception.code, 'INVALID_DEPLOYMENT_STATE')
+        self.assertEqual(served, [])
+        self.assertFalse((state / 'clone.git').exists())
+
+    def test_shutdown_stops_bound_rooms_then_the_singleton_and_keeps_the_operator_path(self):
+        self.selected()
+        observed = {}
+
+        def driver(controller):
+            for room in ('alpha', 'beta'):
+                self.register(room)
+                controller.handle(self.packet('start', room))
+            controller.handle(self.packet('stop', 'alpha'))
+            controller.handle(self.packet('stop', 'beta'))
+            observed['bound'] = [room for room in ('alpha', 'beta')
+                                 if self.deployment.bound(room)]
+            observed['stopped_room'] = library_controls.request(
+                Path(self.install.root) / 'library' / 'operator',
+                {'version': 1, 'action': 'observe', 'project_id': 'beta',
+                 'for_action': 'drain'})
+
+        native = self.host(driver, stop_rooms=('alpha', 'beta'))
+        self.assertEqual(observed['bound'], [])
+        self.assertEqual(observed['stopped_room']['result']['project_id'], 'beta')
+        self.assertEqual(sorted(call.args[0] for call in native.stop.call_args_list),
+                         ['alpha', 'alpha', 'beta', 'beta'])
+        self.assertFalse(self.deployment.running)
 
     def test_explicit_null_operator_disables_the_host_local_path_only(self):
         observed = {}
@@ -293,6 +365,8 @@ class LocalLibraryWiringTests(unittest.TestCase):
     def test_document_must_bind_configured_rooms_and_known_credentials(self):
         broken = (
             self.library_document(rooms={'gamma': {'source_identity': '1003'}}),
+            self.library_document(rooms={'alpha': {'source_identity': '1001'}}),
+            self.library_document(credentials={'alice-git': {'environment': ['PATH']}}),
             self.library_document(credentials={'unknown-cred': {'environment': [ENVIRONMENT]}}),
             self.library_document(qualification={'evidence': {'version': 1}}),
         )

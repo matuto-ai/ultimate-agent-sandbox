@@ -36,13 +36,15 @@ def run_host(installation):
         # The controller owns each running Room's ledger path, so the Library
         # composition reads that exact ledger instead of guessing an instance.
         owner = {'controller': None}
-        library = open_library(installation,
-            ledger_for=lambda room: owner['controller'].ledger(room))
-        controller = LocalController(installation, LocalNativeHost, services=services,
-            host_lock_fd=lock_fd, manager=manager, library=library)
-        owner['controller'] = controller
-        started = False
+        library, controller, started = None, None, False
+        # Everything after the service owners is inside the cleanup boundary: a
+        # refused Library selection must not skip host shutdown accounting.
         try:
+            library = open_library(installation,
+                ledger_for=lambda room: owner['controller'].ledger(room))
+            controller = LocalController(installation, LocalNativeHost, services=services,
+                host_lock_fd=lock_fd, manager=manager, library=library)
+            owner['controller'] = controller
             # One Library singleton for the whole installation lifetime, started
             # before any Room binds; absent, unsafe or unqualified configuration
             # fails the host here instead of running without it.
@@ -56,7 +58,7 @@ def run_host(installation):
             failures = []
             try: manager.close()
             except Exception: failures.append('manager')
-            if controller.native is not None:
+            if controller is not None and controller.native is not None:
                 for room in services.rooms:
                     try:
                         result = controller.native.stop(room)
