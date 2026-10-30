@@ -336,8 +336,7 @@ class LibraryGit:
         # Fixed in-memory mailboxes only: no consumer code, file IO or network.
         with self._subscriptions_lock:
             for subscription in self._subscriptions:
-                if scope is None or (subscription.project_identity == scope.project_identity
-                                     and subscription.project_path == scope.project_path):
+                if scope is None or (subscription.project_identity == scope.project_identity):
                     subscription.signal(publication)
 
     def reconnect(self):
@@ -446,7 +445,7 @@ class LibraryGit:
                 raise LibraryError("INVALID_PROJECT_TREE", "project")
         return head, Tree(files)
 
-    def _registration_identity(self, scope, current):
+    def _registration_identity(self, scope, current, previous_path=None):
         """Bounded service-only root identity catalog; no source/concept scan.
 
         Coordinates are not identity. Registration cannot duplicate an existing
@@ -469,7 +468,8 @@ class LibraryGit:
         for path in roots:
             if time.monotonic() >= deadline:
                 raise LibraryError('PUBLICATION_UNAVAILABLE', 'project')
-            if path == expected:
+            if path == expected or (previous_path is not None and path ==
+                    ("projects/" + previous_path + "/index.md").encode()):
                 continue  # The complete Project gate checks the selected root.
             try:
                 name = path.decode('utf-8')
@@ -597,6 +597,50 @@ class LibraryGit:
                 result = located
             else:
                 result = self._publish(operation, prefix, files, input_sha, current=current, original_input_sha=original_input_sha)
+        self._notify(operation.scope, result)
+        return result
+
+    def move(self, operation, previous_scope, bundle, *, input_sha, current):
+        """Atomically replace two trusted prefixes under the canonical write lock.
+
+        The service supplies a complete gated result. Both source and destination
+        are fenced again at publication; no caller-selected filesystem path enters.
+        Stable operation reconciliation precedes testing whether the source remains.
+        """
+        if not self._started: raise LibraryError('NOT_READY', 'lease')
+        if (type(operation) is not Operation or operation.kind != 'relocate-publication'
+                or type(previous_scope) is not library.LibraryScope
+                or type(bundle) is not Bundle or not callable(current)):
+            raise LibraryError('INVALID_OPERATION', 'relocation')
+        old, new = project_prefix(previous_scope), project_prefix(operation.scope)
+        if (previous_scope.project_identity != operation.scope.project_identity
+                or previous_scope.project_id != operation.scope.project_id
+                or previous_scope.reference_root != operation.scope.reference_root
+                or old == new or bundle.prefix != new):
+            raise LibraryError('PROJECT_MISMATCH', 'relocation')
+        library._commit(input_sha, 'input_sha')
+        files = dict(bundle.files)
+        if any(not p.startswith(new + '/') or type(v) is not bytes for p,v in files.items()):
+            raise LibraryError('INVALID_PUBLICATION', 'relocation')
+        with self._locked():
+            current(); self._fetch(); current()
+            with self._records() as records: records.begin(operation)
+            result = self._locate(operation.operation_id, operation.request_id, operation.kind, None)
+            if result is None:
+                previous = self._head
+                self._compatible(input_sha, previous, old)
+                if self._subtree(previous, old) is None:
+                    raise LibraryError('PROJECT_NOT_REGISTERED', 'relocation')
+                self._compatible(None, previous, new)
+                self._registration_identity(operation.scope, current, previous_scope.project_path)
+                tree = self._tree(previous, files, self._tree_paths(previous, old))
+                current()
+                commit = self._commit(tree, previous, operation, input_sha)
+                current()
+                result = self._push(commit, operation) or Publication(
+                    operation.operation_id, input_sha, previous, commit, True)
+            else:
+                self._reset_local()
         self._notify(operation.scope, result)
         return result
 

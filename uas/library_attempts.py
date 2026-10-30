@@ -59,9 +59,19 @@ class Attempts:
     def _recover(self, op, settings, current):
         publication = self.publisher.publication_for(op, current=current)
         if publication is None: return None
-        _, tree = self.publisher.project_snapshot_at(op.scope, settings,
+        # A committed attempt may predate an atomic coordinate move. Its
+        # metadata-only record pins the historical source prefix; current
+        # authority still belongs to the same immutable Project identity.
+        with self.records() as records:
+            recorded = records.record(op.operation_id, project_identity=op.scope.project_identity)
+        values = op.scope.canonical()
+        values['capabilities'] = tuple(values['capabilities'])
+        values['project_path'] = recorded['project_path']
+        historical_scope = library.LibraryScope(seal=library._SCOPE_SEAL, **values)
+        _, tree = self.publisher.project_snapshot_at(historical_scope, settings,
                                                      publication.resulting_sha, current=current)
-        prefix = bundle._prefix(op.scope)
+        gate.validate(historical_scope, settings, proposed=tree, current=tree)
+        prefix = bundle._prefix(historical_scope)
         marker = 'Library attempt receipt ' + op.operation_id + ': '
         lines = tree.files[prefix + '/log.md'].decode('utf-8').splitlines()
         matches = [line[len(marker):] for line in lines if line.startswith(marker)]

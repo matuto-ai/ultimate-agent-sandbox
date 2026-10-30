@@ -45,7 +45,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_local_room_prepare', 'test_forge_reconciliation', 'test_room_cli_diagnostics',
             'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
         })
-        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_attempts', 'test_library_import'})
+        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_attempts', 'test_library_import', 'test_library_relocation'})
         self.assertEqual('synthesis', ci.partition_for('test_library_attempts.Case.test_one'))
         self.assertFalse(ci.SLOW_MODULES & ci.INTEGRATION_MODULES)
         self.assertFalse(ci.ADDITIONAL_MODULES & (ci.SLOW_MODULES | ci.INTEGRATION_MODULES))
@@ -77,7 +77,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['slow']), 16)
         self.assertEqual(len(groups['integration']), 21)
         self.assertEqual(len(groups['additional']), 23)
-        self.assertEqual(len(groups['synthesis']), 2)
+        self.assertEqual(len(groups['synthesis']), 3)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
