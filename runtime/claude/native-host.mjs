@@ -9,14 +9,14 @@ import {BINARY_SHA256, CLI_VERSION, SDK_VERSION, MAX_FRAME, UUID, NativeState, l
 import {closeOwned, collectListing, validateLoopback, nativeDeadline, CONTROL_DEADLINE} from './sdk-resources.mjs';
 
 import {readProviderAuth} from '../provider-auth.mjs';
+import {makeLibraryReadToolPolicy, LIBRARY_READ_PROFILE} from './library-read.mjs';
 import {nativeOptions, NativeToolState, requireMcp} from './native-policy.mjs';
 import {writeHostDiagnostic, nativeDiagnostic, lifecycleDiagnostic} from './sdk-diagnostics.mjs';
 
 const [cwd, home, endpoint, model, sessionId, resume, manifestFile, manifestDigest, ...optional] = process.argv.slice(2);
-const libraryProfile = optional.at(-1) === 'library-capture-v1';
-if (libraryProfile) optional.pop();
+const profile = ['library-capture-v1',LIBRARY_READ_PROFILE].includes(optional.at(-1)) ? optional.pop() : 'native-v1';
 const authPath = optional[0];
-const profile = libraryProfile ? 'library-capture-v1' : 'native-v1';
+const nativeCwd=profile===LIBRARY_READ_PROFILE ? '/project/reference' : cwd;
 const sdkRoot='/opt/uas/claude-sdk', binary='/opt/uas/claude/claude';
 const bootstrap='/opt/uas/bin/claude-native-bootstrap', helper='/opt/uas/bin/claude-mcp-connector';
 
@@ -90,7 +90,7 @@ function makeInput() {
 }
 async function publicListing(env) {
   const p = spawn(binary, ['agents', '--json', '--all', '--setting-sources', ''],
-    {cwd, env, stdio: ['ignore', 'pipe', 'pipe']});
+    {cwd:nativeCwd, env, stdio: ['ignore', 'pipe', 'pipe']});
   return await collectListing(p, queries, CONTROL_DEADLINE);
 }
 async function sample(env) {
@@ -99,7 +99,7 @@ async function sample(env) {
   // Public SDK method sends its own correlated request; empty MCP status is
   // liveness, never idle. Do not handcraft or intercept its control protocol.
   const statuses = await deadline(query.mcpServerStatus(), 'native-control-timeout');
-  requireMcp(statuses);
+  requireMcp(statuses,profile);
   const rows = await publicListing(env);
   const identity = kernelIdentity();
   if (['T', 't', 'Z', 'X', 'D'].includes(identity.state)) return {state: 'ambiguous', reason: 'kernel-unavailable'};
@@ -130,6 +130,8 @@ async function main() {
       '/opt/uas/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk/package.json',
       '/opt/uas/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
       '/opt/uas/runtime/claude/native-host.mjs','/opt/uas/runtime/claude/native-policy.mjs',
+      '/opt/uas/runtime/claude/library-read.mjs','/opt/uas/runtime/pi/library-scan.mjs',
+      '/opt/uas/pi/node_modules/yaml/package.json','/opt/uas/pi/node_modules/yaml/dist/index.js',
       '/opt/uas/runtime/claude/mcp-server.mjs','/opt/uas/runtime/claude/mcp-tools.mjs',
       '/opt/uas/runtime/claude/sdk-policy.mjs','/opt/uas/runtime/claude/sdk-resources.mjs',
       '/opt/uas/runtime/claude/sdk-diagnostics.mjs','/opt/uas/runtime/pi/channel.mjs','/opt/uas/runtime/library-capture.mjs','/opt/uas/runtime/provider-auth.mjs']) {
@@ -163,12 +165,16 @@ async function main() {
   const options=nativeOptions({binary,cwd,home,model,sessionId,helper,endpoint,resume:resume==='1',providerToken,profile});
   const env=options.env;
   state=new NativeToolState(sessionId,profile); input=makeInput();
+  const readPermission=makeLibraryReadToolPolicy(state);
   phase='native-initialize'; initializationStart=performance.now();
   query=createQuery({prompt:input,options:{...options,
-    canUseTool: async () => { state.hold('needs-input'); return {behavior:'deny',message:'Tool outside fixed native profile'}; },
+    canUseTool: async (name,value,context) => {
+      if (profile === LIBRARY_READ_PROFILE) return readPermission(name,value,context);
+      state.hold('needs-input'); return {behavior:'deny',message:'Tool outside fixed native profile'};
+    },
     spawnClaudeCodeProcess: options => {
       if (child) throw new Error('duplicate-native-spawn');
-      if (options.command !== binary || options.cwd !== cwd) throw Error('unexpected-sdk-spawn');
+      if (options.command !== binary || options.cwd !== nativeCwd) throw Error('unexpected-sdk-spawn');
       child = spawn(bootstrap, [endpoint, options.command, ...options.args], {cwd:options.cwd, env:options.env,
         signal:options.signal, stdio:['pipe','pipe','pipe','pipe']});
       child.stdio[3].on('error',()=>shutdown('rendezvous-loss',2));

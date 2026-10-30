@@ -41,6 +41,8 @@ jobs:
         run: sh tests/claude/install-dependencies.sh
       - name: Acquire matching official TypeScript SDK without extra native binaries or scripts
         run: sh tests/claude/sdk/install-dependencies.sh
+      - name: Acquire exact existing Library parser without lifecycle scripts
+        run: sh tests/claude/library/install-dependencies.sh
       # Save after verified npm ci, not at job teardown: a cold acquisition may
       # still exceed the fixed job budget. A cache is an optimization, not proof.
       - name: Save verified public acquisition bytes before fixture execution

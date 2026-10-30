@@ -23,8 +23,9 @@ ARTIFACTS = frozenset((HOST, HOST_BOOTSTRAP, BOOTSTRAP, HELPER, BINARY, ROOT+'/n
     ROOT+'/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk/package.json',
     ROOT+'/claude-sdk/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs',
     *(ROOT+'/runtime/claude/'+name for name in ('native-policy.mjs','mcp-server.mjs',
-       'mcp-tools.mjs','sdk-policy.mjs','sdk-resources.mjs','sdk-diagnostics.mjs')),
-    ROOT+'/runtime/pi/channel.mjs',ROOT+'/runtime/library-capture.mjs',ROOT+'/runtime/provider-auth.mjs'))
+       'mcp-tools.mjs','library-read.mjs','sdk-policy.mjs','sdk-resources.mjs','sdk-diagnostics.mjs')),
+    ROOT+'/runtime/pi/library-scan.mjs',ROOT+'/pi/node_modules/yaml/package.json',
+    ROOT+'/pi/node_modules/yaml/dist/index.js',ROOT+'/runtime/pi/channel.mjs',ROOT+'/runtime/library-capture.mjs',ROOT+'/runtime/provider-auth.mjs'))
 
 
 class NativeClaudeRecipe:
@@ -42,7 +43,7 @@ class NativeClaudeRecipe:
         from .workstation_exec import ExecSeat
         if type(seat) is not ExecSeat or type(resume) is not bool:
             raise NativeRecipeError('trusted typed native seat required')
-        if type(tool_profile) is not str or tool_profile not in ('native-v1','library-capture-v1'):
+        if type(tool_profile) is not str or tool_profile not in ('native-v1','library-capture-v1','library-read-v1'):
             raise NativeRecipeError('unqualified native tool profile')
         self.tool_profile = tool_profile
         manifest = read_manifest(manifest_path,manifest_digest)
@@ -77,6 +78,8 @@ class NativeClaudeRecipe:
         self.git_profile, self.gate_profile = git_profile, gate_profile
         if (type(ordinary_mounts) is not tuple or not 1<=len(ordinary_mounts)<=16 or any(type(x) is not NativeMount for x in ordinary_mounts)):
             raise NativeRecipeError('admitted immutable mount contract required')
+        if tool_profile == 'library-read-v1' and not any(m.destination == '/project/reference' and m.read_only for m in ordinary_mounts):
+            raise NativeRecipeError('fixed read-only Library projection mount required')
         for i,m in enumerate(ordinary_mounts):
             if any(below(m.destination,n.destination) or below(n.destination,m.destination) for n in ordinary_mounts[i+1:]):
                 raise NativeRecipeError('overlapping ordinary_mounts denied')
@@ -98,7 +101,7 @@ class NativeClaudeRecipe:
         self._scope=json.dumps(scope,sort_keys=True)
         identity={'runtime':'claude','runtime_version':'2.1.310','sdk_version':'0.3.310',
             'manifest_digest':manifest_digest,'payload_manifest_digest':self.payload_manifest_digest,'image_id':self.image_id,'image_reference':self.image_reference,
-            'scope':scope,'checkout':checkout,'home':home,'runtime_root':runtime_root,'endpoint':endpoint,'model':model,
+            'scope':scope,'checkout':checkout,'native_cwd':'/project/reference' if tool_profile == 'library-read-v1' else checkout,'home':home,'runtime_root':runtime_root,'endpoint':endpoint,'model':model,
             'session_id':session_id,'resume':resume,'tool_profile':tool_profile,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts]}
         if git_profile is not None: identity['git_profile_digest']=git_profile.digest
         if gate_profile is not None: identity['gate_profile_digest']=gate_profile.digest
@@ -136,7 +139,11 @@ class NativeClaudeRecipe:
             if len(found)!=1 or found[0].read_only!=(key=='reference'): raise NativeRecipeError('configured Project mount mismatch')
         profile=next(p for p in room['profiles'] if p['id']==selected['profile'])
         tool_profile='native-v1'
-        if 'library.enqueue' in profile['tools']:
+        if any(tool in profile['tools'] for tool in ('Read','Bash')):
+            if set(profile['tools']) != {'Read','Bash'} or roots['reference'] != '/project/reference':
+                raise NativeRecipeError('explicit native Library read-only tool profile required')
+            tool_profile='library-read-v1'
+        elif 'library.enqueue' in profile['tools']:
             if profile['tools'] != ['library.enqueue'] or 'library:enqueue' not in profile['capabilities']:
                 raise NativeRecipeError('explicit Library-only profile and capability required')
             tool_profile='library-capture-v1'
