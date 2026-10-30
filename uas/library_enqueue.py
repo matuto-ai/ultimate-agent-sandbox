@@ -4,7 +4,7 @@ The trusted service supplies current Participant authority and optional originat
 Run from its authenticated request context. No caller path, frontmatter, lifecycle
 hook, transcript scanner, model invocation or alternate content queue exists here.
 """
-from dataclasses import dataclass, replace
+from dataclasses import replace
 import json
 import re
 
@@ -13,17 +13,7 @@ from .library_records import LibraryRecords
 from .library_registration import project_state
 
 
-@dataclass(frozen=True)
-class CaptureResult:
-    outcome: str
-    request_id: str | None
-    reason: str | None
-    retryable: bool
-    queue_id: str | None = None
-    path: str | None = None  # bundle-relative; never a caller-selected path
-    published_sha: str | None = None
-    projection_sha: str | None = None
-    visible: bool = False
+from .library import CaptureResult
 
 
 def _label(value):

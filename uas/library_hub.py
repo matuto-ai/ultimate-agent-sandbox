@@ -11,7 +11,7 @@ import json
 import re
 
 from . import library
-from .library_enqueue import CaptureResult
+from .library import CaptureResult
 from .ledger import Command, Event, LedgerError, Origin, RoomLedger, Transition, _json
 
 _RESULT_ORIGIN = Origin('library-hub', 'library-hub', 'library-hub', 'library-result-v1',
@@ -129,6 +129,19 @@ class LibraryHub:
                 decide=lambda state, _: Transition(state, (Event('library.enqueue.result', payload),), result))
             return receipt['result']
         except LedgerError as error:
-            if error.code not in ('STORAGE_ERROR', 'CLOSED'):
+            if error.code == 'ID_CONFLICT':
+                try:
+                    winner = self.ledger.matched_receipt(key, _RESULT_ORIGIN,
+                        authorize=lambda *_: authorize(),
+                        matches=lambda command: command.kind == 'library.enqueue.result'
+                        and command.target == scope.project_id and command.generation is None
+                        and set(command.payload) == {'command_id', 'request_sha256', 'result'}
+                        and command.payload['command_id'] == request['id']
+                        and command.payload['request_sha256'] == metadata['request_sha256'])
+                    if winner is not None:
+                        return safe_result(CaptureResult(**winner['result']), request['request_id'])
+                except (LedgerError, TypeError, ValueError):
+                    pass  # Foreign preemption or invalid outcome is not evidence.
+            elif error.code not in ('STORAGE_ERROR', 'CLOSED'):
                 raise
             return _uncertain(request['request_id'], 'HUB_RECEIPT_UNAVAILABLE')

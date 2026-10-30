@@ -184,6 +184,27 @@ class HubOwnerTests(ServiceFixture, unittest.TestCase):
         self.assertIn('Originating Run: original-run', self.contents(result['path']))
         self.assertEqual(self.count(), 2)
 
+    def test_two_prepared_exact_calls_reconcile_first_committed_result(self):
+        first = self.owner.prepare(self.envelope(),self.origin,authorize=lambda:True)
+        second = self.owner.prepare(self.envelope(),self.origin,authorize=lambda:True)
+        durable = self.owner.perform(first,current=lambda:True)
+        winner = self.owner.finish(first,durable,authorize=lambda:True)
+        uncertain = dict(durable,outcome='NOT_DURABLE',reason='LOST',retryable=True,
+                         queue_id=None,path=None,published_sha=None,projection_sha=None,visible=False)
+        self.assertEqual(self.owner.finish(second,uncertain,authorize=lambda:True),winner)
+        self.assertEqual(self.count(),2)
+
+    def test_foreign_result_namespace_preemption_never_adopted(self):
+        prepared = self.owner.prepare(self.envelope(),self.origin,authorize=lambda:True)
+        key = prepared[3]
+        self.ledger.apply(Command(key,'fake','alpha',None,{}),self.origin,
+            authorize=lambda *_:True,decide=lambda state,_:Transition(state,(Event('fake',{}),),{'fake':True}))
+        durable=self.owner.perform(prepared,current=lambda:True)
+        result=self.owner.finish(prepared,durable,authorize=lambda:True)
+        self.assertEqual(result['outcome'],'NOT_DURABLE')
+        self.assertEqual(result['reason'],'HUB_RECEIPT_UNAVAILABLE')
+        self.assertEqual(self.count(),2)
+
     def test_storage_failure_after_service_never_claims_durable(self):
         prepared = self.owner.prepare(self.envelope(), self.origin, authorize=lambda: True)
         result = self.owner.perform(prepared, current=lambda: True)
@@ -296,8 +317,8 @@ class AuthenticatedHubTests(ServiceFixture, unittest.TestCase):
         Registrar(self.publisher,current_scope=lambda:beta).register(
             library.action(beta,self.settings,kind='register',operation_id='register-beta',
                            request_id='register-beta',payload={},at=support.AT),self.settings)
-        # Separate actual admitted Room fixture with its trusted binding changed
-        # at construction, never from a Participant packet.
+        # Exercise another trusted Project binding with the same admitted
+        # fixture; the separate owner test covers two distinct Room ledgers.
         beta_owner = LibraryHub(self.ledger,room_id='alpha',project={
             'id':'beta','repository':'acme/beta','roots':{'reference':'/srv/beta/reference'}},
             source_identity='2002',contact=self.contact,clock=lambda:support.AT)
