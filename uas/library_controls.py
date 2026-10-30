@@ -141,6 +141,25 @@ class Controls:
         if project_state(tree,library_bundle._prefix(scope)) != 'active': fail('PROJECT_ARCHIVED')
         return library._digest({p:hashlib.sha256(data).hexdigest() for p,data in tree.files.items()})
 
+    def reconcile(self, raw, principal):
+        """Read-only recovery: an absent service reservation can never write.
+
+        The scheduler RLock covers both lookup and the existing disposition
+        duplicate path. That path may finish operational receipts, not republish.
+        """
+        value = decode(raw)
+        if value['action'] not in ('reject', 'adjudicate'):
+            fail('INVALID_CONTROL_REQUEST')
+        with self.service.scheduler._lock:
+            entry = self._entry(value['project_id'])
+            scope = self._scope(principal, entry, value['action'])
+            identity = 'human-control-' + library._digest([scope.project_identity, value['request_id']])
+            with self.service.scheduler._records() as records:
+                prior = records.record(identity, project_identity=scope.project_identity)
+            if prior is None:
+                fail('CONTROL_OUTCOME_UNKNOWN')
+            return self.handle(raw, principal)
+
     def handle(self, raw, principal):
         value = decode(raw)
         if value['action'] in ('settings-observe','settings-update'):
