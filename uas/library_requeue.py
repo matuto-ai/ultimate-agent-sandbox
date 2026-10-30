@@ -37,21 +37,31 @@ def token(value):
     return True
 
 
-def source_parked(tree, prefix, drain_id):
-    """Parked queues this drain recorded through trusted source handling.
+def episodes(tree, prefix):
+    """The newest recorded parking per queue: (drain, reason, trusted source).
 
-    Only the source-failure handler appends a ``Library source receipt`` line,
-    immediately after that drain's synthesis block, and the model proposal path
-    never does. So this canonical evidence—not a model-chosen reason token that
-    happens to look like a source code—establishes that a recorded source
-    prerequisite parked the draft. A later receipt for the same queue wins.
+    Each attempt appends one synthesis block, and the source-failure handler also
+    appends a ``Library source receipt`` line after its block; the model proposal
+    path never does. So that line—not a model-chosen reason token that happens to
+    look like a source code—establishes that a source prerequisite parked the
+    draft. Reading the log in order keeps the newest episode authoritative, so an
+    already released or superseded source park cannot vouch for a later model
+    park of the same queue.
     """
-    found, current = {}, None
+    newest, current, trusted = {}, None, set()
     for line in tree.files[prefix + '/log.md'].decode('utf-8').splitlines():
         if line.startswith(SYNTHESIS):
             current = line[len(SYNTHESIS):].split(';', 1)[0].strip()
+            trusted = set()
             continue
-        if current != drain_id or not line.startswith(SOURCE_RECEIPT):
+        if current is None:
+            continue
+        if line.startswith('* '):
+            queue, separator, rest = line[2:].partition(': PARKED; ')
+            if separator and rest.endswith('.') and token(rest[:-1]):
+                newest[queue] = (current, rest[:-1], queue in trusted)
+            continue
+        if not line.startswith(SOURCE_RECEIPT):
             continue
         parts = line[len(SOURCE_RECEIPT):].split(': ', 1)
         if len(parts) != 2:
@@ -67,8 +77,11 @@ def source_parked(tree, prefix, drain_id):
                     and outcome['kind'] == 'parked' and type(outcome['queue_id']) is str
                     and library.DIGEST.fullmatch(outcome['queue_id']) is not None
                     and token(outcome['reason'])):
-                found[outcome['queue_id']] = outcome['reason']
-    return found
+                trusted.add(outcome['queue_id'])
+                episode = newest.get(outcome['queue_id'])
+                if episode is not None and episode[0] == current and episode[1] == outcome['reason']:
+                    newest[outcome['queue_id']] = (current, outcome['reason'], True)
+    return newest
 
 
 def parked(tree, prefix):
@@ -191,13 +204,14 @@ def apply(controls, value, principal, entry, scope, settings):
         if content(tree.files) != target:
             fail('STALE_CONTROL_STATE')
         prefix = bundle._prefix(scope)
-        recorded, currently = source_parked(tree, prefix, value['drain_id']), parked(tree, prefix)
+        newest, currently = episodes(tree, prefix), parked(tree, prefix)
         released, retained = {}, {}
-        for queue in sorted(recorded):
+        for queue in sorted(newest):
+            drain, recorded, trusted = newest[queue]
             reason = currently.get(queue)
-            # Already rejected, adjudicated, integrated or released work is not
-            # this action's; a changed canonical reason needs a fresh request.
-            if reason != recorded[queue]:
+            # Only this drain's current, trusted source park is this action's;
+            # already released, superseded or differently parked work is not.
+            if drain != value['drain_id'] or not trusted or reason != recorded:
                 continue
             if reason not in PREREQUISITES or not resolves(
                     entry['runner'].assembler, scope, settings, tree, prefix, queue):

@@ -153,10 +153,8 @@ class RequeueTests(unittest.TestCase):
         self.assertIsNone(self.service.tick())
         self.assertFalse(self.fx.fx.fixture.marker.exists())
 
-    def test_model_parked_work_is_never_released(self):
-        good, resolver = self.source.source(b'Resolvable source quotation.\n')
-        queue = self.source.capture('model', sources=[good])
-        self.entry()['runner'].assembler.resolve_source = lambda scope, declaration: resolver
+    def model_tick(self, reason='SOURCE_UNRESOLVED'):
+        """One real Service tick whose fixture model parks with that reason."""
         attempts = self.fx.fx.fixture
         entry = self.entry(); original = entry['context']
         def context(selected):
@@ -164,24 +162,47 @@ class RequeueTests(unittest.TestCase):
             # The model picks a reason token that also names a source failure.
             state = self.service.scheduler.state(self.source.scope.project_identity)
             reply = dict(version=1, drain_id=state['drain_id'], attempt=state['attempt'],
-                operations=[], outcomes=[dict(queue_id=q, kind='parked',
-                    reason='SOURCE_UNRESOLVED') for q in selected])
+                operations=[], outcomes=[dict(queue_id=q, kind='parked', reason=reason)
+                    for q in selected])
             entry['runner'].dispatcher.gateway.routes[attempts.profile.identity()] = (
                 sys.executable, str(Path(__file__).with_name('fixture_library_provider.py')),
                 str(attempts.marker), 'success', json.dumps(reply))
             return result
         entry['context'] = context
-        result = self.service.tick()
+        return self.service.tick()
+
+    def test_model_parked_work_is_never_released(self):
+        good, resolver = self.source.source(b'Resolvable source quotation.\n')
+        self.source.capture('model', sources=[good])
+        self.entry()['runner'].assembler.resolve_source = lambda scope, declaration: resolver
+        result = self.model_tick()
         self.assertEqual(result['state'], 'COMMITTED')
         self.assertIn('* **Synthesis**: ' + result['drain_id'], self.contents('log.md'))
         self.assertIn('DRAFT PARKED: SOURCE_UNRESOLVED', self.contents('pending/index.md'))
         self.assertNotIn(requeue.SOURCE_RECEIPT, self.contents('log.md'))
         # Resolving the same source does not prove the recorded prerequisite.
-        self.entry()['runner'].assembler.resolve_source = lambda scope, declaration: resolver
         before = self.source.count()
         self.refused(self.value(result['drain_id']), 'NO_ELIGIBLE_PARKED_WORK')
         self.assertEqual(self.source.count(), before)
         self.assertIn('DRAFT PARKED: SOURCE_UNRESOLVED', self.contents('pending/index.md'))
+
+    def test_a_released_source_park_never_releases_a_later_model_park(self):
+        first, second, drain = self.parked()
+        self.assertEqual(self.send(self.value(drain))['outcome'], 'COMMITTED')
+        self.assertIn(first + '.md) - context; draft;', self.contents('pending/index.md'))
+        # The same draft is parked again, this time by the model, in a new drain.
+        model = self.model_tick()
+        self.assertEqual(model['state'], 'COMMITTED')
+        self.assertNotEqual(model['drain_id'], drain)
+        self.assertIn(first + '.md) - context; DRAFT PARKED: SOURCE_UNRESOLVED',
+                      self.contents('pending/index.md'))
+        before = self.source.count()
+        # Neither the consumed source receipt nor the model drain releases it.
+        self.refused(self.value(drain, 'requeue-old'), 'NO_ELIGIBLE_PARKED_WORK')
+        self.refused(self.value(model['drain_id'], 'requeue-new'), 'NO_ELIGIBLE_PARKED_WORK')
+        self.assertEqual(self.source.count(), before)
+        self.assertIn(first + '.md) - context; DRAFT PARKED: SOURCE_UNRESOLVED',
+                      self.contents('pending/index.md'))
 
     def test_a_recorded_release_reconciles_after_a_settings_change(self):
         first, second, drain = self.parked()

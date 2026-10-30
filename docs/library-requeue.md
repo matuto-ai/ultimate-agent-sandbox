@@ -18,10 +18,13 @@ reason tokens. The draft file itself is byte-identical; only the pending index a
 log change in one canonical commit. Nothing is deleted, reinterpreted or
 re-verified.
 
-A queue is released only when all three checks pass. The drain must carry a
-canonical `Library source receipt` outcome for that queue, which only the
-source-failure handler writes, so model-declared or human-declared parking is
-never released even when its reason token happens to name a source code. That
+A queue is released only when all three checks pass. The queue's newest recorded
+parking in `log.md` must belong to the named drain and be corroborated by that
+drain's canonical `Library source receipt`, which only the source-failure handler
+writes. Model-declared and human-declared parking is therefore never released,
+even when its reason token happens to name a source code, and an already released
+or otherwise superseded source park cannot vouch for a later model park of the
+same queue. That
 recorded reason must be a service source prerequisite
 (`SOURCE_*`/`SECRET_DETECTED`). Its recorded source pins must
 resolve now through the same trusted resolver and secret policy assembly uses;
