@@ -215,7 +215,7 @@ def source(resource):
     """Normalize one supported source reference and report whether it is pinned.
 
     Supported declarations are a bundle concept, a source-repository artifact at
-    a pinned commit and an HTTPS resource. A commit segment in the artifact path
+    a pinned commit, an explicit content-addressed snapshot and an HTTPS resource. A commit segment in the artifact path
     is its immutable identity; a plain HTTPS resource stays visibly unpinned and
     therefore cannot carry a machine-verification claim.
     """
@@ -235,6 +235,30 @@ def source(resource):
             _fail("UNSAFE_SOURCE", "source.resource")
         parts = [part for part in path.split("#", 1)[0].split("?", 1)[0].split("/") if part]
         revision = _revision(parts)
+        # Explicit content-addressed captures are a separate source kind, not
+        # repository commits. This is declaration policy only: the resolver
+        # must still verify captured bytes and fresh Project/source authority.
+        # Preserve positional repository references on overlapping shapes:
+        # /objects/<repo>/blob/main/file remains a mutable Git artifact, never
+        # a snapshot merely because its repository name resembles a digest.
+        if path.startswith("objects/") and revision is None:
+            snapshot = path.split("/", 2)
+            try:
+                bounded = len(resource.encode("utf-8")) <= 2048
+                name = snapshot[2] if len(snapshot) == 3 else ""
+                bounded = bounded and 0 < len(name.encode("utf-8")) <= 1024
+            except UnicodeError:
+                bounded = False
+                name = ""
+            if (not bounded or authority != authority.lower()
+                    or len(snapshot) != 3
+                    or not contracts.DIGEST.fullmatch(snapshot[1])
+                    or name.startswith(("/", "-"))
+                    or any(c in path for c in ("%", "\\", "?", "#"))
+                    or any(part in ("", ".", "..") for part in name.split("/"))
+                    or posixpath.normpath(name) != name):
+                _fail("UNSAFE_SOURCE", "source.resource")
+            return {"resource": resource, "kind": "snapshot", "pinned": True}
         pinned = revision is not None and COMMIT_SEGMENT.match(parts[revision]) is not None
         return {"resource": resource,
                 "kind": "artifact" if pinned else "resource", "pinned": pinned}
@@ -426,3 +450,4 @@ def validate(scope, settings, *, proposed, current=None, selected=()):
         text = bundle.files[bundle.prefix + "/" + relative].decode("utf-8")
         _policy(relative, text, filters, observations)
     return Result(bundle=bundle, observations=tuple(observations))
+
