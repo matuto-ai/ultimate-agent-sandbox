@@ -27,7 +27,7 @@ class CIPartitionTests(unittest.TestCase):
                                           'test_run_review',
                                           'test_claude_permission_policy', 'test_artifact_native_source',
                           'test_workstation_control', 'test_peer_delivery_phases', 'test_participant_pi_launch', 'test_room_control_plane', 'test_workstation_peer', 'test_review_hosted'})
-        self.assertEqual(ci.INTEGRATION_MODULES, {'test_library_service', 'test_participant',
+        self.assertEqual(ci.INTEGRATION_MODULES, {'test_library_disposition', 'test_library_service', 'test_participant',
             'test_native_completed_reviewer_reset', 'test_native_reviewer_reset_adversarial',
             'test_command_native_source', 'test_forge_read_process', 'test_native_trust',
             'test_diff_native', 'test_gate_forge_hub', 'test_native_session_human_actions',
@@ -45,7 +45,7 @@ class CIPartitionTests(unittest.TestCase):
             'test_exec_state', 'test_workstation_delivery', 'test_lifecycle', 'test_forge_capacity',
         })
         self.assertEqual(ci.INSPECTION_MODULES, {'test_library_inspection', 'test_library_relocation', 'test_library_disposition_native'})
-        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_disposition', 'test_library_attempts', 'test_staged_source_closure', 'test_context', 'test_native_pi_reset_adversarial'})
+        self.assertEqual(ci.SYNTHESIS_MODULES, {'test_library_disposition_recovery', 'test_library_attempts', 'test_staged_source_closure', 'test_context', 'test_native_pi_reset_adversarial'})
         self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_library_retention', 'test_library_records', 'test_git_payload'})
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual('inspection', ci.partition_for('test_library_inspection.Case.test_one'))
@@ -86,7 +86,7 @@ class CIPartitionTests(unittest.TestCase):
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
         self.assertEqual(len(groups['slow']), 16)
-        self.assertEqual(len(groups['integration']), 18)
+        self.assertEqual(len(groups['integration']), 19)
         self.assertEqual(len(groups['additional']), 21)
         self.assertEqual(len(groups['synthesis']), 5)
         self.assertEqual(len(groups['scheduler']), 3)
