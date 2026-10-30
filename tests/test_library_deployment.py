@@ -299,6 +299,56 @@ class DeploymentLibraryTests(unittest.TestCase):
         self.assertEqual(refused['outcome'], 'unknown')
         self.assertEqual(refused['error'], 'FORBIDDEN')
 
+    def test_stop_during_a_live_model_attempt_keeps_the_lease_and_recovers(self):
+        import test_library_attempts as attempts_fixture
+        fixture = attempts_fixture.AttemptTests(
+            'test_parking_commit_has_durable_inputs_before_contact_and_recovery_outcomes')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.mode = 'release'
+        original = fixture.source.scope
+        reference = self.base / 'active' / 'reference'
+        reference.mkdir(mode=0o755, parents=True)
+        scope = library.LibraryScope(seal=library._SCOPE_SEAL, **{
+            **{name: getattr(original, name) for name in library.LibraryScope.__slots__
+               if name != 'reference_root'},
+            'reference_root': str(reference / 'library')})
+        fixture.source.scope = fixture.source.fresh = scope
+        LocalTransport.canonical = Path(fixture.source.target)
+        document = deepcopy(fixture.source.settings)
+        rooms = {'alpha': {'project': {'id': scope.project_id, 'repository': 'acme/alpha',
+                                       'roots': {'reference': str(reference)}},
+                           'source_identity': '1001'}}
+        def runner_for(_scope):
+            # The composed publisher owns the lease and records for this attempt.
+            fixture.source.publisher = self.deployment.publisher
+            return fixture.runner(), lambda _selected: ((), ())
+        options = dict(settings=document, rooms=rooms, scope_for=lambda _binding: scope,
+                       runner_for=runner_for,
+                       credentials={document['repository']['credential_ref']: {}})
+        deployment = self.make_deployment(**options)
+        deployment.start()
+        self.assertTrue(self.wait_for(lambda: fixture.marker.exists(), seconds=20))
+        stopper = threading.Thread(target=deployment.stop)
+        stopper.start()
+        try:
+            time.sleep(0.3)
+            second = self.make_deployment(**options)
+            with self.assertRaisesRegex(library.LibraryError, 'LEASE_BUSY'):
+                second.start()
+        finally:
+            stopper.join(30)
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(deployment.running)
+        fixture.mode = 'success'
+        restarted = self.make_deployment(**options)
+        restarted.start()
+        self.assertTrue(restarted.running)
+        self.assertTrue(self.wait_for(lambda: self.events('alpha'), seconds=30))
+        self.assertTrue(self.wait_for(
+            lambda: restarted.service.scheduler.state(scope.project_identity)['state']
+            in ('COMMITTED', 'IDLE', 'READY', 'BACKOFF'), seconds=20))
+
     def test_current_shared_settings_apply_to_new_operations_and_fail_closed(self):
         from uas.library_settings import SettingsOwner, canonical
         root = self.base / 'config'

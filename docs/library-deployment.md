@@ -67,10 +67,11 @@ owner, not patched with fabricated content.
 
 ## Not in this slice
 
-This is the trusted composition seam, not an installed daemon. The local
-entrypoint's installation selection for the external Library settings document,
-the split-process Room Hub to host transport that would carry these typed
-endpoints across process boundaries, the actual target qualification of #157,
+This is the trusted composition seam, not an installed daemon. Wiring it into the
+installed Deployment — a digest-pinned installation selection for the Library
+document, credential references and Room bindings, the split-process Room Hub to
+host transport, and Room Start/Stop bind/unbind — is tracked as #252; the human
+operator waived that wiring from #185. The actual target qualification of #157,
 the model/version qualification of T42, provider and backup provisioning, and a
 real two-Room VM proof all remain with their own owners. Shared-settings update
 routing and the Manager Settings page stay with #192: this composition admits
@@ -90,8 +91,9 @@ reference-mount refusal before any clone, a symlinked service-state child refuse
 before clone work, qualification revocation blocking capture and stopping writes,
 a current durable settings owner applying a validated update to the next
 operation and refusing an unavailable store, an operator observation for a
-stopped Room with no Hub, and service reports reaching only the reporting Room's
-ledger.
+stopped Room with no Hub, service reports reaching only the reporting Room's
+ledger, and a stop while a live model attempt is in flight (lease retained,
+second instance refused, restart recovers and reports resume).
 The model runner is a deterministic fixture adapter; no live provider, installed
 daemon, actual target qualification, split-process Room Hub transport, VM,
 account, backup or deployment evidence is claimed here.
