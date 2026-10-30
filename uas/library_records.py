@@ -186,10 +186,10 @@ def _identity(operation):
     _origin(operation.scope)  # validate the authenticated origin fields
     _safe(identity, "identity")
     if operation.manifest is not None:
-        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state"):
+        if operation.kind not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park"):
             raise LibraryError("INVALID_RECORD", "manifest")
         identity["manifest"] = operation_manifest(operation.kind, operation.manifest)
-        expected = identity["manifest"] if operation.kind == "synthesis-batch" else {"manifest_sha256": value_digest(identity["manifest"])}
+        expected = identity["manifest"] if operation.kind in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(identity["manifest"])}
         if operation.payload != expected: raise LibraryError("INVALID_RECORD", "manifest")
     return identity
 
@@ -449,6 +449,34 @@ class LibraryRecords:
             if not rows: return
             for cursor, record in rows: yield record
 
+    def iter_schedules(self, project_identity, *, after_sequence=0):
+        """All durable transition sources in bounded pages, including lost ACKs."""
+        _token(project_identity, 'project_identity')
+        if type(after_sequence) is not int or after_sequence < 0: raise LibraryError('INVALID_RECORD')
+        cursor = 0
+        prefix = 'scheduler-' + value_digest(project_identity) + '-'
+        while True:
+            def read(db):
+                rows = db.execute("SELECT rowid,operation_id FROM attempts WHERE project_identity=? "
+                    "AND operation_id LIKE ? AND CAST(substr(operation_id,?) AS INTEGER)>? AND rowid>? ORDER BY rowid LIMIT 64",
+                    (project_identity, prefix+'%', len(prefix)+1, after_sequence, cursor)).fetchall()
+                return [(row['rowid'], self._attempt(db, row['operation_id'])) for row in rows]
+            rows = self._read(read)
+            if not rows: return
+            for cursor, record in rows: yield record
+
+    def iter_pending(self):
+        """Startup inventory in bounded pages; outages do not impose a lifetime cap."""
+        cursor = 0
+        while True:
+            def read(db):
+                rows = db.execute("SELECT rowid,operation_id FROM attempts WHERE receipt IS NULL "
+                    "AND rowid>? ORDER BY rowid LIMIT 64", (cursor,)).fetchall()
+                return [(row['rowid'],self._attempt(db,row['operation_id'])) for row in rows]
+            rows = self._read(read)
+            if not rows: return
+            for cursor, record in rows: yield record
+
     def pending(self, *, project_identity=None):
         """Bounded restart inventory: records whose terminal was never captured."""
         if project_identity is not None:
@@ -572,9 +600,9 @@ def _identity_like(value):
     """Rebuild the stored identity from a record for tamper checking."""
     result = {key: value[key] for key in _ATTEMPT_KEYS}
     if "manifest" in value:
-        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state"): raise LibraryError("INVALID_RECORD")
+        if value["kind"] not in ("synthesis-attempt", "synthesis-batch", "scheduler-state", "source-park"): raise LibraryError("INVALID_RECORD")
         result["manifest"] = operation_manifest(value["kind"], value["manifest"])
-        expected = result["manifest"] if value["kind"] == "synthesis-batch" else {"manifest_sha256": value_digest(result["manifest"])}
+        expected = result["manifest"] if value["kind"] in ("synthesis-batch", "source-park") else {"manifest_sha256": value_digest(result["manifest"])}
         if value["payload_sha256"] != value_digest(expected): raise LibraryError("INVALID_RECORD", "manifest")
     return result
 

@@ -145,3 +145,30 @@ class LibraryHub:
             elif error.code not in ('STORAGE_ERROR', 'CLOSED'):
                 raise
             return _uncertain(request['request_id'], 'HUB_RECEIPT_UNAVAILABLE')
+
+
+class DrainReports:
+    """Trusted Supervisor-to-Hub ingress, not a Participant Command or capability.
+
+    authenticate is transport-bound service authentication supplied by Supervisor.
+    No Run or Participant presence is required to retain the metadata outcome.
+    """
+    def __init__(self, ledger, *, room_id, project_identity, authenticate):
+        if type(ledger) is not RoomLedger or ledger.room_id != room_id or not callable(authenticate):
+            raise LedgerError('INVALID_LIBRARY_BINDING')
+        library._token(project_identity,'project_identity')
+        self.ledger,self.room_id,self.project_identity,self.authenticate=ledger,room_id,project_identity,authenticate
+
+    def receive(self, value):
+        if self.authenticate() is not True: raise LedgerError('FORBIDDEN')
+        try:
+            if type(value) is not dict or value.get('project_identity')!=self.project_identity or value.get('room_id')!=self.room_id:
+                raise LedgerError('INVALID_LIBRARY_BINDING')
+            data=library.drain_transition({k:v for k,v in value.items() if k not in ('project_identity','room_id')})
+        except library.LibraryError as error: raise LedgerError(error.code) from None
+        report={'project_identity':self.project_identity,'room_id':self.room_id,**data}
+        ident='library-drain-'+library._digest([self.project_identity,data['drain_id'],data['sequence']])
+        command=Command(ident,'library.drain.report',self.project_identity,None,report)
+        def decide(state,_):return Transition(state,(Event('library.drain.reported',report),),{'recorded':True})
+        self.ledger.apply(command,_RESULT_ORIGIN,authorize=lambda *_:self.authenticate() is True,decide=decide)
+        return True

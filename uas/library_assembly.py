@@ -5,7 +5,8 @@ source stores and the selected model's local tokenizer. None are model callbacks
 Parking is an atomic canonical Git transition; no partial request is returned.
 """
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import json
 import hashlib
 
 from . import library, library_bundle as bundle, library_compiler as compiler
@@ -96,6 +97,27 @@ class Assembler:
         except Exception:
             _fail('LIBRARY_AUTHORITY_UNAVAILABLE')
 
+    def recover_park(self, operation, *, admitted, publication, current):
+        with LibraryRecords(self.publisher.records_path, self.publisher.deployment_id) as records:
+            record = records.record(operation.operation_id, project_identity=operation.scope.project_identity)
+        values = operation.scope.canonical(); values['capabilities'] = tuple(values['capabilities'])
+        values['project_path'] = record['project_path']
+        historical = library.LibraryScope(seal=library._SCOPE_SEAL, **values)
+        _, tree = self.publisher.project_snapshot_at(historical, admitted, publication.resulting_sha, current=current)
+        gate.validate(historical, admitted, proposed=tree, current=tree)
+        marker = 'Library source receipt ' + operation.operation_id + ': '
+        lines = tree.files[bundle._prefix(historical) + '/log.md'].decode().splitlines()
+        matches = [line[len(marker):] for line in lines if line.startswith(marker)]
+        if len(matches) != 1: _fail('SOURCE_CANONICAL_EVIDENCE_INVALID')
+        try:
+            outcomes = json.loads(matches[0], object_pairs_hook=library._unique_pairs)
+            library.drain_transition(dict(drain_id=operation.drain_id,sequence=1,phase='COMMITTED',
+                attempt=operation.manifest['attempt'],outcomes=outcomes,resulting_sha=publication.resulting_sha,reason=None,due=None))
+            if not outcomes or any(x['kind']!='parked' or x['queue_id'] not in operation.manifest['selected'] for x in outcomes):
+                _fail('SOURCE_CANONICAL_EVIDENCE_INVALID')
+        except (ValueError, TypeError, KeyError, UnicodeError): _fail('SOURCE_CANONICAL_EVIDENCE_INVALID')
+        return Assembly(None,tuple((x['queue_id'],x['reason']) for x in outcomes),publication.resulting_sha)
+
     def assemble(self, *, input_sha, selected, accepted=(), indexes=(), drain_id, attempt, at):
         settings = self._settings()
         if (self.publisher.target != settings['repository']['target']
@@ -131,6 +153,7 @@ class Assembler:
             'assembly-' + identity, 'assembly-' + identity,
             {'basis': input_sha, 'selected': list(selected), 'accepted': list(accepted),
              'indexes': list(indexes), 'attempt': attempt}, at, drain_id=drain_id)
+        operation = replace(operation, manifest=library.source_manifest(operation.payload))
         with LibraryRecords(self.publisher.records_path, self.publisher.deployment_id) as records:
             # This also checks identity before any recovery or new mutation.
             prior = records.begin(operation)['record']
@@ -141,7 +164,7 @@ class Assembler:
                         publication={'commit_sha': publication.resulting_sha,
                                      'path': 'projects/' + scope.project_path + '/pending/index.md'},
                         reason='SOURCE_FAILURES_PARKED'))
-                return Assembly(None, (), publication.resulting_sha)
+                return self.recover_park(operation, admitted=settings, publication=publication, current=current)
             head, tree = self.publisher.project_snapshot(scope, settings, current=current)
             if head != input_sha:
                 _fail('STALE_INPUT')
@@ -222,7 +245,11 @@ class Assembler:
                     selected=tuple(sorted(failures)), input_sha=head, drain_id=drain_id,
                     attempt=attempt, at=at, proposal=proposal)
                 current()
-                publication = self.publisher.publish(operation, compiled.validation.bundle,
+                files = dict(compiled.tree.files)
+                marker = 'Library source receipt ' + operation.operation_id + ': '
+                files[prefix + '/log.md'] += ('\n' + marker + library._canonical(proposal['outcomes']) + '\n').encode()
+                validated = gate.validate(scope, admitted, proposed=bundle.Tree(files), current=tree)
+                publication = self.publisher.publish(operation, validated.bundle,
                                                       input_sha=head, current=current)
                 records.finish(operation, library.receipt(operation, 'COMMITTED', at=at,
                     publication={'commit_sha': publication.resulting_sha,

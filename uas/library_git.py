@@ -778,14 +778,13 @@ class LibraryGit:
         """Resolve every in-flight identity against the fetched canonical branch."""
         settled, absent = [], []
         with self._records() as records:
-            pending = records.pending()
-        for record in pending:
-            found = self._locate(record["operation_id"], record["request_id"],
-                                 record["kind"], record["queue_id"])
-            if found is None:
-                absent.append(record["operation_id"])
-            else:
-                settled.append(found)
+            for record in records.iter_pending():
+                found = self._locate(record["operation_id"], record["request_id"],
+                                     record["kind"], record["queue_id"])
+                if found is None:
+                    absent.append(record["operation_id"])
+                else:
+                    settled.append(found)
         return settled, absent
 
     def _locate(self, operation_id, request_id, kind, queue_id):
