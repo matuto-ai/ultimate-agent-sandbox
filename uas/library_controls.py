@@ -47,6 +47,9 @@ def decode(raw):
     except (ValueError, UnicodeError, RecursionError): fail('INVALID_CONTROL_REQUEST')
     if type(value) is not dict or type(value.get('version')) is not int or value['version'] != 1:
         fail('INVALID_CONTROL_REQUEST')
+    if value.get('action') in ('settings-observe','settings-update'):
+        from .library_settings import decode as settings_decode
+        return settings_decode(raw)
     library._identifier(value.get('project_id'), 'project_id')
     action = value.get('action')
     if action == 'observe':
@@ -81,8 +84,12 @@ class Controls:
     same typed principal and version contract can be used by future trusted UI
     transports. Configuration/Project authority is rechecked under selection lock.
     """
-    def __init__(self, service):
+    def __init__(self, service, *, settings_owner=None):
         if type(service) is not Service or service.scheduler is None: fail('SERVICE_NOT_STARTED')
+        from .library_settings import SettingsOwner
+        if settings_owner is not None and type(settings_owner) is not SettingsOwner:
+            fail('LOCAL_SETTINGS_DEPENDENCY')
+        self.settings_owner = settings_owner
         self.service = service
 
     def _entry(self, project_id):
@@ -121,6 +128,10 @@ class Controls:
 
     def handle(self, raw, principal):
         value = decode(raw)
+        if value['action'] in ('settings-observe','settings-update'):
+            if self.service._closed or self.service._stop.is_set(): fail('SERVICE_NOT_AVAILABLE')
+            if self.settings_owner is None: fail('SETTINGS_UNAVAILABLE')
+            return self.settings_owner.handle(raw, principal)
         scheduler = self.service.scheduler
         with scheduler._lock:
             entry = self._entry(value['project_id'])

@@ -163,13 +163,14 @@ class Attempts:
     def run(self, **arguments):
         if not self.publisher.synthesis_lock.acquire(blocking=False): fail("ATTEMPT_BUSY")
         try:
-            seconds = self.assembler._settings()["limits"]["attempt_seconds"]
-            with library_deadline.bounded(seconds): return self._run(**arguments)
+            settings = self.assembler._settings()
+            seconds = settings["limits"]["attempt_seconds"]
+            with library_deadline.bounded(seconds): return self._run(_starting_settings=settings, **arguments)
         finally: self.publisher.synthesis_lock.release()
 
-    def _run(self, *, drain_id, attempt, selected, accepted=(), indexes=(), at):
+    def _run(self, *, _starting_settings, drain_id, attempt, selected, accepted=(), indexes=(), at):
         start = self.clock()
-        settings = self.assembler._settings()
+        settings = _starting_settings
         scope = self.assembler._scope()
         library._require_scope(scope, 'participant', library.ENQUEUE_CAPABILITY)
         library._token(drain_id, 'drain_id'); library._integer(attempt, 'attempt'); library._timestamp(at, 'at')

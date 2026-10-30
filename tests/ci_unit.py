@@ -66,7 +66,10 @@ ADDITIONAL_MODULES = frozenset({
 # hosted lanes51-53s cannot absorb it; one parallel one-minute lane preserves
 # all tests and the overall2-3min graph, with no timeout increase.
 # #173 relocation suite measured 6s; synthesis has headroom after #170.
-SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_relocation'})
+# #178 hosted inspection46cases22.7s nearly fills remainder53.8s. Move it
+# to synthesis30.5s and relocation4.8s back to remainder: ~48/36s; retain
+# every ID, seven lanes, one-minute job ceilings and aggregate dependency graph.
+SYNTHESIS_MODULES = frozenset({'test_library_observations', 'test_library_attempts', 'test_library_import', 'test_library_inspection'})
 # T20/T21 real-process scheduler/service suites share the bounded lane; existing lanes
 # approach 50s hosted. Keep one-minute limits and full exhaustive discovery.
 # #177 second hosted run: integration60.174s/remainder49.460s hit job budget.
