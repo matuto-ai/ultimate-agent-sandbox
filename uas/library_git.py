@@ -625,6 +625,10 @@ class LibraryGit:
             self._fetch()
             if current is not None:
                 current()
+            from .library_lifecycle import frozen
+            if (operation.kind not in ('archive','restore','synthesis-attempt','source-park')
+                    and frozen(self, operation.scope.project_identity)):
+                raise LibraryError('PROJECT_ARCHIVING', 'project')
             if operation.kind == 'register':
                 self._registration_identity(operation.scope, current or (lambda: None))
             located = self._locate(operation.operation_id, operation.request_id,
@@ -664,6 +668,9 @@ class LibraryGit:
             raise LibraryError('INVALID_PUBLICATION', 'relocation')
         with self._locked():
             current(); self._fetch(); current()
+            from .library_lifecycle import frozen
+            if frozen(self, operation.scope.project_identity):
+                raise LibraryError('PROJECT_ARCHIVING', 'project')
             with self._records() as records: records.begin(operation)
             result = self._locate(operation.operation_id, operation.request_id, operation.kind, None)
             if result is None:

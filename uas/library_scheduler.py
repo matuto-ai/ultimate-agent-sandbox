@@ -44,6 +44,10 @@ class Scheduler:
         if self._closed: fail('SCHEDULER_CLOSED')
         if self._failed: fail('SCHEDULER_RECOVERY_REQUIRED')
 
+    def _lifecycle_frozen(self, entry):
+        from .library_lifecycle import frozen
+        return frozen(self.publisher, entry['scope'].project_identity)
+
     def _records(self):
         return LibraryRecords(self.publisher.records_path, self.publisher.deployment_id)
 
@@ -75,7 +79,7 @@ class Scheduler:
                 sequence=value['sequence'], phase=phase['phase'],
                 attempt=phase.get('attempt', value['attempt'] or old['attempt']),
                 outcomes=phase.get('outcomes', []), resulting_sha=phase.get('resulting_sha'),
-                reason=value['reason'], due=value['due'] if phase['phase']=='RETRY_SCHEDULED' else None))
+                reason=phase.get('reason',value['reason']), due=value['due'] if phase['phase']=='RETRY_SCHEDULED' else None))
         library.scheduler_manifest(value)
         identity = 'scheduler-' + library._digest(scope.project_identity) + '-' + str(value['sequence'])
         operation = library._operation('scheduler-state', scope, settings, identity, identity,
@@ -118,7 +122,7 @@ class Scheduler:
             entry = dict(scope=scope, runner=runner, context=context, state=state, restored=saved is not None,
                          subscription=self.publisher.subscribe(scope), version=0)
             self._entries[key] = entry
-            if state['state'] == 'DISPOSED':
+            if state['state'] == 'DISPOSED' or self._lifecycle_frozen(entry):
                 entry['settings'] = runner.assembler._settings()
                 return key
             try:
@@ -158,6 +162,7 @@ class Scheduler:
                 if settings['settings_id'] != control.settings_id: fail('STALE_CONTROL_STATE')
                 entry['settings'] = settings
             old = entry['state']; now = instant(self.now())
+            if self._lifecycle_frozen(entry): fail('PROJECT_ARCHIVING')
             if old['state'] == 'DISPOSED':
                 if not resume: fail('DRAIN_DISPOSED')
             elif resume: fail('PROJECT_NOT_DISPOSED')
@@ -176,7 +181,7 @@ class Scheduler:
         """T21 startup/reconnect signal, deliberately not an implicit operator retry."""
         with self._lock:
             self._check(); entry = self._entries[key]; old = entry['state']
-            if old['state'] in ('BLOCKED', 'BACKOFF', 'ACTIVE', 'DISPOSED'): return
+            if self._lifecycle_frozen(entry) or old['state'] in ('BLOCKED', 'BACKOFF', 'ACTIVE', 'DISPOSED'): return
             now = instant(self.now())
             self._save(entry, {**old, 'state':'READY', 'due':now.isoformat()}, now)
 
@@ -186,7 +191,7 @@ class Scheduler:
             if closed or version == entry['version']: continue
             entry['version'] = version
             old = entry['state']; now = instant(self.now())
-            if old['state'] == 'DISPOSED': continue
+            if old['state'] == 'DISPOSED' or self._lifecycle_frozen(entry): continue
             try:
                 _, settings = self._authority(entry)
             except library.LibraryError as error:
@@ -239,7 +244,7 @@ class Scheduler:
             with self._lock:
                 self._check(); self._signals(); now = instant(self.now())
                 eligible = [(entry['state']['served'], key, entry) for key, entry in self._entries.items()
-                    if entry['state']['state'] in ('READY','BACKOFF')
+                    if not self._lifecycle_frozen(entry) and entry['state']['state'] in ('READY','BACKOFF')
                     and entry['state']['due'] is not None
                     and datetime.fromisoformat(entry['state']['due']) <= now]
                 if not eligible: return None
@@ -302,7 +307,7 @@ class Scheduler:
             self._check(); entry = self._entries[key]
             try:
                 old = entry['state']
-                if old['state'] == 'DISPOSED': return
+                if old['state'] == 'DISPOSED' or self._lifecycle_frozen(entry): return
                 from .library_disposition import find, apply_schedule
                 scope, settings = self._authority(entry)
                 def current():
