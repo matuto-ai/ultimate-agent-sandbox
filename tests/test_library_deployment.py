@@ -7,6 +7,7 @@ claim an installed daemon, live provider, actual target qualification or VM.
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import multiprocessing
 from pathlib import Path
 import sys
 import tempfile
@@ -299,15 +300,15 @@ class DeploymentLibraryTests(unittest.TestCase):
         self.assertEqual(refused['outcome'], 'unknown')
         self.assertEqual(refused['error'], 'FORBIDDEN')
 
-    def test_stop_during_a_live_model_attempt_keeps_the_lease_and_recovers(self):
+    def attempt_fixture(self, mode):
         import test_library_attempts as attempts_fixture
         fixture = attempts_fixture.AttemptTests(
             'test_parking_commit_has_durable_inputs_before_contact_and_recovery_outcomes')
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        fixture.mode = 'release'
+        fixture.mode = mode
         original = fixture.source.scope
-        reference = self.base / 'active' / 'reference'
+        reference = self.base / ('active-' + mode) / 'reference'
         reference.mkdir(mode=0o755, parents=True)
         scope = library.LibraryScope(seal=library._SCOPE_SEAL, **{
             **{name: getattr(original, name) for name in library.LibraryScope.__slots__
@@ -322,10 +323,26 @@ class DeploymentLibraryTests(unittest.TestCase):
         def runner_for(_scope):
             # The composed publisher owns the lease and records for this attempt.
             fixture.source.publisher = self.deployment.publisher
-            return fixture.runner(), lambda _selected: ((), ())
-        options = dict(settings=document, rooms=rooms, scope_for=lambda _binding: scope,
-                       runner_for=runner_for,
-                       credentials={document['repository']['credential_ref']: {}})
+            runner = fixture.runner()
+            def context(selected):
+                # The fixture reply must correlate with this scheduler's real drain.
+                state = self.deployment.service.scheduler.state(scope.project_identity)
+                reply = {'version': 1, 'drain_id': state['drain_id'], 'attempt': state['attempt'],
+                         'operations': [], 'outcomes': [
+                             {'queue_id': queue, 'kind': 'parked', 'reason': 'NEEDS_EVIDENCE'}
+                             for queue in selected]}
+                route = runner.dispatcher.gateway.routes[fixture.profile.identity()]
+                runner.dispatcher.gateway.routes[fixture.profile.identity()] = (
+                    route[:3] + (fixture.mode, json.dumps(reply)))
+                return (), ()
+            return runner, context
+        return fixture, scope, dict(
+            settings=document, rooms=rooms, scope_for=lambda _binding: scope,
+            runner_for=runner_for,
+            credentials={document['repository']['credential_ref']: {}})
+
+    def test_stop_during_a_live_model_attempt_keeps_the_lease_and_recovers(self):
+        fixture, scope, options = self.attempt_fixture('release')
         deployment = self.make_deployment(**options)
         deployment.start()
         self.assertTrue(self.wait_for(lambda: fixture.marker.exists(), seconds=20))
@@ -349,6 +366,21 @@ class DeploymentLibraryTests(unittest.TestCase):
             lambda: restarted.service.scheduler.state(scope.project_identity)['state']
             in ('COMMITTED', 'IDLE', 'READY', 'BACKOFF'), seconds=20))
 
+    def test_revocation_during_a_live_attempt_blocks_publication(self):
+        fixture, scope, options = self.attempt_fixture('success')
+        allowed = [True]
+        def hook(event):
+            if event['state'] == 'returned':
+                allowed[0] = False
+        fixture.hook = hook
+        options['qualification'] = lambda _settings: allowed[0]
+        head = git(fixture.source.target, 'rev-parse', 'refs/heads/main').strip()
+        deployment = self.make_deployment(**options)
+        deployment.start()
+        self.assertTrue(self.wait_for(lambda: not deployment.running, seconds=30))
+        self.assertEqual(deployment.failure, 'TARGET_NOT_QUALIFIED')
+        self.assertEqual(git(fixture.source.target, 'rev-parse', 'refs/heads/main').strip(), head)
+
     def test_current_shared_settings_apply_to_new_operations_and_fail_closed(self):
         from uas.library_settings import SettingsOwner, canonical
         root = self.base / 'config'
@@ -363,7 +395,15 @@ class DeploymentLibraryTests(unittest.TestCase):
             lambda _principal, key, action: (
                 key is None and action == library.SETTINGS_CAPABILITY),
             lambda: True)
-        deployment = self.make_deployment(settings_owner=owner)
+        identity = library.project_binding(
+            self.projects['alpha']['project'],
+            source_identity=self.projects['alpha']['source_identity'])['project_identity']
+        operator = library.LocalHuman(
+            'human-1', 'human-actor', 'authority-1',
+            lambda _principal, project_identity, action: (
+                project_identity == identity and action in ('library-drain', 'library-retry')),
+            lambda: True)
+        deployment = self.make_deployment(settings_owner=owner, operator=lambda _uid: operator)
         deployment.start()
         self.register(deployment, 'alpha')
         self.assertTrue(deployment.wait_idle('alpha'))
@@ -381,10 +421,84 @@ class DeploymentLibraryTests(unittest.TestCase):
                          'REJECTED')
         self.assertEqual(self.enqueue(deployment, 'alpha', 'Yes', suffix='three')['outcome'],
                          'DURABLY_QUEUED')
+        root = self.state / 'library' / 'operator'
+        self.assertTrue(self.wait_for(lambda: (root / 'library-operator.sock').exists()))
+        observed_current = library_controls.request(
+            root, {'version': 1, 'action': 'observe', 'project_id': 'alpha',
+                   'for_action': 'drain'})
+        self.assertEqual(observed_current['outcome'], 'observed')
+        self.assertEqual(observed_current['result']['settings_id'], owner()['settings_id'])
         owner.path.unlink()
         failed = self.enqueue(deployment, 'alpha', 'Yes', suffix='four')
         self.assertNotEqual(failed['outcome'], 'DURABLY_QUEUED')
         self.assertTrue(self.wait_for(lambda: not deployment.running, seconds=3))
+
+    def test_forced_process_stop_recovers_projection_lease_and_operator(self):
+        identity = library.project_binding(
+            self.projects['alpha']['project'],
+            source_identity=self.projects['alpha']['source_identity'])['project_identity']
+        principal = library.LocalHuman(
+            'human-1', 'human-actor', 'authority-1',
+            lambda _principal, project_identity, action: (
+                project_identity == identity and action in ('library-drain', 'library-retry')),
+            lambda: True)
+        options = dict(operator=lambda _uid: principal)
+        seeding = self.make_deployment()
+        seeding.start()
+        self.register(seeding, 'alpha')
+        self.assertTrue(seeding.wait_idle('alpha'))
+        head = self.head()
+        seeding.stop()
+        ready = self.base / 'child-ready'
+        def child():
+            deployment = self.make_deployment(**options)
+            deployment.start()
+            ready.write_text('ready')
+            time.sleep(30)
+        process = multiprocessing.get_context('fork').Process(target=child)
+        process.start()
+        try:
+            self.assertTrue(self.wait_for(lambda: ready.exists(), seconds=20))
+            root = self.state / 'library' / 'operator'
+            self.assertTrue((root / 'library-operator.sock').exists())
+        finally:
+            process.kill()
+            process.join(5)
+        self.assertFalse(process.is_alive())
+        recovered = self.make_deployment(**options)
+        recovered.start()
+        self.assertTrue(recovered.running)
+        self.assertTrue(recovered.wait_idle('alpha'))
+        self.assertEqual(recovered.read('alpha').manifest['commit_sha'], head)
+        self.assertEqual(self.head(), head)
+        response = library_controls.request(
+            root, {'version': 1, 'action': 'observe', 'project_id': 'alpha',
+                   'for_action': 'drain'})
+        self.assertEqual(response['outcome'], 'observed')
+        recovered.stop()
+
+    def test_unavailable_active_settings_during_attempt_blocks_publication(self):
+        from uas.library_settings import SettingsOwner
+        fixture, scope, options = self.attempt_fixture('success')
+        root = self.base / 'settings'
+        root.mkdir(mode=0o700)
+        owner = SettingsOwner(
+            root / 'settings.db', 'deployment-1',
+            lambda: deepcopy(fixture.source.settings),
+            now=lambda: datetime(2026, 10, 30, tzinfo=timezone.utc))
+        owner.initialize({key: deepcopy(fixture.source.settings[key])
+                          for key in ('limits', 'filters')})
+        options['settings_owner'] = owner
+        def hook(event):
+            if event['state'] == 'returned':
+                owner.path.unlink()
+        fixture.hook = hook
+        head = git(fixture.source.target, 'rev-parse', 'refs/heads/main').strip()
+        deployment = self.make_deployment(**options)
+        deployment.start()
+        self.assertTrue(self.wait_for(lambda: not deployment.running, seconds=30))
+        self.assertEqual(deployment.failure, 'SETTINGS_UNAVAILABLE')
+        self.assertEqual(git(fixture.source.target, 'rev-parse', 'refs/heads/main').strip(), head)
 
     # --- service-to-Room ingress ------------------------------------------
 
