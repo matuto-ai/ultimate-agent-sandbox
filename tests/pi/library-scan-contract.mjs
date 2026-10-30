@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {scan} from '../../runtime/pi/library-scan.mjs';
+const {parse}=await import(pathToFileURL(process.env.UAS_PI_INSTALL+'/node_modules/yaml/dist/index.js'));
+const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pi-library-contract-'));
+const root=path.join(tmp,'.library-snapshots','a'.repeat(32),'library');
+fs.mkdirSync(root,{recursive:true});fs.symlinkSync(path.relative(tmp,root),tmp+'/library');
+const manifest=tmp+'/library.snapshot.json';
+const record={commit_sha:'1'.repeat(40),published_at:'2026-10-01',project_id:'alpha'};
+const write=()=>fs.writeFileSync(manifest,JSON.stringify(record));write();
+const lookup=(...q)=>scan(tmp,q,{parse,now:'2026-10-30T00:00:00Z'});
+const concept=(name,meta,body)=>fs.writeFileSync(root+'/'+name,'---\n'+meta+'\n---\n'+body+'\n');
+try {
+  concept('a.md','type: unknown-existing\ntitle: Alpha\nunknown: [anything]\nverified: {by: "human:owner", at: "2026-01-01T00:00:00Z"}\nstale_after: 2020-01-01','Amber\nSQLite');
+  assert.match(lookup('AMBER','sqlITE'),/human-reviewed/);assert.match(lookup('amber'),/STALE warning/);
+  assert.doesNotMatch(lookup('amber'),/FUZZY/);assert.match(lookup('amber','absent'),/No matching/);
+  assert.match(lookup('ambr'),/FUZZY/);assert.match(lookup('xx'),/No matching/);
+  fs.mkdirSync(root+'/pending');concept('pending/d.md','title: Draft\ntype: decision\nstatus: draft','Sapphire');
+  assert.match(lookup('sapphire'),/DRAFT/);assert.doesNotMatch(lookup('sapphire'),/FUZZY/);
+  assert.match(lookup('sapphirx'),/FUZZY DRAFT/);
+  concept('b.md','type: other\nverified: {by: "process:check", at: "2026-01-01T00:00:00Z"}\nsources: [{resource: x}]','machine');
+  assert.match(lookup('machine'),/machine-confirmed/);assert.match(lookup('machine'),/sources: present/);
+  concept('c.md','type: other\nverified: {by: "human:fake", at: invalid}\nstale_after: 2026-99-99','tolerate');
+  assert.match(lookup('tolerate'),/trust tier: unknown/);assert.match(lookup('tolerate'),/freshness: unknown/);
+  concept('d.md','type: [\nbroken','malformedmarker [broken](missing.md)');
+  assert.match(lookup('malformedmarker'),/metadata unreadable/);
+  for(let i=0;i<12;i++)concept(`many${i}.md`,'type: context','sharedmatch');
+  assert.equal((lookup('sharedmatch').match(/fragment:/g)||[]).length,8);
+  assert.throws(()=>lookup());assert.throws(()=>lookup(''));
+  record.commit_sha=null;write();assert.match(lookup('amber'),/no published snapshot/);
+  record.commit_sha='1'.repeat(40);write();
+  fs.symlinkSync('/etc/passwd',root+'/escape.md');assert.match(lookup('amber'),/read incomplete/);fs.unlinkSync(root+'/escape.md');
+  fs.writeFileSync(root+'/bad.md',Buffer.from([255]));assert.match(lookup('amber'),/read incomplete/);fs.unlinkSync(root+'/bad.md');
+  const read=fs.readFileSync;let count=0;
+  fs.readFileSync=(file,...args)=>{const value=read(file,...args);if(file===manifest && ++count===2)return value+' ';return value;};
+  try{assert.match(lookup('amber'),/Snapshot changed/);}finally{fs.readFileSync=read;}
+  fs.unlinkSync(tmp+'/library');fs.symlinkSync(os.tmpdir(),tmp+'/library');assert.match(lookup('amber'),/read incomplete/);
+} finally {fs.rmSync(tmp,{recursive:true,force:true});}
