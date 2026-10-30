@@ -67,7 +67,7 @@ class AdmissionSeat:
         if (not all(_token(v) for v in (self.room_id, self.room_instance,
                 self.participant_id, self.actor_id, self.profile_id))
                 or type(self.capabilities) is not tuple or len(self.capabilities) > 32
-                or not all(_token(v) for v in self.capabilities)
+                or not all(_token(v) or v == 'library:enqueue' for v in self.capabilities)
                 or len(set(self.capabilities)) != len(self.capabilities)
                 or type(self.receiver) is not ReceiverIdentity):
             raise OriginDenied('invalid trusted admission seat')
