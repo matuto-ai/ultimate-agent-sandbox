@@ -17,21 +17,31 @@ function near(a,b) {
   }
   return edits+(i<a.length || j<b.length?1:0)<=1;
 }
+function instant(value,{dateOnly=false}={}) {
+  if(typeof value!=='string')return NaN;
+  const day=value.slice(0,10),dayMs=Date.parse(day);
+  const validDay=/^\d{4}-\d{2}-\d{2}$/.test(day) && Number.isFinite(dayMs)
+    && new Date(dayMs).toISOString().slice(0,10)===day;
+  const validTime=/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(value);
+  return validDay && ((dateOnly && value===day)||validTime)?Date.parse(value):NaN;
+}
 function metadata(text,parse,now) {
+  text=text.replace(/\r\n?/g,'\n');
   const match=/^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text);
   let m={},warning='';
-  try {m=match?parse(match[1]):{};if(!m || typeof m!=='object' || Array.isArray(m))throw Error();}
+  try {if(text.startsWith('---\n')&&!match)throw Error();m=match?parse(match[1]):{};if(!m || typeof m!=='object' || Array.isArray(m))throw Error();}
   catch {m={};warning='metadata unreadable; open document';}
   const verified=Array.isArray(m.verified)?m.verified:m.verified?[m.verified]:[];
-  const actors=verified.filter(v=>v && typeof v.by==='string' && v.by && typeof v.at==='string' && Number.isFinite(Date.parse(v.at)));
-  const trust=actors.some(v=>/^human:.+/.test(v.by))?'human-reviewed':actors.length?'machine-confirmed':
+  const actors=verified.filter(v=>v && typeof v.by==='string' && v.by && Number.isFinite(instant(v.at)));
+  const trust=warning?'unknown':actors.some(v=>/^human:.+/.test(v.by))?'human-reviewed':actors.length?'machine-confirmed':
     Object.hasOwn(m,'verified')?'unknown':'unverified';
   const date=typeof m.stale_after==='string'?m.stale_after:'';
-  let freshness=Object.hasOwn(m,'stale_after')?'unknown':'no recorded policy';
-  if(/^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)) && new Date(date).toISOString().slice(0,10)===date)
-    freshness=now.slice(0,10)>=date?'STALE warning (still readable)':'within recorded policy';
-  const sources=Array.isArray(m.sources)?(m.sources.length?'present':'absent'):Object.hasOwn(m,'sources')?'unknown':'absent';
-  return {title:clean(m.title??'(untitled)'),type:clean(m.type??'unknown'),lifecycle:clean(m.status??'stable'),trust,
+  let freshness=warning?'unknown':Object.hasOwn(m,'stale_after')?'unknown':'no recorded policy';
+  const expiry=instant(date,{dateOnly:true});
+  if(Number.isFinite(expiry))
+    freshness=instant(now)>=expiry?'STALE warning (still readable)':'within recorded policy';
+  const sources=warning?'unknown':Array.isArray(m.sources)?(m.sources.length?'present':'absent'):Object.hasOwn(m,'sources')?'unknown':'absent';
+  return {title:clean(m.title??'(untitled)'),type:clean(m.type??'unknown'),lifecycle:clean(m.status??(warning?'unknown':'stable')),trust,
     freshness,sources,warning,body:match?text.slice(match[0].length):text};
 }
 function bytes(file,max) {
@@ -50,8 +60,12 @@ export function scan(reference,query,{parse,now=new Date().toISOString()}={}) {
   try {
     const ref=fs.realpathSync(reference);
     const manifestFile=path.join(ref,'library.snapshot.json');
-    const before=fs.readFileSync(manifestFile,'utf8');
-    if(before.length>4096)throw Error();
+    const readManifest=()=>{
+      const selected=fs.realpathSync(manifestFile);
+      if(!/^\.library-snapshots\/[0-9a-f]{32}\/library\.snapshot\.json$/.test(path.relative(ref,selected)))throw Error();
+      return bytes(selected,4096);
+    };
+    const before=readManifest();
     const manifest=JSON.parse(before);
     if(manifest.commit_sha===null)return 'Library has no published snapshot. No inferred answer.\n';
     if(!/^[0-9a-f]{40,64}$/.test(manifest.commit_sha))throw Error();
@@ -85,14 +99,14 @@ export function scan(reference,query,{parse,now=new Date().toISOString()}={}) {
       const lines=d.body.split('\n');
       const line=lines.find(l=>terms.some(t=>fuzzy?(fold(l).match(/[\p{L}\p{N}_-]+/gu)||[]).some(w=>near(t,w)):fold(l).includes(t)))
         ??lines.find(l=>l.trim())??'';
-      rows.push(`\n${fuzzy?'FUZZY ':''}${draft?'DRAFT ':''}${clean(d.name)} — ${d.title}`,
+      rows.push(`\n${fuzzy?'FUZZY ':''}${draft?'DRAFT ':''}${JSON.stringify(d.name)} — ${d.title}`,
         `fragment: ${clean(line)}`,
         `type: ${d.type}; lifecycle: ${d.lifecycle}; trust tier: ${d.trust}; freshness: ${d.freshness}; sources: ${d.sources}`,
         ...(d.warning?[d.warning]:[]));
     }
     if(!selected.length)rows.push('No matching document. No inferred answer.');
     else rows.push('\nOpen the containing document with native read for authoritative metadata, rationale, sources and cross-references; optional summary follows fragments.');
-    if(fs.readFileSync(manifestFile,'utf8')!==before)return 'Snapshot changed during lookup; retry the native read. No inferred answer.\n';
+    if(readManifest()!==before)return 'Snapshot changed during lookup; retry the native read. No inferred answer.\n';
     return rows.join('\n')+'\n';
   }catch{return 'Projection unavailable or read incomplete. No inferred answer; do not bypass it.\n';}
 }

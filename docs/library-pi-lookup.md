@@ -37,7 +37,7 @@ OKF v0.2 trust derives from recorded verification: no verification is unverified
 non-human verification is machine-confirmed, human verification is human-reviewed.
 These are advisory records, not truth or authority. Absent lifecycle is stable;
 unknown existing types/keys, malformed metadata and broken links do not prevent
-reading the document. An elapsed recorded `stale_after` date warns but does not
+reading the document. An elapsed recorded `stale_after` date or timezone-bearing instant warns but does not
 hide or delete content. Source presence does not prove availability or fidelity.
 See [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format/blob/main/SPEC.md).
 

@@ -8,7 +8,8 @@ const {parse}=await import(pathToFileURL(process.env.UAS_PI_INSTALL+'/node_modul
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'pi-library-contract-'));
 const root=path.join(tmp,'.library-snapshots','a'.repeat(32),'library');
 fs.mkdirSync(root,{recursive:true});fs.symlinkSync(path.relative(tmp,root),tmp+'/library');
-const manifest=tmp+'/library.snapshot.json';
+const manifest=path.dirname(root)+'/library.snapshot.json';
+fs.symlinkSync(path.relative(tmp,manifest),tmp+'/library.snapshot.json');
 const record={commit_sha:'1'.repeat(40),published_at:'2026-10-01',project_id:'alpha'};
 const write=()=>fs.writeFileSync(manifest,JSON.stringify(record));write();
 const lookup=(...q)=>scan(tmp,q,{parse,now:'2026-10-30T00:00:00Z'});
@@ -25,8 +26,19 @@ try {
   assert.match(lookup('machine'),/machine-confirmed/);assert.match(lookup('machine'),/sources: present/);
   concept('c.md','type: other\nverified: {by: "human:fake", at: invalid}\nstale_after: 2026-99-99','tolerate');
   assert.match(lookup('tolerate'),/trust tier: unknown/);assert.match(lookup('tolerate'),/freshness: unknown/);
-  concept('d.md','type: [\nbroken','malformedmarker [broken](missing.md)');
+  concept('badverify.md','type: context\nverified: {by: "human:someone", at: "2026-02-30T00:00:00Z"}','badverify');
+  assert.match(lookup('badverify'),/trust tier: unknown/);
+  const longname='z'.repeat(245)+'.md';concept(longname,'type: context','longpathmarker');
+  assert.ok(lookup('longpathmarker').includes(longname));
+  concept('time.md' ,'type: context\nstale_after: 2026-10-30T01:00:00+01:00','timed');
+  assert.match(lookup('timed'),/STALE warning/);
+  assert.match(scan(tmp,['timed'],{parse,now:'2026-10-29T23:59:59Z'}),/within recorded policy/);
+  assert.match(scan(tmp,['timed'],{parse,now:'2026-10-30T00:00:01Z'}),/STALE warning/);
+  concept('impossible.md','type: context\nstale_after: 2026-02-30T00:00:00Z','impossible');
+  assert.match(lookup('impossible'),/freshness: unknown/);
+  concept('d.md' ,'type: [\nbroken','malformedmarker [broken](missing.md)');
   assert.match(lookup('malformedmarker'),/metadata unreadable/);
+  for(const signal of ['lifecycle','trust tier','freshness','sources'])assert.ok(lookup('malformedmarker').includes(signal+': unknown'));
   for(let i=0;i<12;i++)concept(`many${i}.md`,'type: context','sharedmatch');
   assert.equal((lookup('sharedmatch').match(/fragment:/g)||[]).length,8);
   assert.throws(()=>lookup());assert.throws(()=>lookup(''));
@@ -34,8 +46,11 @@ try {
   record.commit_sha='1'.repeat(40);write();
   fs.symlinkSync('/etc/passwd',root+'/escape.md');assert.match(lookup('amber'),/read incomplete/);fs.unlinkSync(root+'/escape.md');
   fs.writeFileSync(root+'/bad.md',Buffer.from([255]));assert.match(lookup('amber'),/read incomplete/);fs.unlinkSync(root+'/bad.md');
-  const read=fs.readFileSync;let count=0;
-  fs.readFileSync=(file,...args)=>{const value=read(file,...args);if(file===manifest && ++count===2)return value+' ';return value;};
-  try{assert.match(lookup('amber'),/Snapshot changed/);}finally{fs.readFileSync=read;}
+  const real=fs.realpathSync;let count=0;
+  fs.realpathSync=(file,...args)=>{if(file===tmp+'/library.snapshot.json' && ++count===2){record.commit_sha='2'.repeat(40);write();}return real(file,...args);};
+  try{assert.match(lookup('amber'),/Snapshot changed/);}finally{fs.realpathSync=real;}
+  concept('crlf.md','type: context\nverified: {by: "human:crlf", at: "2026-01-01T00:00:00Z"}\nstale_after: 2020-01-01','crlfmarker');
+  fs.writeFileSync(root+'/crlf.md',fs.readFileSync(root+'/crlf.md','utf8').replace(/\n/g,'\r\n'));
+  assert.match(lookup('crlfmarker'),/human-reviewed/);assert.match(lookup('crlfmarker'),/STALE warning/);
   fs.unlinkSync(tmp+'/library');fs.symlinkSync(os.tmpdir(),tmp+'/library');assert.match(lookup('amber'),/read incomplete/);
 } finally {fs.rmSync(tmp,{recursive:true,force:true});}
