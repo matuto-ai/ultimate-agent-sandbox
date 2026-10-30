@@ -24,7 +24,7 @@ const write=v=>{const line=JSON.stringify(v)+'\n';if(Buffer.byteLength(line)>262
 function close(){if(closed)return;closed=true;resolve?.({done:true});try{query?.close();}catch{}setTimeout(()=>process.exit(0),150).unref();}
 process.on('SIGTERM',close);process.on('SIGINT',close);
 const permit=makeLibraryReadToolPolicy(state,{reference,command});
-query=createQuery({prompt,options:{...options,pathToClaudeCodeExecutable:binary,cwd:root,
+query=createQuery({prompt,options:{...options,pathToClaudeCodeExecutable:binary,cwd:reference,
   env:{...options.env,HOME:home,CLAUDE_CONFIG_DIR:home+'/config',ANTHROPIC_BASE_URL:url,ANTHROPIC_API_KEY:key},
   canUseTool:async(name,input,context)=>{const result=await permit(name,input,context);write({type:'permission',name,input,result});return result;},
   spawnClaudeCodeProcess:o=>{child=spawn(o.command,o.args,{cwd:o.cwd,env:o.env,signal:o.signal,stdio:['pipe','pipe','pipe']});child.stderr.on('data',()=>{});write({type:'spawn',pid:child.pid});return child;}}});

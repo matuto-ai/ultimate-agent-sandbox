@@ -8,6 +8,8 @@ import {nativeOptions,NativeToolState,profileTools,requireMcp} from '../../../ru
 const session='11111111-1111-4111-8111-111111111111', uuid='22222222-2222-4222-8222-222222222222';
 const args={binary:'/opt/uas/claude/claude',cwd:'/project/repo',home:'/runtime/home',model:'claude-sonnet-4-6',sessionId:session,helper:'/opt/uas/bin/claude-mcp-connector',endpoint:'/transport/peer'};
 const options=nativeOptions({...args,profile:LIBRARY_READ_PROFILE});
+assert.equal(options.cwd,'/project/reference'); assert.equal(nativeOptions(args).cwd,'/project/repo');
+assert(Object.hasOwn(options.extraArgs,'restricted'));
 assert.deepEqual(options.tools,['Read','Bash']); assert.deepEqual(options.allowedTools,[]);
 assert.deepEqual(options.settings.permissions.ask,['Read','Bash']); assert.equal(options.permissionPrompts,'host');
 assert.deepEqual(options.mcpServers,{}); assert.deepEqual(options.settingSources,[]);
@@ -17,6 +19,10 @@ requireMcp([],LIBRARY_READ_PROFILE); assert.throws(()=>requireMcp([{name:'uas',s
 assert.throws(()=>requireMcp([]));
 const makeState=()=>{const s=new NativeToolState(session,LIBRARY_READ_PROFILE);
   s.event({type:'system',subtype:'init',session_id:session,claude_code_version:'2.1.310',tools:profileTools(LIBRARY_READ_PROFILE),mcp_servers:[]});return s;};
+const readTurn=(name,input)=>{const s=makeState();s.begin(uuid,'read');
+  s.event({type:'user',session_id:session,uuid,isReplay:true,parent_tool_use_id:null,message:{role:'user',content:'read'}});
+  s.event({type:'assistant',session_id:session,user_message_uuid:uuid,parent_tool_use_id:null,message:{role:'assistant',content:[{type:'tool_use',id:'tool',name,input}]}});
+  s.event({type:'system',subtype:'session_state_changed',session_id:session,state:'requires_action'});return s;};
 let state=makeState(); assert(state.initialized); assert.equal(state.state(),null);
 state.begin(uuid,'explicit lookup');
 state.event({type:'user',session_id:session,uuid,isReplay:true,parent_tool_use_id:null,message:{role:'user',content:'explicit lookup'}});
@@ -50,10 +56,40 @@ try {
   assert(allowed('Read',{file_path:reference+'/library/index.md',offset:1,limit:2000}));
   for(const extra of [{offset:0},{offset:1048577},{limit:0},{limit:2001},{offset:1.5},{limit:'10'},{pages:'1'}])
     assert(!allowed('Read',{file_path:reference+'/library/index.md',...extra}));
-  const active=makeState();const toolPolicy=makeLibraryReadToolPolicy(active,{reference});
-  active.begin(uuid,'read');assert.equal(toolPolicy('Read',{file_path:reference+'/library/index.md'},context).behavior,'allow');
-  assert.equal(active.fenced,null);toolPolicy('Bash',{command:'cat /etc/passwd'},context);assert.equal(active.fenced,'needs-input');
-  assert.equal(toolPolicy('Read',{file_path:reference+'/library/index.md'},context).behavior,'deny');
+  const readInput={file_path:reference+'/library/index.md'};
+  const active=readTurn('Read',readInput);const toolPolicy=makeLibraryReadToolPolicy(active,{reference});
+  assert.equal(active.state(),'ambiguous');assert.equal(active.fenced,null);
+  const accepted=toolPolicy('Read',readInput,context);assert.equal(accepted.behavior,'allow');
+  assert.equal(active.state(),'ambiguous');assert.equal(active.fenced,null);
+  active.event({type:'system',subtype:'session_state_changed',session_id:session,state:'running'});
+  assert.equal(active.state(),'ambiguous');
+  const readResult={type:'user',session_id:session,parent_tool_use_id:null,message:{role:'user',content:[{type:'tool_result',tool_use_id:'tool',content:'AUTHORED'}]},
+    tool_result_meta:[{id:'tool',permission_decision:{decision:'accept',source:'user_temporary'}}],
+    tool_use_result:{type:'text',file:{filePath:accepted.updatedInput.file_path}}};
+  active.event(readResult);assert.equal(active.fenced,null);assert.equal(active.state(),'busy');
+  active.event({type:'result',session_id:session,user_message_uuid:uuid,subtype:'success',is_error:false,stop_reason:'end_turn',terminal_reason:'completed',queued_turn_count:0,permission_denials:[]});
+  assert.equal(active.pending,null);assert.equal(active.state(),'busy');
+  active.event({type:'system',subtype:'session_state_changed',session_id:session,state:'idle'});
+  assert.equal(active.state(),null); // still not safe without fresh host listing/control
+  for(const bad of [{...context,toolUseID:'other'}, {...context,agentID:'nested'}]) {
+    const s=readTurn('Read',readInput), policy=makeLibraryReadToolPolicy(s,{reference});
+    assert.equal(policy('Read',readInput,bad).behavior,'deny');assert(s.fenced);
+  }
+  for(const change of [r=>r.tool_result_meta[0].permission_decision.source='config',r=>r.tool_use_result.file.filePath='/etc/passwd',r=>r.message.content[0].tool_use_id='other']) {
+    const s=readTurn('Read',readInput), policy=makeLibraryReadToolPolicy(s,{reference});
+    assert.equal(policy('Read',readInput,context).behavior,'allow');const result=structuredClone(readResult);change(result);s.event(result);assert(s.fenced);
+  }
+  const duplicate=readTurn('Read',readInput), duplicatePolicy=makeLibraryReadToolPolicy(duplicate,{reference});
+  assert.equal(duplicatePolicy('Read',readInput,context).behavior,'allow');assert.equal(duplicatePolicy('Read',readInput,context).behavior,'deny');assert(duplicate.fenced);
+  const changed=readTurn('Read',readInput), changedPolicy=makeLibraryReadToolPolicy(changed,{reference});
+  assert.equal(changedPolicy('Read',{file_path:reference+'/library/pending/draft.md'},context).behavior,'deny');assert(changed.fenced);
+  const unresolved=readTurn('Read',readInput);
+  unresolved.event({type:'system',subtype:'session_state_changed',session_id:session,state:'running'});assert.equal(unresolved.fenced,'unresolved-read-permission');
+  const denied=readTurn('Bash',{command:'cat /etc/passwd'});
+  assert.equal(makeLibraryReadToolPolicy(denied,{reference})('Bash',{command:'cat /etc/passwd'},context).behavior,'deny');assert(denied.fenced);
+  const outside=makeState();outside.event({type:'system',subtype:'permission_denied',session_id:session});assert(outside.fenced);
+  const concurrent=readTurn('Read',readInput);concurrent.event({type:'assistant',session_id:session,parent_tool_use_id:null,message:{role:'assistant',content:[{type:'tool_use',id:'tool2',name:'Read',input:readInput}]}});assert.equal(concurrent.fenced,'concurrent-read-tools');
+
   assert(!allowed('Write',{file_path:reference+'/library/index.md'}));
   assert(!allowed('Read',{file_path:reference+'/library/index.md'},{...context,agentID:'subagent'}));
   assert(!allowed('Read',{file_path:reference+'/library/index.md'},{...context,signal:{aborted:true}}));

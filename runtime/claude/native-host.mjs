@@ -16,6 +16,7 @@ import {writeHostDiagnostic, nativeDiagnostic, lifecycleDiagnostic} from './sdk-
 const [cwd, home, endpoint, model, sessionId, resume, manifestFile, manifestDigest, ...optional] = process.argv.slice(2);
 const profile = ['library-capture-v1',LIBRARY_READ_PROFILE].includes(optional.at(-1)) ? optional.pop() : 'native-v1';
 const authPath = optional[0];
+const nativeCwd=profile===LIBRARY_READ_PROFILE ? '/project/reference' : cwd;
 const sdkRoot='/opt/uas/claude-sdk', binary='/opt/uas/claude/claude';
 const bootstrap='/opt/uas/bin/claude-native-bootstrap', helper='/opt/uas/bin/claude-mcp-connector';
 
@@ -89,7 +90,7 @@ function makeInput() {
 }
 async function publicListing(env) {
   const p = spawn(binary, ['agents', '--json', '--all', '--setting-sources', ''],
-    {cwd, env, stdio: ['ignore', 'pipe', 'pipe']});
+    {cwd:nativeCwd, env, stdio: ['ignore', 'pipe', 'pipe']});
   return await collectListing(p, queries, CONTROL_DEADLINE);
 }
 async function sample(env) {
@@ -173,7 +174,7 @@ async function main() {
     },
     spawnClaudeCodeProcess: options => {
       if (child) throw new Error('duplicate-native-spawn');
-      if (options.command !== binary || options.cwd !== cwd) throw Error('unexpected-sdk-spawn');
+      if (options.command !== binary || options.cwd !== nativeCwd) throw Error('unexpected-sdk-spawn');
       child = spawn(bootstrap, [endpoint, options.command, ...options.args], {cwd:options.cwd, env:options.env,
         signal:options.signal, stdio:['pipe','pipe','pipe','pipe']});
       child.stdio[3].on('error',()=>shutdown('rendezvous-loss',2));

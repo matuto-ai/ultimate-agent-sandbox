@@ -68,6 +68,8 @@ class ClaudeLibraryRecipeTests(recipe_tests.NativeClaudeRecipeTests):
                 NativeMount('/runtime','/runtime',False),NativeMount('/sockets','/transport',True))
         selected=self.make(tool_profile='library-read-v1',mounts=mounts)
         self.assertEqual(selected.host_spec(manifest_in_image='/opt/uas/claude-manifest.json')['Cmd'][-1],'library-read-v1')
+        self.assertEqual(selected.identity['native_cwd'],'/project/reference')
+        self.assertEqual(selected.identity['checkout'],'/project/repo')
         self.assertNotEqual(selected.identity['recipe_sha256'],self.make().identity['recipe_sha256'])
         with self.assertRaises(NativeRecipeError): self.make(tool_profile='library-read-v1',mounts=tuple(
             NativeMount(m.source,m.destination,False) if m.destination=='/project/reference' else m for m in mounts))

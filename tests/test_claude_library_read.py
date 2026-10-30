@@ -136,7 +136,7 @@ class ReadSession:
     def search(self, *terms):
         return {'name':'Bash','input':{'command':self.command + ''.join(" '" + term + "'" for term in terms)}}
 
-    def invoke(self, calls=(), *, denied=False):
+    def invoke(self, calls=(), *, denied=False, native_path_denial=False):
         with self.gateway.lock:
             self.test.assertFalse(self.gateway.calls)
             self.gateway.calls.extend(calls)
@@ -157,7 +157,12 @@ class ReadSession:
         self.test.assertEqual(len(blocks),len(calls),events)
         if not denied: self.test.assertTrue(all(not b.get('is_error') for b in blocks),blocks)
         permits = [e for e in events if e.get('type')=='permission']
-        self.test.assertEqual(len(permits),len(calls),'every native access must reach restricted policy')
+        self.test.assertEqual(len(permits),0 if native_path_denial else len(calls),
+                              'qualified access must reach policy; restricted out-of-cwd rejection occurs earlier')
+        if native_path_denial:
+            self.test.assertTrue(any(e.get('type')=='native' and
+                e['event'].get('subtype')=='permission_denied' and
+                '--restricted' in e['event'].get('decision_reason','') for e in events),events)
         self.test.assertTrue(all(e['result']['behavior']==('deny' if denied else 'allow') for e in permits),permits)
         return [b['content'] if isinstance(b['content'],str) else
                 '\n'.join(v.get('text','') for v in b['content']) for b in blocks]
@@ -240,11 +245,16 @@ class ClaudeLibraryReadNativeTests(unittest.TestCase):
             else:
                 self.assertIn('No matching document',out[2]); self.assertIn('BETA_ONLY',out[6])
                 self.assertNotIn('ALPHA_ONLY',''.join(out))
-            # Same-UID fixture files are intentionally readable to the OS. Only
-            # production policy prevents native access; assert actual denial.
-            other = beta if index==0 else alpha
-            denial = session.invoke([{'name':'Read','input':{'file_path':str(other.root/'library/index.md')}}],denied=True)
-            self.assertNotIn('BETA_SECRET' if index==0 else 'ALPHA_ONLY',''.join(denial))
+            # Same-UID files are readable to the OS. Distinguish native cwd
+            # confinement from a separate actual host-policy Read denial.
+            if index==0:
+                denial = session.invoke([{'name':'Read','input':{'file_path':str(beta.root/'library/index.md')}}],
+                                         denied=True,native_path_denial=True)
+                self.assertNotIn('BETA_SECRET',''.join(denial))
+            else:
+                forbidden = worker.root/'unapproved.txt'; forbidden.write_text('FORBIDDEN_READ_MARKER')
+                denial = session.invoke([{'name':'Read','input':{'file_path':str(forbidden)}}],denied=True)
+                self.assertNotIn('FORBIDDEN_READ_MARKER',''.join(denial))
             self.assertFalse((worker.root/'library/.git').exists())
             session.close()
         missing_scope = p.make_scope('missing','other/missing','3003')

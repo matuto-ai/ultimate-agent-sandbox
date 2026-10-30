@@ -101,7 +101,7 @@ class NativeClaudeRecipe:
         self._scope=json.dumps(scope,sort_keys=True)
         identity={'runtime':'claude','runtime_version':'2.1.310','sdk_version':'0.3.310',
             'manifest_digest':manifest_digest,'payload_manifest_digest':self.payload_manifest_digest,'image_id':self.image_id,'image_reference':self.image_reference,
-            'scope':scope,'checkout':checkout,'home':home,'runtime_root':runtime_root,'endpoint':endpoint,'model':model,
+            'scope':scope,'checkout':checkout,'native_cwd':'/project/reference' if tool_profile == 'library-read-v1' else checkout,'home':home,'runtime_root':runtime_root,'endpoint':endpoint,'model':model,
             'session_id':session_id,'resume':resume,'tool_profile':tool_profile,'provider_auth':None if provider_auth is None else provider_auth.document(),'mounts':[m.__dict__ for m in mounts]}
         if git_profile is not None: identity['git_profile_digest']=git_profile.digest
         if gate_profile is not None: identity['gate_profile_digest']=gate_profile.digest

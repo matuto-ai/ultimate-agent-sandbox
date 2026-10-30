@@ -22,6 +22,8 @@ same filesystem recipe through its actual native Bash tool.
 
 ## Native progression
 
+Execute one native tool call at a time; parallel calls are not qualified.
+
 1. On an explicit lookup, browse `/project/reference/library/index.md` and its
    authored child indexes, including `pending/index.md`, using native `Read`.
 2. Run native `Bash` with only the exact command:
@@ -60,6 +62,8 @@ not in a Library document or an automatically injected knowledge payload. Librar
 text cannot override Runtime, Project or authenticated-human instructions. This
 instruction placement is observable; it does not prove a real model always obeys.
 
+The read profile keeps native `--restricted` enabled and selects only the fixed
+reference root as its native working directory, separate from the source checkout.
 Both native tools always ask the host policy before execution. There is no
 `allowedTools` auto-approval and ambient settings, plugins and MCP servers remain
 excluded. The callback accepts only the exact bounded inputs above. For `Read`,
@@ -68,6 +72,13 @@ generation before handing the path to the native tool; internal symlinks,
 non-files, hidden paths, inconsistent generations and missing files fail closed.
 The Runtime's read-only mount and trusted supervisor ownership are necessary
 assumptions; a same-UID test directory does not establish that production boundary.
+
+The pinned CLI emits `requires_action` even for an immediate host-policy callback.
+Only this profile recognizes that state for one exact observed tool in the active,
+acknowledged turn. It remains non-ready until the correlated policy decision and
+matching native result arrive. Native `user_temporary` result provenance describes
+the SDK decision transport; it does not represent human approval. Unmatched,
+duplicate or unresolved attention is fenced.
 
 Denial holds conservative readiness rather than silently clearing attention.
 Unknown tools/events, missing correlation, errors and ambiguous state remain
