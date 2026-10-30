@@ -616,6 +616,12 @@ async function browserCheck(){
         const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}),name=`${theme}-library-settings.png`;
         fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
       }
+      // Target the actual mobile controls, not only the page introduction.
+      for (const [selector,name] of [['#setting-attempt_seconds','D-library-settings-form-mobile.png'],['[data-settings-save]','D-library-settings-apply-mobile.png']]) {
+        await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'});new Promise(resolve=>requestAnimationFrame(resolve))`);
+        const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+        fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
+      }
       await change(null);
       const draftBefore=await evaluate(`document.getElementById('setting-coalesce_seconds').value`);
       await evaluate(`installDocument(${JSON.stringify(dataFor(documents.reconnected))})`);
@@ -631,7 +637,7 @@ async function browserCheck(){
       assert(await evaluate(`!document.querySelector('[data-settings-save]')`));
       await settingsStep('[data-settings-refresh]');await change(null);await settingsStep('[data-settings-save]','lost-before');
       assert((await settingsStep('[data-settings-reconcile]')).includes('Outcome unknown'));
-      await evaluate(`scrollTo(0,0)`);
+      await evaluate(`document.querySelector('[data-settings-reconcile]').scrollIntoView({block:'center'});new Promise(resolve=>requestAnimationFrame(resolve))`);
       const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false}),name='D-library-settings-unknown.png';
       fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
     } finally {fs.rmSync(settingsDirectory,{recursive:true,force:true});}
