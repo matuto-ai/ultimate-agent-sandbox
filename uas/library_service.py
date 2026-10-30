@@ -1,7 +1,8 @@
 """T21 lease-first service lifecycle and bounded metadata report replay.
 
 The Supervisor supplies current Project compositions and a trusted Hub transport.
-No Participant, model client, canonical target provisioning or disposition API.
+No Participant, model client or canonical target provisioning API. Trusted human
+controls compose the canonical disposition owner separately.
 """
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone

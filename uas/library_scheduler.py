@@ -57,11 +57,11 @@ class Scheduler:
         entry['settings'] = deepcopy(settings)
         return scope, settings
 
-    def _save(self, entry, value, at, *, transition=None, control=None):
+    def _save(self, entry, value, at, *, transition=None, control=None, sequence=None):
         # Service-owned operational evidence must survive Project revocation.
         # This does not read or publish Project content under stale authority.
         scope, settings = entry['scope'], entry['settings']
-        value = {**deepcopy(value), 'sequence': entry['state']['sequence'] + 1}
+        value = {**deepcopy(value), 'sequence': sequence if sequence is not None else entry['state']['sequence'] + 1}
         value.pop('transition', None)
         phase = transition
         if phase is None:
@@ -292,6 +292,16 @@ class Scheduler:
             try:
                 old = entry['state']
                 if old['state'] == 'DISPOSED': return
+                from .library_disposition import find, apply_schedule
+                scope, settings = self._authority(entry)
+                def current():
+                    fresh, active = self._authority(entry)
+                    if fresh.canonical()!=scope.canonical() or active['settings_id']!=settings['settings_id']:
+                        fail('CONFIGURATION_CHANGED')
+                disposed=find(self.publisher,scope,settings,current,old['drain_id'])
+                if disposed is not None:
+                    apply_schedule(self,entry,*disposed)
+                    return
                 if old['selected']:
                     result = entry['runner'].recover(old['drain_id'])
                     if result is not None:
