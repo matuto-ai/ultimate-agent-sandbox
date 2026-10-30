@@ -23,6 +23,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.22.1'
+      - name: Install hash-pinned Library parser for real projection fixture
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uas-python"
+          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
       - name: Install locked official Pi without lifecycle scripts or account configuration
         run: sh tests/pi/install-dependencies.sh
       - name: Require actual Pi extension and RPC across the durable Hub seam
@@ -34,4 +38,4 @@ jobs:
           # Child network namespace only. No host networking modification and no
           # networked fallback. Pi itself also gets clean HOME/env + API guards.
           sudo unshare --net -- sudo -u "$runner_user" -- \
-            env PATH="$node_dir:/usr/bin:/bin" sh tests/pi/run-tests.sh
+            env PATH="$node_dir:$RUNNER_TEMP/uas-python/bin:/usr/bin:/bin" sh tests/pi/run-tests.sh
