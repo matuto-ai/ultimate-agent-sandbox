@@ -82,3 +82,34 @@ class LibraryInstallationProbeTests(unittest.TestCase):
                     result = probe.startup_diagnostic(room, {'outcome': 'unknown', 'error': '/secret/token'})
                 self.assertEqual(result['error'], 'REDACTED')
                 self.assertEqual(result['owned_receipt'], {'state': 'unavailable'})
+
+    def test_owned_hub_diagnostic_requires_exact_labels_before_logs(self):
+        receipt = {'room_id': 'alpha', 'instance_id': 'a'*32,
+                   'spec': {'config_digest': 'sha256:'+'b'*64, 'profile_digest': 'sha256:'+'c'*64}}
+        from uas.local_native import LocalNativeBackend
+        backend = object.__new__(LocalNativeBackend)
+        prefix = backend.LABEL
+        labels = backend._labels(receipt, 'hub')
+        def wire(selected):
+            return ' '.join(json.dumps(x) for x in ('d'*64, '/uas-native-'+'a'*32+'-hub', selected,
+                                                   False, 1, False)).encode()
+        logs = b'File "/opt/uas/uas/local_hub.py", line 1\nModuleNotFoundError: No module named \'_sqlite3\'\nsecret-credential\n'
+        with patch.object(probe, 'diagnostic_command', side_effect=[wire(labels), logs]) as command:
+            result = probe.owned_hub_diagnostic(receipt, 'alpha')
+        self.assertEqual(result['state'], 'owned')
+        self.assertFalse(result['running']); self.assertEqual(result['exit_code'], 1)
+        self.assertEqual(result['errors']['missing_modules'], ['_sqlite3'])
+        self.assertIn('local_hub', result['errors']['uas_frames'])
+        self.assertNotIn('secret-credential', json.dumps(result))
+        self.assertEqual(command.call_args_list[1].args[0], ['logs', '--tail', '80', 'd'*64])
+        with patch.object(probe, 'diagnostic_command', return_value=wire({**labels, prefix+'.room': 'beta'})) as command:
+            self.assertEqual(probe.owned_hub_diagnostic(receipt, 'alpha'), {'state': 'unavailable'})
+        self.assertEqual(command.call_count, 1)
+
+    def test_hub_log_filter_excludes_unknown_paths_modules_and_message_contents(self):
+        result = probe.filtered_hub_errors(b'PermissionError: [Errno 13] Permission denied: /secret/path\n'
+            b'ModuleNotFoundError: No module named \'private_secret\'\nFile "/secret/not_ours.py", line 1\n')
+        self.assertEqual(result['missing_modules'], [])
+        self.assertEqual(result['uas_frames'], [])
+        self.assertEqual(result['known_failures'], ['permission-denied'])
+        self.assertNotIn('secret', json.dumps(result))

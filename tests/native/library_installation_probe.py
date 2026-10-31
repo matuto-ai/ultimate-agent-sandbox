@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import re
 import stat
@@ -89,6 +90,89 @@ def safe_state(value):
     return result
 
 
+def diagnostic_command(arguments, *, limit=65536, seconds=5):
+    """Bound only the exact read-only diagnostic child, including output bytes."""
+    process = subprocess.Popen(['/usr/bin/docker', *arguments], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    output = bytearray(); deadline = time.monotonic() + seconds
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, 'diagnostic timeout')
+            if not select.select([process.stdout], [], [], remaining)[0]:
+                raise RuntimeError('diagnostic timeout')
+            chunk = os.read(process.stdout.fileno(), min(8192, limit + 1 - len(output)))
+            if not chunk: break
+            output.extend(chunk)
+            require(len(output) <= limit, 'diagnostic output bound')
+        require(process.wait(timeout=max(.01, deadline-time.monotonic())) == 0,
+                'diagnostic command unavailable')
+        return bytes(output)
+    finally:
+        if process.poll() is None: process.kill()
+        process.wait(); process.stdout.close()
+
+
+def filtered_hub_errors(raw):
+    text = raw.decode('utf-8', errors='replace')
+    classes = ('ModuleNotFoundError', 'ImportError', 'PermissionError', 'FileNotFoundError',
+               'OSError', 'RuntimeError', 'OriginDenied', 'LedgerError', 'QualificationError',
+               'SyntaxError', 'TypeError', 'ValueError', 'OperationalError')
+    result = {'exception_classes': [name for name in classes
+              if re.search(r'(?:^|\n)(?:[a-z_]+\.)?' + name + r':', text)]}
+    known = {p.stem for p in (ROOT / 'uas').glob('*.py')}
+    result['uas_frames'] = sorted({name for name in re.findall(r'/uas/([a-z_][a-z0-9_]*)\.py', text)
+                                   if name in known})[:16]
+    result['uas_trace'] = [{'module': name, 'line': int(line)}
+                           for name, line in re.findall(r'/uas/([a-z_][a-z0-9_]*)\.py", line ([0-9]{1,6})', text)
+                           if name in known][:16]
+    modules = known | {'sqlite3', '_sqlite3', 'socket', '_socket', 'markdown_it', 'mdurl',
+                       'grp', 'pwd', 'ssl', '_ssl', 'fcntl', 'select', 'uas'}
+    result['missing_modules'] = sorted({name for name in re.findall(r"No module named ['\"]([a-z_][a-z0-9_]*)['\"]", text)
+                                       if name in modules})[:16]
+    result['known_failures'] = [name for name, marker in
+        (('permission-denied', 'Permission denied'), ('file-not-found', 'No such file or directory'),
+         ('database-open-failed', 'unable to open database file'), ('readonly-database', 'readonly database'),
+         ('kernel-origin-unavailable', 'kernel origin unavailable')) if marker in text]
+    return result
+
+
+def owned_hub_diagnostic(receipt, room_id):
+    try:
+        require(receipt.get('room_id') == room_id, 'diagnostic Room differs')
+        instance = receipt.get('instance_id')
+        require(type(instance) is str and re.fullmatch(r'[0-9a-f]{32}', instance), 'diagnostic instance')
+        spec = receipt.get('spec', {})
+        require(all(type(spec.get(key)) is str and re.fullmatch(r'sha256:[0-9a-f]{64}', spec[key])
+                    for key in ('config_digest', 'profile_digest')), 'diagnostic digest')
+        name = 'uas-native-' + instance + '-hub'
+        # Select only identity/ownership/state, never environment or arbitrary config.
+        template = '{{json .Id}} {{json .Name}} {{json .Config.Labels}} {{json .State.Running}} {{json .State.ExitCode}} {{json .State.OOMKilled}}'
+        raw = diagnostic_command(['inspect', '--type', 'container', '--format', template, name])
+        decoder = json.JSONDecoder(); values = []; rest = raw.decode().strip()
+        while rest:
+            value, end = decoder.raw_decode(rest); values.append(value); rest = rest[end:].lstrip()
+        require(len(values) == 6, 'diagnostic inspect schema')
+        identity, observed_name, labels, running, exit_code, oom = values
+        from uas.local_native import LocalNativeBackend
+        prefix = LocalNativeBackend.LABEL
+        expected = {prefix: 'true', prefix+'.room': room_id, prefix+'.instance': instance,
+                    prefix+'.kind': 'hub', prefix+'.config': spec['config_digest'],
+                    prefix+'.profile': spec['profile_digest']}
+        require(observed_name == '/' + name and labels == expected
+                and type(identity) is str and re.fullmatch(r'[0-9a-f]{64}', identity)
+                and type(running) is bool and type(oom) is bool
+                and type(exit_code) is int and 0 <= exit_code <= 255, 'diagnostic ownership differs')
+        result = {'state': 'owned', 'running': running, 'exit_code': exit_code, 'oom_killed': oom}
+        try:
+            result['errors'] = filtered_hub_errors(diagnostic_command(['logs', '--tail', '80', identity]))
+        except Exception:
+            result['errors'] = {'state': 'unavailable'}
+        return result
+    except Exception:
+        return {'state': 'unavailable'}
+
+
 def startup_diagnostic(room, result):
     """Read only this configured Room's fixed receipt; emit no arbitrary details."""
     report = {'action': 'start', 'room': room['id'], 'stage': 'operator-response'}
@@ -112,6 +196,8 @@ def startup_diagnostic(room, result):
             receipt = json.loads(raw)
             require(type(receipt) is dict and receipt.get('room_id') == room['id'], 'receipt scope invalid')
             report['owned_receipt'] = safe_state(receipt)
+            if report.get('outcome') == 'unknown':
+                report['owned_hub'] = owned_hub_diagnostic(receipt, room['id'])
         finally:
             os.close(fd)
     except FileNotFoundError:
