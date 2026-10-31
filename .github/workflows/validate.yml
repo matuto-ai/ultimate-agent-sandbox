@@ -68,8 +68,10 @@ jobs:
       - name: Install pinned Python dependencies
         if: steps.changes.outputs.skip_tests != 'true'
         run: |
-          python3 -m venv "$RUNNER_TEMP/uas-python"
-          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          # Reuse the runner installer, not its site-packages; avoid ensurepip per job.
+          python3 -m venv --without-pip "$RUNNER_TEMP/uas-python"
+          python3 -m pip --python "$RUNNER_TEMP/uas-python" install --require-virtualenv --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          "$RUNNER_TEMP/uas-python/bin/python" -c 'import pathlib, sys, markdown_it, mdurl; assert sys.prefix != sys.base_prefix; assert all(pathlib.Path(m.__file__).is_relative_to(sys.prefix) for m in (markdown_it, mdurl))'
           echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
 
       - name: Validate successor interfaces
@@ -147,8 +149,10 @@ jobs:
       - name: Install pinned Python dependencies
         if: steps.changes.outputs.skip_tests != 'true'
         run: |
-          python3 -m venv "$RUNNER_TEMP/uas-python"
-          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          # Reuse the runner installer, not its site-packages; avoid ensurepip per job.
+          python3 -m venv --without-pip "$RUNNER_TEMP/uas-python"
+          python3 -m pip --python "$RUNNER_TEMP/uas-python" install --require-virtualenv --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          "$RUNNER_TEMP/uas-python/bin/python" -c 'import pathlib, sys, markdown_it, mdurl; assert sys.prefix != sys.base_prefix; assert all(pathlib.Path(m.__file__).is_relative_to(sys.prefix) for m in (markdown_it, mdurl))'
           echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
 
       - name: Validate measured slow unit partition
@@ -234,8 +238,10 @@ jobs:
       - name: Install pinned Python dependencies
         if: steps.changes.outputs.skip_tests != 'true'
         run: |
-          python3 -m venv "$RUNNER_TEMP/uas-python"
-          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          # Reuse the runner installer, not its site-packages; avoid ensurepip per job.
+          python3 -m venv --without-pip "$RUNNER_TEMP/uas-python"
+          python3 -m pip --python "$RUNNER_TEMP/uas-python" install --require-virtualenv --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          "$RUNNER_TEMP/uas-python/bin/python" -c 'import pathlib, sys, markdown_it, mdurl; assert sys.prefix != sys.base_prefix; assert all(pathlib.Path(m.__file__).is_relative_to(sys.prefix) for m in (markdown_it, mdurl))'
           echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
 
       - name: Validate measured integration unit partition
@@ -440,6 +446,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Install pinned service-backed browser dependencies
+        run: |
+          python3 -m venv --without-pip "$RUNNER_TEMP/uas-python"
+          python3 -m pip --python "$RUNNER_TEMP/uas-python" install --require-virtualenv --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          "$RUNNER_TEMP/uas-python/bin/python" -c 'import pathlib, sys, markdown_it, mdurl; assert sys.prefix != sys.base_prefix; assert all(pathlib.Path(m.__file__).is_relative_to(sys.prefix) for m in (markdown_it, mdurl))'
+          echo "$RUNNER_TEMP/uas-python/bin" >> "$GITHUB_PATH"
       - name: Capture live read-model fixtures and check existing Field Notes UI
         env:
           PYTHONPATH: .

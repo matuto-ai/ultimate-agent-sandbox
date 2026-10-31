@@ -38,7 +38,8 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| disposition |35.8|All six rejection/adjudication functional, recovery and native modules|
+| maintenance |39.0|Retention, repair, native repair and T27 requeue|
+| disposition |44.0|All six rejection/adjudication functional, recovery and native modules|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -70,15 +71,48 @@ including setup/cleanup (63s). This is not a qualifying green graph; dependent
 jobs were skipped. A prior59s green operator job was insufficient margin.
 
 An eleventh, explicit `maintenance` matrix lane contains only deterministic
-repair (21 tests), its native transport (4), and the existing retention module.
+repair (21 tests), its native transport (4), the existing retention module and
+T27's requeue release module; the section below records why it does not have a
+lane of its own.
 Hosted timestamp deltas estimate10.7s +3.2s +9.3s =23.2s suite time, leaving
 roughly27s for setup/cleanup and variance under the unchanged60s deadline.
 `operator` retains controls and Git-payload tests (about30s suite time);
-`disposition` retains its original six modules. No existing test is removed,
-weakened, or duplicated; future modules still default to remainder. The exact
+`disposition` retains its original six modules and T27's requeue release module
+has its own lane. No existing test is removed, weakened, or duplicated; future
+modules still default to remainder. The exact
 partition/workflow contract checks include this lane and all downstream jobs
 still require every matrix member. No timeout, permission, or runtime-budget
 policy changes accompany this test-capacity adjustment.
+
+## T27 requeue capacity (#191)
+
+The requeue release module measured61.8 seconds locally for ten real
+Git/SQLite/Service cases: the mixed release, later release of a retained draft,
+an unresolved contradiction, model parking whose reason token names a source
+failure, a released source park followed by a model park of the same queue,
+stale/archived/busy/revoked refusals, a blocked Project, exact retry after a
+settings change, lost acknowledgement and an unknown pre-push outcome.
+
+Its lane took three measurements. Hosted run
+[41055347618](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41055347618)
+first placed it beside the rejection/adjudication family and measured that
+`disposition` job at54.0 seconds with46.0 seconds of suite time. Run
+[41063700322](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41063700322)
+then measured the six-module `disposition` job at35.0 suite seconds and the
+four-module `maintenance` lane, including requeue, at39.0 suite seconds in a48.0
+second job.
+
+A twelfth `requeue` lane for the single module was tried next and reverted. Run
+[41070545069](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41070545069)
+took the graph critical path to116.0 seconds against a baseline median of105.0
+and the115.5 second growth limit, and the same six disposition modules that
+measured49.0 seconds in the baseline run
+[41067720686](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41067720686)
+took63.0 seconds, with every other lane slower too: one more concurrent job
+costs the graph more than the module's own13.0 suite seconds. The module stays in
+`maintenance`, which keeps eleven unit lanes and the measured critical path at
+its baseline. No test was moved out of discovery, excluded or weakened, and the
+exact-partition contract still runs every ID once.
 
 ## T35 archive acceptance capacity (#181)
 
@@ -95,3 +129,47 @@ runtime-budget policy. Exact hosted total graph timing remains authoritative.
 [Run 41129393214](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41129393214) passed every functional job but failed the unchanged moving runtime budget: 118 seconds versus a 115.5-second allowance. Its disposition job took 65 seconds, including 16.7 seconds in `test_library_disposition_recovery`, while archive took 30 seconds. Move that one recovery module to the archive lane, retaining the same tests, discovery, all-root dependencies, watchdogs, and measured-budget policy. The resulting planning estimates are roughly 48 seconds for disposition and 47 seconds for archive; the next exact-head hosted graph determines acceptance.
 
 After composing #185, [run 41131079099](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41131079099) passed every functional job but measured 116 seconds against the same 115.5-second limit. Lifecycle took 63 seconds, including 9.6 seconds for `test_library_deployment`; maintenance took 31 seconds. Place the ten deployment cases in maintenance instead, keeping all discovered cases and the original acceptance limits. This avoids making the merged lifecycle lane the critical path.
+
+
+## Installed Library composition capacity (#252 / PR #255)
+
+The exact-head `7cded1d9` [validation run 41220461050](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41220461050) passed its functional jobs but exceeded the
+unchanged runtime budget: 119 seconds against 117.7 seconds. Hosted remainder
+logs measured 45.706 suite seconds (3,604 tests). Consecutive test-line
+timestamp deltas estimate 3.903 seconds in
+`test_local_library_wiring`, 1.135 seconds in `test_local_library_model`, and
+approximately 0.394 seconds in `test_local_library_transport`. The remainder job
+occupied 59 seconds; the existing lifecycle job occupied 37 seconds.
+
+Move only those three newly introduced installed-Library modules from remainder
+to lifecycle, alongside Library service and Manager transport. This reallocates
+approximately 5.432 measured suite seconds to an existing lane with headroom;
+it does not add a lane or claim a guaranteed hosted duration. Discovery, every
+test ID, all-root dependency gates, job limits, and the measured-budget rule
+remain unchanged. Both lanes retain identical mandatory native peer, Participant,
+connector, HTTP, and channel environment requirements. Explicit membership and complete/disjoint inventory tests
+cover the allocation. The next exact-head hosted graph remains the acceptance
+measurement; no tests are removed or weakened.
+
+
+## Installed Library maintenance rebalance (run 41228190888)
+
+[Run 41228190888](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41228190888)
+passed every functional job but measured a 146-second graph against the unchanged
+117.7-second allowance. Maintenance reported 71 tests in 51.501 suite seconds.
+Its 92-second job duration also includes roughly 33 seconds between completed
+log output and API completion: that infrastructure padding is not test work and
+this allocation change does not claim to fix it.
+
+Hosted test-line timestamp deltas estimate deployment 12.717 seconds, repair
+12.968, repair-native 3.264, requeue 11.623, and retention 10.186. Move only
+`test_library_deployment` from maintenance to the existing operator lane, next
+to Library controls. With operator approximately 31 seconds, this balances
+estimated work around 39 seconds versus 44 seconds rather than leaving
+maintenance near its deadline. These are planning estimates, not a guarantee
+about the next hosted graph or infrastructure delay.
+
+All discovered IDs, required environments, twelve lanes, dependency gates,
+timeouts, and the runtime-budget rule remain unchanged. Explicit module
+membership and exact inventory tests cover the move; the next exact-head run
+must establish acceptance without ignoring the failed graph.

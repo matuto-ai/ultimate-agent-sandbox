@@ -21,6 +21,7 @@ def run_host(installation):
     from .local_native import LocalNativeHost
     from .local_services import LocalServices
     from .local_manager_owner import ManagerOwner
+    from .local_library import open_library
     stopped = threading.Event()
     previous = {}
     def stop(*_): stopped.set()
@@ -32,8 +33,28 @@ def run_host(installation):
         services = LocalServices(lock_fd, runtime_plan_for=installation.runtime_plan_for,
             manager_reference_for=lambda profile:installation.open()[0]['manager'])
         manager = ManagerOwner(installation)
-        controller = LocalController(installation, LocalNativeHost, services=services, host_lock_fd=lock_fd, manager=manager)
+        # The controller owns each running Room's ledger path, so the Library
+        # composition reads that exact ledger instead of guessing an instance.
+        owner = {'controller': None}
+        library, controller, started = None, None, False
+        # Everything after the service owners is inside the cleanup boundary: a
+        # refused Library selection must not skip host shutdown accounting.
         try:
+            library = open_library(installation,
+                ledger_for=lambda room: owner['controller'].ledger(room))
+            controller = LocalController(installation, LocalNativeHost, services=services,
+                host_lock_fd=lock_fd, manager=manager, library=library)
+            owner['controller'] = controller
+            # Installed reports are delivered by the authenticated Hub channel;
+            # the root host must never write the fixed-UID Hub's SQLite/WAL.
+            if type(services) is LocalServices:
+                services.library = library
+                library.set_report_transport(services.report_library)
+            # One Library singleton for the whole installation lifetime, started
+            # before any Room binds; absent, unsafe or unqualified configuration
+            # fails the host here instead of running without it.
+            library.start()
+            started = True
             for sig in (signal.SIGINT, signal.SIGTERM):
                 previous[sig] = signal.signal(sig, stop)
             serve(installation, controller, stopped=stopped.is_set, owner_lock_fd=lock_fd)
@@ -41,12 +62,15 @@ def run_host(installation):
             failures = []
             try: manager.close()
             except Exception: failures.append('manager')
-            if controller.native is not None:
+            if controller is not None and controller.native is not None:
                 for room in services.rooms:
                     try:
                         result = controller.native.stop(room)
                         if not stopped_result(result): failures.append('workstation')
                     except Exception: failures.append('workstation')
+            if started:
+                try: library.stop()
+                except Exception: failures.append('library')
             if services.close() is not True: failures.append('hub')
             for sig, handler in previous.items(): signal.signal(sig, handler)
             require(not failures, 'LOCAL_HOST_SHUTDOWN_UNCONFIRMED')

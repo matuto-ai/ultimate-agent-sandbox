@@ -17,7 +17,8 @@ from uas.lifecycle import Supervisor
 import test_forge_mutation_audit as mutation
 
 
-class ManagerActionsTests(unittest.TestCase):
+class ManagerActionsFixture:
+    """Owner fixture without inherited test cases for host-seam consumers."""
     construct = harness.RunReviewTests.construct
     seed = harness.RunReviewTests.seed
     submit = harness.RunReviewTests.submit
@@ -54,6 +55,7 @@ class ManagerActionsTests(unittest.TestCase):
 
     def execute(self, packet): return self.actions.execute(packet, session=self.session)
 
+class ManagerActionsTests(ManagerActionsFixture, unittest.TestCase):
     def test_manager_pause_resume_owner_and_current_state(self):
         packet = self.packet('pause', {'reason': 'human-hold'})
         result = self.execute(packet)

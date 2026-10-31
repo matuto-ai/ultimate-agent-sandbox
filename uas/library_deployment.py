@@ -114,6 +114,7 @@ class DeploymentLibrary:
         self.settings_owner = settings_owner
         self.audit, self.publisher_factory, self.now = audit, publisher_factory, now
         self.failure = None
+        self._report_transport = None
         self._started = False
         self._lock = threading.RLock()
         self._stopping = threading.Event()
@@ -201,10 +202,17 @@ class DeploymentLibrary:
         if type(runner) is not Attempts or not callable(context):
             fail('SCHEDULER_DEPENDENCY_REQUIRED')
         current, settings = runner.assembler._scope(), runner.assembler._settings()
+        active = self._current_settings()
         if (type(current) is not library.LibraryScope or current.canonical() != scope.canonical()
-                or settings['repository']['target'] != self.settings['repository']['target']
-                or settings['repository']['branch'] != self.settings['repository']['branch']):
+                or settings['repository']['target'] != active['repository']['target']
+                or settings['repository']['branch'] != active['repository']['branch']):
             fail('SCHEDULER_TARGET_MISMATCH')
+        # The composed runner and its dispatcher must read this owner's live
+        # authority/settings at their own admission and publication fences, so a
+        # revoked qualification or unavailable active configuration blocks the
+        # write even mid-attempt. Each attempt still pins its starting limits.
+        runner.assembler.settings = self._current_settings
+        runner.dispatcher.settings = self._current_settings
         return runner, context
 
     # --- lifetime ----------------------------------------------------------
@@ -371,6 +379,10 @@ class DeploymentLibrary:
             fail('ROOM_NOT_BOUND')
         return bound.projection.wait_idle(timeout)
 
+    def bound(self, room):
+        """Whether this Room's projection is currently published by this lease."""
+        return room in self._bound
+
     def read(self, room):
         """One coherent pinned public generation for a bound Room."""
         bound = self._bound.get(room)
@@ -384,6 +396,36 @@ class DeploymentLibrary:
 
     # --- authenticated endpoints ------------------------------------------
 
+    def binding(self, room):
+        """Public binding for a trusted process-channel owner; never credentials."""
+        with self._lock:
+            self._require()
+            item = self._rooms.get(room)
+            if item is None:
+                fail('INVALID_PROJECT_BINDING')
+            return {'project': json.loads(json.dumps(item.project)),
+                    'source_identity': item.source_identity}
+
+    def endpoint(self, room):
+        """Host endpoint for an authenticated split-process Room Hub.
+
+        This does not mint Participant authority. The transport must authenticate
+        the Hub and preserve its current Participant scope at every contact fence.
+        A stopped Room cannot retain a working capture endpoint.
+        """
+        with self._lock:
+            self._require()
+            bound = self._bound.get(room)
+            if bound is None:
+                fail('ROOM_NOT_BOUND')
+            def current():
+                with self._lock:
+                    if self._bound.get(room) is not bound or not self.running:
+                        fail('ROOM_NOT_BOUND')
+                    return self._current_settings()
+            return EnqueueEndpoint(self._publisher, settings=current,
+                                   projection=bound.projection, guard=current)
+
     def hub(self, room, clock=None):
         """The Room's one authenticated enqueue endpoint; payloads bind no Room/Project."""
         with self._lock:
@@ -393,8 +435,7 @@ class DeploymentLibrary:
                 fail('ROOM_NOT_BOUND')
             if room in self._hubs:
                 fail('ROOM_HUB_ALREADY_ATTACHED')
-            endpoint = EnqueueEndpoint(self._publisher, settings=self._current_settings,
-                                       projection=bound.projection)
+            endpoint = self.endpoint(room)
             ledger = self.ledger_for(room)
             hub = LibraryHub(ledger, room_id=room, project=bound.item.project,
                              source_identity=bound.item.source_identity, contact=endpoint.contact,
@@ -402,13 +443,34 @@ class DeploymentLibrary:
             self._hubs[room] = hub
             return hub
 
+    def set_report_transport(self, transport):
+        """Trusted installed owner sets its authenticated Hub route before start.
+
+        The route returns true only after the actual Hub ledger acknowledged;
+        absent/stopped Hubs and uncertain replies leave service reports replayable.
+        """
+        with self._lock:
+            if self._started or not callable(transport):
+                fail('DEPLOYMENT_DEPENDENCY_REQUIRED')
+            self._report_transport = transport
+
     def _transport(self, report):
         """Authenticated service-to-Room ingress; a Room without a Hub stays replayable."""
         room = report.get('room_id') if type(report) is dict else None
         item = self._rooms.get(room)
-        if item is None:
+        if item is None or report.get('project_identity') != item.scope.project_identity:
             return False
-        ledger = self.ledger_for(room)
+        if self._report_transport is not None:
+            try:
+                return self._report_transport(report) is True
+            except Exception:
+                return False
+        try:
+            ledger = self.ledger_for(room)
+        except Exception:
+            # A missing or unusable canonical store keeps the report replayable;
+            # it never becomes a new store under the host identity.
+            return False
         if type(ledger) is not RoomLedger or ledger.room_id != room:
             return False
         try:
