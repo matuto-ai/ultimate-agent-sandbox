@@ -4,7 +4,9 @@
 [immutable specification, Validation 3](https://github.com/matuto-ai/ultimate-agent-sandbox/blob/aec975f074fef3d215d5b6f0f3b54ebcde062791/docs/specs/per-project-librarian.md#validation).
 Automated browser/service fixtures and local recovery tests are complementary
 receipts, not a human login, a human decision or this acceptance run. Keep #195
-open and its delivery draft until the required evidence exists.
+open until the required evidence exists. Preparatory code and runbooks may be
+merged into the consolidated 0.1.0 testing candidate; this does not establish
+human qualification or relax runtime admission guards.
 
 ## Before booking the human session
 
