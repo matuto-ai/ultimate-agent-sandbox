@@ -264,10 +264,30 @@ async function libraryBrowserProof(send,evaluate,output,screenshots) {
     const result=await fixture.request({command:'privacy'});
     assert(Object.values(result.marker_absent).every(Boolean),JSON.stringify(result));
     assert.equal(result.provider_called,false,'panel operation must not run provider');
-    const storage=await evaluate(`(async()=>({local:[...Object.keys(localStorage)].map(k=>[k,localStorage.getItem(k)]),session:[...Object.keys(sessionStorage)].map(k=>[k,sessionStorage.getItem(k)]),caches:await caches.keys(),indexedDB:await indexedDB.databases(),workers:('serviceWorker' in navigator)?(await navigator.serviceWorker.getRegistrations()).length:0}))()`);
+    const storage=await evaluate(`(async()=>{
+      let workers={status:'unavailable-api'};
+      if('serviceWorker' in navigator){
+        try{workers={status:'enumerated',count:(await navigator.serviceWorker.getRegistrations()).length};}
+        catch(error){
+          if(location.protocol!=='file:'||error.name!=='SecurityError'||!error.message.includes('URL protocol')||!error.message.includes('not supported'))throw error;
+          // A file origin cannot host a worker. Verify admission is prohibited,
+          // rather than silently treating a failed enumeration as an empty list.
+          let refused=false;
+          try{await navigator.serviceWorker.register(location.href.split('?')[0]);}
+          catch(admission){
+            if(!['SecurityError','TypeError'].includes(admission.name)||!admission.message.includes('URL protocol')||!admission.message.includes('not supported'))throw admission;
+            refused=true;
+          }
+          if(!refused)throw Error('File origin unexpectedly admitted a service worker');
+          workers={status:'file-origin-prohibited',enumeration:'SecurityError',registration:'prohibited'};
+        }
+      }
+      return {local:[...Object.keys(localStorage)].map(k=>[k,localStorage.getItem(k)]),session:[...Object.keys(sessionStorage)].map(k=>[k,sessionStorage.getItem(k)]),caches:await caches.keys(),indexedDB:await indexedDB.databases(),workers};
+    })()`);
     for(const marker of markers)assert(!JSON.stringify(storage).includes(marker),'private marker retained in browser storage');
-    assert.deepEqual(storage.caches,[]);assert.deepEqual(storage.indexedDB,[]);assert.equal(storage.workers,0);
-    return {surfaces:result.surfaces,browser:['localStorage','sessionStorage','CacheStorage','IndexedDB','ServiceWorker'],marker_absence:true};
+    assert.deepEqual(storage.caches,[]);assert.deepEqual(storage.indexedDB,[]);
+    assert(storage.workers.status==='file-origin-prohibited'||storage.workers.status==='unavailable-api'||(storage.workers.status==='enumerated'&&storage.workers.count===0));
+    return {surfaces:result.surfaces,browser:['localStorage','sessionStorage','CacheStorage','IndexedDB','ServiceWorker'],service_worker:storage.workers,marker_absence:true};
   };
   try {
     let state=await fixture.request({command:'reset',mode:'inspection'});
