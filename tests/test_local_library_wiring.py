@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -246,9 +247,30 @@ class LocalLibraryWiringTests(unittest.TestCase):
         observed = {}
 
         def driver(controller):
+            # Registration signals asynchronous projection workers. Starting
+            # alpha is not a barrier for beta's independent worker.
             for room in ('alpha', 'beta'):
-                self.register(room)
-            controller.handle(self.packet('start', 'alpha'))
+                self.assertTrue(self.deployment.wait_idle(room, timeout=5))
+            beta = self.deployment._bound['beta'].projection
+            entered, release = threading.Event(), threading.Event()
+            refresh = beta.refresh
+            def paused_beta():
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError('fixture projection barrier timed out')
+                return refresh()
+            with patch.object(beta, 'refresh', side_effect=paused_beta):
+                try:
+                    for room in ('alpha', 'beta'):
+                        self.register(room)
+                    self.assertTrue(entered.wait(5), 'beta refresh must reach fixture barrier')
+                    controller.handle(self.packet('start', 'alpha'))
+                    self.assertFalse(self.deployment.wait_idle('beta', timeout=0),
+                                     'alpha Start must not masquerade as beta projection readiness')
+                finally:
+                    release.set()  # Never strand the worker during assertion cleanup.
+                for room in ('alpha', 'beta'):
+                    self.assertTrue(self.deployment.wait_idle(room, timeout=5))
             observed['published'] = {}
             observed['text'] = []
             for room in ('alpha', 'beta'):
