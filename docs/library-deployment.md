@@ -265,3 +265,15 @@ its closed operation plan and only hands off a newly owned empty directory;
 retries observe completed directories rather than repairing populated data.
 Older runtime-owned reference selections fail closed and are not migrated by
 startup. The disposable qualification profile's ownership contract is unchanged.
+
+
+The native acceptance probe requires exactly the ordered disposable Rooms
+`alpha`, `beta`. Its host-shutdown observation ceiling is 600 seconds, composed
+from existing ordinary two-Room cleanup bounds (native readbacks, Library and
+Manager joins, retained Hub closure, and the existing attempt/flush allowance).
+This is a probe observation ceiling, not a production deadline relaxation,
+performance claim, or guarantee that every abnormal path finishes within it.
+The unchanged 1,200-second guest watchdog and 1,800-second job limit remain
+outer limits. A timeout still fails the proof. Fixed checkpoints and sanitized
+shutdown receipts preserve an earlier acceptance failure separately from
+cleanup uncertainty; neither can be converted into success.

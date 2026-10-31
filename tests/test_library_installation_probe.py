@@ -234,3 +234,90 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         self.assertEqual(result, {'state': 'observed', 'processes': [
             {'role': 'tini', 'soft': 1024, 'hard': 4096, 'count': 2}]})
         self.assertNotIn('123', json.dumps(result))
+
+
+    def test_shutdown_timeout_retains_safe_partial_receipt_without_raw_output(self):
+        from unittest.mock import Mock
+        host = Mock(); host.poll.return_value = None
+        host.communicate.side_effect = probe.subprocess.TimeoutExpired('owned-child', probe.HOST_SHUTDOWN_OBSERVATION_SECONDS,
+            output=b'{"outcome":"unknown","error":"LOCAL_STOP_FAILED","secret":"never-print"}',
+            stderr=b'RuntimeError: secret-value\n')
+        output = io.StringIO()
+        with redirect_stdout(output): failures = probe.finish_owned_host(host)
+        host.communicate.assert_called_once_with(timeout=probe.HOST_SHUTDOWN_OBSERVATION_SECONDS)
+        host.send_signal.assert_called_once_with(probe.signal.SIGTERM)
+        self.assertEqual(failures, ['host shutdown uncertain; operator reconciliation required'])
+        self.assertIn('LOCAL_STOP_FAILED', output.getvalue())
+        self.assertNotIn('never-print', output.getvalue())
+        self.assertNotIn('secret-value', output.getvalue())
+
+    def test_cleanup_uncertainty_never_masks_first_failure_or_becomes_success(self):
+        first = ValueError('first assertion')
+        with redirect_stdout(io.StringIO()):
+            with self.assertRaises(ValueError) as caught:
+                try: raise first
+                finally: probe.finish_proof_cleanup(['host shutdown uncertain'], True)
+            self.assertIs(caught.exception, first)
+            with self.assertRaisesRegex(RuntimeError, 'shutdown uncertain'):
+                probe.finish_proof_cleanup(['host shutdown uncertain'], False)
+            probe.finish_proof_cleanup([], False)
+
+    def test_successful_host_shutdown_requires_exact_receipt(self):
+        from unittest.mock import Mock
+        host = Mock(); host.poll.return_value = 0
+        host.communicate.return_value = (b'{"state":"host-stopped"}', b'')
+        with redirect_stdout(io.StringIO()): self.assertEqual(probe.finish_owned_host(host), [])
+        host.send_signal.assert_not_called()
+        host.communicate.return_value = (b'{"state":"host-stopped","extra":true}', b'')
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(probe.finish_owned_host(host), ['host shutdown receipt invalid'])
+
+    def test_primary_and_cleanup_outcome_matrix_never_claims_uncertain_success(self):
+        from unittest.mock import Mock
+        for early, timeout in ((True, False), (True, True), (False, True), (False, False)):
+            with self.subTest(early=early, timeout=timeout):
+                first = ValueError('initial acceptance failure')
+                host = Mock(); host.poll.return_value = None if timeout else 0
+                if timeout:
+                    host.communicate.side_effect = probe.subprocess.TimeoutExpired('owned-child', probe.HOST_SHUTDOWN_OBSERVATION_SECONDS)
+                else:
+                    host.communicate.return_value = (b'{"state":"host-stopped"}', b'')
+                def exercise():
+                    primary = False
+                    try:
+                        if early: raise first
+                    except BaseException:
+                        primary = True
+                        raise
+                    finally:
+                        probe.finish_proof_cleanup(probe.finish_owned_host(host), primary)
+                    return 'passed'
+                with redirect_stdout(io.StringIO()):
+                    if early:
+                        with self.assertRaises(ValueError) as caught: exercise()
+                        self.assertIs(caught.exception, first)
+                    elif timeout:
+                        with self.assertRaisesRegex(RuntimeError, 'shutdown uncertain'): exercise()
+                    else:
+                        self.assertEqual(exercise(), 'passed')
+
+
+    def test_probe_observation_ceiling_matches_reviewed_two_room_composition(self):
+        self.assertEqual(probe.HOST_SHUTDOWN_OBSERVATION_SECONDS,
+                         2*(7*20 + 6 + 10 + 3*20) + 10 + 10 + 5 + 122 + 21)
+        self.assertLess(probe.HOST_SHUTDOWN_OBSERVATION_SECONDS, 1200)
+
+    def test_noncanonical_room_inventory_is_refused_before_host_launch(self):
+        from unittest.mock import Mock
+        for ids in (['other', 'beta'], ['beta', 'alpha'], ['alpha', 'alpha'], ['alpha']):
+            with self.subTest(ids=ids):
+                installation = Mock()
+                installation.open.return_value = ({}, {'rooms': [{'id': value} for value in ids]},
+                                                   {'native': {}, 'library': {}})
+                with patch.object(probe.os, 'geteuid', return_value=0), \
+                     patch.object(probe, 'candidate_identity', return_value='a'*40), \
+                     patch('uas.local_installation.Installation', return_value=installation), \
+                     patch.object(probe.subprocess, 'Popen') as spawn:
+                    with self.assertRaisesRegex(RuntimeError, 'exact ordered alpha and beta'):
+                        probe.run('/prepared', 'a'*40)
+                spawn.assert_not_called()

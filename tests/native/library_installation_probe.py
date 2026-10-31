@@ -22,6 +22,13 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+# Probe observation only, not a production deadline or performance guarantee.
+# Ordinary two-Room composition: 2*(7 native Docker observations*20 + server6
+# + child10 + 3 Hub Docker commands*20) + manager10 + Library joins(10+5)
+# + existing120s attempt/flush/idle allowance122 + observation margin21 =600.
+# Abnormal paths are not guaranteed to fit; timeout still means failed proof.
+# Outer guest1200s/job1800s limits remain authoritative and unchanged.
+HOST_SHUTDOWN_OBSERVATION_SECONDS = 600
 sys.path.insert(0, str(ROOT))
 
 
@@ -380,6 +387,73 @@ def isolated_marker(bundle, own, siblings):
     require(all(marker.encode() not in content for marker in siblings), 'sibling Project content exposed')
 
 
+def proof_checkpoint(stage, room=None, error=None):
+    stages = {'host-ready', 'room-start', 'room-ready', 'projection-verified', 'alpha-stop',
+              'alpha-stopped', 'stopped-room-operator', 'operator-observed', 'sibling-status',
+              'acceptance-observed', 'primary-failure', 'cleanup-room-stop', 'host-shutdown',
+              'cleanup-failure'}
+    require(stage in stages and room in (None, 'alpha', 'beta'), 'fixed proof checkpoint required')
+    value = {'stage': stage}
+    if room is not None: value['room'] = room
+    if error is not None:
+        value['error_code'] = safe_code(getattr(error, 'code', None))
+        name = type(error).__name__
+        value['error_class'] = name if name in {'RuntimeError', 'TimeoutExpired', 'LibraryError',
+            'LocalInstallationError', 'LedgerError', 'OSError', 'ValueError', 'AssertionError'} else 'redacted'
+    print('Library proof checkpoint: ' + json.dumps(value, sort_keys=True), flush=True)
+
+
+def finish_owned_host(host):
+    """Preserve bounded, content-free shutdown evidence without masking first failure."""
+    failures = []; out = error = b''
+    try:
+        if host.poll() is None: host.send_signal(signal.SIGTERM)
+        out, error = host.communicate(timeout=HOST_SHUTDOWN_OBSERVATION_SECONDS)
+    except subprocess.TimeoutExpired as timeout:
+        out, error = timeout.output or b'', timeout.stderr or b''
+        failures.append('host shutdown uncertain; operator reconciliation required')
+    except Exception:
+        failures.append('host shutdown unavailable; operator reconciliation required')
+    report = {'stage': 'host-shutdown', 'completed': not failures,
+              'stdout_bytes': len(out), 'stderr_bytes': len(error)}
+    code = host.poll()
+    report['exit_code'] = code if type(code) is int and -255 <= code <= 255 else None
+    if 0 < len(out) <= 8192:
+        try:
+            receipt = json.loads(out)
+            if receipt == {'state': 'host-stopped'}:
+                report['receipt'] = 'host-stopped'
+            elif type(receipt) is dict and receipt.get('outcome') == 'unknown':
+                report['error_code'] = safe_code(receipt.get('error'))
+        except (ValueError, TypeError): pass
+    if error:
+        raw = error if type(error) is bytes else error.encode('utf-8', errors='replace')
+        report['stderr_evidence'] = filtered_hub_errors(raw[:65536])
+    print('Library host shutdown: ' + json.dumps(report, sort_keys=True), flush=True)
+    if not failures:
+        if code != 0 or error: failures.append('host shutdown unconfirmed')
+        elif report.get('receipt') != 'host-stopped': failures.append('host shutdown receipt invalid')
+    return failures
+
+
+def finish_proof_cleanup(failures, primary_failure):
+    if failures:
+        proof_checkpoint('cleanup-failure')
+        known = {'Room Stop unconfirmed', 'Room Stop unavailable',
+                 'host shutdown uncertain; operator reconciliation required',
+                 'host shutdown unavailable; operator reconciliation required',
+                 'host shutdown unconfirmed', 'host shutdown receipt invalid',
+                 'selection changed', 'selection observation unavailable'}
+        print('Library cleanup outcomes: ' + json.dumps({
+            'primary_failure_preserved': primary_failure,
+            'failures': [value if value in known else 'redacted' for value in failures[:8]]},
+            sort_keys=True), flush=True)
+        # Keep the first assertion/operation failure as the raised exception.
+        # Cleanup uncertainty remains a failed proof, never a success receipt.
+        if not primary_failure:
+            raise RuntimeError('; '.join(failures))
+
+
 def run(installation_root, expected_commit, *, source_manifest=None, expected_markers=None):
     from uas.local_installation import Installation
     from uas.local_host import request
@@ -391,7 +465,8 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
     require(selected['native'] is not None and selected['library'] is not None,
             'prepared native and Library selections required')
     rooms = config['rooms']
-    require(len(rooms) == 2, 'exactly two disposable prepared Rooms required')
+    require(type(rooms) is list and [room.get('id') for room in rooms] == ['alpha', 'beta'],
+            'exact ordered alpha and beta disposable Rooms required')
     if expected_markers is not None:
         require(set(expected_markers) == {r['id'] for r in rooms}
                 and len(set(expected_markers.values())) == 2
@@ -403,6 +478,7 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
         cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.monotonic() + 60
     started = []
+    primary_failure = False
     proof = {'commit': head, 'selection_sha256': hashlib.sha256(before).hexdigest(),
              'kind': 'actual-prepared-native-installation-two-room',
              'target_qualification': 'external-not-established-by-probe',
@@ -412,8 +488,10 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
             require(host.poll() is None, 'host exited before readiness')
             require(time.monotonic() < deadline, 'host readiness deadline')
             time.sleep(.05)
+        proof_checkpoint('host-ready')
         generations = {}
         for room in rooms:
+            proof_checkpoint('room-start', room['id'])
             result = request(installation, 'start', room['id'])
             startup_diagnostic(room, result)
             require(result.get('outcome') == 'observed', 'Room Start outcome unknown')
@@ -422,6 +500,7 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
                     and not state['infrastructure'].get('leftovers')
                     and state.get('services', {}).get('hub') == 'ready', 'real Room/Hub not ready')
             started.append(room['id'])
+            proof_checkpoint('room-ready', room['id'])
             reference = Path(room['project']['roots']['reference'])
             snapshot = json.loads((reference / 'library.snapshot.json').read_text())
             require(snapshot['project_id'] == room['project']['id'], 'projection Project mismatch')
@@ -435,16 +514,22 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
                 isolated_marker(bundle, expected_markers[room['id']],
                     [value for key, value in expected_markers.items() if key != room['id']])
             generations[room['id']] = snapshot
+            proof_checkpoint('projection-verified', room['id'])
         alpha, beta = rooms
+        proof_checkpoint('alpha-stop')
         stopped = request(installation, 'stop', alpha['id'])
         from uas.local_cli import stopped_result
         require(stopped.get('outcome') == 'observed' and stopped_result(stopped['result']),
                 'Room Stop unconfirmed')
         started.remove(alpha['id'])
+        proof_checkpoint('alpha-stopped')
+        proof_checkpoint('stopped-room-operator')
         observation = library_request(installation.root / 'library' / 'operator',
             {'version': 1, 'action': 'observe', 'project_id': alpha['project']['id'], 'for_action': 'drain'})
         require(observation.get('outcome') == 'observed', 'stopped-Room operator unavailable')
+        proof_checkpoint('operator-observed')
         require(host.poll() is None, 'singleton host ended with Room')
+        proof_checkpoint('sibling-status')
         beta_state = request(installation, 'status', beta['id'])
         require(beta_state.get('outcome') == 'observed'
                 and beta_state['result']['infrastructure']['phase'] == 'running', 'sibling Room stopped')
@@ -455,34 +540,31 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
         proof.update(status='passed', rooms=[r['id'] for r in rooms],
                      stopped_room_operator='observed', sibling='running',
                      projection_identities={r: s['project_identity'] for r, s in generations.items()})
+        proof_checkpoint('acceptance-observed')
+    except BaseException as first:
+        primary_failure = True
+        proof_checkpoint('primary-failure', error=first)
+        raise
     finally:
         failures = []
         for room in reversed(started):
             try:
+                proof_checkpoint('cleanup-room-stop', room)
                 result = request(installation, 'stop', room)
                 from uas.local_cli import stopped_result
                 if result.get('outcome') != 'observed' or not stopped_result(result['result']):
                     failures.append('Room Stop unconfirmed')
             except Exception:
                 failures.append('Room Stop unavailable')
-        # Always request orderly termination of the exact child owned here, even
-        # when a Room Stop failed. Do not scan PIDs or force-kill native owners.
-        if host.poll() is None:
-            host.send_signal(signal.SIGTERM)
+        # No force-kill/PID scans. Unconfirmed termination remains a failed proof.
+        proof_checkpoint('host-shutdown')
+        failures.extend(finish_owned_host(host))
         try:
-            out, error = host.communicate(timeout=15)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError('host shutdown uncertain; operator reconciliation required') from None
-        if host.returncode != 0 or error:
-            failures.append('host shutdown unconfirmed')
-        else:
-            try:
-                if json.loads(out) != {'state': 'host-stopped'}:
-                    failures.append('host shutdown receipt invalid')
-            except ValueError:
-                failures.append('host shutdown receipt invalid')
-        require((installation.root / 'installation.json').read_bytes() == before, 'selection changed')
-        require(not failures, '; '.join(failures))
+            if (installation.root / 'installation.json').read_bytes() != before:
+                failures.append('selection changed')
+        except OSError:
+            failures.append('selection observation unavailable')
+        finish_proof_cleanup(failures, primary_failure)
     return proof
 
 
