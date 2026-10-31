@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import select
+import stat
 import sys
 import time
 
@@ -26,6 +27,50 @@ CONTROL = '/uas/control/hub.sock'
 PEER = '/uas/peer/pi.sock'
 STORE = Path('/uas/hub')
 RELEASE = b'UAS-HUB-RELEASE-1'
+
+
+def admission_journal():
+    """One fixed private Hub child; canonical shared Room ledger stays in STORE.
+
+    Never migrate an old shared admission journal or repair an existing child.
+    Only a newly created, empty, exact-owned directory loses inherited setgid.
+    """
+    if not STORE.is_absolute() or STORE.resolve() != STORE:
+        raise OriginDenied('canonical Hub store required')
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    with ExitStack() as stack:
+        try:
+            parent=os.open(STORE,flags);stack.callback(os.close,parent)
+            parent_identity=os.fstat(parent)
+            for legacy in ('admissions.db','admissions.db.lock','admissions.db-wal','admissions.db-shm'):
+                try:os.stat(legacy,dir_fd=parent,follow_symlinks=False)
+                except FileNotFoundError:continue
+                raise OriginDenied('legacy Hub journal requires explicit reconciliation')
+            created=False
+            try:
+                os.mkdir('private-admission',0o700,dir_fd=parent);created=True
+            except FileExistsError:pass
+            before=os.stat('private-admission',dir_fd=parent,follow_symlinks=False)
+            child=os.open('private-admission',flags,dir_fd=parent);stack.callback(os.close,child)
+            node=os.fstat(child)
+            if (not stat.S_ISDIR(node.st_mode) or (node.st_dev,node.st_ino)!=(before.st_dev,before.st_ino)
+                    or node.st_uid!=os.getuid() or node.st_gid!=os.getgid()):
+                raise OriginDenied('private Hub journal ownership required')
+            if created:
+                if stat.S_IMODE(node.st_mode) not in (0o700,0o2700) or os.listdir(child):
+                    raise OriginDenied('fresh private Hub journal directory required')
+                os.fchmod(child,0o700)
+            if stat.S_IMODE(os.fstat(child).st_mode)!=0o700:
+                raise OriginDenied('private Hub journal mode required')
+            current=os.stat('private-admission',dir_fd=parent,follow_symlinks=False)
+            current_parent=STORE.lstat()
+            if ((current.st_dev,current.st_ino)!=(node.st_dev,node.st_ino)
+                    or not stat.S_ISDIR(current.st_mode)
+                    or (current_parent.st_dev,current_parent.st_ino)!=(parent_identity.st_dev,parent_identity.st_ino)):
+                raise OriginDenied('private Hub journal directory replaced')
+        except OSError:
+            raise OriginDenied('private Hub journal directory unavailable') from None
+    return STORE/'private-admission'/'admissions.db'
 
 
 def configuration(raw, *, persistent=False, progress=None):
@@ -181,7 +226,7 @@ def run_service(*, persistent=False, progress=None):
         if 'library' in metadata:
             from .local_library_transport import offer_handoff
             library_channel=offer_handoff(control);stack.callback(library_channel.close)
-        admissions=HubAdmission(STORE/'admissions.db',seats=seats,supervisor=supervisor,endpoint=peer_lease)
+        admissions=HubAdmission(admission_journal(),seats=seats,supervisor=supervisor,endpoint=peer_lease)
         stack.callback(admissions.close)
         ledger=RoomLedger(STORE/'room.db',metadata['room_id']);stack.callback(ledger.close)
         hub=FixturePeerHub(ledger)

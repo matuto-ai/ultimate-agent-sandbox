@@ -209,3 +209,69 @@ assert 'uas.manager_actions' in sys.modules
             service.configuration(json.dumps(value).encode(),persistent=True,progress=phases.append)
         self.assertEqual(phases[-1],'library-imported')
         self.assertNotIn('binding-validated',phases)
+
+
+class PrivateAdmissionJournalTests(unittest.TestCase):
+    def test_setgid_shared_store_gets_private_journal_and_reopens_without_repairs(self):
+        import os
+        import stat
+        from uas.kernel_origin import HeldOrigin, Record
+        from uas.ledger import RoomLedger
+        from uas.workstation_admission import HubAdmission
+        with tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+            store=Path(directory);store.chmod(0o2770)
+            chmod=os.fchmod;observed=[]
+            def fresh_only(fd,mode):
+                observed.append((stat.S_IMODE(os.fstat(fd).st_mode),mode));chmod(fd,mode)
+            with patch.object(service.os,'fchmod',side_effect=fresh_only):journal=service.admission_journal()
+            self.assertEqual(observed,[(0o2700,0o700)])
+            self.assertEqual(journal,store/'private-admission'/'admissions.db')
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode),0o2770)
+            self.assertEqual(stat.S_IMODE(journal.parent.stat().st_mode),0o700)
+            self.assertEqual((journal.parent.stat().st_uid,journal.parent.stat().st_gid),(os.getuid(),os.getgid()))
+            supervisor=HeldOrigin(Record(b'',(os.getpid(),os.getuid(),os.getgid()),os.pidfd_open(os.getpid())))
+            self.addCleanup(supervisor.close)
+            _,seats=service.configuration(json.dumps(LocalHubTests().value()).encode(),persistent=True)
+            admission=HubAdmission(journal,seats=seats,supervisor=supervisor,endpoint=Mock())
+            admission.close()
+            with patch.object(service.os,'fchmod') as repair:
+                self.assertEqual(service.admission_journal(),journal)
+            repair.assert_not_called()
+            reopened=HubAdmission(journal,seats=seats,supervisor=supervisor,endpoint=Mock());reopened.close()
+            with RoomLedger(store/'room.db','alpha') as ledger:self.assertEqual(ledger.snapshot()['room_seq'],0)
+            self.assertTrue((store/'room.db').is_file());self.assertFalse((store/'admissions.db').exists())
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode),0o2770)
+
+    def test_existing_wrong_mode_foreign_owner_and_symlink_are_never_repaired(self):
+        import os
+        import stat
+        for mode in (0o2770,0o2700,0o770,0o755,0o600):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+                child=Path(directory)/'private-admission';child.mkdir();child.chmod(mode)
+                with patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+                repair.assert_not_called();self.assertEqual(stat.S_IMODE(child.stat().st_mode),mode)
+        with tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+            child=Path(directory)/'private-admission';child.mkdir(mode=0o700)
+            uid=os.getuid()
+            with patch.object(service.os,'getuid',return_value=uid+1),patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+            repair.assert_not_called()
+            gid=os.getgid()
+            with patch.object(service.os,'getgid',return_value=gid+1),patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+            repair.assert_not_called()
+            child.rmdir();target=Path(directory)/'target';target.mkdir(mode=0o700);child.symlink_to(target)
+            with patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+            repair.assert_not_called();self.assertTrue(child.is_symlink())
+
+    def test_legacy_shared_journal_is_not_silently_migrated_or_reset(self):
+        for name in ('admissions.db','admissions.db.lock','admissions.db-wal','admissions.db-shm'):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+                old=Path(directory)/name;old.write_bytes(b'old authority receipt')
+                with self.assertRaisesRegex(OriginDenied,'explicit reconciliation'):service.admission_journal()
+                self.assertEqual(old.read_bytes(),b'old authority receipt')
+                self.assertFalse((Path(directory)/'private-admission').exists())
+
+    def test_qualification_reader_uses_same_private_child_without_moving_room_ledger(self):
+        root=Path(__file__).resolve().parents[1]
+        reader=(root/'tests/vm/guest_workstation.py').read_text()
+        self.assertIn("read_admission_states(paths['hub']/'private-admission'/'admissions.db')",reader)
+        self.assertIn("RoomLedger(STORE/'room.db'",(root/'uas/workstation_service.py').read_text())
