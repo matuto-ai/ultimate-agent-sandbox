@@ -20,6 +20,8 @@ import posixpath
 import re
 
 from .ledger import Origin
+from .library_binding import (LibraryError, _fail, _token, _identifier, _absolute,
+                              project_binding, TOKEN, IDENTIFIER, REPOSITORY)
 
 
 CONTRACT_VERSION = 1
@@ -27,13 +29,10 @@ SETTINGS_VERSION = 1
 MAX_SETTINGS_BYTES = 65536
 MAX_AUDIT_BYTES = 4096
 MAX_PROPOSAL_OPERATIONS = 64
-TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
-IDENTIFIER = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}\Z")
-REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}\Z")
 
 ENQUEUE_CAPABILITY = "library:enqueue"
 SETTINGS_CAPABILITY = "library-settings"
@@ -135,24 +134,6 @@ CONTENT_KEYS = frozenset({
 })
 
 
-class LibraryError(ValueError):
-    """Stable code plus safe field path; never echoes input values or secrets.
-
-    ``evidence`` carries optional rule/location/hash facts about the refusal
-    (for example a credential rule name, its document line and a digest of the
-    matched bytes) so a record can correlate refusals without the secret.
-    """
-
-    def __init__(self, code: str, field: str = "$", evidence=None):
-        self.code, self.field = code, field
-        self.evidence = evidence
-        super().__init__(f"{code}: {field}")
-
-
-def _fail(code, field="$"):
-    raise LibraryError(code, field)
-
-
 def _canonical(value):
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -178,18 +159,6 @@ def _text(value, field, limit=2048, multiline=False):
         value.encode("utf-8")
     except UnicodeError:
         _fail("INVALID_TEXT", field)
-    return value
-
-
-def _token(value, field, limit=128):
-    if type(value) is not str or len(value) > limit or not TOKEN.fullmatch(value):
-        _fail("INVALID_IDENTIFIER", field)
-    return value
-
-
-def _identifier(value, field):
-    if type(value) is not str or not IDENTIFIER.fullmatch(value):
-        _fail("INVALID_IDENTIFIER", field)
     return value
 
 
@@ -431,7 +400,6 @@ class CaptureResult:
     visible: bool = False
 
 
-
 # --- Trusted scope ---------------------------------------------------------
 
 _SCOPE_SEAL = object()
@@ -504,40 +472,6 @@ class LibraryScope:
                 "project_path": self.project_path,
                 "reference_root": self.reference_root,
                 "participant_id": self.participant_id, "human_id": self.human_id}
-
-
-def _absolute(value):
-    return (type(value) is str and value.startswith("/") and value != "/"
-            and ".." not in value.split("/") and posixpath.normpath(value) == value)
-
-
-def project_binding(project, *, source_identity):
-    """Derive the Library binding from the trusted configured Room Project.
-
-    Registration identity is the source Forge host plus the immutable source
-    repository identity, so a rename or transfer keeps project identity, queue
-    identity and deduplication stable. Current ``repository`` coordinates only
-    establish the human-readable bundle path. The main product is GitHub-first,
-    so the source host is fixed; Library hosting stays independent of it.
-    """
-    if type(project) is not dict:
-        _fail("INVALID_BINDING", "project")
-    project_id = _identifier(project.get("id"), "project.id")
-    repository = project.get("repository")
-    if type(repository) is not str or not REPOSITORY.fullmatch(repository):
-        _fail("INVALID_BINDING", "project.repository")
-    roots = project.get("roots")
-    if type(roots) is not dict or not _absolute(roots.get("reference")):
-        _fail("INVALID_BINDING", "project.roots.reference")
-    reference = roots["reference"].rstrip("/") or "/"
-    if reference == "/":
-        _fail("INVALID_BINDING", "project.roots.reference")
-    identity = _token(source_identity, "source_identity", 128)
-    return {"project_id": project_id,
-            "project_identity": "github.com/" + identity,
-            "project_path": "github.com/" + repository,
-            "reference_root": reference + "/library",
-            "snapshot_path": reference + "/library.snapshot.json"}
 
 
 def participant_scope(origin, *, binding):

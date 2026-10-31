@@ -12,7 +12,9 @@ COMMAND = ['/opt/uas/bin/tini', '--', '/usr/bin/python3', '-m', 'uas.local_hub']
 
 PHASES = frozenset({'import-start','import-done','entrypoint-validated','probe-start',
     'probe-done','metadata-wait','metadata-read','metadata-parsed','mapping-validated',
-    'paths-validated','control-connect','control-connected'})
+    'paths-validated','control-connect','control-connected','config-decoded',
+    'forge-import','forge-imported','library-import','library-imported',
+    'binding-validated','seats-validated'})
 
 
 def progress(phase):

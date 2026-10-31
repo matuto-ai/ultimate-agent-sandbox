@@ -159,7 +159,7 @@ class LocalHubTests(unittest.TestCase):
         phases=[]
         with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=65531),patch.object(service.os,'getgid',return_value=65531),patch.object(service.os,'umask'),patch.object(service,'probe') as probe,patch.object(service,'process_status',return_value={'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'}),patch.object(service.sys,'stdin',SimpleNamespace(buffer=BytesIO(json.dumps(value).encode()+b'\n'))),patch.object(service.Path,'read_text',read),patch.object(service,'EndpointLease'),patch.object(service.socket,'socket',return_value=channel),patch.object(service,'enable'):
             with self.assertRaises(ConnectReached):service.run_service(persistent=True,progress=phases.append)
-        self.assertEqual(phases,['entrypoint-validated','probe-start','probe-done','metadata-wait','metadata-read','metadata-parsed','mapping-validated','paths-validated','control-connect'])
+        self.assertEqual(phases,['entrypoint-validated','probe-start','probe-done','metadata-wait','metadata-read','config-decoded','binding-validated','seats-validated','metadata-parsed','mapping-validated','paths-validated','control-connect'])
         probe.assert_called_once();channel.send.assert_not_called()
         with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=0),patch.object(service,'probe') as probe:
             with self.assertRaises(OriginDenied):service.run_service(persistent=True,progress=lambda _:self.fail('phase before guard'))
@@ -182,6 +182,8 @@ value=json.loads(sys.argv[2]);observed,seats=configuration(json.dumps(value).enc
 assert observed==value and len(seats)==2
 assert 'uas.forge' not in sys.modules
 assert 'uas.manager_actions' not in sys.modules
+assert 'uas.library' not in sys.modules
+assert 'uas.library_binding' in sys.modules
 from uas import library
 binding=library.project_binding(value['library']['project'],source_identity='source')
 try:library.human_scope(object(),binding=binding,kind='drain')
@@ -192,3 +194,18 @@ assert 'uas.manager_actions' in sys.modules
         result=subprocess.run([sys.executable,'-I','-S','-B','-c',script,
             str(Path(__file__).resolve().parents[1]),json.dumps(value)],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
+    def test_configuration_phase_order_preserves_binding_refusal(self):
+        from uas.library_binding import LibraryError
+        value=self.value()
+        value['forge']={'project_id':'project','repository':'owner/repository','host':'github.com'}
+        value['library']={'project':{'id':'project','repository':'owner/repository',
+            'roots':{'reference':'/owned/reference'}},'source_identity':'source'}
+        phases=[]
+        service.configuration(json.dumps(value).encode(),persistent=True,progress=phases.append)
+        self.assertEqual(phases,['config-decoded','forge-import','forge-imported',
+            'library-import','library-imported','binding-validated','seats-validated'])
+        value['library']['source_identity']='not a valid identity';phases=[]
+        with self.assertRaises(LibraryError):
+            service.configuration(json.dumps(value).encode(),persistent=True,progress=phases.append)
+        self.assertEqual(phases[-1],'library-imported')
+        self.assertNotIn('binding-validated',phases)

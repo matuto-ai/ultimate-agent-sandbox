@@ -28,12 +28,13 @@ STORE = Path('/uas/hub')
 RELEASE = b'UAS-HUB-RELEASE-1'
 
 
-def configuration(raw, *, persistent=False):
+def configuration(raw, *, persistent=False, progress=None):
     if type(persistent) is not bool:
         raise OriginDenied('fixed Hub lifetime selection required')
     if type(raw) is not bytes or not 0 < len(raw) <= 8192:
         raise OriginDenied('bounded trusted Hub startup required')
     value = json.loads(raw.decode(), object_pairs_hook=_unique)
+    if progress is not None: progress('config-decoded')
     fields = {'version','challenge','supervisor_identity','mapping_digest','room_id','room_instance','seats'}
     fields.add('profile' if persistent else 'run_id')
     if (type(value) is not dict or set(value) - {'forge','library'} != fields
@@ -46,7 +47,9 @@ def configuration(raw, *, persistent=False):
             or type(value['seats']) is not list or len(value['seats']) != 2):
         raise OriginDenied('invalid trusted Hub startup')
     if 'forge' in value:
+        if progress is not None: progress('forge-import')
         from .github_read import GitHubProject
+        if progress is not None: progress('forge-imported')
         forge = value['forge']
         if (type(forge) is not dict or set(forge) != {'project_id','repository','host'}
                 or forge['host'] != 'github.com'):
@@ -54,7 +57,9 @@ def configuration(raw, *, persistent=False):
         from .ledger import _token
         _token(forge['project_id']); GitHubProject(forge['repository'], forge['host'])
     if 'library' in value:
-        from .library import project_binding
+        if progress is not None: progress('library-import')
+        from .library_binding import project_binding
+        if progress is not None: progress('library-imported')
         selected = value['library']
         if (not persistent or type(selected) is not dict
                 or set(selected) != {'project','source_identity'}):
@@ -63,6 +68,7 @@ def configuration(raw, *, persistent=False):
         if 'forge' in value and (selected['project']['id'] != value['forge']['project_id']
                 or selected['project']['repository'] != value['forge']['repository']):
             raise OriginDenied('trusted Project bindings disagree')
+    if progress is not None: progress('binding-validated')
     receiver = ReceiverIdentity(65532,65532,'hub-'+value['room_instance'],value['mapping_digest'])
     seats=[]
     for seat in value['seats']:
@@ -82,6 +88,7 @@ def configuration(raw, *, persistent=False):
         from .workstation_admission import _token
         if not _token(value['run_id']):
             raise OriginDenied('invalid trusted initial Run')
+    if progress is not None: progress('seats-validated')
     return value,tuple(seats)
 
 
@@ -142,7 +149,7 @@ def run_service(*, persistent=False, progress=None):
     if progress is not None: progress('metadata-wait')
     raw_metadata=sys.stdin.buffer.readline(8193)
     if progress is not None: progress('metadata-read')
-    metadata,seats=configuration(raw_metadata, persistent=persistent)
+    metadata,seats=configuration(raw_metadata, persistent=persistent, progress=progress)
     if progress is not None: progress('metadata-parsed')
     mapping={'uid_map':Path('/proc/self/uid_map').read_text(),
              'gid_map':Path('/proc/self/gid_map').read_text(),

@@ -116,7 +116,9 @@ def diagnostic_command(arguments, *, limit=65536, seconds=5):
 def filtered_hub_errors(raw):
     text = raw.decode('utf-8', errors='replace')
     phases = ('import-start', 'import-done', 'entrypoint-validated', 'probe-start', 'probe-done',
-              'metadata-wait', 'metadata-read', 'metadata-parsed', 'mapping-validated', 'paths-validated',
+              'metadata-wait', 'metadata-read', 'config-decoded', 'forge-import', 'forge-imported',
+              'library-import', 'library-imported', 'binding-validated', 'seats-validated',
+              'metadata-parsed', 'mapping-validated', 'paths-validated',
               'control-connect', 'control-connected')
     # Whole exact fixed markers only; arbitrary stderr never becomes evidence.
     phase_lines = {'UAS_LOCAL_HUB_PHASE ' + phase: phase for phase in phases}

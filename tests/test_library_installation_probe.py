@@ -117,7 +117,9 @@ class LibraryInstallationProbeTests(unittest.TestCase):
 
     def test_hub_phase_parser_requires_closed_exact_whole_lines(self):
         phases = ('import-start', 'import-done', 'entrypoint-validated', 'probe-start', 'probe-done',
-                  'metadata-wait', 'metadata-read', 'metadata-parsed', 'mapping-validated', 'paths-validated',
+                  'metadata-wait', 'metadata-read', 'config-decoded', 'forge-import', 'forge-imported',
+                  'library-import', 'library-imported', 'binding-validated', 'seats-validated',
+                  'metadata-parsed', 'mapping-validated', 'paths-validated',
                   'control-connect', 'control-connected')
         from uas.local_hub import PHASES
         self.assertEqual(set(phases), PHASES)

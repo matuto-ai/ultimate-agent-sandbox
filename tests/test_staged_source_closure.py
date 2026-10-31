@@ -22,6 +22,7 @@ OPTIONAL_LOCAL_EDGES = {
     ('uas/workstation_peer.py', 'uas/library_hub.py'),
     # Library-selected persistent Hub only; full Hub image packages these.
     ('uas/workstation_service.py', 'uas/library.py'),
+    ('uas/workstation_service.py', 'uas/library_binding.py'),
     ('uas/workstation_service.py', 'uas/library_hub.py'),
     ('uas/workstation_service.py', 'uas/local_library_transport.py'),
     ('uas/lifecycle.py', 'uas/local_native.py'),
@@ -126,7 +127,7 @@ class StagedSourceClosureTests(unittest.TestCase):
     def test_production_hub_packages_the_explicit_library_route(self):
         from uas.native_hub_image import source_inventory
         sources = source_inventory(ROOT)
-        self.assertTrue({'/opt/uas/uas/library.py', '/opt/uas/uas/library_hub.py',
+        self.assertTrue({'/opt/uas/uas/library.py', '/opt/uas/uas/library_binding.py', '/opt/uas/uas/library_hub.py',
                          '/opt/uas/uas/workstation_peer.py'} <= set(sources))
         # The optional edge is precisely the explicit trusted attachment method,
         # not an unconditional import hidden from the fixed fixture inventory.
