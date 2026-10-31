@@ -41,6 +41,7 @@ class LibraryVMAdapterTests(unittest.TestCase):
         value = {'version': 1, 'nonce': nonce, 'profile': runner.PROFILE, 'production_enabled': False,
             'status': 'passed', 'proof': {'status': 'passed', 'rooms': ['alpha', 'beta'],
                 'stopped_room_operator': 'observed', 'sibling': 'running',
+                'project_content_isolation': 'own-marker-present-sibling-markers-absent',
                 'projection_identities': {'alpha': 'a'*64, 'beta': 'b'*64}},
             'absent_configuration': 'refused', 'unsafe_configuration': 'refused', 'cleanup': 'confirmed'}
         def parse(doc):

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import threading
+import tempfile
 import time
 from types import SimpleNamespace
 import unittest
@@ -194,3 +195,43 @@ class NativeLibraryChannelTests(unittest.TestCase):
             time.sleep(.01)
         second.join(1)
         self.assertEqual(result,[True]);self.assertEqual(reports.receive.call_count,2)
+
+    def test_actual_report_channel_commits_canonical_ledger_and_rejects_foreign_scope(self):
+        from uas.ledger import RoomLedger, LedgerError
+        from uas.library_hub import DrainReports
+        from uas.kernel_origin import alive
+        report={'room_id':'alpha','project_identity':BINDING['project_identity'],
+                'drain_id':'drain-1','sequence':1,'phase':'STARTED','attempt':1,
+                'outcomes':[],'resulting_sha':None,'reason':None,'due':None}
+        # Each refusal owns a fresh channel: a rejected trusted ingress is fatal,
+        # not an ACK or a reason to reuse a possibly desynchronized stream.
+        for changed in ({}, {'room_id':'beta'}, {'project_identity':'foreign-project'}):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                root,host=self.pair();supervisor,hub=self.pair()
+                server=transport.RootServer(root,self.origin(),lambda:Mock(),BINDING,SEATS,current=lambda:True)
+                relay=transport.Relay(supervisor,self.origin(),host,self.origin())
+                server.start();relay.start();self.resources.extend([server.close,relay.close])
+                peer=self.origin();path=Path(directory)/'room.db'
+                result=[]
+                with RoomLedger(path,'alpha') as ledger:
+                    receiver=DrainReports(ledger,room_id='alpha',project_identity=BINDING['project_identity'],
+                                          authenticate=lambda:not peer.revoked and alive(peer.pidfd))
+                    client=transport.Client(hub,peer,BINDING,reports=receiver)
+                    sender=threading.Thread(target=lambda:result.append(server.report({**report,**changed})))
+                    sender.start()
+                    # Wait for the atomic report packet, not an arbitrary sleep.
+                    self.assertTrue(transport.select.select([server.reports],[],[],1)[0])
+                    if changed:
+                        with self.assertRaisesRegex(LedgerError,'INVALID_LIBRARY_BINDING'):client.poll()
+                    else:
+                        client.poll()
+                        self.assertEqual([event['payload'] for event in ledger.replay(0,limit=10)], [report])
+                    sender.join(1);self.assertFalse(sender.is_alive())
+                    self.assertEqual(result,[not bool(changed)])
+                # Reopen the actual canonical ledger: ACK means durable metadata,
+                # while foreign Room/Project reports produced no ledger event.
+                with RoomLedger(path,'alpha') as reopened:
+                    events=reopened.replay(0,limit=10)
+                    self.assertEqual([event['kind'] for event in events], [] if changed else ['library.drain.reported'])
+                    if not changed:self.assertEqual(events[0]['payload'],report)
+                self.assertTrue(relay.close());self.assertTrue(server.close())

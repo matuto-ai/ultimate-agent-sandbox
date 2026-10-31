@@ -93,6 +93,7 @@ def parse_report(serial, nonce):
     proof = report.get('proof', {})
     require(proof.get('status') == 'passed' and proof.get('stopped_room_operator') == 'observed'
             and proof.get('sibling') == 'running' and proof.get('rooms') == ['alpha', 'beta']
+            and proof.get('project_content_isolation') == 'own-marker-present-sibling-markers-absent'
             and len(set(proof.get('projection_identities', {}).values())) == 2
             and report.get('absent_configuration') == 'refused'
             and report.get('unsafe_configuration') == 'refused'

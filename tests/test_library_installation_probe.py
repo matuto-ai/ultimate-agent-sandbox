@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -31,3 +32,18 @@ class LibraryInstallationProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'candidate commit mismatch'):
                 probe.run('/prepared', 'a'*40)
         spawn.assert_not_called()
+
+
+    def test_real_bundle_markers_detect_missing_and_sibling_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root / 'context').mkdir()
+            own = root / 'context/index.md'; own.write_text('alpha-private')
+            probe.isolated_marker(root, 'alpha-private', ['beta-private'])
+            with self.assertRaisesRegex(RuntimeError, 'own Project marker absent'):
+                probe.isolated_marker(root, 'missing', ['beta-private'])
+            leak = root / 'context/leak.md'; leak.write_text('beta-private')
+            with self.assertRaisesRegex(RuntimeError, 'sibling Project content exposed'):
+                probe.isolated_marker(root, 'alpha-private', ['beta-private'])
+            leak.unlink(); (root / 'beta-private.md').write_text('innocent')
+            with self.assertRaisesRegex(RuntimeError, 'sibling Project content exposed'):
+                probe.isolated_marker(root, 'alpha-private', ['beta-private'])

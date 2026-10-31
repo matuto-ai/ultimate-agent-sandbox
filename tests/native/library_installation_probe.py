@@ -59,7 +59,16 @@ def candidate_identity(expected_commit, source_manifest=None):
     return expected_commit
 
 
-def run(installation_root, expected_commit, *, source_manifest=None):
+def isolated_marker(bundle, own, siblings):
+    files = list(bundle.rglob('*'))
+    require(not any(path.is_symlink() for path in files), 'projection symlink exposed')
+    content = b'\n'.join(path.relative_to(bundle).as_posix().encode() + b'\n' + path.read_bytes()
+                         for path in files if path.is_file())
+    require(own.encode() in content, 'own Project marker absent')
+    require(all(marker.encode() not in content for marker in siblings), 'sibling Project content exposed')
+
+
+def run(installation_root, expected_commit, *, source_manifest=None, expected_markers=None):
     from uas.local_installation import Installation
     from uas.local_host import request
     from uas.library_controls import request as library_request
@@ -71,6 +80,11 @@ def run(installation_root, expected_commit, *, source_manifest=None):
             'prepared native and Library selections required')
     rooms = config['rooms']
     require(len(rooms) == 2, 'exactly two disposable prepared Rooms required')
+    if expected_markers is not None:
+        require(set(expected_markers) == {r['id'] for r in rooms}
+                and len(set(expected_markers.values())) == 2
+                and all(type(v) is str and 0 < len(v) <= 128 for v in expected_markers.values()),
+                'distinct fixed fixture markers required')
     require(not (installation.root / 'operator.sock').exists(), 'existing host owner must be stopped')
     before = (installation.root / 'installation.json').read_bytes()
     host = subprocess.Popen([sys.executable, '-m', 'uas', 'local', '--root', str(installation.root), 'serve'],
@@ -104,6 +118,9 @@ def run(installation_root, expected_commit, *, source_manifest=None):
                     'canonical state exposed in projection')
             require(set(p.name for p in reference.iterdir() if not p.name.startswith('.'))
                     == {'library', 'library.snapshot.json'}, 'unexpected published projection content')
+            if expected_markers is not None:
+                isolated_marker(bundle, expected_markers[room['id']],
+                    [value for key, value in expected_markers.items() if key != room['id']])
             generations[room['id']] = snapshot
         alpha, beta = rooms
         stopped = request(installation, 'stop', alpha['id'])
@@ -120,6 +137,8 @@ def run(installation_root, expected_commit, *, source_manifest=None):
                 and beta_state['result']['infrastructure']['phase'] == 'running', 'sibling Room stopped')
         require(json.loads((Path(beta['project']['roots']['reference']) / 'library.snapshot.json').read_text())
                 == generations[beta['id']], 'sibling projection changed')
+        if expected_markers is not None:
+            proof['project_content_isolation'] = 'own-marker-present-sibling-markers-absent'
         proof.update(status='passed', rooms=[r['id'] for r in rooms],
                      stopped_room_operator='observed', sibling='running',
                      projection_identities={r: s['project_identity'] for r, s in generations.items()})

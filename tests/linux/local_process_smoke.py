@@ -34,6 +34,13 @@ def hosted_gate(run):
             'explicit hosted Linux local process smoke required')
 
 
+def fixture_support():
+    # Direct script execution puts tests/linux, not the repository, on sys.path.
+    sys.path[:0] = [str(ROOT), str(ROOT/'tests')]
+    import library_support
+    return library_support
+
+
 class Smoke:
     def __init__(self,root):
         self.root=root;self.install=root/'install';self.children=[]
@@ -90,8 +97,7 @@ class Smoke:
         # The installed host now requires Library selection. Keep the original
         # process/socket proof with a real disposable Git target, not a mocked
         # Library or a production credential/provider. This is not qualification.
-        sys.path.insert(0,str(ROOT/'tests'))
-        import library_support
+        library_support=fixture_support()
         project=self.root/'project.json'
         config=json.loads((ROOT/'tests/fixtures/two-rooms.json').read_text())
         config['deployment']['state_root']=str(self.root/'state')

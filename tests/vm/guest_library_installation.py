@@ -188,7 +188,24 @@ def prepare_library(config):
                                request_id=f'register-{i}', payload={}, at=support.AT), admitted)
     finally:
         publisher.close()
+    # Controlled fixture publication, not an authenticated Participant capture.
+    # These distinct canonical documents make sibling projection leakage visible.
+    seed = CONFIG / 'marker-seed'
+    branch = settings['repository']['branch']
+    run('git', 'clone', '-q', '--branch', branch, str(target), str(seed))
+    for room, binding in zip(config['rooms'], bindings):
+        path = seed / 'projects' / binding['project_path'] / 'context/index.md'
+        with path.open('a') as output:
+            output.write('\nFixture isolation marker: ' + fixture_marker(room['id']) + '\n')
+    run('git', '-C', str(seed), 'add', 'projects')
+    run('git', '-C', str(seed), '-c', 'user.name=Library fixture',
+        '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'Seed isolated fixture documents')
+    run('git', '-C', str(seed), 'push', '-q', 'origin', 'HEAD:' + branch)
     return value
+
+
+def fixture_marker(room_id):
+    return 'UAS-PRIVATE-LIBRARY-MARKER-' + room_id + '-7e034c8b'
 
 
 def startup_refusal(result, expected):
@@ -249,7 +266,8 @@ def scenario(nonce, manifest, candidate):
     path = CANDIDATE / 'tests/native/library_installation_probe.py'
     spec = importlib.util.spec_from_file_location('installation_probe', path)
     probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
-    proof = probe.run(str(INSTALL), candidate['commit'], source_manifest=CANDIDATE / 'candidate.json')
+    proof = probe.run(str(INSTALL), candidate['commit'], source_manifest=CANDIDATE / 'candidate.json',
+                      expected_markers={r['id']: fixture_marker(r['id']) for r in config['rooms']})
     return {'proof': proof, 'absent_configuration': 'refused', 'unsafe_configuration': 'refused',
             'cleanup': 'confirmed'}
 
