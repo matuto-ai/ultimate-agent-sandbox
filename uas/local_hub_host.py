@@ -25,15 +25,33 @@ def startup_document(raw):
         raise QualificationError('LOCAL_HUB_STARTUP_DOCUMENT')
     value=json.loads(raw,object_pairs_hook=_unique)
     if (type(value) is not dict or type(value.get('version')) is not int or value['version'] not in (1,2)
-            or set(value) not in (({'version','room','resources'}|({'host_profile'} if value['version']==2 else set())),
+            or set(value) - {'library'} not in (({'version','room','resources'}|({'host_profile'} if value['version']==2 else set())),
                                   ({'version','room','resources','runtime'}|({'host_profile'} if value['version']==2 else set())))
             or type(value['room']) is not dict or type(value['resources']) is not dict):
         raise QualificationError('LOCAL_HUB_STARTUP_DOCUMENT')
+    if 'library' in value:
+        selected = value['library']
+        if (type(selected) is not dict or set(selected) != {'fd','root_identity','project','source_identity'}
+                or type(selected['fd']) is not int or selected['fd'] < 3
+                or type(selected['root_identity']) is not list or len(selected['root_identity']) != 2
+                or any(type(v) is not int or v < 0 for v in selected['root_identity'])):
+            raise QualificationError('LOCAL_LIBRARY_STARTUP')
+        from .library import project_binding
+        project_binding(selected['project'],source_identity=selected['source_identity'])
+        if selected['project'] != value['room'].get('project'):
+            raise QualificationError('LOCAL_LIBRARY_STARTUP')
     resources=value['resources']
     if (set(resources)!={'hub_id','instance','control_path','mapping_digest','control_fd','peer_fd'}
             or any(type(resources[k]) is not int or resources[k]<3 for k in ('control_fd','peer_fd'))
             or resources['control_fd']==resources['peer_fd']):
         raise QualificationError('LOCAL_HUB_STARTUP_RESOURCES')
+    if 'library' in value:
+        reserved={resources['control_fd'],resources['peer_fd']}
+        runtime=value.get('runtime',{})
+        if type(runtime) is dict:
+            reserved.update(runtime.get(k) for k in ('broker_fd','checkout_fd','git_fd'))
+        if value['library']['fd'] in reserved:
+            raise QualificationError('LOCAL_LIBRARY_STARTUP_ALIAS')
     startup_engine(value)
     return value
 
@@ -100,10 +118,31 @@ def run(raw,parent_fd):
     with ExitStack() as stack:
         self_fd=os.pidfd_open(os.getpid(),0);stack.callback(os.close,self_fd)
         startup=metadata(document['room'],resources,_identity(self_fd),secrets.token_hex(32))
+        library_pair = None
+        if 'library' in document:
+            from .kernel_origin import enable, receive, HeldOrigin
+            from .local_library_transport import Relay, handoff, require
+            root_channel = socket.socket(fileno=document['library']['fd']); stack.callback(root_channel.close)
+            enable(root_channel); root_channel.settimeout(5)
+            with receive(root_channel) as record:
+                require(record.credentials[1:] == (0,0)
+                        and list(_identity(record.pidfd)) == document['library']['root_identity']
+                        and json.loads(record.data) == {'kind':'root-ready'})
+                root_origin = HeldOrigin(record)
+            stack.callback(root_origin.close)
+            library_pair = socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+            for channel in library_pair: enable(channel); channel.settimeout(5); stack.callback(channel.close)
+            startup['library'] = {k:document['library'][k] for k in ('project','source_identity')}
+            configuration(_canonical(startup),persistent=True)
         listener=socket.socket(fileno=resources['control_fd']);stack.callback(listener.close)
         peer=socket.socket(fileno=resources['peer_fd']);stack.callback(peer.close)
         control,origin,ready,_=start_hub_channel(DockerExecAPI(startup_engine(document)),resources,
-                                               startup,listener,stack,SessionBudget(30),host_profile=host_profile)
+                                               startup,listener,stack,SessionBudget(30),host_profile=host_profile,
+                                               library_handoff=None if library_pair is None else lambda control:handoff(control,library_pair[1]))
+        if library_pair is not None:
+            library_pair[1].close()
+            relay=Relay(library_pair[0],origin,root_channel,root_origin)
+            relay.start();stack.callback(relay.close)
         receipt={'version':1,'status':'ready','room_id':startup['room_id'],
                  'room_instance':startup['room_instance'],'controller':ready['controller']}
         def announce(_=None):

@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import library_support as support
+from fixture_library_selection import write_selection
 from test_library_git import git
 from test_local_installation import native_selection
 from uas import library, library_controls, local_cli, local_library
@@ -105,6 +106,12 @@ class LocalLibraryWiringTests(unittest.TestCase):
                                   'terms': 'terms-v1'},
                       'command': ['/bin/true']},
         }
+        value['model']['selection'] = write_selection(
+            self.base / 'model-selection.json', profile=value['model']['profile'],
+            command=value['model']['command'],
+            bindings=[library.project_binding(self.room(room)['project'],
+                       source_identity=entry['source_identity'])
+                      for room, entry in value['rooms'].items()])
         value.update(overrides)
         return value
 

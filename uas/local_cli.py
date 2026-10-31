@@ -45,6 +45,11 @@ def run_host(installation):
             controller = LocalController(installation, LocalNativeHost, services=services,
                 host_lock_fd=lock_fd, manager=manager, library=library)
             owner['controller'] = controller
+            # Installed reports are delivered by the authenticated Hub channel;
+            # the root host must never write the fixed-UID Hub's SQLite/WAL.
+            if type(services) is LocalServices:
+                services.library = library
+                library.set_report_transport(services.report_library)
             # One Library singleton for the whole installation lifetime, started
             # before any Room binds; absent, unsafe or unqualified configuration
             # fails the host here instead of running without it.

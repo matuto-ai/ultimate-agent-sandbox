@@ -12,7 +12,8 @@ from uas.native_completed_retirement import NativeCompletedRetirement
 import test_native_completed_retirement as fixture
 
 
-class LocalStopTests(unittest.TestCase):
+class LocalStopFixture:
+    """Shared stopped-owner setup, without duplicating completed-path cases."""
     seed=fixture.CompletedRetirementTests.seed
     open=fixture.CompletedRetirementTests.open
     recruit=fixture.CompletedRetirementTests.recruit
@@ -34,6 +35,7 @@ class LocalStopTests(unittest.TestCase):
         held=bundle.adopt_completed(self.admission,self.recruitment,operation,self.run_id)
         self.admission._completed_retirements[operation]=held
         return held
+class LocalStopTests(LocalStopFixture, unittest.TestCase):
     def test_all_captured_before_effects_then_fresh_canonical_retirement(self):
         snapshot=self.ledger.snapshot()
         bundle=self.bundle();self.assertEqual(2,len(self.captured));self.assertFalse(self.stopped)

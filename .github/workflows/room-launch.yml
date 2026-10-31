@@ -5,6 +5,14 @@ on:
     types: [labeled]
   workflow_dispatch:
     inputs:
+      scenario:
+        description: Exact reviewed warm-guest qualification scenario
+        required: false
+        default: room-boundary
+        type: choice
+        options:
+          - room-boundary
+          - library-installation
       producer_run_id:
         description: Exact reviewed successful preparation run ID
         required: true
@@ -31,7 +39,7 @@ concurrency:
 
 jobs:
   composed-room-boundary:
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.actor == 'puglab-reviewer') || (github.event.label.name == 'qualify-room-launch' && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.actor == 'puglab-reviewer') || (github.event_name == 'pull_request' && github.event.action == 'labeled' && (github.event.label.name == 'qualify-room-launch' || github.event.label.name == 'qualify-library-installation') && github.event.sender.login == 'puglab-reviewer' && github.event.pull_request.head.repo.full_name == github.repository) }}
     permissions:
       contents: read
       actions: read
@@ -42,6 +50,23 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Require exactly one explicitly selected warm scenario
+        env:
+          SELECTED_SCENARIO: ${{ inputs.scenario }}
+          SELECTED_LABEL: ${{ github.event.label.name }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          if os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+              selected = os.environ['SELECTED_SCENARIO'] or 'room-boundary'
+              if selected not in ('room-boundary', 'library-installation'):
+                  raise ValueError('one reviewed warm scenario required')
+          elif os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+              if os.environ['SELECTED_LABEL'] not in ('qualify-room-launch', 'qualify-library-installation'):
+                  raise ValueError('exact qualification label required')
+          else:
+              raise ValueError('deliberate qualification event required')
+          PYTHON
       - name: Fetch explicit reviewed PR selection, with no cold fallback
         if: ${{ github.event_name == 'pull_request' }}
         timeout-minutes: 6
@@ -83,8 +108,18 @@ jobs:
         timeout-minutes: 10
         run: python3 tests/vm/install_runner_tools.py boundary
       - name: Exercise fresh Room launch using verified clean preparation
+        if: ${{ github.event.label.name == 'qualify-room-launch' || (github.event_name == 'workflow_dispatch' && (inputs.scenario == 'room-boundary' || inputs.scenario == '')) }}
         env:
           UAS_ROOM_VM_PROFILE: room-launch-ipv4-v1
           UAS_ROOM_EXECUTION: warm
           UAS_ROOM_PREPARED_DIR: ${{ runner.temp }}/room-prepared
         run: python3 tests/vm/run_room.py
+      - name: Exercise actual installed Library on two Rooms using verified clean preparation
+        if: ${{ github.event.label.name == 'qualify-library-installation' || (github.event_name == 'workflow_dispatch' && inputs.scenario == 'library-installation') }}
+        env:
+          UAS_LIBRARY_VM_APPROVED: '1'
+          UAS_LIBRARY_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          UAS_ROOM_VM_PROFILE: room-launch-ipv4-v1
+          UAS_ROOM_EXECUTION: warm
+          UAS_ROOM_PREPARED_DIR: ${{ runner.temp }}/room-prepared
+        run: python3 tests/vm/run_library_installation.py

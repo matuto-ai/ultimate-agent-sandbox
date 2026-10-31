@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Hosted-only real account-free local CLI/process/socket smoke.
 
-No native bindings or Manager selected: this proves persistent setup and the
+A disposable credential-free Library transport is selected, but no native
+bindings or Manager: this proves persistent setup and the
 operator transport, NOT native Room/Run/Manager operation or uncertain native
 effect recovery. Importing this module starts nothing.
 """
@@ -86,10 +87,54 @@ class Smoke:
         require(not os.path.lexists(self.install/'operator.sock'),'owned endpoint removed')
 
     def exercise(self):
+        # The installed host now requires Library selection. Keep the original
+        # process/socket proof with a real disposable Git target, not a mocked
+        # Library or a production credential/provider. This is not qualification.
+        sys.path.insert(0,str(ROOT/'tests'))
+        import library_support
         project=self.root/'project.json'
-        original=(ROOT/'tests/fixtures/two-rooms.json').read_bytes();project.write_bytes(original)
+        config=json.loads((ROOT/'tests/fixtures/two-rooms.json').read_text())
+        config['deployment']['state_root']=str(self.root/'state')
+        for room in config['rooms']:
+            room['state_root']=str(self.root/'state'/room['id'])
+            for name in room['project']['roots']:
+                room['project']['roots'][name]=str(self.root/'projects'/room['id']/name)
+            Path(room['project']['roots']['reference']).mkdir(parents=True)
+        original=json.dumps(config).encode();project.write_bytes(original)
+        canonical=self.root/'canonical.git'
+        subprocess.run(['/usr/bin/git','init','--bare','-q',str(canonical)],check=True,
+                       timeout=self.left(),env=self.environment)
+        transport=self.root/'git-transport.py'
+        transport.write_text("#!/usr/bin/python3\nimport os,shlex,sys\n"
+            "args=sys.argv[1:]\n"
+            "if '-G' in args: raise SystemExit(1)\n"
+            "command=shlex.split(args[-1])\n"
+            "assert args[-2]=='git@library.invalid'\n"
+            "assert len(command)==2 and command[0] in ('git-upload-pack','git-receive-pack') and command[1]=='/library.git'\n"
+            "os.execv('/usr/bin/'+command[0],[command[0],"+repr(str(canonical))+"])\n")
+        self.environment['GIT_SSH_COMMAND']='/usr/bin/python3 '+str(transport)
+        settings=library_support.document()
+        settings['repository'].update(target='ssh://git@library.invalid/library.git',credential_ref='alice-git')
+        library_path=self.root/'library.json'
+        library_path.write_text(json.dumps({'version':1,'settings':settings,
+            'credentials':{'alice-git':{'environment':['GIT_SSH_COMMAND']}},
+            'rooms':{'alpha':{'source_identity':'1001'},'beta':{'source_identity':'1002'}},
+            'qualification':{'evidence':{'version':1,'target':settings['repository']['target'],
+                'branch':settings['repository']['branch'],'qualified':True}},
+            'model':{'profile':{'reference':'synth-local','placement':'local','provider':'fixture',
+                'version':'v1','endpoint':'http://127.0.0.1:1/unused','region':'local',
+                'retention':'zero','terms':'fixture-only'},'command':['/bin/false']}}))
+        from fixture_library_selection import write_selection
+        from uas.library import project_binding
+        library_doc=json.loads(library_path.read_text())
+        library_doc['model']['selection']=write_selection(self.root/'model-evidence.json',
+            profile=library_doc['model']['profile'], command=library_doc['model']['command'],
+            bindings=[project_binding(room['project'],source_identity=library_doc['rooms'][room['id']]['source_identity'])
+                      for room in config['rooms']])
+        library_path.write_text(json.dumps(library_doc))
         selection={'version':1,'project':{'path':str(project),'sha256':hashlib.sha256(original).hexdigest()},
-                   'native':None,'manager':None}
+                   'native':None,'manager':None,
+                   'library':{'path':str(library_path),'sha256':hashlib.sha256(library_path.read_bytes()).hexdigest()}}
         selected=self.root/'selection.json';selected.write_text(json.dumps(selection))
         require(self.command('setup',str(selected))['status']=='installed','real setup')
         saved=(self.install/'installation.json').read_bytes()

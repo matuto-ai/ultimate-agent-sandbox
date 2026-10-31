@@ -68,6 +68,17 @@ class RoomPreparationTests(unittest.TestCase):
             for record in room['paths'].values():
                 self.assertEqual(prepare.directory_identity(record['path']),record['identity'])
                 self.assertEqual(self.fixture.attributes[record['path']][0],room['quota_project_id'])
+        operations=prepare._operations(self.value,[1,2])['operations']
+        for room in self.config['rooms']:
+            for role,path in room['project']['roots'].items():
+                selected=next(op for op in operations if op.get('path')==path)
+                self.assertIs(selected['readonly'],role=='reference')
+                info=self.fixture.fake_stat(path)
+                expected=(0,0) if role=='reference' else (165532,165532)
+                self.assertEqual((info.st_uid,info.st_gid),expected)
+                if role=='reference':self.assertEqual(info.st_mode & 0o777,0o755)
+            runtime=next(op for op in operations if op.get('path')==room['state_root']+'/runtime')
+            self.assertIs(runtime['readonly'],False)
         effects=len(self.fixture.calls)
         second=prepare.apply(self.value)
         self.assertEqual(result,second)

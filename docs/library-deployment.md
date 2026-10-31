@@ -80,7 +80,7 @@ routing and the Manager Settings page stay with #192: this composition admits
 the authority document it is given, and a changed canonical target or branch is
 refused by the existing publisher pin instead of silently repointing a clone. Until they supply
 qualification evidence and the external configuration, a real host startup is
-expected to fail closed at `TARGET_NOT_QUALIFIED`; no fallback target, credential
+expected to fail closed at target or model evidence admission; no fallback target, credential
 or Room binding is selected in the meantime.
 
 ## Proof
@@ -125,7 +125,7 @@ The selected document is version 1 with these fields:
 | `credentials` | Maps each referenced credential to the exact host environment variable names that carry its Git transport environment, limited to the admitted Git transport variables. Each reference must be a configured `git` credential; a missing variable fails the host closed. |
 | `rooms` | Approved Rooms and their immutable source identity. Every configured Room must be bound, so no Room is left without an admitted Library by omission. The Project binding itself stays in the closed installation configuration, so paths, repository coordinates and Room ownership cannot drift from it. |
 | `qualification` | Operator-supplied evidence for the exact target and branch it names: the target, the branch and the `qualified` flag. Establishing that evidence stays with #157; this wiring only refuses to run when it is absent, false or inconsistent. Failure happens at `TARGET_NOT_QUALIFIED` before any clone work. |
-| `model` | The fixed synthesis route: one qualified profile identity plus the exact adapter argv. The adapter inherits only the host environment; it never receives Library content on its command line. |
+| `model` | The fixed synthesis profile, exact adapter argv and required `selection` path/SHA256 reference to separately established model evidence. The adapter never receives Library content on its command line. |
 | `operator` | Optional host-local human principal (`human_id`, `actor_id`). Omitted, it is the installation owner, which grants the Library human actions over the approved Projects only; an explicit `null` disables the T22 endpoint. |
 
 `uas/local_library.py` builds the composition from that document
@@ -157,19 +157,28 @@ exact approved binding. That origin is used only inside the host service for
 projection and scheduling authority; it never leaves the host, and a Participant
 capture still requires the Room Hub's authenticated Participant origin.
 
-### Not wired by this slice
+### Authenticated installed Hub route
 
-The Participant `library.enqueue` route across the Room Hub process boundary is
-not established here. The production Room Hub is the fixed-uid
-`uas.workstation_service` process with its own hardened bootstrap and
-`/uas/hub/room.db` ledger, and `AdmittedPeerDispatcher.attach_library` currently
-requires the Library owner to share that in-process ledger. Connecting the
-host's `EnqueueEndpoint` to it needs a new authenticated duplex channel carried
-through the Hub startup document, with its own kernel peer verification, request
-framing and bounded failure behaviour; that channel does not exist yet, so no
-candidate claims it. `DeploymentLibrary._transport` report ingress is bound to
-the running Room's ledger through `LocalController.ledger`, and a Room whose
-ledger is unavailable stays replayable rather than losing its reports.
+The selected Library binding is carried through the closed native Hub startup
+document. The root owner supplies an anonymous, inherited Unix seqpacket channel
+to its fixed-identity supervisor helper. That helper transfers a separate
+connected descriptor to the actual Hub during the existing authenticated control
+bootstrap. No filesystem listener, credential, mount, network route or host/LAN
+exemption is added. Each record pins and rechecks the sending kernel process.
+
+The Hub keeps its own canonical ledger and derives Participant authority through
+its existing admission owner. The host reconstructs the immutable Project scope
+from its selected Room binding, accepts only that Room's configured actors and
+capabilities, and challenges the live Hub authority at capture fences. Capture
+content is bounded and transient across the relay; no intermediary content queue
+or autosave exists. Publication and projection receipts remain distinct, and an
+uncertain disconnect is not a false rejection or successful commit.
+
+Service reports return over that authenticated channel and are committed by the
+Hub's own ledger owner. The root host does not create the Room database or its WAL
+files. A stopped/unavailable Hub, foreign Project, timeout or uncertain reply
+leaves the report replayable. Report-worker termination cannot retain a shared
+mutex or turn an unrelated later acknowledgement into success.
 
 ## Proof for the installed wiring
 
@@ -201,6 +210,58 @@ controlled fixtures. It covers:
 
 It also covers the default installation-owner operator path, an explicit `null`
 that disables only the operator endpoint while the host and Rooms keep running,
-and both Rooms' published roots so neither carries the other's Project. It proves installed wiring and projection boundaries. It does not prove a VM,
-Docker or live native Room, a live model provider, actual target qualification,
-or the split-process Hub enqueue route above.
+and both Rooms' published roots so neither carries the other's Project. It proves the in-process wiring and projection boundaries, not actual native
+host acceptance. Separate transport tests exercise the split-process channel.
+Neither suite proves a VM, Docker/native Room, live model provider, or actual
+target qualification. The candidate-pinned prepared-host result remains a
+separate acceptance gate.
+
+### External model-selection evidence
+
+`model.selection` is an owner-controlled `{path, sha256}` reference, separate
+from the installation/Room settings document. Its closed schema is:
+
+- `version`: 1;
+- `profile_sha256`: the existing `Profile.identity()` digest;
+- `command_sha256`: the canonical digest of the exact fixed adapter argv;
+- `selections`: one entry per configured immutable Project identity, containing
+  `qualification`, `authorization`, and `hosted_approval` (null for a local route).
+
+Each non-null entry uses the existing dispatcher `Evidence` fields:
+`reference`, `profile_sha256`, `project_identity`, `valid_until`, `qualified`.
+The consumer checks the existing qualification/profile reference contracts and
+expiry rules. It does not manufacture a qualification result or turn a profile
+name into evidence. The external T42/#171 owner still supplies the real result.
+
+The evidence file must be a regular, owner-controlled, non-group/world-writable,
+non-symlink file with the selected digest. Startup validates every configured
+Project before clone work; each dispatch fence reads and validates the file
+again. Missing, changed, expired or revoked evidence refuses dispatch and output
+release. Replacing evidence requires deliberate re-selection of its digest and
+host restart; this change provisions no model, account or authorization.
+
+`tests/test_local_library_model.py` verifies the actual installed composition
+through Attempts, a fixed deterministic adapter and real disposable Git,
+including revocation after adapter contact. Its external evidence and provider
+are explicitly synthetic. This proves evidence consumption, not actual model
+quality, remote retention policy or target qualification.
+
+### Actual prepared-host acceptance probe
+
+`tests/native/library_installation_probe.py` is a separately opt-in probe for an
+already prepared, disposable two-Room native installation. It retains all
+`LocalNativeHost` checks, compares the candidate commit and clean tracked source,
+starts the real foreground host and Rooms, observes the stopped Room through the
+independent Library operator path, checks the sibling projection and performs
+bounded orderly cleanup. It provisions nothing and must not run against an
+unapproved existing installation. A source or unit pass of this script is not an
+actual-host acceptance result; candidate-pinned execution evidence is required.
+
+The installed native profile now requires the `reference` parent to be
+`root:root` mode `0755`: the singleton publishes there and the Room receives the
+existing read-only mount. Repo, workspace, checkouts and runtime retain the
+shifted runtime UID/GID. Guided fresh preparation records this reference role in
+its closed operation plan and only hands off a newly owned empty directory;
+retries observe completed directories rather than repairing populated data.
+Older runtime-owned reference selections fail closed and are not migrated by
+startup. The disposable qualification profile's ownership contract is unchanged.

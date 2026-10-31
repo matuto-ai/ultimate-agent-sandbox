@@ -263,6 +263,9 @@ class NativeBoundaryProfile:
     def storage_identity(self, path):
         return directory_identity(path)
 
+    def require_path_owner(self, key, info):
+        require(info.st_uid == self.owners['runtime'] and info.st_gid == self.owners['runtime'], 'PATH_OWNER')
+
     def observe_storage(self):
         self.guard()
         require(self.storage_identity(self.root) == self.boundary['root_identity'], 'ROOT_IDENTITY')
@@ -283,7 +286,7 @@ class NativeBoundaryProfile:
             require(self.storage_identity(path) == self.boundary['paths'][key]['identity'], 'PATH_IDENTITY')
             info = Path(path).stat()
             require(info.st_dev == self.storage.stat().st_dev, 'QUOTA_FILESYSTEM')
-            require(info.st_uid == self.owners['runtime'] and info.st_gid == self.owners['runtime'], 'PATH_OWNER')
+            self.require_path_owner(key, info)
             require(project_attributes(path) == (self.project_id, True), 'PROJECT_QUOTA')
             label = command('stat', '-c', '%C', path).strip()
             require(label == 'system_u:object_r:container_file_t:' + self.level, 'PATH_LABEL')

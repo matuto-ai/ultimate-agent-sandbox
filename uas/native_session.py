@@ -109,7 +109,7 @@ def _hub(engine, resources, plan, peer, control_listener, stack, budget):
     return start_hub_channel(engine, resources, metadata, control_listener, stack, budget)
 
 
-def start_hub_channel(engine, resources, metadata, control_listener, stack, budget, *, host_profile=None):
+def start_hub_channel(engine, resources, metadata, control_listener, stack, budget, *, host_profile=None, library_handoff=None):
     """One authenticated startup; callers retain stack for the owner lifetime."""
     from .local_host_profile import LocalHostProfile
     require(host_profile is None or type(host_profile) is LocalHostProfile,'HOST_PROFILE_REQUIRED')
@@ -132,6 +132,8 @@ def start_hub_channel(engine, resources, metadata, control_listener, stack, budg
     stack.callback(origin.close)
     control_lease.require()
     require(control.send(RELEASE) == len(RELEASE), 'HUB_RELEASE_UNKNOWN')
+    if library_handoff is not None:
+        library_handoff(control)
     with receive(control) as record:
         origin.require(record); ready = json.loads(record.data, object_pairs_hook=_unique)
     require(type(ready) is dict and set(ready) == {'version', 'kind', 'controller', 'room_id', 'room_instance', 'observation'}

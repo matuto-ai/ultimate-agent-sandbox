@@ -20,11 +20,12 @@ owned stale socket after process death. No shell, arbitrary path, clone edit,
 configuration mutation or Participant route is exposed.
 
 The bounded version-1 request contract has `observe`, `inspect`, `reject`,
-`adjudicate`, `drain`, `retry`, `resume` and `defer`; each action's own module
-owns its fields and evidence. Defer is the T38 attention snooze, binds no
-drain/queue/content identity, and is admitted through the same current Project
-grant and settings fence; it is described in
-[Library attention](library-attention.md).
+`adjudicate`, `drain`, `retry`, `resume`, the archive/lifecycle actions,
+`requeue` and `defer`; each action's own module owns its fields and evidence.
+[Releasing parked work](library-requeue.md) owns the requeue release contract.
+Defer is the T38 attention snooze, binds no drain/queue/content identity, and is
+admitted through the same current Project grant and settings fence; it is
+described in [Library attention](library-attention.md).
 An observation names the Project and intended action; it returns current settings
 identity, opaque observed version, scheduler state and drain identity. For the
 `defer` action it instead returns the current durable attention-cut version. The

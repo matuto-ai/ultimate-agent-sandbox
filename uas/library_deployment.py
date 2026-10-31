@@ -114,6 +114,7 @@ class DeploymentLibrary:
         self.settings_owner = settings_owner
         self.audit, self.publisher_factory, self.now = audit, publisher_factory, now
         self.failure = None
+        self._report_transport = None
         self._started = False
         self._lock = threading.RLock()
         self._stopping = threading.Event()
@@ -395,6 +396,36 @@ class DeploymentLibrary:
 
     # --- authenticated endpoints ------------------------------------------
 
+    def binding(self, room):
+        """Public binding for a trusted process-channel owner; never credentials."""
+        with self._lock:
+            self._require()
+            item = self._rooms.get(room)
+            if item is None:
+                fail('INVALID_PROJECT_BINDING')
+            return {'project': json.loads(json.dumps(item.project)),
+                    'source_identity': item.source_identity}
+
+    def endpoint(self, room):
+        """Host endpoint for an authenticated split-process Room Hub.
+
+        This does not mint Participant authority. The transport must authenticate
+        the Hub and preserve its current Participant scope at every contact fence.
+        A stopped Room cannot retain a working capture endpoint.
+        """
+        with self._lock:
+            self._require()
+            bound = self._bound.get(room)
+            if bound is None:
+                fail('ROOM_NOT_BOUND')
+            def current():
+                with self._lock:
+                    if self._bound.get(room) is not bound or not self.running:
+                        fail('ROOM_NOT_BOUND')
+                    return self._current_settings()
+            return EnqueueEndpoint(self._publisher, settings=current,
+                                   projection=bound.projection, guard=current)
+
     def hub(self, room, clock=None):
         """The Room's one authenticated enqueue endpoint; payloads bind no Room/Project."""
         with self._lock:
@@ -404,9 +435,7 @@ class DeploymentLibrary:
                 fail('ROOM_NOT_BOUND')
             if room in self._hubs:
                 fail('ROOM_HUB_ALREADY_ATTACHED')
-            endpoint = EnqueueEndpoint(self._publisher, settings=self._current_settings,
-                                       projection=bound.projection,
-                                       guard=self._current_settings)
+            endpoint = self.endpoint(room)
             ledger = self.ledger_for(room)
             hub = LibraryHub(ledger, room_id=room, project=bound.item.project,
                              source_identity=bound.item.source_identity, contact=endpoint.contact,
@@ -414,12 +443,28 @@ class DeploymentLibrary:
             self._hubs[room] = hub
             return hub
 
+    def set_report_transport(self, transport):
+        """Trusted installed owner sets its authenticated Hub route before start.
+
+        The route returns true only after the actual Hub ledger acknowledged;
+        absent/stopped Hubs and uncertain replies leave service reports replayable.
+        """
+        with self._lock:
+            if self._started or not callable(transport):
+                fail('DEPLOYMENT_DEPENDENCY_REQUIRED')
+            self._report_transport = transport
+
     def _transport(self, report):
         """Authenticated service-to-Room ingress; a Room without a Hub stays replayable."""
         room = report.get('room_id') if type(report) is dict else None
         item = self._rooms.get(room)
-        if item is None:
+        if item is None or report.get('project_identity') != item.scope.project_identity:
             return False
+        if self._report_transport is not None:
+            try:
+                return self._report_transport(report) is True
+            except Exception:
+                return False
         try:
             ledger = self.ledger_for(room)
         except Exception:

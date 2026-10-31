@@ -105,10 +105,11 @@ class LocalNativeV3Tests(unittest.TestCase):
     def test_inherited_storage_observer_uses_stable_identity_and_rejects_path_inode_change(self):
         profile=self.profile();observer=self.observed()
         def stat_node(path):
-            path=str(path);runtime=path in profile.paths.values()
+            path=str(path);reference=path==str(profile.paths['reference'])
+            runtime=path in profile.paths.values() and not reference
             return N(st_dev=99,st_ino=observer(path)[1] if path in profile.paths.values() or path=='/srv/uas' else 9,
                      st_uid=165532 if runtime else 0,st_gid=165532 if runtime else 0,
-                     st_mode=stat.S_IFDIR|0o711)
+                     st_mode=stat.S_IFDIR|(0o755 if reference else 0o711))
         def command(*args,**kwargs):
             if args[:3]==('stat','-f','-c'):return 'xfs'
             if args[:3]==('stat','-c','%C'):return 'system_u:object_r:container_file_t:s0:c401,c402'

@@ -35,6 +35,11 @@ def canonical(value):
                       allow_nan=False).encode('utf-8')
 
 
+def content(files):
+    """Version of one complete canonical Project tree, by per-file digest."""
+    return library._digest({p: hashlib.sha256(data).hexdigest() for p, data in files.items()})
+
+
 def decode(raw):
     if type(raw) is not bytes or not 0 < len(raw) <= MAX_REQUEST: fail('CONTROL_REQUEST_LIMIT')
     def pairs(items):
@@ -57,7 +62,7 @@ def decode(raw):
         keys = {'version','action','project_id','for_action'}
         if value.get('for_action') == 'inspect': keys.add('queue_id')
         if set(value) != keys or value['for_action'] not in (
-                'drain','retry','resume','inspect','repair','archive','restore','defer'):
+                'drain','retry','resume','inspect','repair','archive','restore','requeue','defer'):
             fail('INVALID_CONTROL_REQUEST')
         if 'queue_id' in value: library._digest_value(value['queue_id'], 'queue_id')
     elif action == 'defer':
@@ -89,16 +94,19 @@ def decode(raw):
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
-    elif action in ('drain','retry','resume','repair','archive','restore'):
+    elif action in ('drain','retry','resume','repair','archive','restore','requeue'):
         keys = {'version','action','project_id','request_id','settings_id','observed_version'}
-        if action in ('retry','resume'): keys.add('drain_id')
+        if action in ('retry','resume','requeue'): keys.add('drain_id')
         if set(value) != keys: fail('INVALID_CONTROL_REQUEST')
         library._token(value['request_id'], 'request_id')
         library._digest_value(value['settings_id'], 'settings_id')
         library._digest_value(value['observed_version'], 'observed_version')
+        # Retry may retry a pre-batch selection ticket; requeue always names the
+        # drain whose recorded parked outcomes it may release.
         if action == 'retry' and value['drain_id'] is not None: library._token(value['drain_id'], 'drain_id')
         # Only a terminal disposition has a remainder; resume names that exact drain.
         if action == 'resume': library._token(value['drain_id'], 'drain_id')
+        if action == 'requeue': library._token(value['drain_id'], 'drain_id')
     else: fail('UNKNOWN_CONTROL_ACTION')
     return value
 
@@ -153,7 +161,7 @@ class Controls:
         _, tree = self.service.publisher.project_snapshot(scope, settings, current=current)
         library_gate.validate(scope,settings,proposed=tree,current=tree)
         if project_state(tree,library_bundle._prefix(scope)) != 'active': fail('PROJECT_ARCHIVED')
-        return library._digest({p:hashlib.sha256(data).hexdigest() for p,data in tree.files.items()})
+        return content(tree.files)
 
     def reconcile(self, raw, principal):
         """Read-only recovery: an absent service reservation can never write.
@@ -206,6 +214,9 @@ class Controls:
                 return apply(self, value, principal, entry, scope, settings)
             if value['action'] == 'defer':
                 return self._defer(value, principal, entry, scope, settings)
+            if kind == 'requeue' and value['action'] == 'requeue':
+                from .library_requeue import apply
+                return apply(self, value, principal, entry, scope, settings)
             if kind == 'inspect':
                 return self._inspect(value, principal, entry, scope, settings)
             if value['action'] == 'observe':
@@ -346,7 +357,7 @@ class Controls:
         text = data.decode('utf-8')
         meta, body = library_bundle.frontmatter(text, relative)
         if meta.get('status') != 'draft': fail('PENDING_ITEM_UNAVAILABLE')
-        content_version = library._digest({p:hashlib.sha256(b).hexdigest() for p,b in tree.files.items()})
+        content_version = content(tree.files)
         target_version = hashlib.sha256(data).hexdigest()
         version = library._digest({'human_scope':scope.canonical(), 'project_identity':scope.project_identity,
             'project_path':scope.project_path, 'queue_id':value['queue_id'],

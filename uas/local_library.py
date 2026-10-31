@@ -25,9 +25,10 @@ from .ledger import Origin
 from .library_assembly import Assembler
 from .library_attempts import Attempts
 from .library_deployment import DeploymentLibrary
-from .library_dispatch import Dispatcher, Gateway, Profile
+from .library_dispatch import Dispatcher, Gateway, Profile, Evidence, Selection
 from .library_git import _ENVIRONMENT, LibraryGit
-from .local_installation import LocalInstallationError, require
+from .local_installation import (LocalInstallationError, require, reference,
+                                 read_reference, document)
 
 FIELDS = ('version', 'settings', 'credentials', 'rooms', 'qualification', 'model', 'operator')
 REQUIRED = ('version', 'settings', 'credentials', 'rooms', 'qualification', 'model')
@@ -119,7 +120,7 @@ def _qualification(value):
 
 
 def _model(value, settings):
-    require(type(value) is dict and set(value) == {'profile', 'command'},
+    require(type(value) is dict and set(value) == {'profile', 'command', 'selection'},
             'LIBRARY_DOCUMENT_MODEL')
     profile = _profile(value['profile'])
     command = value['command']
@@ -128,7 +129,8 @@ def _model(value, settings):
             and all(type(arg) is str and 0 < len(arg) <= 4096 and '\0' not in arg
                     for arg in command), 'LIBRARY_DOCUMENT_MODEL')
     require(profile.reference == settings['model']['profile_ref'], 'LIBRARY_DOCUMENT_MODEL')
-    return {'profile': profile, 'command': tuple(command)}
+    return {'profile': profile, 'command': tuple(command),
+            'selection': reference(value['selection'])}
 
 
 def _profile(value):
@@ -142,6 +144,56 @@ def _profile(value):
     except library.LibraryError as error:
         raise LocalInstallationError('LIBRARY_DOCUMENT_MODEL') from error
     return profile
+
+
+def _selected_model(model, scope, settings, now, projects):
+    """Read separately authenticated operator evidence, never model/settings proof.
+
+    The pinned file is an external authority handoff: the existing installation
+    reader verifies ownership, mode, regular-file identity and exact digest.
+    Reopening on every dispatch fence makes deletion, replacement, permission
+    drift and expiry revoke use. This reader establishes no qualification: the
+    external T42 owner must supply the original decision for this exact route.
+    """
+    try:
+        value = document(read_reference(model['selection']))
+        require(set(value) == {'version', 'profile_sha256', 'command_sha256', 'selections'}
+                and type(value['version']) is int and value['version'] == 1,
+                'LIBRARY_MODEL_SELECTION_SCHEMA')
+        profile = model['profile']
+        profile_id = profile.identity()
+        require(value['profile_sha256'] == profile_id
+                and value['command_sha256'] == library._digest(list(model['command'])),
+                'LIBRARY_MODEL_SELECTION_ROUTE')
+        rows = value['selections']
+        require(type(rows) is dict and set(rows) == set(projects),
+                'LIBRARY_MODEL_SELECTION_PROJECTS')
+        row = rows[scope.project_identity]
+        require(type(row) is dict
+                and set(row) == {'qualification', 'authorization', 'hosted_approval'},
+                'LIBRARY_MODEL_SELECTION_SCHEMA')
+
+        def evidence(raw, expected):
+            require(type(raw) is dict and set(raw) == {
+                'reference', 'profile_sha256', 'project_identity', 'valid_until', 'qualified'},
+                'LIBRARY_MODEL_SELECTION_SCHEMA')
+            require(type(raw['qualified']) is bool, 'LIBRARY_MODEL_SELECTION_SCHEMA')
+            proof = Evidence(**raw)
+            proof.check(expected, profile_id, scope.project_identity, now)
+            return proof
+
+        qualification = evidence(row['qualification'], settings['model']['qualification_ref'])
+        authorization = evidence(row['authorization'], profile.reference)
+        hosted = None
+        if profile.placement == 'hosted':
+            approval = library.egress_approval(settings, scope.project_id)
+            hosted = evidence(row['hosted_approval'], approval['approval_ref'])
+        else:
+            require(row['hosted_approval'] is None, 'LIBRARY_MODEL_SELECTION_SCHEMA')
+        return Selection(profile, qualification, authorization, hosted)
+    except (OSError, LocalInstallationError, KeyError, TypeError, ValueError):
+        # No authority path, evidence content or operating-system detail escapes.
+        raise library.LibraryError('MODEL_EVIDENCE_INVALID', 'model') from None
 
 
 def _operator(value):
@@ -200,6 +252,16 @@ def composition(admitted, *, deployment_id, state_root, ledger_for,
             and action in ('library-' + kind for kind in library.HUMAN_KINDS)),
         lambda: True)
 
+    # Refuse an unusable configured route before any canonical clone or host
+    # serving. Actual qualification and human selection remain external inputs.
+    projects = {binding['project_identity'] for binding in bindings.values()}
+
+    def selected_model(scope):
+        return _selected_model(admitted['model'], scope, admitted['settings'], now(), projects)
+
+    for binding in bindings.values():
+        selected_model(scope_for(binding))
+
     holder = {}
 
     def runner_for(scope):
@@ -210,7 +272,7 @@ def composition(admitted, *, deployment_id, state_root, ledger_for,
                           interactive=interactive)
         dispatcher = Dispatcher(
             gateway, current_scope=lambda: scope, settings=lambda: settings,
-            selection=lambda _scope: None, current=lambda _request: True,
+            selection=selected_model, current=lambda _request: True,
             token_count=lambda _profile, body: len(body), audit=lambda _event: None,
             records_path=deployment.publisher.records_path,
             deployment_id=deployment.publisher.deployment_id, now=now)

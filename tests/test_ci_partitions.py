@@ -94,9 +94,10 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual('archive', ci.partition_for('test_library_disposition_recovery.Case.test_one'))
         self.assertEqual('archive', ci.partition_for('test_library_archive.Case.test_one'))
         self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_retention', 'test_library_repair',
- 'test_library_repair_native', 'test_library_deployment'})
+ 'test_library_repair_native', 'test_library_deployment', 'test_library_requeue'})
         self.assertEqual('maintenance', ci.partition_for('test_library_deployment.Case.test_one'))
         self.assertEqual('maintenance', ci.partition_for('test_library_repair.Case.test_one'))
+        self.assertEqual('maintenance', ci.partition_for('test_library_requeue.Case.test_one'))
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual('inspection', ci.partition_for('test_library_inspection.Case.test_one'))
         workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/validate.yml').read_text()
@@ -143,7 +144,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['inspection']), 3)
         self.assertEqual(len(groups['lifecycle']), 4)
         self.assertEqual(len(groups['disposition']), 5)
-        self.assertEqual(len(groups['maintenance']), 4)
+        self.assertEqual(len(groups['maintenance']), 5)
         self.assertEqual(len(groups['archive']), 4)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),

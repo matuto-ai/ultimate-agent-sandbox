@@ -137,8 +137,15 @@ def _marker(parent_fd, name, value=None):
 
 
 def prepare_leaf(receipt, index):
-    operation = _operation(receipt, index, 'prepare-room-leaf',
-                           {'storage_root', 'storage_identity', 'path', 'project_id', 'mcs_level'})
+    # Legacy explicit operations retain runtime ownership. New generated plans
+    # carry one closed boolean selected by the trusted reference-root role.
+    require(type(index) is int and 0 <= index < len(receipt.plan['operations']), 'ROOM_PREPARE_INDEX')
+    selected=receipt.plan['operations'][index]
+    fields={'storage_root', 'storage_identity', 'path', 'project_id', 'mcs_level'}
+    if type(selected) is dict and 'readonly' in selected: fields.add('readonly')
+    operation = _operation(receipt, index, 'prepare-room-leaf', fields)
+    readonly=operation.get('readonly',False)
+    require(type(readonly) is bool,'ROOM_LEAF_ROLE')
     storage, storage_info = _storage(operation,receipt)
     path = Path(absolute_path(operation['path']))
     require(storage in path.parents and len(path.name.encode()) < 220, 'ROOM_LEAF_PATH')
@@ -196,8 +203,9 @@ def prepare_leaf(receipt, index):
 
         fresh, attributes, label = current()
         profile=LocalHostProfile.parse(receipt.plan['host_profile'])
-        final_owner = (profile.owners['runtime'], profile.owners['runtime'])
-        if (fresh.st_uid, fresh.st_gid) == final_owner:
+        final_owner = (0,0) if readonly else (profile.owners['runtime'], profile.owners['runtime'])
+        if ((fresh.st_uid, fresh.st_gid) == final_owner
+                and (not readonly or stat.S_IMODE(fresh.st_mode) == 0o755)):
             # Ownership was already handed off. Runtime may have populated data;
             # only observation is permitted, not a recursive repair/relabel.
             require(attributes == (project, True) and label == expected_label,
@@ -221,11 +229,17 @@ def prepare_leaf(receipt, index):
             require(attributes == (project, True) and label == expected_label
                     and (fresh.st_uid, fresh.st_gid) == (0, 0) and os.listdir(leaf_fd) == [],
                     'ROOM_LEAF_HANDOFF_UNCONFIRMED')
-            os.fchown(leaf_fd, *final_owner)
+            if readonly:
+                # Final mode is the handoff marker for root-owned read-only
+                # projections. Never chmod a populated or already handed leaf.
+                os.fchmod(leaf_fd,0o755)
+            else:
+                os.fchown(leaf_fd, *final_owner)
             os.fsync(leaf_fd)
         fresh, attributes, label = current()
         require((fresh.st_uid, fresh.st_gid) == final_owner and attributes == (project, True)
-                and label == expected_label, 'ROOM_LEAF_HANDOFF_UNCONFIRMED')
+                and label == expected_label and (not readonly or stat.S_IMODE(fresh.st_mode) == 0o755),
+                'ROOM_LEAF_HANDOFF_UNCONFIRMED')
         evidence = {'identity': binding['identity'], 'observed_sha256': digest({
             'binding': binding, 'project': project, 'mcs': level, 'owner': list(final_owner)})}
         if state['state'] == 'confirmed':
