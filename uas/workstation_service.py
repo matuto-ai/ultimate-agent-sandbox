@@ -46,7 +46,6 @@ def configuration(raw, *, persistent=False):
             or type(value['seats']) is not list or len(value['seats']) != 2):
         raise OriginDenied('invalid trusted Hub startup')
     if 'forge' in value:
-        from .forge import ForgeBinding
         from .github_read import GitHubProject
         forge = value['forge']
         if (type(forge) is not dict or set(forge) != {'project_id','repository','host'}

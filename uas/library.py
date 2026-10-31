@@ -20,7 +20,6 @@ import posixpath
 import re
 
 from .ledger import Origin
-from .manager_actions import HumanSession
 
 
 CONTRACT_VERSION = 1
@@ -558,6 +557,7 @@ def participant_scope(origin, *, binding):
 
 def human_scope(session, *, binding, kind):
     """One exact human action, freshly allowed by the Manager authority seam."""
+    from .manager_actions import HumanSession
     if type(session) is not HumanSession:
         _fail("LIBRARY_AUTHENTICATION_REQUIRED", "session")
     if kind not in HUMAN_KINDS:

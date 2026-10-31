@@ -168,3 +168,27 @@ class LocalHubTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'phase failure'):
                 service.run_service(persistent=True,progress=Mock(side_effect=RuntimeError('phase failure')))
         probe.assert_not_called()
+    def test_cold_configuration_does_not_load_unneeded_broker_or_human_authority(self):
+        import subprocess
+        import sys
+        value=self.value()
+        value['forge']={'project_id':'project','repository':'owner/repository','host':'github.com'}
+        value['library']={'project':{'id':'project','repository':'owner/repository',
+            'roots':{'reference':'/owned/reference'}},'source_identity':'source'}
+        script="""import sys,json
+sys.path.insert(0,sys.argv[1])
+from uas.workstation_service import configuration
+value=json.loads(sys.argv[2]);observed,seats=configuration(json.dumps(value).encode(),persistent=True)
+assert observed==value and len(seats)==2
+assert 'uas.forge' not in sys.modules
+assert 'uas.manager_actions' not in sys.modules
+from uas import library
+binding=library.project_binding(value['library']['project'],source_identity='source')
+try:library.human_scope(object(),binding=binding,kind='drain')
+except library.LibraryError as error:assert error.code=='LIBRARY_AUTHENTICATION_REQUIRED'
+else:raise AssertionError('fake human accepted')
+assert 'uas.manager_actions' in sys.modules
+"""
+        result=subprocess.run([sys.executable,'-I','-S','-B','-c',script,
+            str(Path(__file__).resolve().parents[1]),json.dumps(value)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
