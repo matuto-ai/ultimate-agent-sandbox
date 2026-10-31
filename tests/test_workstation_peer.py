@@ -335,3 +335,35 @@ class AdmittedPeerTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertIn('message-1', self.ledger.snapshot()['state']['peer_traffic']['traffic'])
         self.assertFalse(admissions.status(operation)['installed'])
+
+
+class ColdPeerParsingTests(unittest.TestCase):
+    def test_cold_import_defers_lifecycle_until_exact_duplicate_rejecting_parser(self):
+        code="""import sys,json
+sys.path.insert(0,sys.argv[1])
+from uas.workstation_peer import AdmittedPeerDispatcher
+from uas.ledger import LedgerError
+assert 'uas.lifecycle' not in sys.modules
+assert 'uas.manager_owner' not in sys.modules
+raw=b'{"request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","envelope":{"kind":"one","kind":"two"}}'
+try:AdmittedPeerDispatcher._decode(raw)
+except LedgerError as error:
+ assert error.code=='INVALID_NATIVE_FRAME'
+ assert type(error.__cause__) is ValueError
+ assert str(error.__cause__)=='duplicate manifest field'
+else:raise AssertionError('duplicate key accepted')
+assert 'uas.lifecycle' in sys.modules
+from uas.lifecycle import _unique_object
+from unittest.mock import patch
+with patch('uas.lifecycle._unique_object',wraps=_unique_object) as exact:
+ value=AdmittedPeerDispatcher._decode(b'{"request_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","envelope":{}}')
+ assert value['envelope']=={} and exact.call_count==2
+from types import SimpleNamespace
+instance=object.__new__(AdmittedPeerDispatcher)
+try:instance._library_frame('operation',SimpleNamespace(data=raw),object())
+except LedgerError as error:assert error.code=='INVALID_NATIVE_FRAME'
+else:raise AssertionError('duplicate Library frame accepted')
+"""
+        result=subprocess.run([sys.executable,'-I','-S','-B','-c',code,
+            str(Path(__file__).resolve().parents[1])],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)

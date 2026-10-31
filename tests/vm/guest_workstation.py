@@ -539,7 +539,7 @@ def scenario(nonce,manifest,*,checks=None,progress=None):
         emit_check(checks,'wrong_process')
         progress.update(check='control_loss',stage='control-loss-result')
         expect(result['hub_exited_after_control_eof'],'Hub control-loss monitor did not stop')
-        states=read_admission_states(paths['hub']/'admissions.db')
+        states=read_admission_states(paths['hub']/'private-admission'/'admissions.db')
         expect(states and all(row[0]=='revoked' for row in states),'control loss retained authority projection')
         checks['control_loss']={'status':'passed','all_admissions_revoked':True,'hub_survived_workstation_stop':result['hub_alive_after_workstation_stop']}
         emit_check(checks,'control_loss')

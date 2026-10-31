@@ -81,21 +81,23 @@ SYNTHESIS_MODULES = frozenset({'test_context',
 
 SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'})
 
-OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
+# Run41228190888: maintenance51.501s; deployment12.717s moves beside controls.
+OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload', 'test_library_deployment'})
 
 # #182 measured repair+native+retention ~23s; keep setup/variance margin.
 # #191 requeue joins the existing retention/repair/deployment lane.
 # Keep main's recovery/archive and attention/lifecycle assignments intact.
 MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair',
- 'test_library_repair_native', 'test_library_deployment', 'test_library_requeue'})
+ 'test_library_repair_native', 'test_library_requeue'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
 # #189 host/service/Git transport measured7.2s hosted; lifecycle24.8s
 # leaves margin in the existing60s lane, without changing discovery or limits.
-# Deployment's 9.6s hosted suite uses maintenance headroom instead of this critical lane.
+# Deployment's current12.717s suite uses operator headroom; see docs/testing/ci-partition-headroom.md.
 LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
- 'test_library_service', 'test_manager_library_transport'})
+ 'test_library_service', 'test_manager_library_transport',
+ 'test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',

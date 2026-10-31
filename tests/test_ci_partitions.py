@@ -81,9 +81,10 @@ class CIPartitionTests(unittest.TestCase):
  'test_library_attempts',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
-        self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_git_payload'})
+        self.assertEqual(ci.OPERATOR_MODULES, {'test_library_controls', 'test_git_payload', 'test_library_deployment'})
         self.assertEqual(ci.LIFECYCLE_MODULES, {'test_library_attention', 'test_library_records',
- 'test_library_service', 'test_manager_library_transport'})
+ 'test_library_service', 'test_manager_library_transport',
+ 'test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'})
         self.assertEqual(ci.DISPOSITION_MODULES, {'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
@@ -94,8 +95,10 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual('archive', ci.partition_for('test_library_disposition_recovery.Case.test_one'))
         self.assertEqual('archive', ci.partition_for('test_library_archive.Case.test_one'))
         self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_retention', 'test_library_repair',
- 'test_library_repair_native', 'test_library_deployment', 'test_library_requeue'})
-        self.assertEqual('maintenance', ci.partition_for('test_library_deployment.Case.test_one'))
+ 'test_library_repair_native', 'test_library_requeue'})
+        for module in ('test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'):
+            self.assertEqual('lifecycle', ci.partition_for(module + '.Case.test_one'))
+        self.assertEqual('operator', ci.partition_for('test_library_deployment.Case.test_one'))
         self.assertEqual('maintenance', ci.partition_for('test_library_repair.Case.test_one'))
         self.assertEqual('maintenance', ci.partition_for('test_library_requeue.Case.test_one'))
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
@@ -140,11 +143,11 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['additional']), 20)
         self.assertEqual(len(groups['synthesis']), 4)
         self.assertEqual(len(groups['scheduler']), 2)
-        self.assertEqual(len(groups['operator']), 2)
+        self.assertEqual(len(groups['operator']), 3)
         self.assertEqual(len(groups['inspection']), 3)
-        self.assertEqual(len(groups['lifecycle']), 4)
+        self.assertEqual(len(groups['lifecycle']), 7)
         self.assertEqual(len(groups['disposition']), 5)
-        self.assertEqual(len(groups['maintenance']), 5)
+        self.assertEqual(len(groups['maintenance']), 4)
         self.assertEqual(len(groups['archive']), 4)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
