@@ -150,3 +150,26 @@ remain unchanged. Both lanes retain identical mandatory native peer, Participant
 connector, HTTP, and channel environment requirements. Explicit membership and complete/disjoint inventory tests
 cover the allocation. The next exact-head hosted graph remains the acceptance
 measurement; no tests are removed or weakened.
+
+
+## Installed Library maintenance rebalance (run 41228190888)
+
+[Run 41228190888](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41228190888)
+passed every functional job but measured a 146-second graph against the unchanged
+117.7-second allowance. Maintenance reported 71 tests in 51.501 suite seconds.
+Its 92-second job duration also includes roughly 33 seconds between completed
+log output and API completion: that infrastructure padding is not test work and
+this allocation change does not claim to fix it.
+
+Hosted test-line timestamp deltas estimate deployment 12.717 seconds, repair
+12.968, repair-native 3.264, requeue 11.623, and retention 10.186. Move only
+`test_library_deployment` from maintenance to the existing operator lane, next
+to Library controls. With operator approximately 31 seconds, this balances
+estimated work around 39 seconds versus 44 seconds rather than leaving
+maintenance near its deadline. These are planning estimates, not a guarantee
+about the next hosted graph or infrastructure delay.
+
+All discovered IDs, required environments, twelve lanes, dependency gates,
+timeouts, and the runtime-budget rule remain unchanged. Explicit module
+membership and exact inventory tests cover the move; the next exact-head run
+must establish acceptance without ignoring the failed graph.
