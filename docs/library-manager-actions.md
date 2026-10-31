@@ -57,3 +57,8 @@ Maintained stores and replay/notification surfaces are checked for marker absenc
 This is the T32 panel proof, not T44's full deployment human journey, actual private
 repository qualification, model qualification or an installed browser login.
 No new heavy VM qualification is required or claimed by this slice.
+
+The separate [T44 human validation checklist](library-human-validation.md)
+records the interactive-host prerequisites, personally performed journey and
+local recovery evidence still required. Automated panel proof does not satisfy
+that human acceptance gate.

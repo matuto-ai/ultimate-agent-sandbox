@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import json
 import multiprocessing
+import socket
 from pathlib import Path
 import sys
 import tempfile
@@ -345,6 +346,170 @@ class DeploymentLibraryTests(unittest.TestCase):
                    'for_action': 'drain'})
         self.assertEqual(refused['outcome'], 'unknown')
         self.assertEqual(refused['error'], 'FORBIDDEN')
+
+    def test_manager_to_local_disposition_after_room_destroy(self):
+        """T44 continuity over real Git/SQLite/Unix socket, not a human/VM run.
+
+        Seed a blocked batch (synthesis is separately covered), inspect through
+        the actual Manager adapter, then destroy its owned lifecycle instance.
+        The container backend is a file fixture, not Docker/VM isolation proof.
+        The same singleton and canonical data must remain locally operable.
+        """
+        from lifecycle_support import FileFixtureBackend
+        from uas.lifecycle import FixtureSpec, Supervisor
+        from uas.ledger import Origin
+        from uas.manager_actions import HumanSession
+        from uas.manager_library_transport import (
+            FieldNotesLibraryHost, ManagerLibraryHub, LibraryServiceContact)
+
+        identity = library.project_binding(
+            self.projects['alpha']['project'], source_identity='1001')['project_identity']
+        allowed, connected = [True], [True]
+        principal = library.LocalHuman('t44-human', 't44-actor', 't44-grant',
+            lambda _human, key, action: allowed[0] and key == identity and action in (
+                'library-inspect', 'library-adjudicate', 'library-resume'), lambda: True)
+        backend = FileFixtureBackend(self.base / 'resources')
+        def revoke(instance, scope):
+            connected[0] = False
+            self.deployment.stop_room('alpha')
+            return backend.revoke(instance, scope)
+        supervisor = Supervisor(self.base / 'control', 'alpha', backend,
+            authorize=lambda *_: True, revoke=revoke)
+        spec = FixtureSpec('alpha', 'alpha', (str(self.base / 'alpha'),),
+            'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64, 'sha256:' + 'c' * 64)
+        started = supervisor.start(spec)
+        self.assertEqual(started['phase'], 'running')
+        instance = self.base / 'control' / 'alpha' / 'instances' / started['instance_id']
+        room_data = instance / 'data'
+        deployment = self.make_deployment(operator=lambda _uid: principal,
+            ledger_for=lambda room: RoomLedger(room_data / 'hub.db', room)
+                if room == 'alpha' else self.ledger_for(room)).start()
+        for room in ('alpha', 'beta'):
+            self.register(deployment, room)
+            self.assertTrue(deployment.wait_idle(room))
+        first = self.enqueue(deployment, 'alpha', 'T44_PRIVATE_INSPECTION')
+        second = self.enqueue(deployment, 'alpha', 'T44_RETAINED_DRAFT', suffix='two')
+        self.assertEqual(first['outcome'], 'DURABLY_QUEUED')
+        self.assertEqual(second['outcome'], 'DURABLY_QUEUED')
+        queue, retained = first['queue_id'], second['queue_id']
+        self.assertTrue(deployment.wait_idle('alpha'))
+        beta = deployment.read('beta')
+        scheduler = deployment.service.scheduler
+        with scheduler._lock:
+            entry = scheduler._entries[identity]
+            scheduler._save(entry, {**entry['state'], 'state': 'BLOCKED',
+                'drain_id': 't44-original', 'selected': [queue, retained],
+                'attempt': 1, 'reason': 'MODEL_FAILURE', 'due': None}, scheduler.now())
+        controls = library_controls.Controls(deployment.service)
+        ledger = RoomLedger(room_data / 'manager-private.db', 'alpha')
+        self.addCleanup(ledger.close)
+        session = HumanSession('deployment-1', 'alpha', 't44-instance', 't44-human',
+            Origin('t44-actor', 't44-human', 't44-incarnation', 't44-grant', ()),
+            lambda *_: allowed[0], lambda: connected[0])
+        context = object()
+        hub = ManagerLibraryHub(ledger, deployment_id='deployment-1', room_id='alpha',
+            instance_id='t44-instance', project_id='alpha', project_identity=identity,
+            contact=LibraryServiceContact(controls, lambda _: principal))
+        host = FieldNotesLibraryHost(hub, lambda value: session if value is context else None)
+        def manager(request, operation):
+            return host.handle(library_controls.canonical(dict(version=1,
+                operation_id=operation, mode='execute', request=request)), context)
+        observe = dict(version=1, action='observe', project_id='alpha',
+                       for_action='inspect', queue_id=queue)
+        observed = manager(observe, 't44-observe')['result']
+        opening = dict(version=1, action='inspect', project_id='alpha', queue_id=queue,
+            request_id='t44-open', settings_id=observed['settings_id'],
+            observed_version=observed['observed_version'])
+        inspected = manager(opening, 't44-open')
+        self.assertEqual(inspected['outcome'], 'OBSERVED')
+        self.assertIn('T44_PRIVATE_INSPECTION', inspected['result']['item']['text'])
+        self.assertEqual(inspected['result']['commit_sha'], self.head())
+        # Check intermediary evidence before deletion, not merely its absence
+        # afterward. The canonical repository intentionally contains the draft.
+        metadata = library_controls.canonical(ledger.snapshot()) + library_controls.canonical(
+            ledger.replay(0, limit=1000))
+        manager_paths = list(room_data.glob('*.db*'))
+        self.assertIn(room_data / 'manager-private.db', manager_paths)
+        self.assertIn(room_data / 'hub.db', manager_paths)
+        for path in manager_paths:
+            metadata += path.read_bytes()
+        self.assertNotIn(b'T44_PRIVATE_INSPECTION', metadata)
+        connected[0] = False
+        self.assertEqual(manager(opening, 't44-after-disconnect')['outcome'], 'UNCONFIRMED')
+        ledger.close()
+        for key, captured_hub in list(self.hubs.items()):
+            if key[1] == 'alpha':
+                captured_hub.ledger.close()
+                del self.hubs[key]
+        destroyed = supervisor.destroy()
+        self.assertEqual(destroyed['phase'], 'destroyed')
+        self.assertFalse(instance.exists(), 'owned Room/Hub files must be removed')
+        self.assertTrue((self.base / 'alpha').exists(), 'Project files are preserved')
+        with self.assertRaisesRegex(library.LibraryError, 'ROOM_NOT_BOUND'):
+            deployment.hub('alpha')
+        self.assertTrue(deployment.running)
+        self.assertEqual(deployment.read('beta').files, beta.files)
+        root = self.state / 'library' / 'operator'
+        def local(value):
+            return library_controls.request(root, value)
+        fresh = local(observe)
+        self.assertEqual(fresh['outcome'], 'observed', fresh)
+        observed = fresh['result']
+        self.assertEqual(local({**opening, 'request_id': 't44-local-open',
+            'observed_version': observed['observed_version']})['result']['item']['text'],
+            inspected['result']['item']['text'])
+        self.assertEqual(local({**observe, 'project_id': 'beta'})['error'], 'FORBIDDEN')
+        allowed[0] = False
+        self.assertEqual(local(observe)['error'], 'FORBIDDEN')
+        allowed[0] = True
+        conclusion = 'T44_PRIVATE_CONCLUSION Preserve the selected human decision.'
+        rationale = 'T44_PRIVATE_RATIONALE Exact explanation, not model interpretation.'
+        value = dict(version=1, action='adjudicate', project_id='alpha', queue_id=queue,
+            drain_id='t44-original', request_id='t44-adjudicate',
+            settings_id=observed['settings_id'], observed_version=observed['observed_version'],
+            conclusion=conclusion, rationale=rationale)
+        before = self.head()
+        # Discard the real socket response: the caller has no outcome to claim.
+        # Only its unchanged explicit request may later recover the receipt.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
+            channel.connect(str(root / 'library-operator.sock'))
+            channel.sendall(library_controls.canonical(value))
+        self.assertTrue(self.wait_for(lambda: self.head() != before))
+        allowed[0] = False
+        self.assertEqual(local(value)['error'], 'FORBIDDEN')
+        allowed[0] = True
+        receipt = local(value)
+        self.assertEqual(receipt['outcome'], 'observed', receipt)
+        self.assertEqual(receipt['result']['outcome'], 'COMMITTED')
+        committed = self.head()
+        self.assertEqual(receipt['result']['publication']['commit_sha'], committed)
+        self.assertEqual(local(value), receipt)
+        self.assertEqual(self.head(), committed)
+        self.assertEqual(local({**value, 'rationale': 'Changed'})['error'], 'ID_CONFLICT')
+        decision = git(self.canonical, 'show',
+            committed + ':projects/github.com/acme/alpha/decisions/adjudication-' + queue + '.md')
+        self.assertIn(conclusion, decision)
+        self.assertIn(rationale, decision)
+        self.assertIn('Human identity: t44-human\nActor identity: t44-actor', decision)
+        self.assertEqual(scheduler.state(identity)['state'], 'DISPOSED')
+        self.assertEqual(scheduler.state(identity)['selected'], [queue, retained])
+        resume = local(dict(version=1, action='observe', project_id='alpha', for_action='resume'))['result']
+        resumed = local(dict(version=1, action='resume', project_id='alpha', request_id='t44-resume',
+            drain_id='t44-original', settings_id=resume['settings_id'],
+            observed_version=resume['observed_version']))
+        self.assertEqual(resumed['result']['outcome'], 'ACKNOWLEDGED')
+        self.assertNotEqual(resumed['result']['operation_id'], receipt['result']['operation_id'])
+        self.assertIsNone(scheduler.state(identity)['drain_id'])
+        self.assertEqual(self.head(), committed)
+        records = deployment.publisher.records_path
+        self.assertTrue(records.is_file())
+        record_paths = list(records.parent.glob(records.name + '*'))
+        self.assertIn(records, record_paths)
+        for path in record_paths:
+            for marker in (conclusion, rationale, 'T44_PRIVATE_INSPECTION'):
+                self.assertNotIn(marker.encode(), path.read_bytes())
+        self.assertFalse(instance.exists(), 'operator must not recreate a Hub')
+        self.assertFalse((self.base / 'alpha-contact').exists(), 'no provider call')
 
     def attempt_fixture(self, mode):
         import test_library_attempts as attempts_fixture
