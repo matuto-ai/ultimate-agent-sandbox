@@ -190,6 +190,179 @@ async function settingsContract(){
   } finally {fs.rmSync(directory,{recursive:true,force:true});}
 }
 
+// Persistent test-only pipe to real Manager -> Hub -> Controls -> Git/SQLite.
+// Private request bodies stay in process memory and are never added to proof.
+function libraryServiceFixture() {
+  const {spawn}=require('node:child_process');
+  const child=spawn('python3',[path.resolve('tests/manager_library_fixture.py')],{
+    env:{...process.env,PYTHONPATH:'.:tests',PYTHONDONTWRITEBYTECODE:'1'},stdio:['pipe','pipe','pipe']});
+  let buffer='',stderr='',pending=null,closed=false;
+  child.stderr.on('data',chunk=>{stderr=(stderr+chunk).slice(-4096);});
+  child.stdout.on('data',chunk=>{
+    buffer+=chunk.toString();
+    while(buffer.includes('\n')){
+      const at=buffer.indexOf('\n'),line=buffer.slice(0,at);buffer=buffer.slice(at+1);
+      const current=pending;pending=null;
+      if(!current)continue;
+      clearTimeout(current.timer);
+      try{current.resolve(JSON.parse(line));}catch(error){current.reject(error);}
+    }
+  });
+  const stopped=new Promise(resolve=>child.once('close',()=>{closed=true;resolve();if(pending){clearTimeout(pending.timer);pending.reject(Error('Library fixture closed: '+stderr));pending=null;}}));
+  child.on('error',error=>{if(pending){clearTimeout(pending.timer);pending.reject(error);pending=null;}});
+  return {
+    request(value){
+      assert(!pending,'one fixture pipe request at a time');
+      return new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>{pending=null;reject(Error('Library fixture response deadline'));},4000);
+        pending={resolve,reject,timer};child.stdin.write(JSON.stringify(value)+'\n');
+      });
+    },
+    async close(){
+      if(!closed)child.stdin.end(JSON.stringify({command:'close'})+'\n');
+      let timer;await Promise.race([stopped,new Promise(resolve=>{timer=setTimeout(resolve,2000);})]);clearTimeout(timer);
+      if(!closed){child.kill('SIGTERM');await stopped;}
+      assert.equal(child.exitCode,0,stderr||'Library fixture did not shut down cleanly');
+      assert.equal(stderr,'','Library fixture emitted diagnostics');
+    }
+  };
+}
+
+async function libraryBrowserProof(send,evaluate,output,screenshots) {
+  const fixture=libraryServiceFixture(),evidence=[];
+  let lastWrite=null;
+  const markers=['T32_PRIVATE_ITEM','T32_PRIVATE_CONTEXT','T32_PRIVATE_SIBLING','T32_PRIVATE_CONCLUSION','T32_PRIVATE_RATIONALE','T32_PRIVATE_REASON'];
+  const pump=async(scenario='normal')=>{
+    let handled=0;
+    for(let guard=0;guard<4;guard++){
+      const packet=await evaluate(`globalThis.libraryPackets.shift()`);
+      if(!packet)break;
+      if(!['observe','inspect','receipt'].includes(packet.request.action))lastWrite=packet;
+      const result=await fixture.request({packet,scenario:typeof scenario==='function'?scenario(packet):scenario});
+      evidence.push({action:packet.request.action,for_action:packet.request.for_action||null,mode:packet.mode,outcome:result.outcome,reason:result.reason||null});
+      await evaluate(`libraryReply(${JSON.stringify(result)});new Promise(resolve=>requestAnimationFrame(resolve))`);
+      handled++;
+    }
+    assert(handled>0,'Library control must reach actual authenticated service');
+    return evaluate(`document.getElementById('library-message').textContent`);
+  };
+  const click=async(selector,scenario='normal')=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).click();true`);return pump(scenario);};
+  const input=async(id,value)=>evaluate(`{const field=document.getElementById(${JSON.stringify(id)});field.value=${JSON.stringify(value)};field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}));}`);
+  const attach=async()=>evaluate(`globalThis.libraryPackets=[];installLibraryActionHost(${JSON.stringify(project)},{project_id:'alpha',handle:packet=>new Promise(resolve=>{libraryPackets.push(packet);globalThis.libraryReply=resolve;})});true`);
+  const open=async queue=>{
+    await evaluate(`document.querySelector('[data-library-open]').click();true`);
+    await input('library-queue-id',queue);
+  };
+  const inspect=async queue=>{await input('library-queue-id',queue);return click('[data-library-inspect]');};
+  const operation=async(kind,scenario='normal',drain=null)=>{
+    await input('library-operation',kind);
+    await click('[data-library-observe]');
+    if(drain!==null)await input('library-requeue-drain',drain);
+    return click('[data-library-execute]',scenario);
+  };
+  const privacy=async()=>{
+    const result=await fixture.request({command:'privacy'});
+    assert(Object.values(result.marker_absent).every(Boolean),JSON.stringify(result));
+    assert.equal(result.provider_called,false,'panel operation must not run provider');
+    const storage=await evaluate(`(async()=>({local:[...Object.keys(localStorage)].map(k=>[k,localStorage.getItem(k)]),session:[...Object.keys(sessionStorage)].map(k=>[k,sessionStorage.getItem(k)]),caches:await caches.keys(),indexedDB:await indexedDB.databases(),workers:('serviceWorker' in navigator)?(await navigator.serviceWorker.getRegistrations()).length:0}))()`);
+    for(const marker of markers)assert(!JSON.stringify(storage).includes(marker),'private marker retained in browser storage');
+    assert.deepEqual(storage.caches,[]);assert.deepEqual(storage.indexedDB,[]);assert.equal(storage.workers,0);
+    return {surfaces:result.surfaces,browser:['localStorage','sessionStorage','CacheStorage','IndexedDB','ServiceWorker'],marker_absence:true};
+  };
+  try {
+    let state=await fixture.request({command:'reset',mode:'inspection'});
+    await send('Emulation.setDeviceMetricsOverride',{width:1440,height:1100,deviceScaleFactor:1,mobile:false});
+    await evaluate(`history.pushState({},'', '?variant=C&page=project&project='+encodeURIComponent(${JSON.stringify(project)}));installDocument(${JSON.stringify(dataFor(documents.connected))});render();true`);
+    await attach();await open(state.queue_id);
+    assert.equal(await evaluate('libraryPackets.length'),0,'opening panel alone cannot disclose content');
+    await click('[data-library-inspect]');
+    assert(await evaluate(`document.getElementById('library-private-content').textContent.includes('T32_PRIVATE_ITEM')&&document.getElementById('library-private-content').textContent.includes('T32_PRIVATE_CONTEXT')`));
+    assert(await evaluate(`!document.getElementById('library-private-content').textContent.includes('T32_PRIVATE_SIBLING')&&!document.getElementById('library-private-content').querySelector('img,iframe,a,script,object')&&!globalThis.t32Pwned`));
+    assert(await evaluate(`document.getElementById('library-dialog').textContent.toLowerCase().includes('insufficient')`));
+    assert(await evaluate(`!performance.getEntriesByType('resource').some(x=>x.name.includes('never-fetch.test'))`),'inert content attempted remote fetch');
+    for(const [theme,width,height,mobile] of [['C',1440,1100,false],['D',390,844,true]]){
+      await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
+      await evaluate(`document.body.className='v-'+${JSON.stringify(theme)};true`);
+      assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'Library panel overflow');
+      const name=theme+'-library-inspection'+(mobile?'-mobile':'')+'.png',shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+      fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
+    }
+    await input('library-conclusion','T32_PRIVATE_CONCLUSION unsubmitted');
+    await input('library-rationale','T32_PRIVATE_RATIONALE unsubmitted');
+    await privacy();
+    await evaluate(`installLibraryActionHost(${JSON.stringify(project)},null);true`);
+    assert(await evaluate(`!document.getElementById('library-dialog').open&&!document.getElementById('library-body').textContent.includes('T32_PRIVATE_')`));
+    await attach();await open(state.queue_id);
+    assert(await evaluate(`!document.getElementById('library-conclusion')&&!document.getElementById('library-rationale')&&!document.getElementById('library-private-content')`),'reconnect must not restore draft or private content');
+    assert((await click('[data-library-inspect]','revoked')).match(/authority|forbidden|authorized|permission|refused/i));
+    await input('library-queue-id',state.beta_queue_id);
+    assert((await click('[data-library-inspect]')).match(/UNAVAILABLE|FORBIDDEN|refused/i));
+    await inspect(state.queue_id);
+    // A fresh current read still cannot authorize a stale content write.
+    await input('library-disposition','reject');await input('library-reason','T32_PRIVATE_REASON stale');
+    assert((await click('[data-library-dispose]','stale')).match(/stale/i));
+    state=await fixture.request({command:'reset',mode:'blocked'});
+    await attach();await open(state.queue_id);await click('[data-library-inspect]');
+    await input('library-disposition','adjudicate');
+    const conclusion='T32_PRIVATE_CONCLUSION Keep this policy.\n  Preserve spaces.',rationale='T32_PRIVATE_RATIONALE Human decision.\n\nExact reason.';
+    await input('library-conclusion','界'.repeat(4000));await input('library-rationale',rationale);
+    await evaluate(`document.querySelector('[data-library-dispose]').click();true`);
+    assert.equal(await evaluate('libraryPackets.length'),0,'UTF-8 oversized private request must not be sent');
+    assert(await evaluate(`!document.querySelector('[data-library-reconcile]')`),'oversize must not create pending request');
+    await input('library-conclusion',conclusion);
+    assert((await click('[data-library-dispose]','busy')).match(/BUSY|busy/));
+    await inspect(state.queue_id);await input('library-disposition','adjudicate');await input('library-conclusion',conclusion);await input('library-rationale',rationale);
+    const before=await fixture.request({command:'state'});
+    assert((await click('[data-library-dispose]','lost-after')).match(/unknown|unconfirmed/i));
+    assert.equal((await fixture.request({command:'state'})).commits,before.commits+1);
+    await evaluate(`document.querySelector('[data-library-dispose]')?.click();true`);assert.equal(await evaluate('libraryPackets.length'),0,'unknown may not repeat write');
+    assert((await click('[data-library-reconcile]','revoked')).match(/refused|unknown|unconfirmed/i));
+    assert(await evaluate(`document.querySelector('[data-library-reconcile]')!==null`),'revoked receipt must retain unresolved original');
+    assert((await click('[data-library-reconcile]')).match(/COMMITTED|committed/));
+    assert.equal((await fixture.request({command:'state'})).commits,before.commits+1);
+    const duplicate=await fixture.request({packet:lastWrite});assert.equal(duplicate.outcome,'COMMITTED','exact retry returns original receipt');
+    const changed=JSON.parse(JSON.stringify(lastWrite));changed.request.conclusion+=' changed';
+    assert.equal((await fixture.request({packet:changed})).reason,'ID_CONFLICT','changed payload cannot reuse request identity');
+    assert.equal((await fixture.request({command:'state'})).commits,before.commits+1);
+    const decision=await fixture.request({command:'decision'});assert(decision.text.includes(conclusion)&&decision.text.includes(rationale),'faithful human text');
+    assert.equal((await fixture.request({command:'state'})).schedule.state,'DISPOSED','blocked batch cannot restart itself');
+    assert((await operation('resume')).match(/acknowledg/i));
+    assert.equal((await fixture.request({command:'state'})).schedule.drain_id,null);
+    await privacy();
+    // Remaining controls use their distinct actual service paths.
+    state=await fixture.request({command:'reset',mode:'normal'});await attach();await open(state.queue_id);
+    const scheduled=await fixture.request({command:'state'});
+    assert((await operation('drain')).match(/acknowledg/i));
+    assert.equal((await fixture.request({command:'state'})).commits,scheduled.commits);
+    state=await fixture.request({command:'reset',mode:'blocked'});await attach();await open(state.queue_id);
+    assert((await operation('retry')).match(/acknowledg/i));
+    assert.equal((await fixture.request({command:'state'})).schedule.drain_id,'original-drain');
+    state=await fixture.request({command:'reset',mode:'defer'});await attach();await open(state.queue_id);
+    const deferred=await fixture.request({command:'state'});
+    assert((await operation('defer')).match(/acknowledg/i));
+    assert.deepEqual((await fixture.request({command:'state'})).schedule,deferred.schedule);
+    state=await fixture.request({command:'reset',mode:'parked'});await attach();await open(state.queue_id);
+    const parked=await fixture.request({command:'state'});
+    assert((await operation('requeue','normal',state.parked_drain)).match(/COMMITTED|committed/));
+    assert.deepEqual((await fixture.request({command:'state'})).schedule,parked.schedule);
+    await inspect(state.queue_id);await input('library-disposition','reject');await input('library-reason','T32_PRIVATE_REASON not needed');
+    assert((await click('[data-library-dispose]')).match(/COMMITTED|committed/));
+    const finalPrivacy=await privacy();
+    state=await fixture.request({command:'reset',mode:'normal'});await attach();await open(state.queue_id);
+    const uncontacted=await fixture.request({command:'state'});
+    assert((await operation('drain','lost-before')).match(/unknown|unconfirmed/i));
+    await attach();await open(state.queue_id);
+    assert(!await evaluate(`document.getElementById('library-private-content')!==null`));
+    assert((await click('[data-library-reconcile]')).match(/unknown|unconfirmed/i));
+    assert.deepEqual((await fixture.request({command:'state'})).schedule,uncontacted.schedule);
+    assert.equal((await fixture.request({command:'state'})).commits,uncontacted.commits);
+    await privacy();
+    await evaluate(`installDocument(${JSON.stringify(dataFor(documents.reconnected))});true`);
+    assert(await evaluate(`!document.getElementById('library-dialog').open&&!document.getElementById('library-body').textContent.includes('T32_PRIVATE_')`));
+    return {path:'actual FieldNotesLibraryHost -> ManagerLibraryHub -> Controls -> disposable canonical Git/SQLite over test-only pipe',operations:evidence,privacy:finalPrivacy};
+  } finally {await fixture.close();}
+}
+
 async function actionContract(){
   const ui=boot('C','run'), sent=[];
   const current={run_id:run,generation:1,observed_version:'a'.repeat(64)};
@@ -642,7 +815,8 @@ async function browserCheck(){
       fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
     } finally {fs.rmSync(settingsDirectory,{recursive:true,force:true});}
 
-    proof={settings_evidence:settingsEvidence,settings_path:'real Python FieldNotesLibrarySettingsHost -> ManagerLibrarySettingsHub -> SettingsOwner over test-only pipes',status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
+    const libraryEvidence=await libraryBrowserProof(send,evaluate,output,screenshots);
+    proof={library_evidence:libraryEvidence,settings_evidence:settingsEvidence,settings_path:'real Python FieldNotesLibrarySettingsHost -> ManagerLibrarySettingsHub -> SettingsOwner over test-only pipes',status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
     failure=error;failureElapsed=Math.max(0,Date.now()-started);
     const observed=current?.captureFailure(error);
