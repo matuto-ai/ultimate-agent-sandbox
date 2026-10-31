@@ -254,9 +254,14 @@ async function libraryBrowserProof(send,evaluate,output,screenshots) {
     await input('library-queue-id',queue);
   };
   const inspect=async queue=>{await input('library-queue-id',queue);return click('[data-library-inspect]');};
+  const panelFits=async()=>{
+    const bounds=await evaluate(`(()=>{const body=document.getElementById('library-body'),dialog=document.getElementById('library-dialog').getBoundingClientRect();return {bodyWidth:body.clientWidth,bodyScroll:body.scrollWidth,left:dialog.left,right:dialog.right,viewport:innerWidth,pageWidth:document.documentElement.clientWidth,pageScroll:document.documentElement.scrollWidth};})()`);
+    assert(bounds.bodyScroll<=bounds.bodyWidth+1&&bounds.left>=-1&&bounds.right<=bounds.viewport+1&&bounds.pageScroll<=bounds.pageWidth+1,'Library panel inner/outer overflow: '+JSON.stringify(bounds));
+  };
   const operation=async(kind,scenario='normal',drain=null)=>{
     await input('library-operation',kind);
     await click('[data-library-observe]');
+    await panelFits();
     if(drain!==null)await input('library-requeue-drain',drain);
     return click('[data-library-execute]',scenario);
   };
@@ -300,14 +305,16 @@ async function libraryBrowserProof(send,evaluate,output,screenshots) {
     assert(await evaluate(`!document.getElementById('library-private-content').textContent.includes('T32_PRIVATE_SIBLING')&&!document.getElementById('library-private-content').querySelector('img,iframe,a,script,object')&&!globalThis.t32Pwned`));
     assert(await evaluate(`document.getElementById('library-dialog').textContent.toLowerCase().includes('insufficient')`));
     assert(await evaluate(`!performance.getEntriesByType('resource').some(x=>x.name.includes('never-fetch.test'))`),'inert content attempted remote fetch');
+
     for(const [theme,width,height,mobile] of [['C',1440,1100,false],['D',390,844,true]]){
       await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
       await evaluate(`document.body.className='v-'+${JSON.stringify(theme)};true`);
-      assert(await evaluate(`document.documentElement.scrollWidth<=document.documentElement.clientWidth+1`),'Library panel overflow');
+      await panelFits();
       const name=theme+'-library-inspection'+(mobile?'-mobile':'')+'.png',shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
       fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
     }
     for(const [selector,name] of [['[data-library-dispose]','D-library-disposition-mobile.png'],['#library-operation','D-library-actions-mobile.png']]){
+      await panelFits();
       await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'});new Promise(resolve=>requestAnimationFrame(resolve))`);
       const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
       fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);

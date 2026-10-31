@@ -607,7 +607,9 @@
     .library-attachments { display:flex; flex-wrap:wrap; gap:12px; margin-top:18px; }
     .library-attachments section { flex:1 1 200px; padding:12px; border:1px dashed var(--line); }
     #library-dialog { width:min(860px,94vw); }
-    #library-body fieldset { margin:18px 0; padding:16px; border:1px solid var(--line); }
+    #library-body { min-width:0; overflow-wrap:anywhere; }
+    #library-body > *, #library-body fieldset > * { min-width:0; max-width:100%; }
+    #library-body fieldset { min-width:0; margin:18px 0; padding:16px; border:1px solid var(--line); }
     #library-body label { display:block; margin-top:12px; }
     #library-body input, #library-body select, #library-body textarea { display:block; width:100%; max-width:100%; margin:6px 0 12px; }
     #library-private-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; padding:12px; border:1px solid var(--line); font:13px/1.6 var(--mono); }
