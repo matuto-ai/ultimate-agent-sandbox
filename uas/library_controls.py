@@ -170,7 +170,8 @@ class Controls:
         duplicate path. That path may finish operational receipts, not republish.
         """
         value = decode(raw)
-        if value['action'] not in ('reject', 'adjudicate', 'repair', 'archive', 'restore'):
+        if value['action'] not in ('reject', 'adjudicate', 'repair', 'archive', 'restore',
+                                    'drain', 'retry', 'defer', 'requeue', 'resume'):
             fail('INVALID_CONTROL_REQUEST')
         if self.guard is not None: self.guard()
         if value['action'] in ('archive','restore'):
@@ -185,6 +186,33 @@ class Controls:
             if prior is None:
                 fail('CONTROL_OUTCOME_UNKNOWN')
             return self.handle(raw, principal)
+
+    def receipt(self, project_id, kind, operation_id, principal):
+        """Body-free, read-only outcome lookup for a trusted transport reservation.
+
+        This never reserves, schedules, republishes or completes a pending
+        operation. Lost canonical-publication acknowledgements remain unknown
+        until the service's existing reconciliation has established a receipt.
+        """
+        library._identifier(project_id, 'project_id')
+        library._token(operation_id, 'operation_id')
+        if kind not in ('drain', 'retry', 'defer', 'requeue', 'reject', 'adjudicate', 'resume'):
+            fail('INVALID_CONTROL_REQUEST')
+        with self.service.scheduler._lock:
+            entry = self._entry(project_id)
+            scope = self._scope(principal, entry, kind)
+            with self.service.scheduler._records() as records:
+                prior = records.record(operation_id, project_identity=scope.project_identity)
+            if prior is None: fail('CONTROL_OUTCOME_UNKNOWN')
+            if (prior['kind'] != kind or any(prior['scope'][key] != scope.canonical()[key]
+                    for key in ('human_id', 'actor_id', 'subject', 'project_id', 'project_identity'))):
+                fail('FORBIDDEN')
+            if prior['receipt'] is None: fail('CONTROL_OUTCOME_UNKNOWN')
+            result = deepcopy(prior['receipt'])
+            self._entry(project_id)
+            if self._scope(principal, entry, kind).canonical() != scope.canonical():
+                fail('FORBIDDEN')
+            return result
 
     def handle(self, raw, principal):
         value = decode(raw)
@@ -359,11 +387,14 @@ class Controls:
         if meta.get('status') != 'draft': fail('PENDING_ITEM_UNAVAILABLE')
         content_version = content(tree.files)
         target_version = hashlib.sha256(data).hexdigest()
+        state = entry['state']
+        drain_id = state['drain_id'] if (value['queue_id'] in state['selected']
+                    and state['state'] != 'DISPOSED') else None
         version = library._digest({'human_scope':scope.canonical(), 'project_identity':scope.project_identity,
             'project_path':scope.project_path, 'queue_id':value['queue_id'],
             'commit':commit, 'content_version':content_version, 'target_version':target_version,
-            'settings_id':settings['settings_id']})
-        evidence = dict(version=1, project_id=scope.project_id, queue_id=value['queue_id'],
+            'settings_id':settings['settings_id'], 'drain_id':drain_id})
+        evidence = dict(version=1, project_id=scope.project_id, queue_id=value['queue_id'], drain_id=drain_id,
             commit_sha=commit, target_version=target_version, content_version=content_version,
             settings_id=settings['settings_id'], observed_version=version)
         if value['action'] == 'observe':

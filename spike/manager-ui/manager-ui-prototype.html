@@ -606,6 +606,13 @@
     .library-operations dd { overflow-wrap:anywhere; }
     .library-attachments { display:flex; flex-wrap:wrap; gap:12px; margin-top:18px; }
     .library-attachments section { flex:1 1 200px; padding:12px; border:1px dashed var(--line); }
+    #library-dialog { width:min(860px,94vw); }
+    #library-body { min-width:0; overflow-wrap:anywhere; }
+    #library-body > *, #library-body fieldset > * { min-width:0; max-width:100%; }
+    #library-body fieldset { min-width:0; margin:18px 0; padding:16px; border:1px solid var(--line); }
+    #library-body label { display:block; margin-top:12px; }
+    #library-body input, #library-body select, #library-body textarea { display:block; width:100%; max-width:100%; margin:6px 0 12px; }
+    #library-private-content pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; padding:12px; border:1px solid var(--line); font:13px/1.6 var(--mono); }
     @media(max-width:700px) { .library-groups { grid-template-columns:1fr; } .library-operations { padding:16px; } }
     @media(prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition:none!important; animation:none!important; } }
   </style>
@@ -622,6 +629,11 @@
     <div class="dialog-head"><div><div class="caps">Needs your attention</div><h2 id="item-title" tabindex="-1">Inbox item</h2></div><button class="btn ghost" data-close-item>Close</button></div>
     <div class="dialog-body" id="item-body"></div>
     <div class="dialog-foot" id="item-actions"></div>
+  </dialog>
+
+  <dialog id="library-dialog" aria-labelledby="library-dialog-title" autocomplete="off">
+    <div class="dialog-head"><h2 id="library-dialog-title" tabindex="-1">Project Library inspection and actions</h2><button class="btn ghost" data-library-close>Close and discard private text</button></div>
+    <div class="dialog-body" id="library-body"></div>
   </dialog>
 
   <script type="application/json" id="manager-data"></script>
@@ -846,8 +858,285 @@
         ["Observed window", ["window_start","window_end","coverage","published_drafts","completed_outcomes","effectiveness","duplicate_merges","feedback","human_corrections","human_decisions"]],
         ["Provider and failures", ["provider_state","provider_mode","provider_profile_sha256","provider_version","provider_observed_at","capture_failures","source_failures","model_failures","validation_failures","transport_failures","audit_failures","recovery_failures"]]
       ];
-      return `<section class="library-operations" aria-labelledby="library-title" data-library-project="${esc(project.key)}"><h2 id="library-title">Library operations</h2><p class="small muted">Project-bound operational metadata only. Empty queues, connectivity and successful publication do not establish healthy inference or knowledge quality.</p>${sourceLine(project,"library")}${value ? `<p>Literal drain ${status(value.drain_state)} · queue ${status(value.queue_status)} · projection ${status(value.projection_state)} · provider ${status(value.provider_state)}</p><div class="library-groups">${groups.map(([title,keys])=>`<section><h3>${esc(title)}</h3>${fields(Object.fromEntries(keys.map(key=>[key,value[key]])))}</section>`).join("")}</div>` : '<p class="empty">Library observation unknown or unavailable. No healthy, empty or completed state inferred.</p>'}<div class="library-attachments"><section data-library-actions><h3>Library actions</h3><p class="small muted">Separate Project-authorized action surface. Not attached in this view.</p></section><section data-library-settings><h3>Library settings</h3><p class="small muted">Separate installation-operator surface affecting all Projects.</p><a class="text-link" href="${href("library-settings")}" data-nav>Open Library settings</a><p class="small muted">A Project grant never authorizes installation settings.</p></section></div></section>`;
+      return `<section class="library-operations" aria-labelledby="library-title" data-library-project="${esc(project.key)}"><h2 id="library-title">Library operations</h2><p class="small muted">Project-bound operational metadata only. Empty queues, connectivity and successful publication do not establish healthy inference or knowledge quality.</p>${sourceLine(project,"library")}${value ? `<p>Literal drain ${status(value.drain_state)} · queue ${status(value.queue_status)} · projection ${status(value.projection_state)} · provider ${status(value.provider_state)}</p><div class="library-groups">${groups.map(([title,keys])=>`<section><h3>${esc(title)}</h3>${fields(Object.fromEntries(keys.map(key=>[key,value[key]])))}</section>`).join("")}</div>` : '<p class="empty">Library observation unknown or unavailable. No healthy, empty or completed state inferred.</p>'}<div class="library-attachments"><section data-library-actions>${libraryLauncher(project)}</section><section data-library-settings><h3>Library settings</h3><p class="small muted">Separate installation-operator surface affecting all Projects.</p><a class="text-link" href="${href("library-settings")}" data-nav>Open Library settings</a><p class="small muted">A Project grant never authorizes installation settings.</p></section></div></section>`;
     }
+    // T32: private inspection is a transient view, never a document/replay row.
+    // Only safe request identities survive closing/rebinding this view.
+    const libraryHosts = new Map(), libraryPending = new Map();
+    let libraryEpoch = 0, libraryView = null;
+    const libraryActions = {
+      drain: ['Drain', 'Schedule one fair bounded unit. Does not bypass blocked work.'],
+      retry: ['Retry blocked drain', 'Retry the original complete fixed batch with a new attempt.'],
+      defer: ['Defer attention', 'Snooze attention only. Drafts, parking and blocked state stay unchanged.'],
+      requeue: ['Requeue parked work', 'Release only eligible parked work whose prerequisite is resolved.'],
+      resume: ['Resume remaining work', 'Separately release the disposed batch remainder into a new drain. Never resurrect the old drain.']
+    };
+    const libraryErrors = {
+      FORBIDDEN: 'Permission refused. Fresh Project authority is required.',
+      ID_CONFLICT: 'Request identity conflict. No changed-payload retry is allowed.',
+      STALE_INSPECTION: 'Stale inspection. Refresh and explicitly open the item again.',
+      STALE_CONTROL_STATE: 'Stale control state. Refresh before acting.',
+      CONTROL_BUSY: 'Busy with a bounded attempt. Refresh after it finishes; do not queue a blind write.',
+      CONTROL_OUTCOME_UNKNOWN: 'Outcome unknown. Reconcile the original request; do not submit a new write.',
+      INVALID_CONTROL_REQUEST: 'The request is invalid according to the service response.',
+      CONTROL_REQUEST_LIMIT: 'The request exceeds the service limit.',
+      PENDING_ITEM_UNAVAILABLE: 'This pending item is unavailable. Refresh before opening another item.',
+      PROJECT_UNAVAILABLE: 'The Project is unavailable.',
+      SERVICE_NOT_AVAILABLE: 'The Library service is unavailable.',
+      ATTENTION_UNAVAILABLE: 'Attention is unavailable; no snooze is inferred.',
+      ATTENTION_UNKNOWN: 'Attention is unknown; no snooze is inferred.',
+      ATTENTION_ALREADY_SNOOZED: 'Attention is already snoozed.',
+      ATTENTION_NOT_PRESENT: 'No attention is present to defer.',
+      PROJECT_ARCHIVED: 'The Project is archived.',
+      PROJECT_BLOCKED: 'The Project is blocked. Ordinary drain cannot bypass the block.',
+      PROJECT_ARCHIVING: 'The Project is being archived.',
+      PROJECT_NOT_BLOCKED: 'The Project is not blocked; this retry is unavailable.',
+      PROJECT_NOT_DISPOSED: 'The Project has no disposed remainder to resume.',
+      DRAIN_DISPOSED: 'The old drain is disposed and cannot be resurrected.',
+      DRAIN_NOT_BLOCKED: 'The selected drain is not blocked.',
+      DRAIN_NOT_DISPOSED: 'The selected drain is not disposed.',
+      NO_ELIGIBLE_PARKED_WORK: 'No eligible parked work can be released for this drain.',
+      SCHEDULER_BUSY: 'The scheduler is busy. Refresh after the bounded work finishes.',
+      SCHEDULER_RECOVERY_REQUIRED: 'The service requires scheduler recovery.',
+      INSPECTION_CONTEXT_LIMIT: 'The item exceeds bounded inspection context; use authorized local inspection.',
+      INSPECTION_RESPONSE_LIMIT: 'The item exceeds the bounded response limit; use authorized local inspection.',
+      INVALID_TEXT: 'The supplied text is invalid according to the service response.',
+      RECORD_UNCERTAIN: 'The durable record is uncertain. Reconcile before another write.',
+      TARGET_NOT_QUALIFIED: 'The private target has not been qualified.',
+      MODEL_NOT_QUALIFIED: 'The selected model has not been qualified.',
+      FRESH_OPEN_REQUIRED: 'Private content is not replayed. Open the item again with current authority.'
+    };
+    const libraryHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+    const libraryToken = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(value);
+    const libraryCommit = value => value === null || (typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value));
+    function installLibraryActionHost(key, binding) {
+      if (binding !== null && (!object(binding) || typeof binding.handle !== 'function' || typeof binding.project_id !== 'string')) throw Error('Trusted Project Library host required');
+      if (binding === null) libraryHosts.delete(key); else libraryHosts.set(key, binding);
+      closeLibraryPanel(false); render();
+    }
+    function libraryLauncher(project) {
+      const binding = libraryHosts.get(project.key);
+      const enabled = binding && binding.project_id === project.metadata.project_id && !stale(project);
+      return `<h3>Library actions</h3><p class="small muted">Explicit confidential inspection and Project-authorized interventions. No offline view or autosaved draft.</p><button class="btn" data-library-open="${esc(project.key)}" ${enabled?'':'disabled'}>Inspect and act</button>`;
+    }
+    function closeLibraryPanel(restore = true) {
+      libraryEpoch++; libraryView = null;
+      const dialog = document.getElementById('library-dialog');
+      if (dialog.open) dialog.close();
+      // Erase detached controls as well as visible text. No submitted body is kept
+      // for reconnect or outcome reconciliation.
+      document.getElementById('library-body').innerHTML = '';
+      if (restore && lastTrigger?.isConnected) lastTrigger.focus();
+    }
+    function libraryNode(tag, textValue, attributes = {}) {
+      const node = document.createElement(tag);
+      if (textValue !== null) node.textContent = textValue;
+      for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+      return node;
+    }
+    function libraryButton(label, attribute, disabled = false) {
+      const node = libraryNode('button', label, {class:'btn',type:'button',[attribute]:''}); node.disabled = disabled; return node;
+    }
+    function libraryField(parent, label, id, tag = 'input', limit = null) {
+      parent.append(libraryNode('label', label, {for:id}));
+      const node = libraryNode(tag, null, {id,autocomplete:'off',spellcheck:'false'});
+      if (limit) node.maxLength = limit;
+      if (tag === 'textarea') node.rows = 3;
+      parent.append(node); return node;
+    }
+    function libraryMessage(view, message) { view.message = message; paintLibraryPanel(); }
+    function libraryCurrent(view) {
+      const project = stateFor(view.key).project;
+      return libraryView === view && view.epoch === libraryEpoch && view.binding === libraryHosts.get(view.key)
+        && project && !stale(project) && project.metadata.project_id === view.binding.project_id
+        && document.getElementById('library-dialog').open;
+    }
+    function openLibraryPanel(key) {
+      const project = stateFor(key).project, binding = libraryHosts.get(key);
+      if (!project || stale(project) || !binding || binding.project_id !== project.metadata.project_id) return;
+      closeDrawer(false); closeItem(false); closeLibraryPanel(false);
+      lastTrigger = document.activeElement;
+      libraryView = {key, binding, epoch:libraryEpoch, busy:false, action:'drain', queue:'', observed:null, inspection:null,
+        message:libraryPending.has(key) ? 'Original outcome remains unknown. Reconcile it before another write.' : 'Choose an explicit open or refresh current action state. Nothing has been requested.'};
+      paintLibraryPanel(); document.getElementById('library-dialog').showModal();
+      document.getElementById('library-dialog-title').focus();
+    }
+    function paintLibraryPanel() {
+      const view = libraryView; if (!view) return;
+      const body = document.getElementById('library-body'); body.replaceChildren();
+      body.append(libraryNode('p', 'Private text is visible only in this open view. Refresh, reconnect, closing or a crash loses unsubmitted text. No offline content or autosave.'));
+      body.append(libraryNode('p', view.message, {id:'library-message',role:'status'}));
+      const pending = libraryPending.get(view.key);
+      if (pending) {
+        body.append(libraryNode('p', 'Original outcome remains unknown. Request: ' + pending.operation_id + ' · ' + pending.action + '. No new write will be sent.'));
+        body.append(libraryButton('Reconcile original outcome', 'data-library-reconcile', view.busy));
+      }
+      const read = libraryNode('fieldset', null); read.append(libraryNode('legend', 'Explicit pending-item inspection'));
+      const queue = libraryField(read, 'Pending item ID (not a path)', 'library-queue-id', 'input', 64);
+      queue.value = view.queue; queue.disabled = view.busy;
+      read.append(libraryButton('Open committed item', 'data-library-inspect', view.busy));
+      body.append(read);
+      if (view.inspection) {
+        const inspection = view.inspection, content = libraryNode('section', null, {id:'library-private-content'});
+        content.append(libraryNode('h3', 'Committed item and service-selected context'));
+        content.append(libraryNode('p', inspection.insufficient_context ? 'Insufficient context: ' + inspection.reasons.join(', ') + '. Use authorized local inspection for broader review.' : 'Context is bounded to direct same-Project references. Completeness is limited to this selection.'));
+        content.append(libraryNode('p', 'Pending item: ' + inspection.queue_id + ' · committed version: ' + inspection.commit_sha));
+        content.append(libraryNode('pre', inspection.item.text, {'data-library-item':''}));
+        for (const entry of inspection.context) {
+          content.append(libraryNode('h4', entry.reference)); content.append(libraryNode('pre', entry.text, {'data-library-context':''}));
+        }
+        body.append(content);
+        const disposition = libraryNode('fieldset', null); disposition.append(libraryNode('legend', 'Human disposition'));
+        const choose = libraryField(disposition, 'Disposition', 'library-disposition', 'select');
+        for (const [value,label] of [['reject','Reject with reason'],['adjudicate','Adjudicate with conclusion and rationale']]) choose.append(libraryNode('option',label,{value}));
+        choose.value = view.disposition || 'reject'; choose.disabled = view.busy || !!pending;
+        for (const [id,label] of [['reason','Rejection reason'],['conclusion','Authoritative human conclusion'],['rationale','Human rationale']]) {
+          const field = libraryField(disposition,label,'library-'+id,'textarea',6000);
+          field.value = view[id] || ''; field.disabled = view.busy || !!pending;
+        }
+        disposition.append(libraryNode('p','Text is submitted faithfully, without model reinterpretation. A committed disposition does not resume a blocked drain. Resume remaining work is a separate receipted action.'));
+        disposition.append(libraryButton('Submit human disposition', 'data-library-dispose', view.busy || !!pending)); body.append(disposition);
+      }
+      const operations = libraryNode('fieldset', null); operations.append(libraryNode('legend', 'Scheduling and attention'));
+      const select = libraryField(operations,'Action','library-operation','select');
+      for (const [value,[label]] of Object.entries(libraryActions)) select.append(libraryNode('option',label,{value}));
+      select.value = view.action; select.disabled = view.busy;
+      operations.append(libraryNode('p', libraryActions[view.action][1]));
+      if (view.action==='requeue') {
+        const drain=libraryField(operations,'Original parked drain ID (not the current drain or a path)','library-requeue-drain','input',128);
+        drain.value=view.requeueDrain || ''; drain.disabled=view.busy || !!pending;
+      }
+      operations.append(libraryButton('Refresh action state', 'data-library-observe', view.busy));
+      if (view.observed) {
+        operations.append(libraryNode('p', 'Current service evidence · action ' + view.action + (view.observed.state ? ' · state ' + view.observed.state : '') + (view.observed.drain_id ? ' · drain ' + view.observed.drain_id : '') + '. Settings ' + view.observed.settings_id));
+        operations.append(libraryButton(libraryActions[view.action][0], 'data-library-execute', view.busy || !!pending));
+      }
+      body.append(operations);
+    }
+    function libraryIdentity() { return globalThis.crypto?.randomUUID?.(); }
+    async function libraryCall(view, packet) {
+      if (!libraryCurrent(view)) return null;
+      let response;
+      try { response = await view.binding.handle(JSON.parse(JSON.stringify(packet))); } catch (_) { response = null; }
+      if (!libraryCurrent(view)) return null;
+      try { if (!object(response) || new TextEncoder().encode(JSON.stringify(response)).length > 16384) return null; } catch (_) { return null; }
+      return response;
+    }
+    function libraryPacket(view, request, id = libraryIdentity()) {
+      if (!id) return null;
+      return {version:1,operation_id:id,mode:'execute',request:{version:1,project_id:view.binding.project_id,...request}};
+    }
+    function libraryEvidence(value, view) {
+      return object(value) && value.version === 1 && value.project_id === view.binding.project_id
+        && libraryHash(value.settings_id) && libraryHash(value.observed_version);
+    }
+    function libraryFailure(view, response, write = false) {
+      view.inspection = null; view.observed = null; view.reason = view.conclusion = view.rationale = '';
+      const reason = response?.reason;
+      view.message = own(libraryErrors, reason) ? (write ? 'Original outcome unknown. ' : '') + libraryErrors[reason] : (write ? 'Outcome unknown. Reconcile the original request; do not submit a new write.' : 'Read unavailable or refused. No private content displayed. Refresh explicitly.');
+    }
+    async function inspectLibraryItem() {
+      const view = libraryView; if (!view || view.busy || !libraryCurrent(view)) return;
+      const queue = document.getElementById('library-queue-id').value;
+      if (!libraryHash(queue)) return libraryMessage(view, 'Enter the exact 64-character pending item ID. Paths are not accepted.');
+      view.queue = queue; view.inspection = null; view.reason = view.conclusion = view.rationale = '';
+      const observe = libraryPacket(view,{action:'observe',for_action:'inspect',queue_id:queue});
+      if (!observe) return libraryMessage(view,'Secure request identity unavailable. Nothing sent.');
+      view.busy = true; view.message = 'Authorizing a fresh bounded inspection…'; paintLibraryPanel();
+      const evidence = await libraryCall(view,observe);
+      if (!libraryCurrent(view)) return;
+      if (evidence?.outcome !== 'OBSERVED' || !libraryEvidence(evidence.result,view) || evidence.result.queue_id !== queue) {
+        view.busy=false; libraryFailure(view,evidence); paintLibraryPanel(); return;
+      }
+      const packet = libraryPacket(view,{action:'inspect',queue_id:queue,settings_id:evidence.result.settings_id,observed_version:evidence.result.observed_version});
+      if (!packet) { view.busy=false; return libraryMessage(view,'Secure request identity unavailable. Nothing sent.'); }
+      packet.request.request_id = packet.operation_id;
+      const response = await libraryCall(view,packet);
+      if (!libraryCurrent(view)) return;
+      view.busy=false; const result=response?.result;
+      const reasons = ['MISSING_CONTEXT','CONTEXT_LIMIT','RESPONSE_LIMIT','RECURSION_NOT_EXPANDED','UNAVAILABLE_REFERENCE','INERT_RESOURCE'];
+      if (response?.outcome === 'OBSERVED' && libraryEvidence(result,view) && result.queue_id===queue
+          && result.request_id===packet.request.request_id && result.media_type==='text/plain' && result.recursive===false && result.remote_resources===false
+          && libraryCommit(result.commit_sha) && result.commit_sha !== null && object(result.item) && typeof result.item.text==='string' && libraryHash(result.item.sha256)
+          && Array.isArray(result.context) && result.context.every(item=>object(item)&&typeof item.reference==='string'&&typeof item.text==='string'&&libraryHash(item.sha256))
+          && typeof result.insufficient_context==='boolean' && Array.isArray(result.reasons) && result.reasons.every(reason=>reasons.includes(reason))
+          && result.insufficient_context === (result.reasons.length > 0) && result.selection==='direct-local-concept-references-only'
+          && (result.drain_id===null || libraryToken(result.drain_id))) {
+        view.inspection=result; view.message='Fresh authorized committed inspection. Text and links are inert; no remote resources are fetched.';
+      } else libraryFailure(view,response);
+      paintLibraryPanel();
+    }
+    async function observeLibraryAction() {
+      const view=libraryView; if (!view || view.busy || !libraryCurrent(view)) return;
+      const action=document.getElementById('library-operation').value;
+      if (!own(libraryActions,action)) return;
+      const packet=libraryPacket(view,{action:'observe',for_action:action});
+      if (!packet) return libraryMessage(view,'Secure request identity unavailable. Nothing sent.');
+      view.action=action; view.observed=null; view.busy=true; view.message='Reading current action-specific service state…'; paintLibraryPanel();
+      const response=await libraryCall(view,packet); if (!libraryCurrent(view)) return;
+      view.busy=false;
+      if (response?.outcome==='OBSERVED' && libraryEvidence(response.result,view)
+          && (action==='defer' || (typeof response.result.state==='string' && (response.result.drain_id===null || libraryToken(response.result.drain_id))))) {
+        view.observed=response.result; view.message='Current evidence received. Review the action, then submit explicitly. Admission rechecks every version and grant.';
+      } else libraryFailure(view,response);
+      paintLibraryPanel();
+    }
+    async function executeLibraryAction() {
+      const view=libraryView; if (!view || view.busy || libraryPending.has(view.key) || !view.observed || !libraryCurrent(view)) return;
+      const request={action:view.action,settings_id:view.observed.settings_id,observed_version:view.observed.observed_version};
+      if (['retry','resume'].includes(view.action)) request.drain_id=view.observed.drain_id;
+      if (view.action==='requeue') {
+        request.drain_id=document.getElementById('library-requeue-drain').value;
+        if (!libraryToken(request.drain_id)) return libraryMessage(view,'Enter the exact original parked drain ID. No action was sent.');
+      }
+      return sendLibraryWrite(view,request);
+    }
+    async function disposeLibraryItem() {
+      const view=libraryView; if (!view || view.busy || libraryPending.has(view.key) || !view.inspection || !libraryCurrent(view)) return;
+      const action=document.getElementById('library-disposition').value, item=view.inspection;
+      if (!['reject','adjudicate'].includes(action)) return;
+      const request={action,queue_id:item.queue_id,drain_id:item.drain_id,settings_id:item.settings_id,observed_version:item.observed_version};
+      const names=action==='reject'?['reason']:['conclusion','rationale'];
+      for (const name of names) {
+        request[name]=document.getElementById('library-'+name).value;
+        if (!request[name].trim()) return libraryMessage(view,'Supply the human '+name+' before submitting.');
+      }
+      return sendLibraryWrite(view,request);
+    }
+    async function sendLibraryWrite(view, request) {
+      const packet=libraryPacket(view,request); if (!packet) return libraryMessage(view,'Secure request identity unavailable. Nothing sent.');
+      packet.request.request_id=packet.operation_id;
+      if (new TextEncoder().encode(JSON.stringify(packet.request)).length>8192) return libraryMessage(view,'Request too large. Shorten the human text; nothing was sent.');
+      const pending={operation_id:packet.operation_id,action:request.action,project_id:view.binding.project_id};
+      libraryPending.set(view.key,pending); view.busy=true; view.inspection=null; view.observed=null;
+      view.reason=view.conclusion=view.rationale=''; view.message='Awaiting authoritative receipt. No success inferred.'; paintLibraryPanel();
+      const response=await libraryCall(view,packet); if (!libraryCurrent(view)) return;
+      view.busy=false; acceptLibraryReceipt(view,pending,response); paintLibraryPanel();
+    }
+    function acceptLibraryReceipt(view, pending, response) {
+      // Only this explicit owner outcome proves an authoritative no-effect refusal.
+      // An UNCONFIRMED error after publication must never unlock a second write.
+      if (response?.outcome==='REFUSED' && own(libraryErrors,response.reason)) {
+        libraryPending.delete(view.key); libraryFailure(view,response,false); return;
+      }
+      // The attached transport returns a bounded metadata-only service receipt.
+      if (object(response) && ['COMMITTED','ACKNOWLEDGED','REJECTED'].includes(response.outcome)
+          && response.kind === pending.action && libraryToken(response.service_operation_id) && libraryCommit(response.commit_sha)
+          && (response.outcome!=='COMMITTED' || response.commit_sha !== null)) {
+        libraryPending.delete(view.key);
+        view.message=response.outcome==='COMMITTED' ? 'Committed by the service: '+response.commit_sha+'. Resume remaining work, if needed, is a separate action.'
+          : response.outcome==='ACKNOWLEDGED' ? 'Durable operational acknowledgement: '+(libraryToken(response.acknowledgement) ? response.acknowledgement : response.service_operation_id)+'. This is not a Git publication or successful model call.' : 'The service recorded a refusal. Refresh before another action.';
+      } else libraryFailure(view,response,true);
+    }
+    async function reconcileLibraryAction() {
+      const view=libraryView, pending=view&&libraryPending.get(view.key);
+      if (!view || !pending || view.busy || !libraryCurrent(view)) return;
+      view.busy=true; view.message='Reading the original authoritative outcome. No action or private body is replayed.'; paintLibraryPanel();
+      const packet={version:1,operation_id:pending.operation_id,mode:'reconcile',request:{version:1,action:'receipt',project_id:pending.project_id,for_action:pending.action}};
+      const response=await libraryCall(view,packet); if (!libraryCurrent(view)) return;
+      view.busy=false; acceptLibraryReceipt(view,pending,response); paintLibraryPanel();
+    }
+
     // Installation attachment is deliberately separate from per-Project action hosts.
     let settingsHost = null, settingsEpoch = 0, settingsBusy = false, settingsView = null,
         settingsDraft = null, settingsPending = null, settingsMessage = 'Attach an authenticated installation-operator host, then refresh.';
@@ -930,13 +1219,32 @@
     function openAttention(key) { const item = stateFor().attention.find(item => item.key === key); if (!item) return; closeDrawer(false); lastTrigger = document.activeElement; document.getElementById("item-title").textContent = item.title; document.getElementById("item-body").innerHTML = `${snapshot(item.project)}${sourceLine(item.project, item.source || "attention")}${fields(item.observation)}${sectionDetails(item.project, "review", id => id === item.runId)}${controls("attention")}`; document.getElementById("item-actions").innerHTML = `<button class="btn" data-close-item>Close</button><a class="btn" href="${href("run", item.project.key, item.runId)}" data-nav>Open Run</a>${githubLink(item.project, item.runId)}`; document.getElementById("item-dialog").showModal(); requestAnimationFrame(() => document.getElementById("item-title").focus()); }
     function installDocument(value) {
       if (!object(value) || value.schema_version !== 1 || !Array.isArray(value.rooms) || value.rooms.some(item => !object(item.metadata) || !object(item.view?.identity))) throw new Error("Unsupported Manager view");
-      live = value; closeDrawer(false); closeItem(false); if (page() !== "library-settings" || !document.getElementById("app").innerHTML) render();
+      closeLibraryPanel(false); live = value; closeDrawer(false); closeItem(false); if (page() !== "library-settings" || !document.getElementById("app").innerHTML) render();
     }
     document.addEventListener("input", event => {
       const input = event.target;
+      if (libraryView && !libraryView.busy) {
+        if (input.id === 'library-queue-id') libraryView.queue = input.value;
+        if (input.id === 'library-requeue-drain') libraryView.requeueDrain = input.value;
+        if (['library-reason','library-conclusion','library-rationale'].includes(input.id)) libraryView[input.id.slice(8)] = input.value;
+      }
       if (settingsDraft && !settingsBusy && !settingsPending && input.dataset?.settingGroup && own(settingsDraft[input.dataset.settingGroup],input.dataset.settingKey)) settingsDraft[input.dataset.settingGroup][input.dataset.settingKey] = input.dataset.settingGroup === "limits" ? Number(input.value) : input.value;
     });
+    document.addEventListener("change", event => {
+      const input=event.target, view=libraryView;
+      if (!view || view.busy) return;
+      if (input.id==='library-queue-id' && view.inspection && input.value!==view.inspection.queue_id) { view.inspection=null; view.reason=view.conclusion=view.rationale=''; view.message='Item selection changed. Explicitly open it with fresh authorization.'; paintLibraryPanel(); }
+      if (input.id==='library-operation' && own(libraryActions,input.value)) { view.action=input.value; view.observed=null; paintLibraryPanel(); }
+      if (input.id==='library-disposition') view.disposition=input.value;
+    });
     document.addEventListener("click", event => {
+      const libraryOpen=event.target.closest('[data-library-open]'); if (libraryOpen) return openLibraryPanel(libraryOpen.dataset.libraryOpen);
+      if (event.target.closest('[data-library-close]')) return closeLibraryPanel();
+      if (event.target.closest('[data-library-inspect]')) return inspectLibraryItem();
+      if (event.target.closest('[data-library-observe]')) return observeLibraryAction();
+      if (event.target.closest('[data-library-execute]')) return executeLibraryAction();
+      if (event.target.closest('[data-library-dispose]')) return disposeLibraryItem();
+      if (event.target.closest('[data-library-reconcile]')) return reconcileLibraryAction();
       if (event.target.closest("[data-settings-refresh]")) return refreshLibrarySettings();
       if (event.target.closest("[data-settings-save]")) return saveLibrarySettings();
       if (event.target.closest("[data-settings-reconcile]")) return reconcileLibrarySettings();
@@ -944,7 +1252,7 @@
       const target = event.target;
       const human = target.closest('[data-human-action]'); if (human) return submitHumanAction(human.dataset.humanAction);
       const panel = target.closest('[data-action-panel]'); if (panel) return openActionPanel(panel.dataset.project,panel.dataset.actionPanel,panel.dataset.subject);
-      const nav = target.closest("a[data-nav]"); if (nav) { event.preventDefault(); closeDrawer(false); closeItem(false); history.pushState({}, "", nav.href); render(true); return; }
+      const nav = target.closest("a[data-nav]"); if (nav) { event.preventDefault(); closeLibraryPanel(false); closeDrawer(false); closeItem(false); history.pushState({}, "", nav.href); render(true); return; }
       const theme = target.closest("[data-variant]"); if (theme) { const url = new URL(location.href); url.searchParams.set("variant", theme.dataset.variant); history.replaceState({}, "", url); render(); return; }
       const item = target.closest("[data-attention]"); if (item) return openAttention(item.dataset.attention);
       const gate = target.closest("[data-gate-index]"); if (gate) return gateDetail(gate.dataset.gateIndex, gate.dataset.project, gate.dataset.run);
@@ -957,7 +1265,9 @@
     });
     document.addEventListener("keydown", event => { if (event.key === "Escape" && !document.getElementById("drawer").hidden) { event.preventDefault(); closeDrawer(); } });
     document.getElementById("item-dialog").addEventListener("cancel", event => { event.preventDefault(); closeItem(); });
-    window.addEventListener("popstate", () => { closeDrawer(false); closeItem(false); render(true); });
+    document.getElementById('library-dialog').addEventListener('cancel', event => { event.preventDefault(); closeLibraryPanel(); });
+    window.addEventListener('pagehide', () => closeLibraryPanel(false));
+    window.addEventListener("popstate", () => { closeLibraryPanel(false); closeDrawer(false); closeItem(false); render(true); });
     const bootstrap = document.getElementById("manager-data").textContent.trim();
     if (bootstrap) { try { installDocument(JSON.parse(bootstrap)); } catch (_) { document.getElementById("app").textContent = "Manager data unavailable — unsupported or invalid view. No actions are available."; } }
     else render();
@@ -965,7 +1275,7 @@
     let lastStaleness = stateFor().projects.map(project => `${project.key}:${stale(project)}:${libraryQuality(project, fact(project, "library"))}`).join("|");
     setInterval(() => {
       const marker = stateFor().projects.map(project => `${project.key}:${stale(project)}:${libraryQuality(project, fact(project, "library"))}`).join("|");
-      if (marker !== lastStaleness) { lastStaleness = marker; closeDrawer(false); closeItem(false); if (page() !== "library-settings") render(); }
+      if (marker !== lastStaleness) { lastStaleness = marker; closeLibraryPanel(false); closeDrawer(false); closeItem(false); if (page() !== "library-settings") render(); }
     }, 1000);
   </script>
 </body>
