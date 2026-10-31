@@ -8,8 +8,8 @@ from uas.local_native_terminal import terminal_stopped_run, retirement_for, prec
 from uas.ledger import LedgerError
 
 
-class TerminalTests(fixture.LocalStopTests):
-    # Inherited completed tests remain relevant; active cases explicitly activate.
+class TerminalTests(fixture.LocalStopFixture, unittest.TestCase):
+    # Completed-path cases remain in test_local_native_stop; active cases explicitly activate.
     def activate(self):
         def active(state):
             state['runs'][self.run_id].update(status='ACTIVE',outcome=None,completion=None)

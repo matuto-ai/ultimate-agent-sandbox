@@ -8,9 +8,9 @@ import test_manager_actions as actions_fixture
 from uas.manager_action_host import FieldNotesActionHost
 
 
-class ManagerActionHostTests(actions_fixture.ManagerActionsTests):
-    # Inherited tests are intentionally not rediscovered by the local focused
-    # runner. CI's ordinary unittest discovery may safely run them again.
+class ManagerActionHostTests(actions_fixture.ManagerActionsFixture, unittest.TestCase):
+    # The owner contract runs once in test_manager_actions; these cases drive
+    # the distinct authenticated host seam using the same owner fixture.
     def setUp(self):
         super().setUp()
         self.context = object()
