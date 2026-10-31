@@ -38,7 +38,8 @@ from suite time. Estimates retain roughly20 seconds below each job deadline.
 | operator |35.1|Move operational records out|
 | inspection |33.4|Move disposition native cases out; Hub in|
 | lifecycle |29.5|Service plus records; transport fits here when introduced|
-| disposition |35.8|All six rejection/adjudication functional, recovery and native modules|
+| maintenance |39.0|Retention, repair, native repair and T27 requeue|
+| disposition |44.0|All six rejection/adjudication functional, recovery and native modules|
 
 PR240's existing transport module belongs in lifecycle when its source is
 composed, with matching explicit partition expectation and full ID inventory.
@@ -70,15 +71,48 @@ including setup/cleanup (63s). This is not a qualifying green graph; dependent
 jobs were skipped. A prior59s green operator job was insufficient margin.
 
 An eleventh, explicit `maintenance` matrix lane contains only deterministic
-repair (21 tests), its native transport (4), and the existing retention module.
+repair (21 tests), its native transport (4), the existing retention module and
+T27's requeue release module; the section below records why it does not have a
+lane of its own.
 Hosted timestamp deltas estimate10.7s +3.2s +9.3s =23.2s suite time, leaving
 roughly27s for setup/cleanup and variance under the unchanged60s deadline.
 `operator` retains controls and Git-payload tests (about30s suite time);
-`disposition` retains its original six modules. No existing test is removed,
-weakened, or duplicated; future modules still default to remainder. The exact
+`disposition` retains its original six modules and T27's requeue release module
+has its own lane. No existing test is removed, weakened, or duplicated; future
+modules still default to remainder. The exact
 partition/workflow contract checks include this lane and all downstream jobs
 still require every matrix member. No timeout, permission, or runtime-budget
 policy changes accompany this test-capacity adjustment.
+
+## T27 requeue capacity (#191)
+
+The requeue release module measured61.8 seconds locally for ten real
+Git/SQLite/Service cases: the mixed release, later release of a retained draft,
+an unresolved contradiction, model parking whose reason token names a source
+failure, a released source park followed by a model park of the same queue,
+stale/archived/busy/revoked refusals, a blocked Project, exact retry after a
+settings change, lost acknowledgement and an unknown pre-push outcome.
+
+Its lane took three measurements. Hosted run
+[41055347618](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41055347618)
+first placed it beside the rejection/adjudication family and measured that
+`disposition` job at54.0 seconds with46.0 seconds of suite time. Run
+[41063700322](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41063700322)
+then measured the six-module `disposition` job at35.0 suite seconds and the
+four-module `maintenance` lane, including requeue, at39.0 suite seconds in a48.0
+second job.
+
+A twelfth `requeue` lane for the single module was tried next and reverted. Run
+[41070545069](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41070545069)
+took the graph critical path to116.0 seconds against a baseline median of105.0
+and the115.5 second growth limit, and the same six disposition modules that
+measured49.0 seconds in the baseline run
+[41067720686](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41067720686)
+took63.0 seconds, with every other lane slower too: one more concurrent job
+costs the graph more than the module's own13.0 suite seconds. The module stays in
+`maintenance`, which keeps eleven unit lanes and the measured critical path at
+its baseline. No test was moved out of discovery, excluded or weakened, and the
+exact-partition contract still runs every ID once.
 
 ## T35 archive acceptance capacity (#181)
 

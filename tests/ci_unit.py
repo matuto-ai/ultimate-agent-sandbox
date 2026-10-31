@@ -84,8 +84,10 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload'})
 
 # #182 measured repair+native+retention ~23s; keep setup/variance margin.
+# #191 requeue joins the existing retention/repair/deployment lane.
+# Keep main's recovery/archive and attention/lifecycle assignments intact.
 MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair',
- 'test_library_repair_native', 'test_library_deployment'})
+ 'test_library_repair_native', 'test_library_deployment', 'test_library_requeue'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
