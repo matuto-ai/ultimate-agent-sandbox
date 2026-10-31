@@ -113,3 +113,23 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         self.assertEqual(result['uas_frames'], [])
         self.assertEqual(result['known_failures'], ['permission-denied'])
         self.assertNotIn('secret', json.dumps(result))
+
+
+    def test_hub_phase_parser_requires_closed_exact_whole_lines(self):
+        phases = ('import-start', 'import-done', 'entrypoint-validated', 'probe-start', 'probe-done',
+                  'metadata-wait', 'metadata-read', 'metadata-parsed', 'mapping-validated', 'paths-validated',
+                  'control-connect', 'control-connected')
+        from uas.local_hub import PHASES
+        self.assertEqual(set(phases), PHASES)
+        raw = ('\n'.join('UAS_LOCAL_HUB_PHASE ' + phase for phase in phases) + '\n').encode()
+        result = probe.filtered_hub_errors(raw)
+        self.assertEqual(result['startup_phases'], list(phases))
+        self.assertFalse(result['startup_phase_overflow'])
+        for invalid in ('UAS_LOCAL_HUB_PHASE unknown', 'prefix UAS_LOCAL_HUB_PHASE import-start',
+                        'UAS_LOCAL_HUB_PHASE import-start secret', ' UAS_LOCAL_HUB_PHASE import-start',
+                        'UAS_LOCAL_HUB_PHASE import-start\r', 'UAS_LOCAL_HUB_PHASE import-start\x00'):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(probe.filtered_hub_errors(invalid.encode())['startup_phases'], [])
+        overflow = probe.filtered_hub_errors(raw * 10)
+        self.assertEqual(len(overflow['startup_phases']), len(phases))
+        self.assertTrue(overflow['startup_phase_overflow'])

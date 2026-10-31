@@ -123,21 +123,28 @@ def serve_loop(loop, ledger, control_lease, *, persistent=False, library_client=
     raise OriginDenied('bounded qualification service lifetime expired')
 
 
-def run_service(*, persistent=False):
+def run_service(*, persistent=False, progress=None):
     if type(persistent) is not bool:
         raise OriginDenied('fixed Hub lifetime selection required')
     if len(sys.argv)!=1 or (os.getuid(),os.getgid())!=(65531,65531):
         raise OriginDenied('fixed unprivileged Hub entrypoint required')
+    if progress is not None: progress('entrypoint-validated')
     # Only this Room ledger directory is shared with the trusted host owner.
     # Setgid directory + group-readable/writable SQLite WAL files, never world
     # access or a Supervisor-private-store mount into Hub.
     os.umask(0o007)
     # Child of the fixed init, never unsupported PID1/parent0 or process scans.
+    if progress is not None: progress('probe-start')
     probe()
+    if progress is not None: progress('probe-done')
     kernel_status=process_status()
     if kernel_status!={'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'}:
         raise OriginDenied('actual Hub capabilities/NNP/seccomp profile differs')
-    metadata,seats=configuration(sys.stdin.buffer.readline(8193), persistent=persistent)
+    if progress is not None: progress('metadata-wait')
+    raw_metadata=sys.stdin.buffer.readline(8193)
+    if progress is not None: progress('metadata-read')
+    metadata,seats=configuration(raw_metadata, persistent=persistent)
+    if progress is not None: progress('metadata-parsed')
     mapping={'uid_map':Path('/proc/self/uid_map').read_text(),
              'gid_map':Path('/proc/self/gid_map').read_text(),
              'overflow_uid':int(Path('/proc/sys/kernel/overflowuid').read_text()),
@@ -145,11 +152,16 @@ def run_service(*, persistent=False):
     if (mapping['overflow_uid']!=65534 or mapping['overflow_gid']!=65534
             or hashlib.sha256(json.dumps(mapping,sort_keys=True).encode()).hexdigest()!=metadata['mapping_digest']):
         raise OriginDenied('actual Hub receiver namespace/overflow mapping differs')
+    if progress is not None: progress('mapping-validated')
     control_lease=EndpointLease(CONTROL,owner=65533,group=65531)
     peer_lease=EndpointLease(PEER,owner=65533,group=65532)
+    if progress is not None: progress('paths-validated')
     with ExitStack() as stack:
         control=stack.enter_context(closing(socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)))
-        enable(control);control.settimeout(8);control.connect(CONTROL)
+        enable(control);control.settimeout(8)
+        if progress is not None: progress('control-connect')
+        control.connect(CONTROL)
+        if progress is not None: progress('control-connected')
         control_lease.require()
         if control.send(b'HUB1'+bytes.fromhex(metadata['challenge']))!=36:
             raise OriginDenied('incomplete fixed Hub bootstrap')

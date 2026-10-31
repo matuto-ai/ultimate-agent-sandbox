@@ -126,3 +126,45 @@ class LocalHubTests(unittest.TestCase):
             with self.assertRaises(OriginDenied):host.main()
         value=json.loads(output.getvalue())
         self.assertEqual(value,{'version':1,'status':'unknown','phase':'hub-startup','error':'origin-denied'})
+    def test_local_entrypoint_emits_only_fixed_flushed_phases_and_import_order(self):
+        import builtins
+        from uas import local_hub
+        output=Mock()
+        with patch.object(local_hub.sys,'stderr',output):
+            for phase in sorted(local_hub.PHASES):local_hub.progress(phase)
+            for bad in ('secret\nprobe-done','unknown',None,[]):
+                with self.assertRaises(ValueError):local_hub.progress(bad)
+        self.assertEqual(output.flush.call_count,len(local_hub.PHASES))
+        self.assertEqual([call.args[0] for call in output.write.call_args_list],
+            ['UAS_LOCAL_HUB_PHASE '+phase+'\n' for phase in sorted(local_hub.PHASES)])
+        events=[];original=builtins.__import__
+        def importing(name,*args,**kwargs):
+            if name=='workstation_service':events.append('actual-import')
+            return original(name,*args,**kwargs)
+        with patch.object(local_hub,'progress',side_effect=events.append),patch.object(builtins,'__import__',side_effect=importing),patch.object(service,'run_service',return_value='done') as run:
+            self.assertEqual(local_hub.main(),'done')
+        self.assertEqual(events,['import-start','actual-import','import-done'])
+        self.assertTrue(run.call_args.kwargs['persistent'])
+        self.assertIn('progress',run.call_args.kwargs)
+
+    def test_preconnect_phases_preserve_guard_order_and_propagate_failure(self):
+        from io import BytesIO
+        import hashlib
+        mapping={'uid_map':'0 100000 65536\n','gid_map':'0 100000 65536\n','overflow_uid':65534,'overflow_gid':65534}
+        value=self.value();value['mapping_digest']=hashlib.sha256(json.dumps(mapping,sort_keys=True).encode()).hexdigest()
+        def read(path):
+            return str(mapping[{'overflowuid':'overflow_uid','overflowgid':'overflow_gid'}.get(path.name,path.name)])
+        class ConnectReached(Exception):pass
+        channel=Mock();channel.connect.side_effect=ConnectReached
+        phases=[]
+        with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=65531),patch.object(service.os,'getgid',return_value=65531),patch.object(service.os,'umask'),patch.object(service,'probe') as probe,patch.object(service,'process_status',return_value={'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'}),patch.object(service.sys,'stdin',SimpleNamespace(buffer=BytesIO(json.dumps(value).encode()+b'\n'))),patch.object(service.Path,'read_text',read),patch.object(service,'EndpointLease'),patch.object(service.socket,'socket',return_value=channel),patch.object(service,'enable'):
+            with self.assertRaises(ConnectReached):service.run_service(persistent=True,progress=phases.append)
+        self.assertEqual(phases,['entrypoint-validated','probe-start','probe-done','metadata-wait','metadata-read','metadata-parsed','mapping-validated','paths-validated','control-connect'])
+        probe.assert_called_once();channel.send.assert_not_called()
+        with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=0),patch.object(service,'probe') as probe:
+            with self.assertRaises(OriginDenied):service.run_service(persistent=True,progress=lambda _:self.fail('phase before guard'))
+        probe.assert_not_called()
+        with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=65531),patch.object(service.os,'getgid',return_value=65531),patch.object(service,'probe') as probe:
+            with self.assertRaisesRegex(RuntimeError,'phase failure'):
+                service.run_service(persistent=True,progress=Mock(side_effect=RuntimeError('phase failure')))
+        probe.assert_not_called()

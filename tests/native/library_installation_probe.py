@@ -115,11 +115,19 @@ def diagnostic_command(arguments, *, limit=65536, seconds=5):
 
 def filtered_hub_errors(raw):
     text = raw.decode('utf-8', errors='replace')
+    phases = ('import-start', 'import-done', 'entrypoint-validated', 'probe-start', 'probe-done',
+              'metadata-wait', 'metadata-read', 'metadata-parsed', 'mapping-validated', 'paths-validated',
+              'control-connect', 'control-connected')
+    # Whole exact fixed markers only; arbitrary stderr never becomes evidence.
+    phase_lines = {'UAS_LOCAL_HUB_PHASE ' + phase: phase for phase in phases}
+    observed_phases = [phase_lines[line] for line in text.split('\n') if line in phase_lines]
     classes = ('ModuleNotFoundError', 'ImportError', 'PermissionError', 'FileNotFoundError',
                'OSError', 'RuntimeError', 'OriginDenied', 'LedgerError', 'QualificationError',
                'SyntaxError', 'TypeError', 'ValueError', 'OperationalError')
     result = {'exception_classes': [name for name in classes
               if re.search(r'(?:^|\n)(?:[a-z_]+\.)?' + name + r':', text)]}
+    result['startup_phases'] = observed_phases[:len(phases)]
+    result['startup_phase_overflow'] = len(observed_phases) > len(phases)
     known = {p.stem for p in (ROOT / 'uas').glob('*.py')}
     result['uas_frames'] = sorted({name for name in re.findall(r'/uas/([a-z_][a-z0-9_]*)\.py', text)
                                    if name in known})[:16]
