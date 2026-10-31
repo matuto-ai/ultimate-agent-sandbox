@@ -26,6 +26,8 @@ import prepared_room
 
 PROFILE = 'library-installation-v1'
 CANDIDATE = Path('/var/lib/uas-library-source')
+# Existing native trust command guard admits only this disposable installroot.
+ROOTFS = Path('/var/lib/uas-native-rootfs')
 STORAGE = Path('/mnt/uas-library')
 CONFIG = Path('/var/lib/uas-library-config')
 INSTALL = Path('/var/lib/uas-library-install')
@@ -235,7 +237,7 @@ def scenario(nonce, manifest, candidate):
     from guest_room_base import import_image
     from uas.local_installation import Installation
     CONFIG.mkdir(mode=0o700)
-    root = Path('/var/lib/uas-library-rootfs')
+    root = ROOTFS
     build_room_rootfs(nonce, manifest, root, run=run)
     shutil.rmtree(root / 'opt/uas/uas')
     shutil.copytree(CANDIDATE / 'uas', root / 'opt/uas/uas')

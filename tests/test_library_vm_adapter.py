@@ -36,6 +36,20 @@ class LibraryVMAdapterTests(unittest.TestCase):
             ('tests/vm/prepared_room.py', 'tests/vm/guest_boundary.py',
              'tests/vm/room_profile.py', 'tests/vm/fedora-image.json'))
 
+    def test_rootfs_uses_existing_fixed_native_trust_installroot(self):
+        import native_trust
+        self.assertEqual(guest.ROOTFS, Path('/var/lib/uas-native-rootfs'))
+        streams = {'stdout': {'output': 'fixed trust result'}}
+        with patch.object(guest.boundary, 'native_command', return_value=(0, streams)) as command:
+            for argv in native_trust.fixed_commands(guest.ROOTFS):
+                self.assertEqual(guest.run(*argv, timeout=90, native_trust_context=True),
+                                 'fixed trust result')
+            count = command.call_count
+            for argv in native_trust.fixed_commands(Path('/var/lib/uas-library-rootfs')):
+                with self.assertRaisesRegex(ValueError, 'fixed offline installroot'):
+                    guest.run(*argv, timeout=90, native_trust_context=True)
+            self.assertEqual(command.call_count, count)
+
     def test_report_requires_actual_two_room_and_negative_observations(self):
         nonce = 'a' * 32
         value = {'version': 1, 'nonce': nonce, 'profile': runner.PROFILE, 'production_enabled': False,
