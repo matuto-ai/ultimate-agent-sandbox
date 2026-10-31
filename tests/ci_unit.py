@@ -95,7 +95,8 @@ INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', '
 # leaves margin in the existing60s lane, without changing discovery or limits.
 # Deployment's 9.6s hosted suite uses maintenance headroom instead of this critical lane.
 LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
- 'test_library_service', 'test_manager_library_transport'})
+ 'test_library_service', 'test_manager_library_transport',
+ 'test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'})
 
 DISPOSITION_MODULES = frozenset({'test_library_adjudication',
  'test_library_adjudication_native',

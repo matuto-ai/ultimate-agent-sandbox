@@ -129,3 +129,24 @@ runtime-budget policy. Exact hosted total graph timing remains authoritative.
 [Run 41129393214](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41129393214) passed every functional job but failed the unchanged moving runtime budget: 118 seconds versus a 115.5-second allowance. Its disposition job took 65 seconds, including 16.7 seconds in `test_library_disposition_recovery`, while archive took 30 seconds. Move that one recovery module to the archive lane, retaining the same tests, discovery, all-root dependencies, watchdogs, and measured-budget policy. The resulting planning estimates are roughly 48 seconds for disposition and 47 seconds for archive; the next exact-head hosted graph determines acceptance.
 
 After composing #185, [run 41131079099](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41131079099) passed every functional job but measured 116 seconds against the same 115.5-second limit. Lifecycle took 63 seconds, including 9.6 seconds for `test_library_deployment`; maintenance took 31 seconds. Place the ten deployment cases in maintenance instead, keeping all discovered cases and the original acceptance limits. This avoids making the merged lifecycle lane the critical path.
+
+
+## Installed Library composition capacity (#252 / PR #255)
+
+The exact-head `7cded1d9` [validation run 41220461050](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41220461050) passed its functional jobs but exceeded the
+unchanged runtime budget: 119 seconds against 117.7 seconds. Hosted remainder
+logs measured 45.706 suite seconds (3,604 tests). Consecutive test-line
+timestamp deltas estimate 3.903 seconds in
+`test_local_library_wiring`, 1.135 seconds in `test_local_library_model`, and
+approximately 0.394 seconds in `test_local_library_transport`. The remainder job
+occupied 59 seconds; the existing lifecycle job occupied 37 seconds.
+
+Move only those three newly introduced installed-Library modules from remainder
+to lifecycle, alongside Library service and Manager transport. This reallocates
+approximately 5.432 measured suite seconds to an existing lane with headroom;
+it does not add a lane or claim a guaranteed hosted duration. Discovery, every
+test ID, all-root dependency gates, job limits, and the measured-budget rule
+remain unchanged. Both lanes retain identical mandatory native peer, Participant,
+connector, HTTP, and channel environment requirements. Explicit membership and complete/disjoint inventory tests
+cover the allocation. The next exact-head hosted graph remains the acceptance
+measurement; no tests are removed or weakened.
