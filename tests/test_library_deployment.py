@@ -474,7 +474,12 @@ class DeploymentLibraryTests(unittest.TestCase):
         with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
             channel.connect(str(root / 'library-operator.sock'))
             channel.sendall(library_controls.canonical(value))
-        self.assertTrue(self.wait_for(lambda: self.head() != before))
+        # A pushed Git ref precedes the disposition receipt and scheduler
+        # transition. Wait on the canonical scheduler lock as well: revoking
+        # earlier would race the still-running original write, not test a
+        # denied retry after its discarded response. No request is replayed.
+        self.assertTrue(self.wait_for(lambda:
+            scheduler.state(identity)['state'] == 'DISPOSED' and self.head() != before))
         allowed[0] = False
         self.assertEqual(local(value)['error'], 'FORBIDDEN')
         allowed[0] = True
