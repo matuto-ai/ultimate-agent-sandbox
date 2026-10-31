@@ -86,6 +86,57 @@ class RoomResourceTests(unittest.TestCase):
         self.assertEqual(self.effect_count('project'),1)
         self.assertEqual(self.effect_count('chcon'),1)
 
+    def readonly_plan(self, value=True):
+        self.receipt.close()
+        body={k:v for k,v in self.plan.items() if k!='plan_id'}
+        body['operations']=[dict(op) for op in body['operations']]
+        body['operations'][1]['readonly']=value
+        self.plan=dict(body,plan_id=digest(body))
+        directory=self.root/'readonly-receipts';directory.mkdir(mode=0o700)
+        self.receipt=PreparationReceipt(directory,self.plan,owner_uid=0)
+        self.addCleanup(self.receipt.close)
+
+    def test_reference_leaf_stays_root_owned_and_readable_idempotently(self):
+        self.readonly_plan();self.reserve();evidence=self.prepare()
+        info=self.fake_stat(self.leaf)
+        self.assertEqual((info.st_uid,info.st_gid),(0,0))
+        self.assertEqual(info.st_mode & 0o777,0o755)
+        self.assertNotIn(info.st_ino,self.owners)
+        (self.leaf/'published.txt').write_text('keep')
+        calls=list(self.calls)
+        self.assertEqual(self.prepare(),evidence)
+        self.assertEqual((self.leaf/'published.txt').read_text(),'keep')
+        self.assertEqual(self.effect_count('project'),1);self.assertEqual(self.effect_count('chcon'),1)
+
+    def test_reference_mode_drift_is_never_repaired(self):
+        self.readonly_plan();self.reserve();self.prepare();self.leaf.chmod(0o700)
+        with self.assertRaisesRegex(HostProfileError,'NOT_FRESH_EMPTY'):self.prepare()
+        self.assertEqual(self.leaf.stat().st_mode & 0o777,0o700)
+
+    def test_reference_populated_unknown_leaf_is_never_adopted(self):
+        self.readonly_plan();self.reserve();self.failure='project'
+        with self.assertRaises(OSError):self.prepare()
+        (self.leaf/'human.txt').write_text('keep')
+        with self.assertRaisesRegex(HostProfileError,'NOT_FRESH_EMPTY'):self.prepare()
+        self.assertEqual(self.leaf.stat().st_mode & 0o777,0o700)
+        self.assertEqual((self.leaf/'human.txt').read_text(),'keep')
+
+    def test_reference_lost_final_mode_ack_is_observation_only(self):
+        self.readonly_plan();self.reserve();real=os.fchmod
+        def lost(fd,mode):real(fd,mode);raise OSError('lost final mode ack')
+        with patch.object(resources.os,'fchmod',side_effect=lost):
+            with self.assertRaises(OSError):self.prepare()
+        self.assertEqual(self.receipt.state(1)['state'],'unknown')
+        (self.leaf/'published.txt').write_text('keep')
+        with patch.object(resources.os,'fchmod',side_effect=AssertionError('must not repair')):
+            self.prepare()
+        self.assertEqual(self.receipt.state(1)['state'],'confirmed')
+
+    def test_readonly_role_requires_exact_boolean(self):
+        self.readonly_plan('yes');self.reserve()
+        with self.assertRaisesRegex(HostProfileError,'LEAF_ROLE'):self.prepare()
+        self.assertFalse(self.leaf.exists())
+
     def test_quota_collision_before_intent(self):
         self.quotas[1200]=65536
         with self.assertRaisesRegex(HostProfileError,'ALREADY_ALLOCATED'):self.reserve()

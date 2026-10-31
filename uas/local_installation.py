@@ -93,11 +93,14 @@ def read_reference(value):
 
 def selection(raw):
     value = document(raw)
-    require(set(value) in ({'version', 'project', 'native', 'manager'}, {'version', 'project', 'native', 'manager','runtime'})
+    require(set(value) in ({'version', 'project', 'native', 'manager'}, {'version', 'project', 'native', 'manager','runtime'},
+                           {'version', 'project', 'native', 'manager', 'library'},
+                           {'version', 'project', 'native', 'manager', 'runtime', 'library'})
             and type(value['version']) is int and value['version'] == 1, 'INSTALLATION_SCHEMA')
     result = {'version': 1, 'project': reference(value['project'])}
-    for name in ('native', 'manager'):
-        result[name] = None if value[name] is None else reference(value[name])
+    for name in ('native', 'manager', 'library'):
+        entry = value.get(name)
+        result[name] = None if entry is None else reference(entry)
     if 'runtime' in value:
         require(type(value['runtime']) is dict and len(value['runtime'])<=64,'LOCAL_RUNTIME_SELECTION')
         result['runtime']={room:reference(ref) for room,ref in value['runtime'].items()}
@@ -146,6 +149,7 @@ class Installation:
         selected = {}
         for name in ('native', 'manager'):
             selected[name] = None if value[name] is None else document(read_reference(value[name]))
+        selected['library'] = None
         if selected['native'] is not None:
             from .local_native import validate_document, LocalNativeProfile
             from .lifecycle import LifecycleError
@@ -174,6 +178,9 @@ class Installation:
                     configuration_sha256=hashlib.sha256(canonical(config)).hexdigest())
             except (LedgerError, NativeRecipeError) as error:
                 raise LocalInstallationError('LOCAL_MANAGER_SELECTION_INVALID') from error
+        if value.get('library') is not None:
+            from .local_library import admit
+            selected['library'] = admit(document(read_reference(value['library'])), config)
         runtime=value.get('runtime',{})
         require(not runtime or selected['native'] is not None,'LOCAL_RUNTIME_NATIVE_REQUIRED')
         require(set(runtime)<={room['id'] for room in config['rooms']},'LOCAL_RUNTIME_ROOM_SELECTION')
@@ -194,7 +201,6 @@ class Installation:
             self._bootstrap_paths(value,native)
             config=load(StringIO(read_reference(value['project']).decode('utf-8')))
             return value,config,{'native':native}
-
     def _bootstrap_paths(self,value,native):
         if native is None or native.get('version')!=3:return
         storage=Path(native['storage_root'])
@@ -321,4 +327,5 @@ class Installation:
                 'rooms': [room['id'] for room in config['rooms']],
                 'native': 'not-configured' if selected['native'] is None else 'selected-not-observed',
                 'manager': 'not-configured' if selected['manager'] is None else 'selected-not-authenticated',
+                'library': 'not-configured' if selected['library'] is None else 'selected-not-started',
                 'runtime': 'not-observed', 'isolation': 'not-verified'}

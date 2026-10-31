@@ -9,7 +9,8 @@ from uas.native_pi_recipe import NativeMount, NativeRecipeError
 from uas.workstation_exec import ExecSeat
 
 ROOT=Path(__file__).resolve().parents[1]
-class NativeClaudeRecipeTests(unittest.TestCase):
+class NativeClaudeRecipeFixture:
+    """Reusable recipe inputs, without rediscovering the ordinary profile tests."""
     def setUp(self):
         self.manifest={'version':1,'runtime':'claude','runtime_version':'2.1.310','sdk_version':'0.3.310',
             'image_reference':'registry/image@sha256:'+'a'*64,'image_id':'sha256:'+'b'*64,
@@ -27,6 +28,7 @@ class NativeClaudeRecipeTests(unittest.TestCase):
         args={**self.args,**changes}
         with patch('uas.native_claude_recipe.read_manifest',return_value=copy.deepcopy(self.manifest)):
             return NativeClaudeRecipe('/trusted/manifest.json','a'*64,**args)
+class NativeClaudeRecipeTests(NativeClaudeRecipeFixture, unittest.TestCase):
     def test_provider_reference_does_not_share_native_context(self):
         from uas.runtime_provider import ProviderAuthReference
         ref=ProviderAuthReference('claude','chosen','subscription','claude-oauth-token')

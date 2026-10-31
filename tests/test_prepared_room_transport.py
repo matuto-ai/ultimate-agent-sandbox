@@ -58,6 +58,46 @@ class TransportTests(unittest.TestCase):
         self.assertIn('UAS_ROOM_PRODUCER_COMMIT:',producer)
         self.assertIn('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',producer)
 
+    def test_library_scenario_is_one_explicit_warm_reviewed_run(self):
+        source = (Path(__file__).parents[1] / '.github/workflows/room-launch.yml').read_text()
+        self.assertIn("github.event.label.name == 'qualify-library-installation'", source)
+        self.assertIn("github.event_name == 'pull_request' && github.event.action == 'labeled'", source)
+        self.assertIn("github.event.sender.login == 'puglab-reviewer'", source)
+        self.assertIn('github.event.pull_request.head.repo.full_name == github.repository', source)
+        self.assertEqual(1, source.count('    timeout-minutes: 30'))
+        self.assertEqual(1, source.count('run: python3 tests/vm/run_room.py'))
+        self.assertEqual(1, source.count('run: python3 tests/vm/run_library_installation.py'))
+        self.assertIn("UAS_LIBRARY_VM_APPROVED: '1'", source)
+        self.assertIn('UAS_LIBRARY_EXPECTED_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}', source)
+        self.assertNotIn('prepare_room_base.py', source)
+        self.assertNotIn('pull_request_target', source)
+        self.assertNotIn('types: [synchronize', source)
+        validation = source.split('      - name: Require exactly one explicitly selected warm scenario', 1)[1].split('      - name:', 1)[0]
+        body = validation.split("          python3 - <<'PYTHON'\n", 1)[1].split('          PYTHON', 1)[0]
+        body = '\n'.join(line[10:] for line in body.splitlines())
+        for event, scenario, label, good in (
+                ('workflow_dispatch', 'room-boundary', '', True),
+                ('workflow_dispatch', '', '', True),
+                ('workflow_dispatch', 'library-installation', '', True),
+                ('workflow_dispatch', 'other', '', False),
+                ('pull_request', '', 'qualify-room-launch', True),
+                ('pull_request', '', 'qualify-library-installation', True),
+                ('pull_request', '', 'other', False),
+                ('push', 'library-installation', '', False)):
+            with self.subTest(event=event, scenario=scenario, label=label), mock.patch.dict(os.environ, {
+                    'GITHUB_EVENT_NAME': event, 'SELECTED_SCENARIO': scenario, 'SELECTED_LABEL': label}, clear=True):
+                if good:
+                    exec(compile(body, 'scenario-selection', 'exec'), {})
+                else:
+                    with self.assertRaises(ValueError):
+                        exec(compile(body, 'scenario-selection', 'exec'), {})
+        room = source.split('      - name: Exercise fresh Room launch', 1)[1].split('      - name:', 1)[0]
+        library = source.split('      - name: Exercise actual installed Library', 1)[1]
+        self.assertNotIn('qualify-library-installation', room)
+        self.assertNotIn("inputs.scenario == 'library-installation'", room)
+        self.assertNotIn('qualify-room-launch', library)
+        self.assertNotIn("inputs.scenario == 'room-boundary'", library)
+
     def test_exact_metadata_and_pr_checkout_binding(self):
         self.assertEqual(transport.verify_metadata(self.run,self.artifact,self.chosen),'c'*64)
         self.run.update(event='pull_request',head_sha='d'*40,pull_requests=[{'head':{'sha':'a'*40,'repo':{'id':1}}}])

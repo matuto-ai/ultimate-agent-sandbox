@@ -253,7 +253,8 @@ class ClaudeNativeTests(unittest.TestCase):
         self.gateway = Gateway(('127.0.0.1', 0), Handler)
         self.gateway.key = 'fixture-only-local-key'
         self.gateway.requests = []
-        self.thread = threading.Thread(target=self.gateway.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.gateway.serve_forever,
+                                       kwargs={'poll_interval': .05}, daemon=True)
         self.thread.start()
         self.binary = Path(INSTALL) / 'node_modules/@anthropic-ai/claude-code-linux-x64/claude'
         self.scope = {'room_id': 'alpha', 'participant_id': 'claude', 'run_id': 'run-1', 'generation': 1, 'context_generation': 1}

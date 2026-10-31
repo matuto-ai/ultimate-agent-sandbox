@@ -32,6 +32,24 @@ def selections(root='/srv/uas'):
 class LocalNativeTests(unittest.TestCase):
     def setUp(self): self.config,self.doc=selections()
     def profile(self): return local.LocalNativeProfile(self.config,self.doc,'room','/srv/uas/control')
+    def test_reference_is_host_owned_readonly_projection_only(self):
+        profile = self.profile()
+        root = N(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o755)
+        runtime = N(st_uid=165532, st_gid=165532, st_mode=stat.S_IFDIR | 0o700)
+        profile.require_path_owner('reference', root)
+        for key in ('repo', 'workspace', 'checkouts', 'runtime'):
+            profile.require_path_owner(key, runtime)
+            with self.assertRaisesRegex(LifecycleError, 'PATH_OWNER'):
+                profile.require_path_owner(key, root)
+        for info in (runtime, N(st_uid=0, st_gid=1, st_mode=0o755),
+                     N(st_uid=0, st_gid=0, st_mode=0o777),
+                     N(st_uid=0, st_gid=0, st_mode=0o700)):
+            with self.assertRaisesRegex(LifecycleError, 'REFERENCE_OWNER_MODE'):
+                profile.require_path_owner('reference', info)
+        # The disposable qualifier's contract is deliberately unchanged.
+        with self.assertRaisesRegex(LifecycleError, 'PATH_OWNER'):
+            local.native.NativeBoundaryProfile.require_path_owner(profile, 'reference', root)
+
     def test_profile_stable_and_exact_distinct_from_qualification(self):
         a,b=self.profile(),self.profile()
         self.assertEqual(a.spec(),b.spec());self.assertEqual(a.digest,b.digest)

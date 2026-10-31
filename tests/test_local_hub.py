@@ -82,14 +82,18 @@ class LocalHubTests(unittest.TestCase):
         record2=SimpleNamespace(data=json.dumps(ready).encode())
         def record(value):
             result=Mock();result.__enter__=Mock(return_value=value);result.__exit__=Mock(return_value=False);return result
-        engine=Mock();budget=Mock();budget.remaining.return_value=5
+        engine=Mock();budget=Mock();budget.remaining.return_value=5;phases=[];handoff=Mock()
         with patch.object(session,'EndpointLease'),patch.object(session,'enable'),patch.object(session,'HeldOrigin'),patch.object(session,'receive',side_effect=[record(record1),record(record2)]),ExitStack() as stack:
-            result=session.start_hub_channel(engine,resources,startup,listener,stack,budget)
+            result=session.start_hub_channel(engine,resources,startup,listener,stack,budget,progress=phases.append,library_handoff=handoff)
             self.assertEqual(result[2],ready);engine.start_hub.assert_called_once_with('owned-id')
-        engine=Mock();engine.start_hub.side_effect=TimeoutError('uncertain start')
+            self.assertEqual(phases,['hub-attach','hub-start','hub-write','hub-connect','hub-origin','hub-release','hub-library-handoff','hub-ready'])
+            handoff.assert_called_once_with(control,result[1])
+        engine=Mock();engine.start_hub.side_effect=TimeoutError('uncertain start');phases=[]
         with patch.object(session,'EndpointLease'),ExitStack() as stack:
-            with self.assertRaises(TimeoutError):session.start_hub_channel(engine,resources,startup,listener,stack,budget)
+            with self.assertRaises(TimeoutError):session.start_hub_channel(engine,resources,startup,listener,stack,budget,progress=phases.append)
         engine.start_hub.assert_called_once_with('owned-id');engine.attach_hub.return_value.close.assert_called_once()
+        self.assertEqual(phases,['hub-attach','hub-start'])
+        self.assertEqual(host.failure_receipt(phases[-1],TimeoutError('private'))['phase'],'hub-start')
 
     def test_startup_rejects_alias_descriptors(self):
         value={'version':1,'room':{},'resources':{'hub_id':'owned','instance':'instance','control_path':'/owned/hub.sock',
@@ -105,3 +109,169 @@ class LocalHubTests(unittest.TestCase):
         self.assertNotIn('run_id',result)
         self.assertEqual(result['seats'][0]['capabilities'],['forge-read','peer-traffic'])
         self.assertEqual(result['forge']['repository'],room['project']['repository'])
+    def test_failure_receipt_is_closed_and_never_contains_exception_text(self):
+        for error,kind in ((OriginDenied('secret/path'),'origin-denied'),
+                           (QualificationError('secret/token'),'qualification'),
+                           (PermissionError('secret'),'permission'),
+                           (TimeoutError('secret'),'timeout'),(ValueError('secret'),'other')):
+            self.assertEqual(host.failure_receipt('library-root',error),
+                {'version':1,'status':'unknown','phase':'library-root','error':kind})
+        self.assertEqual(host.failure_receipt('private/path',ValueError()).get('phase'),'bootstrap')
+    def test_main_emits_safe_failure_then_terminates(self):
+        from io import BytesIO
+        output=BytesIO()
+        def fail(raw,fd,*,phase):
+            phase('hub-startup');raise OriginDenied('private model/config text')
+        with patch.object(host.sys,'argv',['fixed']),patch.object(host.os,'read',side_effect=[b'{',b'}',b'\n']),patch.object(host,'run',side_effect=fail),patch.object(host.sys,'stdout',SimpleNamespace(buffer=output)):
+            with self.assertRaises(OriginDenied):host.main()
+        value=json.loads(output.getvalue())
+        self.assertEqual(value,{'version':1,'status':'unknown','phase':'hub-startup','error':'origin-denied'})
+    def test_local_entrypoint_emits_only_fixed_flushed_phases_and_import_order(self):
+        import builtins
+        from uas import local_hub
+        output=Mock()
+        with patch.object(local_hub.sys,'stderr',output):
+            for phase in sorted(local_hub.PHASES):local_hub.progress(phase)
+            for bad in ('secret\nprobe-done','unknown',None,[]):
+                with self.assertRaises(ValueError):local_hub.progress(bad)
+        self.assertEqual(output.flush.call_count,len(local_hub.PHASES))
+        self.assertEqual([call.args[0] for call in output.write.call_args_list],
+            ['UAS_LOCAL_HUB_PHASE '+phase+'\n' for phase in sorted(local_hub.PHASES)])
+        events=[];original=builtins.__import__
+        def importing(name,*args,**kwargs):
+            if name=='workstation_service':events.append('actual-import')
+            return original(name,*args,**kwargs)
+        with patch.object(local_hub,'progress',side_effect=events.append),patch.object(builtins,'__import__',side_effect=importing),patch.object(service,'run_service',return_value='done') as run:
+            self.assertEqual(local_hub.main(),'done')
+        self.assertEqual(events,['import-start','actual-import','import-done'])
+        self.assertTrue(run.call_args.kwargs['persistent'])
+        self.assertIn('progress',run.call_args.kwargs)
+
+    def test_preconnect_phases_preserve_guard_order_and_propagate_failure(self):
+        from io import BytesIO
+        import hashlib
+        mapping={'uid_map':'0 100000 65536\n','gid_map':'0 100000 65536\n','overflow_uid':65534,'overflow_gid':65534}
+        value=self.value();value['mapping_digest']=hashlib.sha256(json.dumps(mapping,sort_keys=True).encode()).hexdigest()
+        def read(path):
+            return str(mapping[{'overflowuid':'overflow_uid','overflowgid':'overflow_gid'}.get(path.name,path.name)])
+        class ConnectReached(Exception):pass
+        channel=Mock();channel.connect.side_effect=ConnectReached
+        phases=[]
+        with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=65531),patch.object(service.os,'getgid',return_value=65531),patch.object(service.os,'umask'),patch.object(service,'probe') as probe,patch.object(service,'process_status',return_value={'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'}),patch.object(service.sys,'stdin',SimpleNamespace(buffer=BytesIO(json.dumps(value).encode()+b'\n'))),patch.object(service.Path,'read_text',read),patch.object(service,'EndpointLease'),patch.object(service.socket,'socket',return_value=channel),patch.object(service,'enable'):
+            with self.assertRaises(ConnectReached):service.run_service(persistent=True,progress=phases.append)
+        self.assertEqual(phases,['entrypoint-validated','probe-start','probe-done','metadata-wait','metadata-read','config-decoded','binding-validated','seats-validated','metadata-parsed','mapping-validated','paths-validated','control-connect'])
+        probe.assert_called_once();channel.send.assert_not_called()
+        with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=0),patch.object(service,'probe') as probe:
+            with self.assertRaises(OriginDenied):service.run_service(persistent=True,progress=lambda _:self.fail('phase before guard'))
+        probe.assert_not_called()
+        with patch.object(service.sys,'argv',['fixed']),patch.object(service.os,'getuid',return_value=65531),patch.object(service.os,'getgid',return_value=65531),patch.object(service,'probe') as probe:
+            with self.assertRaisesRegex(RuntimeError,'phase failure'):
+                service.run_service(persistent=True,progress=Mock(side_effect=RuntimeError('phase failure')))
+        probe.assert_not_called()
+    def test_cold_configuration_does_not_load_unneeded_broker_or_human_authority(self):
+        import subprocess
+        import sys
+        value=self.value()
+        value['forge']={'project_id':'project','repository':'owner/repository','host':'github.com'}
+        value['library']={'project':{'id':'project','repository':'owner/repository',
+            'roots':{'reference':'/owned/reference'}},'source_identity':'source'}
+        script="""import sys,json
+sys.path.insert(0,sys.argv[1])
+from uas.workstation_service import configuration
+value=json.loads(sys.argv[2]);observed,seats=configuration(json.dumps(value).encode(),persistent=True)
+assert observed==value and len(seats)==2
+assert 'uas.forge' not in sys.modules
+assert 'uas.manager_actions' not in sys.modules
+assert 'uas.library' not in sys.modules
+assert 'uas.library_binding' in sys.modules
+from uas import library
+binding=library.project_binding(value['library']['project'],source_identity='source')
+try:library.human_scope(object(),binding=binding,kind='drain')
+except library.LibraryError as error:assert error.code=='LIBRARY_AUTHENTICATION_REQUIRED'
+else:raise AssertionError('fake human accepted')
+assert 'uas.manager_actions' in sys.modules
+"""
+        result=subprocess.run([sys.executable,'-I','-S','-B','-c',script,
+            str(Path(__file__).resolve().parents[1]),json.dumps(value)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+    def test_configuration_phase_order_preserves_binding_refusal(self):
+        from uas.library_binding import LibraryError
+        value=self.value()
+        value['forge']={'project_id':'project','repository':'owner/repository','host':'github.com'}
+        value['library']={'project':{'id':'project','repository':'owner/repository',
+            'roots':{'reference':'/owned/reference'}},'source_identity':'source'}
+        phases=[]
+        service.configuration(json.dumps(value).encode(),persistent=True,progress=phases.append)
+        self.assertEqual(phases,['config-decoded','forge-import','forge-imported',
+            'library-import','library-imported','binding-validated','seats-validated'])
+        value['library']['source_identity']='not a valid identity';phases=[]
+        with self.assertRaises(LibraryError):
+            service.configuration(json.dumps(value).encode(),persistent=True,progress=phases.append)
+        self.assertEqual(phases[-1],'library-imported')
+        self.assertNotIn('binding-validated',phases)
+
+
+class PrivateAdmissionJournalTests(unittest.TestCase):
+    def test_setgid_shared_store_gets_private_journal_and_reopens_without_repairs(self):
+        import os
+        import stat
+        from uas.kernel_origin import HeldOrigin, Record
+        from uas.ledger import RoomLedger
+        from uas.workstation_admission import HubAdmission
+        with tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+            store=Path(directory);store.chmod(0o2770)
+            chmod=os.fchmod;observed=[]
+            def fresh_only(fd,mode):
+                observed.append((stat.S_IMODE(os.fstat(fd).st_mode),mode));chmod(fd,mode)
+            with patch.object(service.os,'fchmod',side_effect=fresh_only):journal=service.admission_journal()
+            self.assertEqual(observed,[(0o2700,0o700)])
+            self.assertEqual(journal,store/'private-admission'/'admissions.db')
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode),0o2770)
+            self.assertEqual(stat.S_IMODE(journal.parent.stat().st_mode),0o700)
+            self.assertEqual((journal.parent.stat().st_uid,journal.parent.stat().st_gid),(os.getuid(),os.getgid()))
+            supervisor=HeldOrigin(Record(b'',(os.getpid(),os.getuid(),os.getgid()),os.pidfd_open(os.getpid())))
+            self.addCleanup(supervisor.close)
+            _,seats=service.configuration(json.dumps(LocalHubTests().value()).encode(),persistent=True)
+            admission=HubAdmission(journal,seats=seats,supervisor=supervisor,endpoint=Mock())
+            admission.close()
+            with patch.object(service.os,'fchmod') as repair:
+                self.assertEqual(service.admission_journal(),journal)
+            repair.assert_not_called()
+            reopened=HubAdmission(journal,seats=seats,supervisor=supervisor,endpoint=Mock());reopened.close()
+            with RoomLedger(store/'room.db','alpha') as ledger:self.assertEqual(ledger.snapshot()['room_seq'],0)
+            self.assertTrue((store/'room.db').is_file());self.assertFalse((store/'admissions.db').exists())
+            self.assertEqual(stat.S_IMODE(store.stat().st_mode),0o2770)
+
+    def test_existing_wrong_mode_foreign_owner_and_symlink_are_never_repaired(self):
+        import os
+        import stat
+        for mode in (0o2770,0o2700,0o770,0o755,0o600):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+                child=Path(directory)/'private-admission';child.mkdir();child.chmod(mode)
+                with patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+                repair.assert_not_called();self.assertEqual(stat.S_IMODE(child.stat().st_mode),mode)
+        with tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+            child=Path(directory)/'private-admission';child.mkdir(mode=0o700)
+            uid=os.getuid()
+            with patch.object(service.os,'getuid',return_value=uid+1),patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+            repair.assert_not_called()
+            gid=os.getgid()
+            with patch.object(service.os,'getgid',return_value=gid+1),patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+            repair.assert_not_called()
+            child.rmdir();target=Path(directory)/'target';target.mkdir(mode=0o700);child.symlink_to(target)
+            with patch.object(service.os,'fchmod') as repair,self.assertRaises(OriginDenied):service.admission_journal()
+            repair.assert_not_called();self.assertTrue(child.is_symlink())
+
+    def test_legacy_shared_journal_is_not_silently_migrated_or_reset(self):
+        for name in ('admissions.db','admissions.db.lock','admissions.db-wal','admissions.db-shm'):
+            with self.subTest(name=name),tempfile.TemporaryDirectory() as directory,patch.object(service,'STORE',Path(directory)):
+                old=Path(directory)/name;old.write_bytes(b'old authority receipt')
+                with self.assertRaisesRegex(OriginDenied,'explicit reconciliation'):service.admission_journal()
+                self.assertEqual(old.read_bytes(),b'old authority receipt')
+                self.assertFalse((Path(directory)/'private-admission').exists())
+
+    def test_qualification_reader_uses_same_private_child_without_moving_room_ledger(self):
+        root=Path(__file__).resolve().parents[1]
+        reader=(root/'tests/vm/guest_workstation.py').read_text()
+        self.assertIn("read_admission_states(paths['hub']/'private-admission'/'admissions.db')",reader)
+        self.assertIn("RoomLedger(STORE/'room.db'",(root/'uas/workstation_service.py').read_text())

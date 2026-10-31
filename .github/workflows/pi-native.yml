@@ -31,8 +31,9 @@ jobs:
           node-version: '24.22.1'
       - name: Install hash-pinned Library parser for real projection fixture
         run: |
-          python3 -m venv "$RUNNER_TEMP/uas-python"
-          "$RUNNER_TEMP/uas-python/bin/python" -m pip install --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
+          # Reuse the runner installer, not its site-packages; avoid ensurepip per job.
+          python3 -m venv --without-pip "$RUNNER_TEMP/uas-python"
+          python3 -m pip --python "$RUNNER_TEMP/uas-python" install --require-virtualenv --disable-pip-version-check --require-hashes --only-binary=:all: -r requirements.txt
       - name: Install locked official Pi without lifecycle scripts or account configuration
         run: sh tests/pi/install-dependencies.sh
       - name: Require actual Pi extension and RPC across the durable Hub seam

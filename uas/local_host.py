@@ -13,6 +13,7 @@ import socket
 import stat
 import struct
 
+from .ledger import LedgerError
 from .local_installation import Installation, LocalInstallationError, document, canonical, require
 
 MAX_REQUEST = 8192
@@ -20,14 +21,20 @@ MAX_RESPONSE = 1024 * 1024
 
 
 class LocalController:
-    def __init__(self, installation, native_factory, *, services, host_lock_fd=None, manager=None):
+    def __init__(self, installation, native_factory, *, services, host_lock_fd=None, manager=None,
+                 library=None):
         require(type(installation) is Installation, 'INSTALLATION_OWNER_REQUIRED')
+        if library is not None:
+            from .library_deployment import DeploymentLibrary
+            require(type(library) is DeploymentLibrary, 'LOCAL_LIBRARY_DEPLOYMENT_REQUIRED')
         self.installation = installation
         self.value, self.config, selected = installation.open()
         self.rooms = {r['id'] for r in self.config['rooms']}
         self.services = services
         self.host_lock_fd = host_lock_fd
         self.manager = manager
+        self.library = library
+        self._ledgers = {}
         self.native = None
         if selected['native'] is not None:
             self.native = native_factory(self.config, selected['native'],
@@ -49,6 +56,23 @@ class LocalController:
                 return self._handle(raw)
         return self._handle(raw)
 
+    def ledger(self, room):
+        """The running Room's canonical ledger; no guessed instance or path."""
+        from .ledger import RoomLedger
+        if self.native is None:
+            raise LocalInstallationError('LIBRARY_LEDGER_UNAVAILABLE')
+        path = self._ledgers.get(room)
+        if path is None:
+            owner, backend, state = self.native.resources(room)
+            path = backend.layout(state)['hub'] / 'room.db'
+            self._ledgers[room] = path
+        try:
+            # Reports must never create or initialize the Hub's canonical store
+            # under the host identity; a missing one leaves them replayable.
+            return RoomLedger.open_reader(path, room)
+        except LedgerError:
+            raise LocalInstallationError('LIBRARY_LEDGER_UNAVAILABLE') from None
+
     def _handle(self, raw):
         require(type(raw) is bytes and 0 < len(raw) <= MAX_REQUEST, 'REQUEST_SIZE')
         request = document(raw)
@@ -65,14 +89,35 @@ class LocalController:
         if action == 'start':
             if self.host_lock_fd is not None:
                 self.native.prepare_start(room, owner_lock_fd=self.host_lock_fd)
-            result = self.native.start(room)
-            owner, backend, state = self.native.resources(room)
-            service = self.services.ensure(room, owner, backend, state)
+            # A Room whose projection this request bound must not keep it when
+            # the Room itself fails to start; a projection the host published at
+            # startup is left to the lease, which removes no content.
+            bound = False
+            if self.library is not None and not self.library.bound(room):
+                self.library.start_room(room)
+                bound = True
+            try:
+                result = self.native.start(room)
+                owner, backend, state = self.native.resources(room)
+                self._ledgers.pop(room, None)  # a restarted Room owns a new ledger path
+                service = self.services.ensure(room, owner, backend, state)
+            except BaseException:
+                if bound:
+                    self.library.stop_room(room)
+                raise
             manager = ({'status':'owned-by-runtime-child'} if service.get('manager_owner') in {'runtime','unknown'} else
                        self.manager.ensure(room, owner, backend, state) if self.manager else {'status':'not-configured'})
             return {**result, 'services': service, 'manager':manager}
         if action == 'stop':
-            return self.native.stop(room)
+            try:
+                return self.native.stop(room)
+            finally:
+                # A Stop whose native outcome is unknown must not keep publishing
+                # that Room, so the projection is released either way; canonical
+                # content and the Library singleton keep running.
+                if self.library is not None:
+                    self.library.stop_room(room)
+                self._ledgers.pop(room, None)
         return {**self.native.status(room), 'services': self.services.status(room),
                 'manager':self.manager.status() if self.manager else {'status':'not-configured'}}
 

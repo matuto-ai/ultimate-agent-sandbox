@@ -43,7 +43,7 @@ class ClaudeCICacheTests(unittest.TestCase):
 
 
 class ClaudeCIRunnerTests(unittest.TestCase):
-    def run_fixture(self, *, fail=False):
+    def run_fixture(self, *, fail=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root/'tests/claude').mkdir(parents=True)
@@ -54,7 +54,8 @@ class ClaudeCIRunnerTests(unittest.TestCase):
                 "from pathlib import Path\nPath('events').write_text('scan\\n')\n")
             (root/'tests/claude/probe.py').write_text(
                 "with open('events', 'a') as output: output.write('probe\\n')\n")
-            names = ('first', 'sdk_receiver', 'future')
+            names = ('first', 'sdk_receiver', 'participant', 'sdk', 'readiness',
+                     'runtime', 'library_read', 'library', 'future')
             for name in names:
                 (root/f'tests/test_claude_{name}.py').write_text(
                     'import time, unittest\n'
@@ -63,7 +64,7 @@ class ClaudeCIRunnerTests(unittest.TestCase):
                     f"  with open('events', 'a') as output: output.write('start:{name}\\n')\n"
                     '  time.sleep(.15)\n'
                     f"  with open('events', 'a') as output: output.write('end:{name}\\n')\n"
-                    f'  self.assertFalse({fail and name == "first"!r})\n')
+                    f'  self.assertFalse({name == fail!r})\n')
             result = subprocess.run(['sh', str(script)], cwd=root,
                 env={**os.environ, 'UAS_CLAUDE_INSTALL':'fixture',
                      'UAS_CLAUDE_SDK_INSTALL':'fixture', 'UAS_CLAUDE_NODE':sys.executable},
@@ -79,6 +80,10 @@ class ClaudeCIRunnerTests(unittest.TestCase):
             peak = max(peak, active)
         self.assertEqual(0, active)
         self.assertEqual(2, peak)
+        starts = [event for event in events[2:] if event.startswith('start:')]
+        self.assertCountEqual(['start:sdk_receiver', 'start:participant'], starts[:2])
+        # Every discovered module ran exactly once, including future/unranked ones.
+        self.assertEqual(len(names), len(starts))
         return result
 
     def test_all_modules_execute_with_two_workers_after_serial_contracts(self):
@@ -86,6 +91,11 @@ class ClaudeCIRunnerTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_a_worker_failure_cannot_be_hidden_by_other_successes(self):
-        result = self.run_fixture(fail=True)
+        result = self.run_fixture(fail="first")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('FAILED', result.stderr)
+
+    def test_a_prioritized_worker_failure_keeps_complete_discovery_binding(self):
+        result = self.run_fixture(fail='sdk_receiver')
         self.assertNotEqual(0, result.returncode)
         self.assertIn('FAILED', result.stderr)
