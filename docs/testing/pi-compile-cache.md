@@ -35,3 +35,15 @@ with a cold cache, a5.959s reduction. This is diagnostic local evidence, not a
 hosted gate claim; runner variance and full setup still count. The original hosted
 failures were62s,59s and66s against57.2s. Exact-head hosted CI must independently
 establish eligibility before merge. No reruns or thresholds are changed.
+
+## Measured recovery-shard rebalance
+
+The first hosted cache-only candidate passed all139 native cases but remained
+60.0s >57.2s. Native suite times were42.820s (primary),39.053s (default), and
+24.893s (recovery). Four independently isolated runtime cases (compaction,
+preflush crash, SIGSTOP handoff recovery and slow first flush) therefore move to
+the recovery shard. Local individual measurements totaled6.609s for these cases;
+an additional runtime-class official version probe in recovery remains counted.
+All139 IDs still execute exactly once; future runtime cases default to primary.
+No fixture, native assertion or deadline changes. This is substantive balancing
+of measured idle capacity, not a rerun of the rejected cache-only candidate.

@@ -75,6 +75,17 @@ class PiPartitionRunnerTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 runner.partition(bad)
 
+    def test_measured_runtime_cases_move_once_and_future_cases_still_run(self):
+        measured = sorted(runner.RECOVERY_RUNTIME_CASES)
+        future = 'test_pi_runtime.PiNativeTests.test_future_case'
+        inventory = NAMES + measured + [future]
+        groups = runner.partition(inventory)
+        self.assertEqual(NAMES[:2] + [future], groups[0])
+        self.assertEqual(NAMES[5:], groups[1])
+        self.assertEqual(NAMES[2:5] + measured, groups[2])
+        self.assertEqual(sorted(inventory), sorted(sum(groups, [])))
+        self.assertEqual(len(inventory), len(set(sum(groups, []))))
+
     def test_wait_reports_failure_or_absolute_timeout_without_reaping(self):
         process = Mock(returncode=None)
         with patch.object(runner, 'observe', return_value=1), self.assertRaises(RuntimeError):

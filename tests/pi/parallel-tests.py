@@ -21,6 +21,14 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PRIMARY = frozenset(('test_pi_runtime', 'test_pi_forge'))
 RECOVERY = frozenset(('test_pi_assignment', 'test_pi_reset', 'test_pi_library_capture'))
+# Measured slow, independently isolated runtime cases fill the recovery shard's
+# idle tail. These are scheduling hints, not an inventory allowlist.
+RECOVERY_RUNTIME_CASES = frozenset('test_pi_runtime.PiNativeTests.' + name for name in (
+    'test_actual_compaction_holds_then_fresh_observation_releases',
+    'test_crash_before_first_native_flush_keeps_unknown_intent_without_reinjection',
+    'test_sigstop_large_handoff_has_bounded_write_and_fenced_restart_recovery',
+    'test_slow_first_flush_stays_unconfirmed_then_read_only_retry_recovers',
+))
 WORK_SECONDS = 125
 CANCELLED = None
 
@@ -44,7 +52,7 @@ def partition(inventory):
     groups = [[], [], []]
     for name in inventory:
         module = name.split('.')[0]
-        index = 0 if module in PRIMARY else 2 if module in RECOVERY else 1
+        index = 2 if name in RECOVERY_RUNTIME_CASES or module in RECOVERY else 0 if module in PRIMARY else 1
         groups[index].append(name)
     if not all(groups) or sorted(sum(groups, [])) != sorted(inventory):
         raise ValueError('invalid Pi partition')
