@@ -133,11 +133,11 @@ def run(raw,parent_fd,*,phase=lambda _:None):
     with ExitStack() as stack:
         self_fd=os.pidfd_open(os.getpid(),0);stack.callback(os.close,self_fd)
         startup=metadata(document['room'],resources,_identity(self_fd),secrets.token_hex(32))
-        library_pair = None
+        library_channel = None
         if 'library' in document:
             phase('library-root')
             from .kernel_origin import enable, receive, HeldOrigin
-            from .local_library_transport import Relay, handoff, require
+            from .local_library_transport import Relay, accept_handoff, require
             root_channel = socket.socket(fileno=document['library']['fd']); stack.callback(root_channel.close)
             enable(root_channel); root_channel.settimeout(5)
             with receive(root_channel) as record:
@@ -146,20 +146,21 @@ def run(raw,parent_fd,*,phase=lambda _:None):
                         and json.loads(record.data) == {'kind':'root-ready'})
                 root_origin = HeldOrigin(record)
             stack.callback(root_origin.close)
-            library_pair = socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
-            for channel in library_pair: enable(channel); channel.settimeout(5); stack.callback(channel.close)
             startup['library'] = {k:document['library'][k] for k in ('project','source_identity')}
             configuration(_canonical(startup),persistent=True)
+        def receive_library(control, hub_origin):
+            nonlocal library_channel
+            library_channel = accept_handoff(control, hub_origin)
+            stack.callback(library_channel.close)
         listener=socket.socket(fileno=resources['control_fd']);stack.callback(listener.close)
         peer=socket.socket(fileno=resources['peer_fd']);stack.callback(peer.close)
         phase('hub-startup')
         control,origin,ready,_=start_hub_channel(DockerExecAPI(startup_engine(document)),resources,
                                                startup,listener,stack,SessionBudget(30),host_profile=host_profile,progress=phase,
-                                               library_handoff=None if library_pair is None else lambda control:handoff(control,library_pair[1]))
-        if library_pair is not None:
+                                               library_handoff=receive_library if 'library' in document else None)
+        if library_channel is not None:
             phase('relay-start')
-            library_pair[1].close()
-            relay=Relay(library_pair[0],origin,root_channel,root_origin)
+            relay=Relay(library_channel,origin,root_channel,root_origin)
             relay.start();stack.callback(relay.close)
         receipt={'version':1,'status':'ready','room_id':startup['room_id'],
                  'room_instance':startup['room_instance'],'controller':ready['controller']}

@@ -87,7 +87,7 @@ class LocalHubTests(unittest.TestCase):
             result=session.start_hub_channel(engine,resources,startup,listener,stack,budget,progress=phases.append,library_handoff=handoff)
             self.assertEqual(result[2],ready);engine.start_hub.assert_called_once_with('owned-id')
             self.assertEqual(phases,['hub-attach','hub-start','hub-write','hub-connect','hub-origin','hub-release','hub-library-handoff','hub-ready'])
-            handoff.assert_called_once_with(control)
+            handoff.assert_called_once_with(control,result[1])
         engine=Mock();engine.start_hub.side_effect=TimeoutError('uncertain start');phases=[]
         with patch.object(session,'EndpointLease'),ExitStack() as stack:
             with self.assertRaises(TimeoutError):session.start_hub_channel(engine,resources,startup,listener,stack,budget,progress=phases.append)

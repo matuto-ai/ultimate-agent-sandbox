@@ -92,10 +92,12 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         labels = backend._labels(receipt, 'hub')
         def wire(selected):
             return ' '.join(json.dumps(x) for x in ('d'*64, '/uas-native-'+'a'*32+'-hub', selected,
-                                                   False, 1, False, '2026-10-31T17:00:00.000000000Z')).encode()
+                                                   False, 1, False, '2026-10-31T17:00:00.000000000Z',
+                                                   'system_u:system_r:container_t:s0:c601,c602', 123)).encode()
         logs = b'File "/opt/uas/uas/local_hub.py", line 1\nModuleNotFoundError: No module named \'_sqlite3\'\nsecret-credential\n'
         logs = b'\n'.join(b'2026-10-31T17:00:01.000000000Z ' + line for line in logs.split(b'\n'))
-        with patch.object(probe, 'diagnostic_command', side_effect=[wire(labels), logs]) as command:
+        with patch.object(probe, 'owned_hub_avc', return_value={'state': 'fixture'}), \
+             patch.object(probe, 'diagnostic_command', side_effect=[wire(labels), logs]) as command:
             result = probe.owned_hub_diagnostic(receipt, 'alpha')
         self.assertEqual(result['state'], 'owned')
         self.assertFalse(result['running']); self.assertEqual(result['exit_code'], 1)
@@ -103,9 +105,11 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         self.assertIn('local_hub', result['errors']['uas_frames'])
         self.assertNotIn('secret-credential', json.dumps(result))
         self.assertEqual(command.call_args_list[1].args[0], ['logs', '--timestamps', '--tail', '80', 'd'*64])
-        with patch.object(probe, 'diagnostic_command', return_value=wire({**labels, prefix+'.room': 'beta'})) as command:
+        with patch.object(probe, 'owned_hub_avc') as avc, \
+             patch.object(probe, 'diagnostic_command', return_value=wire({**labels, prefix+'.room': 'beta'})) as command:
             self.assertEqual(probe.owned_hub_diagnostic(receipt, 'alpha'), {'state': 'unavailable'})
         self.assertEqual(command.call_count, 1)
+        avc.assert_not_called()
         bad_start = wire(labels).replace(b'2026-10-31T17:00:00.000000000Z', b'malformed-time')
         with patch.object(probe, 'diagnostic_command', return_value=bad_start) as command:
             result = probe.owned_hub_diagnostic(receipt, 'alpha')
@@ -113,6 +117,7 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         self.assertEqual(command.call_count, 1)
 
     def test_hub_log_filter_excludes_unknown_paths_modules_and_message_contents(self):
+        self.assertEqual(probe.filtered_hub_errors(b'uas.kernel_origin.OriginDenied: private message')['exception_classes'], ['OriginDenied'])
         result = probe.filtered_hub_errors(b'PermissionError: [Errno 13] Permission denied: /secret/path\n'
             b'ModuleNotFoundError: No module named \'private_secret\'\nFile "/secret/not_ours.py", line 1\n')
         self.assertEqual(result['missing_modules'], [])
@@ -167,3 +172,65 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         overflow = probe.timestamped_hub_errors(raw * 20, start)
         self.assertEqual(len(overflow['phase_timings']), 19)
         self.assertTrue(overflow['phase_timing_overflow'])
+
+
+    def test_avc_filter_requires_exact_owned_context_time_and_closed_fields(self):
+        label = 'system_u:system_r:container_t:s0:c601,c602'
+        start = '2026-10-31T17:00:00.000000000Z'
+        seconds = probe.docker_time_ns(start) // 1000000000
+        def row(context=label, timestamp=seconds+1, target='unconfined_t', perms='use'):
+            return (f'type=AVC msg=audit({timestamp}.123:7): avc:  denied  {{ {perms} }} for pid=123 '
+                    f'comm="python3" path="/private/secret" scontext={context} '
+                    f'tcontext=system_u:system_r:{target}:s0 tclass=fd permissive=0\n').encode()
+        result = probe.scoped_avc_rows(row(), label, start)
+        self.assertEqual(result['denials'], [{'class': 'fd', 'permissions': ['use'], 'target_type': 'unconfined_t'}])
+        self.assertNotIn('secret', json.dumps(result)); self.assertNotIn('123', json.dumps(result))
+        for raw in (row(context=label.replace('602', '603')), row(timestamp=seconds-1), row(timestamp=seconds+121)):
+            self.assertEqual(probe.scoped_avc_rows(raw, label, start)['denials'], [])
+        redacted = probe.scoped_avc_rows(row(target='secret_type', perms='secret_permission'), label, start)
+        self.assertEqual(redacted['denials'][0]['target_type'], 'redacted')
+        self.assertEqual(redacted['denials'][0]['permissions'], [])
+        overflow = probe.scoped_avc_rows(row()*20, label, start)
+        self.assertEqual(len(overflow['denials']), 16); self.assertTrue(overflow['overflow'])
+
+    def test_avc_reader_refuses_invalid_scope_before_open_and_symlink(self):
+        with patch.object(probe.os, 'open') as opened:
+            self.assertEqual(probe.owned_hub_avc('foreign-label', 'invalid-time'), {'state': 'unavailable'})
+        opened.assert_not_called()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)/'audit.log'; path.symlink_to(Path(temp)/'elsewhere')
+            with patch.object(probe, 'AUDIT_LOG', path):
+                result = probe.owned_hub_avc('system_u:system_r:container_t:s0:c601,c602',
+                                           '2026-10-31T17:00:00.000000000Z')
+            self.assertEqual(result, {'state': 'unavailable'})
+
+
+    def test_container_process_scope_requires_exact_init_descendants_and_fixed_roles(self):
+        rows = probe.owned_hub_processes(b'PID PPID COMMAND\n123 1 tini\n124 123 python3.14\n', 123)
+        self.assertEqual(rows, {123: (1, 'tini'), 124: (123, 'python3')})
+        for raw in (b'PID PPID COMMAND\n124 123 python3\n',
+                    b'PID PPID COMMAND\n123 1 tini\n124 999 python3\n',
+                    b'PID PPID COMMAND\n123 1 tini\n124 123 secret-command\n',
+                    b'PID PPID COMMAND\n123 1 tini\n124 123 python3 --secret\n'):
+            with self.assertRaises(RuntimeError): probe.owned_hub_processes(raw, 123)
+        with patch.object(probe, 'diagnostic_command', return_value=b'PID PPID COMMAND\n124 1 python3\n'), \
+             patch.object(probe.os, 'pidfd_open') as opened:
+            self.assertEqual(probe.owned_hub_fd_limits('a'*64, 123), {'state': 'unavailable'})
+        opened.assert_not_called()
+
+
+    def test_owned_fd_limit_diagnostic_emits_only_numeric_limits_and_roles(self):
+        from unittest.mock import MagicMock
+        listing = MagicMock(); listing.__enter__.return_value = iter([object(), object()])
+        top = b'PID PPID COMMAND\n123 1 tini\n'
+        with patch.object(probe, 'diagnostic_command', return_value=top), \
+             patch.object(probe.os, 'pidfd_open', return_value=10), \
+             patch.object(probe.os, 'open', return_value=11), \
+             patch.object(probe.os, 'read', return_value=b'Max open files     1024    4096    files   \n'), \
+             patch.object(probe.os, 'scandir', return_value=listing), \
+             patch.object(probe.os, 'close'), \
+             patch.object(probe.select, 'select', return_value=([], [], [])):
+            result = probe.owned_hub_fd_limits('a'*64, 123)
+        self.assertEqual(result, {'state': 'observed', 'processes': [
+            {'role': 'tini', 'soft': 1024, 'hard': 4096, 'count': 2}]})
+        self.assertNotIn('123', json.dumps(result))

@@ -1,4 +1,5 @@
 """Installed Library protocol guards plus real anonymous-channel proof when supported."""
+import array
 import base64
 from dataclasses import asdict
 import hashlib
@@ -6,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import threading
 import tempfile
 import time
@@ -125,6 +127,63 @@ class TransportGuards(unittest.TestCase):
         self.assertIn({'kind':'report-result','accepted':True},[call.args[1] for call in send.call_args_list])
 
 
+class HandoffFailureTests(unittest.TestCase):
+    def test_rejected_ancillary_closes_all_installed_descriptors_before_refusal(self):
+        for mode in ('trunc','ctrunc','unknown-first','malformed-first','partial-rights','extra-rights','wrong-origin','wrong-tag'):
+            with self.subTest(mode=mode):
+                descriptors=[os.open('/dev/null',os.O_RDONLY) for _ in range(3 if mode=='extra-rights' else 2)]
+                rights=descriptors[:-1];pidfd=descriptors[-1]
+                ancillary=[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',rights).tobytes()+
+                            (b'x' if mode=='partial-rights' else b'')),
+                           (socket.SOL_SOCKET,transport.SCM_PIDFD,array.array('i',[pidfd]).tobytes()),
+                           (socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('3i',1,2,3))]
+                if mode=='unknown-first':ancillary.insert(0,(socket.SOL_SOCKET,999,b'unknown'))
+                if mode=='malformed-first':ancillary.insert(0,(socket.SOL_SOCKET,socket.SCM_CREDENTIALS,b'short'))
+                flags={'trunc':socket.MSG_TRUNC,'ctrunc':socket.MSG_CTRUNC}.get(mode,0)
+                channel=Mock();channel.recvmsg.return_value=(b'wrong' if mode=='wrong-tag' else b'LIBRARY-CHANNEL-1',ancillary,flags,None)
+                origin=Mock()
+                if mode=='wrong-origin':origin.require.side_effect=OriginDenied('wrong origin')
+                try:
+                    with self.assertRaises(OriginDenied):transport.accept_handoff(channel,origin)
+                    for fd in descriptors:
+                        with self.assertRaises(OSError):os.fstat(fd)
+                    if mode!='wrong-origin':origin.require.assert_not_called()
+                finally:
+                    for fd in descriptors:
+                        try:os.close(fd)
+                        except OSError:pass
+
+    def test_negative_pidfd_refusal_closes_only_actually_installed_fds(self):
+        fd=os.open('/dev/null',os.O_RDONLY)
+        control=Mock();control.recvmsg.return_value=(b'LIBRARY-CHANNEL-1',[
+            (socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[fd]).tobytes()),
+            (socket.SOL_SOCKET,transport.SCM_PIDFD,array.array('i',[-13]).tobytes()),
+            (socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('3i',1,2,3))],0,None)
+        with self.assertRaises(OriginDenied):transport.accept_handoff(control,Mock())
+        with self.assertRaises(OSError):os.fstat(fd)
+
+    def test_listener_and_wrong_type_are_closed_not_adopted(self):
+        for listener,kind in ((True,socket.SOCK_SEQPACKET),(False,socket.SOCK_STREAM)):
+            descriptors=[os.open('/dev/null',os.O_RDONLY) for _ in range(2)]
+            channel=Mock();channel.recvmsg.return_value=(b'LIBRARY-CHANNEL-1',[
+                (socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[descriptors[0]]).tobytes()),
+                (socket.SOL_SOCKET,transport.SCM_PIDFD,array.array('i',[descriptors[1]]).tobytes()),
+                (socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('3i',1,2,3))],0,None)
+            endpoint=Mock(family=socket.AF_UNIX,type=kind);endpoint.getsockopt.return_value=int(listener)
+            endpoint.close.side_effect=lambda:os.close(descriptors[0])
+            with patch.object(transport.socket,'socket',return_value=endpoint),self.assertRaises(OriginDenied):
+                transport.accept_handoff(channel,Mock())
+            for fd in descriptors:
+                with self.assertRaises(OSError):os.fstat(fd)
+            endpoint.getpeername.assert_not_called()
+
+    def test_failed_offer_closes_both_created_endpoints(self):
+        left,right=Mock(),Mock()
+        with patch.object(transport.socket,'socketpair',return_value=(left,right)),patch.object(transport,'enable'),patch.object(transport,'handoff',side_effect=OriginDenied('refused')):
+            with self.assertRaises(OriginDenied):transport.offer_handoff(Mock())
+        left.close.assert_called_once();right.close.assert_called_once()
+
+
 class NativeLibraryChannelTests(unittest.TestCase):
     def setUp(self):
         try:probe()
@@ -167,8 +226,8 @@ class NativeLibraryChannelTests(unittest.TestCase):
             if process.is_alive():process.kill();process.join(1)
 
     def test_actual_bootstrap_descriptor_authenticated_and_connected(self):
-        sender,receiver=self.pair();left,right=self.pair()
-        transport.handoff(sender,right)
+        sender,receiver=self.pair()
+        left=transport.offer_handoff(sender);self.resources.append(left.close)
         installed=transport.accept_handoff(receiver,self.origin());self.resources.append(installed.close)
         left.send(b'proof')
         from uas.kernel_origin import receive
@@ -235,3 +294,23 @@ class NativeLibraryChannelTests(unittest.TestCase):
                     self.assertEqual([event['kind'] for event in events], [] if changed else ['library.drain.reported'])
                     if not changed:self.assertEqual(events[0]['payload'],report)
                 self.assertTrue(relay.close());self.assertTrue(server.close())
+
+    def test_reverse_handoff_is_authenticated_to_exact_owned_child(self):
+        import multiprocessing
+        sender,receiver=self.pair()
+        def child():
+            endpoint=transport.offer_handoff(sender)
+            try:
+                endpoint.send(b'child-created')
+                endpoint.recv(16)
+            finally:endpoint.close()
+        process=multiprocessing.get_context('fork').Process(target=child);process.start()
+        origin=HeldOrigin(Record(b'',(process.pid,os.getuid(),os.getgid()),os.pidfd_open(process.pid)))
+        self.resources.append(origin.close)
+        try:
+            installed=transport.accept_handoff(receiver,origin);self.resources.append(installed.close)
+            self.assertEqual(installed.recv(32),b'child-created')
+            installed.send(b'ack');process.join(1)
+            self.assertFalse(process.is_alive());self.assertEqual(process.exitcode,0)
+        finally:
+            if process.is_alive():process.kill();process.join(1)

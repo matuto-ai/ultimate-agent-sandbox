@@ -10,6 +10,7 @@ import calendar
 from datetime import datetime
 import hashlib
 import json
+import itertools
 import os
 from pathlib import Path
 import select
@@ -129,7 +130,7 @@ def filtered_hub_errors(raw):
                'OSError', 'RuntimeError', 'OriginDenied', 'LedgerError', 'QualificationError',
                'SyntaxError', 'TypeError', 'ValueError', 'OperationalError')
     result = {'exception_classes': [name for name in classes
-              if re.search(r'(?:^|\n)(?:[a-z_]+\.)?' + name + r':', text)]}
+              if re.search(r'(?:^|\n)(?:[a-z_][a-z0-9_]*\.)*' + name + r':', text)]}
     result['startup_phases'] = observed_phases[:len(phases)]
     result['startup_phase_overflow'] = len(observed_phases) > len(phases)
     known = {p.stem for p in (ROOT / 'uas').glob('*.py')}
@@ -181,6 +182,120 @@ def timestamped_hub_errors(raw, started_at):
     return result
 
 
+def owned_hub_processes(raw, init_pid):
+    lines = raw.decode('ascii').splitlines()
+    require(lines and lines[0].split() == ['PID', 'PPID', 'COMMAND'] and len(lines) <= 3,
+            'bounded exact container process table required')
+    rows = {}
+    for line in lines[1:]:
+        fields = line.split()
+        require(len(fields) == 3 and all(re.fullmatch(r'[1-9][0-9]{0,9}', n) for n in fields[:2])
+                and re.fullmatch(r'tini|python3(?:\.[0-9]{1,2})?', fields[2]), 'fixed Hub process roles required')
+        pid, parent = map(int, fields[:2])
+        require(pid not in rows, 'duplicate container process')
+        rows[pid] = (parent, 'tini' if fields[2] == 'tini' else 'python3')
+    require(init_pid in rows and rows[init_pid][1] == 'tini', 'owned container init required')
+    for pid in rows:
+        current = pid; seen = set()
+        while current != init_pid:
+            require(current in rows and current not in seen, 'owned descendant required')
+            seen.add(current); current = rows[current][0]
+    return rows
+
+
+def owned_hub_fd_limits(identity, init_pid):
+    try:
+        require(type(init_pid) is int and init_pid > 0, 'live owned init required')
+        command = ['top', identity, '-eo', 'pid,ppid,comm']
+        rows = owned_hub_processes(diagnostic_command(command, limit=4096), init_pid)
+        result = []
+        for pid, (_, role) in rows.items():
+            held = os.pidfd_open(pid, 0)
+            try:
+                require(not select.select([held], [], [], 0)[0], 'owned process exited')
+                directory = os.open('/proc/' + str(pid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    limits = os.open('limits', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                    try: raw = os.read(limits, 8193)
+                    finally: os.close(limits)
+                    require(len(raw) <= 8192, 'process limits bound')
+                    match = re.search(rb'^Max open files +([0-9]{1,10}) +([0-9]{1,10}) +files *$', raw, re.M)
+                    require(match is not None, 'numeric FD limits required')
+                    descriptors = os.open('fd', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                    try:
+                        with os.scandir(descriptors) as entries:
+                            count = sum(1 for _ in itertools.islice(entries, 4097))
+                    finally: os.close(descriptors)
+                    require(count <= 4096, 'descriptor inventory bound')
+                    require(not select.select([held], [], [], 0)[0], 'owned process exited')
+                    require(owned_hub_processes(diagnostic_command(command, limit=4096), init_pid) == rows,
+                            'container processes changed')
+                    result.append({'role': role, 'soft': int(match[1]), 'hard': int(match[2]), 'count': count})
+                finally: os.close(directory)
+            finally: os.close(held)
+        return {'state': 'observed', 'processes': result}
+    except Exception:
+        return {'state': 'unavailable'}
+
+
+AUDIT_LOG = Path('/var/log/audit/audit.log')
+
+
+def scoped_avc_rows(raw, process_label, started_at):
+    require(type(process_label) is str and re.fullmatch(
+        r'system_u:system_r:container_t:s0:c[0-9]{1,4},c[0-9]{1,4}', process_label),
+        'exact container process label required')
+    start = docker_time_ns(started_at)
+    classes = {'fd', 'file', 'dir', 'sock_file', 'unix_stream_socket', 'unix_dgram_socket',
+               'process', 'capability', 'capability2'}
+    permissions = {'use', 'read', 'write', 'open', 'getattr', 'setattr', 'ioctl', 'lock',
+                   'append', 'map', 'connectto', 'connect', 'accept', 'sendto', 'recvfrom',
+                   'send_msg', 'recv_msg', 'shutdown', 'search', 'execute', 'entrypoint', 'transition'}
+    types = {'container_t', 'container_runtime_t', 'unconfined_t', 'init_t', 'kernel_t',
+             'container_file_t', 'var_run_t', 'docker_var_run_t', 'tmp_t', 'unlabeled_t'}
+    rows = []
+    for line in raw.decode('utf-8', errors='replace').split('\n'):
+        if not line.startswith('type=AVC '): continue
+        context = re.search(r'(?:^| )scontext=([^ ]+)(?: |$)', line)
+        if context is None or context[1] != process_label: continue
+        stamp = re.search(r' msg=audit\(([0-9]{1,12})\.([0-9]{1,9}):[0-9]+\):', line)
+        if stamp is None: continue
+        timestamp = int(stamp[1])*1000000000 + int(stamp[2].ljust(9, '0'))
+        if not 0 <= timestamp-start <= 120000000000: continue
+        denial = re.search(r' avc: +denied +\{ ([a-z_ ]+) \}', line)
+        selected_class = re.search(r'(?:^| )tclass=([a-z0-9_]+)(?: |$)', line)
+        target = re.search(r'(?:^| )tcontext=[^ :]+:[^ :]+:([a-z0-9_]+):[^ ]+(?: |$)', line)
+        if denial is None or selected_class is None: continue
+        selected = denial[1].split()
+        rows.append({'class': selected_class[1] if selected_class[1] in classes else 'redacted',
+                     'permissions': sorted({p for p in selected if p in permissions}),
+                     'target_type': target[1] if target is not None and target[1] in types else 'redacted'})
+    return {'state': 'observed', 'denials': rows[:16], 'overflow': len(rows) > 16,
+            'scope': 'exact-owned-container-label-and-start-window'}
+
+
+def owned_hub_avc(process_label, started_at):
+    try:
+        # Validate scope before any audit access, including when the file is absent.
+        scoped_avc_rows(b'', process_label, started_at)
+        fd = os.open(AUDIT_LOG, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1,
+                    'ordinary root audit log required')
+            offset = max(0, info.st_size - 65536)
+            os.lseek(fd, offset, os.SEEK_SET)
+            raw = os.read(fd, 65536)
+            if offset: raw = raw.partition(b'\n')[2]  # discard partial leading record
+        finally:
+            os.close(fd)
+        return scoped_avc_rows(raw, process_label, started_at)
+    except FileNotFoundError:
+        return {'state': 'absent'}
+    except Exception:
+        return {'state': 'unavailable'}
+
+
 def owned_hub_diagnostic(receipt, room_id):
     try:
         require(receipt.get('room_id') == room_id, 'diagnostic Room differs')
@@ -191,13 +306,13 @@ def owned_hub_diagnostic(receipt, room_id):
                     for key in ('config_digest', 'profile_digest')), 'diagnostic digest')
         name = 'uas-native-' + instance + '-hub'
         # Select only identity/ownership/state, never environment or arbitrary config.
-        template = '{{json .Id}} {{json .Name}} {{json .Config.Labels}} {{json .State.Running}} {{json .State.ExitCode}} {{json .State.OOMKilled}} {{json .State.StartedAt}}'
+        template = '{{json .Id}} {{json .Name}} {{json .Config.Labels}} {{json .State.Running}} {{json .State.ExitCode}} {{json .State.OOMKilled}} {{json .State.StartedAt}} {{json .ProcessLabel}} {{json .State.Pid}}'
         raw = diagnostic_command(['inspect', '--type', 'container', '--format', template, name])
         decoder = json.JSONDecoder(); values = []; rest = raw.decode().strip()
         while rest:
             value, end = decoder.raw_decode(rest); values.append(value); rest = rest[end:].lstrip()
-        require(len(values) == 7, 'diagnostic inspect schema')
-        identity, observed_name, labels, running, exit_code, oom, started_at = values
+        require(len(values) == 9, 'diagnostic inspect schema')
+        identity, observed_name, labels, running, exit_code, oom, started_at, process_label, init_pid = values
         from uas.local_native import LocalNativeBackend
         prefix = LocalNativeBackend.LABEL
         expected = {prefix: 'true', prefix+'.room': room_id, prefix+'.instance': instance,
@@ -214,6 +329,8 @@ def owned_hub_diagnostic(receipt, room_id):
                 diagnostic_command(['logs', '--timestamps', '--tail', '80', identity]), started_at)
         except Exception:
             result['errors'] = {'state': 'unavailable'}
+        result['selinux_avc'] = owned_hub_avc(process_label, started_at)
+        result['fd_limits'] = owned_hub_fd_limits(identity, init_pid) if running else {'state': 'not-running'}
         return result
     except Exception:
         return {'state': 'unavailable'}

@@ -179,8 +179,8 @@ def run_service(*, persistent=False, progress=None):
                 raise OriginDenied('startup Supervisor kernel object not verified')
         library_channel = None
         if 'library' in metadata:
-            from .local_library_transport import accept_handoff
-            library_channel=accept_handoff(control,supervisor);stack.callback(library_channel.close)
+            from .local_library_transport import offer_handoff
+            library_channel=offer_handoff(control);stack.callback(library_channel.close)
         admissions=HubAdmission(STORE/'admissions.db',seats=seats,supervisor=supervisor,endpoint=peer_lease)
         stack.callback(admissions.close)
         ledger=RoomLedger(STORE/'room.db',metadata['room_id']);stack.callback(ledger.close)

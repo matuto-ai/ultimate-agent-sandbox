@@ -89,25 +89,46 @@ def handoff(control, channel):
                                     array.array('i', [channel.fileno()]))]) == len(raw))
 
 
-def accept_handoff(control, supervisor):
+def offer_handoff(control):
+    """Confined Hub creates its own channel and exports only the peer endpoint.
+
+    Never import a host-created socket into the confined Hub. The receiver still
+    authenticates the exact held Hub origin before retaining the exported fd.
+    """
+    local, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    try:
+        for channel in (local, peer): enable(channel); channel.settimeout(5)
+        handoff(control, peer)
+        return local
+    except BaseException:
+        local.close()
+        raise
+    finally: peer.close()
+
+
+def accept_handoff(control, expected):
     installed = []; rights = []; pids = []; creds = []
     channel = None
     try:
         data, ancillary, flags, _ = control.recvmsg(64, socket.CMSG_SPACE(12) +
             socket.CMSG_SPACE(4) + socket.CMSG_SPACE(253*4), socket.MSG_CMSG_CLOEXEC)
-        require(not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
+        # recvmsg can install descriptors even when truncation or a later
+        # ancillary record is invalid. Collect every installed fd before refusal.
+        invalid = bool(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
         for level, kind, raw in ancillary:
-            require(level == socket.SOL_SOCKET)
-            if kind in (socket.SCM_RIGHTS, SCM_PIDFD):
-                require(len(raw) % 4 == 0)
-                fds = array.array('i'); fds.frombytes(raw); installed.extend(fds)
+            if level == socket.SOL_SOCKET and kind in (socket.SCM_RIGHTS, SCM_PIDFD):
+                invalid |= len(raw) % 4 != 0
+                fds = array.array('i'); fds.frombytes(raw[:len(raw)-len(raw)%4])
+                installed.extend(fd for fd in fds if fd >= 0)
+                invalid |= any(fd < 0 for fd in fds)
                 (rights if kind == socket.SCM_RIGHTS else pids).extend(fds)
-            elif kind == socket.SCM_CREDENTIALS:
-                require(len(raw) == 12); creds.append(struct.unpack('3i', raw))
-            else: require(False)
+            elif level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS and len(raw) == 12:
+                creds.append(struct.unpack('3i', raw))
+            else: invalid = True
+        require(not invalid)
         require(data == b'LIBRARY-CHANNEL-1' and len(rights) == len(pids) == len(creds) == 1
                 and all(fd >= 0 and not os.get_inheritable(fd) for fd in installed))
-        supervisor.require(Record(data, creds[0], pids[0]))
+        expected.require(Record(data, creds[0], pids[0]))
         channel = socket.socket(fileno=rights[0]); installed.remove(rights[0])
         require(channel.family == socket.AF_UNIX and channel.type == socket.SOCK_SEQPACKET
                 and not channel.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))

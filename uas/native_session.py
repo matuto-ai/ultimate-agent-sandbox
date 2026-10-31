@@ -140,7 +140,7 @@ def start_hub_channel(engine, resources, metadata, control_listener, stack, budg
     require(control.send(RELEASE) == len(RELEASE), 'HUB_RELEASE_UNKNOWN')
     if library_handoff is not None:
         if progress is not None: progress('hub-library-handoff')
-        library_handoff(control)
+        library_handoff(control, origin)
     if progress is not None: progress('hub-ready')
     with receive(control) as record:
         origin.require(record); ready = json.loads(record.data, object_pairs_hook=_unique)
