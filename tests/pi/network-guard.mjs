@@ -15,3 +15,7 @@ http.request = http.get = https.request = https.get = deny;
 net.connect = net.createConnection = tls.connect = deny;
 net.Socket.prototype.connect = deny;
 syncBuiltinESMExports();
+
+// The shell owns a fresh private directory; standalone guard calls remain uncached.
+import { enableJobCompileCache } from './compile-cache.mjs';
+enableJobCompileCache();
