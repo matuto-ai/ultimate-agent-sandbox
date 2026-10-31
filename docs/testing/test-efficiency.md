@@ -60,3 +60,21 @@ families, records, partition inventory and workflow policy. Native tests skipped
 locally are not passing native evidence. Exact-head hosted functional results,
 runtime-budget results and independent review must be recorded in the PR,
 followed by postmerge CI; this document alone does not claim those passed.
+
+## Native Pi fixture version setup (#258)
+
+`PiNativeTests` probes the actual official CLI's `--version` once for each class
+execution in a new account-free temporary HOME with the existing network guard.
+Each case still checks its locked package version; each RPC start/restart retains
+its own existing HOME, journal, session and native process behavior. A mismatch,
+launch failure or timeout fails class setup, clears prior proof and cannot count
+as skipped native evidence. The class hook runs again on another suite execution.
+
+Five local actual CLI probes measured 0.849, 0.674, 0.677, 0.720 and 0.717 seconds.
+The 17 native runtime cases previously probed on every start, including restarts;
+at least 16 redundant process launches are removed. This is setup cost, not a
+reduction in native test cases, RPC checks, deadlines or runtime accounting.
+Hosted evidence is required because runner speed varies: unchanged partition 0
+ran its 36 cases in 40.442 seconds on main run 41182815804 and 64.970 seconds on
+PR247 run 41193663699. The latter's 81-second job exceeded its 70.4-second limit;
+it was not merged or rerun to erase that failure.

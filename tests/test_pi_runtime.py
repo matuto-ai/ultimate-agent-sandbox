@@ -25,6 +25,30 @@ INSTALL = os.environ.get('UAS_PI_INSTALL')
 
 @unittest.skipUnless(INSTALL, 'Set UAS_PI_INSTALL for the mandatory official Pi native CI suite')
 class PiNativeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # A locked installation is shared, never a session or process. Probe the
+        # actual executable once per class run, not before every RPC restart.
+        # Clear first so a later failed class setup cannot reuse earlier proof.
+        cls.runtime_version = None
+        install = Path(INSTALL).resolve()
+        package = install / 'node_modules/@earendil-works/pi-coding-agent'
+        if json.loads((package / 'package.json').read_text())['version'] != '1.4.0':
+            raise AssertionError('Official Pi 1.4.0 required')
+        with tempfile.TemporaryDirectory(prefix='uas-pi-version-') as directory:
+            home = Path(directory)
+            (home / 'agent').mkdir()
+            env = {'PATH': os.environ['PATH'], 'HOME': str(home),
+                   'PI_CODING_AGENT_DIR': str(home / 'agent'), 'PI_OFFLINE': '1',
+                   'NODE_OPTIONS': '--import=' + str(ROOT / 'tests/pi/network-guard.mjs'),
+                   'UAS_PI_FAUX_MODULE': str(install / 'node_modules/@earendil-works/pi-ai/dist/providers/faux.js')}
+            version = subprocess.run([shutil.which('node'), str(package / 'dist/cli.js'), '--version'],
+                                     env=env, cwd=home, capture_output=True, text=True,
+                                     check=True, timeout=10).stdout.strip()
+            if version != '1.4.0':
+                raise AssertionError('Official Pi CLI 1.4.0 required')
+        cls.runtime_version = version
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='uas-pi-')
         self.root = Path(self.temp.name)
@@ -53,11 +77,9 @@ class PiNativeTests(unittest.TestCase):
                 '--provider', 'faux', '--model', 'faux-1', '--session-dir', str(self.root / 'sessions')]
         if session:
             argv += ['--session', session]
-        version = subprocess.run([argv[0], argv[1], '--version'], env=env, cwd=self.root,
-                                 capture_output=True, text=True, check=True, timeout=10).stdout.strip()
-        self.assertEqual(version, '1.4.0')
+        self.assertEqual(self.runtime_version, '1.4.0')
         self.native = FixturePiRpcReceiver(argv, cwd=self.root, env=env, journal=self.root / 'intent.db',
-                                          runtime_version=version, scope={'room_id': 'alpha', 'participant_id': 'pi',
+                                          runtime_version=self.runtime_version, scope={'room_id': 'alpha', 'participant_id': 'pi',
                                           'run_id': 'run-1', 'generation': 1, 'context_generation': 1})
         self.connection = self.hub.connect('pi-' + self.native.initial_state['runtime_id'], 'pi',
                                           self.native.initial_state['runtime_id'], self.native)
