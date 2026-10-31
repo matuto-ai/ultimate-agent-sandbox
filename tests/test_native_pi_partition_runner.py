@@ -75,16 +75,16 @@ class PiPartitionRunnerTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 runner.partition(bad)
 
-    def test_measured_runtime_cases_move_once_and_future_cases_still_run(self):
-        measured = sorted(runner.RECOVERY_RUNTIME_CASES)
-        future = 'test_pi_runtime.PiNativeTests.test_future_case'
-        inventory = NAMES + measured + [future]
-        groups = runner.partition(inventory)
-        self.assertEqual(NAMES[:2] + [future], groups[0])
-        self.assertEqual(NAMES[5:], groups[1])
-        self.assertEqual(NAMES[2:5] + measured, groups[2])
+    def test_two_workers_keep_modules_together_and_include_future_cases(self):
+        inventory = NAMES + ['test_pi_runtime.C.test_future', 'test_pi_forge.C.test_next']
+        groups = runner.worker_groups(inventory)
+        self.assertEqual(2, len(groups))
         self.assertEqual(sorted(inventory), sorted(sum(groups, [])))
-        self.assertEqual(len(inventory), len(set(sum(groups, []))))
+        for module in {name.split('.')[0] for name in inventory}:
+            self.assertEqual(1, sum(any(name.split('.')[0] == module for name in g) for g in groups))
+        for bad in ([], NAMES + NAMES[:1]):
+            with self.assertRaises(ValueError):
+                runner.worker_groups(bad)
 
     def test_wait_reports_failure_or_absolute_timeout_without_reaping(self):
         process = Mock(returncode=None)
@@ -180,6 +180,7 @@ class PiPartitionRunnerTests(unittest.TestCase):
                         runner.run(selected)
                 else:
                     self.assertEqual(0, runner.run(selected))
+            self.assertLessEqual(len(processes), 2)
             cleanup.assert_called_once_with(processes)
             if cancel_during_spawn:
                 self.assertEqual(1, len(processes))
@@ -196,10 +197,13 @@ class PiPartitionRunnerTests(unittest.TestCase):
         first = self.exercise(selected=0)
         second = self.exercise(selected=1)
         third = self.exercise(selected=2)
-        self.assertEqual([NAMES[:2]], first)
+        self.assertEqual([[NAMES[0]], [NAMES[1]]], first)
         self.assertEqual([NAMES[5:]], second)
-        self.assertEqual([NAMES[2:5]], third)
-        self.assertEqual(first + second + third, self.exercise())
+        self.assertEqual([[NAMES[2], NAMES[4]], [NAMES[3]]], third)
+        local = self.exercise()
+        self.assertEqual(2, len(local))
+        self.assertEqual(sorted(NAMES), sorted(sum(first + second + third, [])))
+        self.assertEqual(sorted(NAMES), sorted(sum(local, [])))
         for invalid in (-1, 3, True, '0'):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 runner.run(invalid)

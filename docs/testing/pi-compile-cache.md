@@ -47,3 +47,26 @@ an additional runtime-class official version probe in recovery remains counted.
 All139 IDs still execute exactly once; future runtime cases default to primary.
 No fixture, native assertion or deadline changes. This is substantive balancing
 of measured idle capacity, not a rerun of the rejected cache-only candidate.
+
+## Two workers within each existing job
+
+The attempted four-case rebalance still failed the hosted budget:68s, with
+primary/default/recovery native times37.092/34.580/46.660s. It is superseded,
+not retried. Restore the original36/81/22 partition inventory and split each job
+into at most two owned subprocesses, matching the two-core runner. Whole modules
+remain together: runtime vs Forge; admission/initialization vs other default
+modules; reset vs assignment/capture. No repeated class setup is introduced.
+
+The existing process-group retention/signalling/reaping mechanism and single
+absolute125-second work deadline cover both workers. Both have unique TMPDIR,
+manifest, evidence and log files; evidence joins only after cleanup. Any worker
+failure, cancellation, partial spawn failure, skip or inventory drift fails the
+invocation. Local all-partition execution also has a two-worker ceiling, never
+six. The three hosted job names and runtime accounting graph are unchanged.
+
+Isolation inspection: native modules create per-test TemporaryDirectories,
+private ledgers and sessions; channels use unnamed socketpairs rather than shared
+ports. Official installation/source and compiled code are the only shared data.
+No production setting, test timeout, fixture assertion or network permission
+changes. New tests assert exact disjoint union, module co-location, future-test
+inclusion and the two-worker ceiling across normal/failure/cancellation paths.

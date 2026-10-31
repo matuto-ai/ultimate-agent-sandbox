@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Three disjoint native Pi suites; no shared sessions, fixtures or evidence writers.
 
-CI runs one partition per runner; local invocations run all three in parallel.
+CI runs one partition per runner. Every invocation uses at most two workers;
+local invocations cover all three partitions within the same two-worker ceiling.
 The shell runs the official auth/resume contracts first. This runner never changes
 network/provider guards or skips discovered tests. Work is bounded to 125 seconds
 plus two seconds of owned process-group cleanup inside the existing CI job.
@@ -21,14 +22,11 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PRIMARY = frozenset(('test_pi_runtime', 'test_pi_forge'))
 RECOVERY = frozenset(('test_pi_assignment', 'test_pi_reset', 'test_pi_library_capture'))
-# Measured slow, independently isolated runtime cases fill the recovery shard's
-# idle tail. These are scheduling hints, not an inventory allowlist.
-RECOVERY_RUNTIME_CASES = frozenset('test_pi_runtime.PiNativeTests.' + name for name in (
-    'test_actual_compaction_holds_then_fresh_observation_releases',
-    'test_crash_before_first_native_flush_keeps_unknown_intent_without_reinjection',
-    'test_sigstop_large_handoff_has_bounded_write_and_fenced_restart_recovery',
-    'test_slow_first_flush_stays_unconfirmed_then_read_only_retry_recovers',
-))
+# Two bounded workers per invocation, including local all-partition runs. Keep
+# complete modules/classes together so class-level official probes are not repeated.
+# Native module pairs balance real process startup; unknown modules remain included.
+SECOND_WORKER_MODULES = frozenset(('test_pi_forge', 'test_pi_run_admission',
+                                    'test_pi_initialization', 'test_pi_reset'))
 WORK_SECONDS = 125
 CANCELLED = None
 
@@ -52,11 +50,21 @@ def partition(inventory):
     groups = [[], [], []]
     for name in inventory:
         module = name.split('.')[0]
-        index = 2 if name in RECOVERY_RUNTIME_CASES or module in RECOVERY else 0 if module in PRIMARY else 1
+        index = 0 if module in PRIMARY else 2 if module in RECOVERY else 1
         groups[index].append(name)
     if not all(groups) or sorted(sum(groups, [])) != sorted(inventory):
         raise ValueError('invalid Pi partition')
     return groups
+
+
+def worker_groups(inventory):
+    groups = [[], []]
+    for name in inventory:
+        groups[int(name.split('.')[0] in SECOND_WORKER_MODULES)].append(name)
+    result = [group for group in groups if group]
+    if not result or sorted(sum(result, [])) != sorted(inventory) or len(set(inventory)) != len(inventory):
+        raise ValueError('invalid bounded worker inventory')
+    return result
 
 
 def configure_imports():
@@ -172,8 +180,9 @@ def run(selected=None):
     deadline = time.monotonic() + WORK_SECONDS
     inventory = discover()
     groups = partition(inventory)
+    work_groups = worker_groups(inventory if selected is None else groups[selected])
     print(json.dumps({'pi_inventory_count': len(inventory), 'partitions': [len(g) for g in groups],
-                      'selected_partition': selected,
+                      'selected_partition': selected, 'worker_counts': [len(g) for g in work_groups],
                       'inventory_sha256': hashlib.sha256('\n'.join(sorted(inventory)).encode()).hexdigest(),
                       'test_ids': inventory}), flush=True)
     children, logs, evidence = [], [], []
@@ -183,9 +192,7 @@ def run(selected=None):
         with tempfile.TemporaryDirectory(prefix='uas-pi-partitions-') as directory:
             base = Path(directory)
             try:
-                for index, names in enumerate(groups):
-                    if selected is not None and index != selected:
-                        continue
+                for index, names in enumerate(work_groups):
                     check_cancelled()
                     home = base / str(index)
                     home.mkdir()
@@ -220,7 +227,7 @@ def run(selected=None):
                         print('Cleanup error: ' + str(exc), file=sys.stderr)
                 for index, output in enumerate(logs):
                     output.seek(0)
-                    print('=== Pi partition ' + str(index if selected is None else selected) + ' ===', flush=True)
+                    print('=== Pi worker ' + str(index) + ' (partition ' + str(selected) + ') ===', flush=True)
                     for line in output:
                         print(line, end='')
                     output.close()
