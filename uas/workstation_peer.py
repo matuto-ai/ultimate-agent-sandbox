@@ -13,7 +13,6 @@ import re
 
 from .kernel_origin import MAX_PACKET, OriginDenied, OriginUnavailable, receive
 from .ledger import LedgerError, Origin, RoomLedger, _json
-from .lifecycle import _unique_object
 from .peer import FixtureConnection, FixturePeerHub, Readiness
 from .workstation_admission import HubAdmission, _canonical
 
@@ -287,6 +286,7 @@ class AdmittedPeerDispatcher:
         # assembler may pass its fixed larger aggregate bound.
         if type(data) is not bytes or len(data) > limit:
             raise LedgerError('INVALID_NATIVE_FRAME')
+        from .lifecycle import _unique_object
         try:
             value = json.loads(data.decode('utf-8'), object_pairs_hook=_unique_object)
             _json(value)
@@ -423,6 +423,7 @@ class AdmittedPeerDispatcher:
 
     def _library_frame(self, operation, first, channel, *, helper=None):
         """Bounded transient assembly; authenticate every record, never persist bytes."""
+        from .lifecycle import _unique_object
         try:
             initial = json.loads(first.data.decode('utf-8'), object_pairs_hook=_unique_object)
         except (ValueError, UnicodeError, RecursionError):

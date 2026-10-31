@@ -69,10 +69,12 @@ def _operations(value, identity, owned_xfs=None):
         operations.append({'kind':'reserve-room-quota','storage_root':storage,
             'storage_identity':identity,'project_id':selected['quota_project_id'],
             'disk_bytes':room['resources']['disk_bytes']})
-        for path in [*room['project']['roots'].values(),room['state_root']+'/runtime']:
+        leaves=[(path, role == 'reference') for role,path in room['project']['roots'].items()]
+        leaves.append((room['state_root']+'/runtime',False))
+        for path, readonly in leaves:
             operations.append({'kind':'prepare-room-leaf','storage_root':storage,
                 'storage_identity':identity,'path':path,'project_id':selected['quota_project_id'],
-                'mcs_level':selected['mcs_level']})
+                'mcs_level':selected['mcs_level'],'readonly':readonly})
     body={'version':1,'request_id':value['request_id'],'operations':operations,
           'host_profile':value['host_plan']['profile']}
     if owned_xfs is not None:body['owned_xfs']=deepcopy(owned_xfs)

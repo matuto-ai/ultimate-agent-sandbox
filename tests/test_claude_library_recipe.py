@@ -1,13 +1,14 @@
 """Pure immutable profile selection and packaging, not native execution proof."""
 import io
 import json
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 import test_native_claude_recipe as recipe_tests
 from uas.native_claude_recipe import NativeClaudeRecipe, ARTIFACTS
 from uas.native_pi_recipe import NativeRecipeError
 
-class ClaudeLibraryRecipeTests(recipe_tests.NativeClaudeRecipeTests):
+class ClaudeLibraryRecipeTests(recipe_tests.NativeClaudeRecipeFixture, unittest.TestCase):
     def test_library_profile_is_explicit_immutable_and_exact(self):
         ordinary=self.make();selected=self.make(tool_profile='library-capture-v1')
         self.assertNotEqual(ordinary.identity['recipe_sha256'],selected.identity['recipe_sha256'])

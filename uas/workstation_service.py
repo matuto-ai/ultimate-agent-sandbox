@@ -9,10 +9,12 @@ import hashlib
 import os
 from pathlib import Path
 import socket
+import select
+import stat
 import sys
 import time
 
-from .kernel_origin import HeldOrigin, OriginDenied, ReceiverIdentity, enable, probe, receive
+from .kernel_origin import HeldOrigin, OriginDenied, ReceiverIdentity, alive, enable, probe, receive
 from .ledger import RoomLedger
 from .peer import FixtureParticipant, FixturePeerHub
 from .workstation_admission import AdmissionSeat, HubAdmission, _canonical, _unique
@@ -27,15 +29,60 @@ STORE = Path('/uas/hub')
 RELEASE = b'UAS-HUB-RELEASE-1'
 
 
-def configuration(raw, *, persistent=False):
+def admission_journal():
+    """One fixed private Hub child; canonical shared Room ledger stays in STORE.
+
+    Never migrate an old shared admission journal or repair an existing child.
+    Only a newly created, empty, exact-owned directory loses inherited setgid.
+    """
+    if not STORE.is_absolute() or STORE.resolve() != STORE:
+        raise OriginDenied('canonical Hub store required')
+    flags=os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC
+    with ExitStack() as stack:
+        try:
+            parent=os.open(STORE,flags);stack.callback(os.close,parent)
+            parent_identity=os.fstat(parent)
+            for legacy in ('admissions.db','admissions.db.lock','admissions.db-wal','admissions.db-shm'):
+                try:os.stat(legacy,dir_fd=parent,follow_symlinks=False)
+                except FileNotFoundError:continue
+                raise OriginDenied('legacy Hub journal requires explicit reconciliation')
+            created=False
+            try:
+                os.mkdir('private-admission',0o700,dir_fd=parent);created=True
+            except FileExistsError:pass
+            before=os.stat('private-admission',dir_fd=parent,follow_symlinks=False)
+            child=os.open('private-admission',flags,dir_fd=parent);stack.callback(os.close,child)
+            node=os.fstat(child)
+            if (not stat.S_ISDIR(node.st_mode) or (node.st_dev,node.st_ino)!=(before.st_dev,before.st_ino)
+                    or node.st_uid!=os.getuid() or node.st_gid!=os.getgid()):
+                raise OriginDenied('private Hub journal ownership required')
+            if created:
+                if stat.S_IMODE(node.st_mode) not in (0o700,0o2700) or os.listdir(child):
+                    raise OriginDenied('fresh private Hub journal directory required')
+                os.fchmod(child,0o700)
+            if stat.S_IMODE(os.fstat(child).st_mode)!=0o700:
+                raise OriginDenied('private Hub journal mode required')
+            current=os.stat('private-admission',dir_fd=parent,follow_symlinks=False)
+            current_parent=STORE.lstat()
+            if ((current.st_dev,current.st_ino)!=(node.st_dev,node.st_ino)
+                    or not stat.S_ISDIR(current.st_mode)
+                    or (current_parent.st_dev,current_parent.st_ino)!=(parent_identity.st_dev,parent_identity.st_ino)):
+                raise OriginDenied('private Hub journal directory replaced')
+        except OSError:
+            raise OriginDenied('private Hub journal directory unavailable') from None
+    return STORE/'private-admission'/'admissions.db'
+
+
+def configuration(raw, *, persistent=False, progress=None):
     if type(persistent) is not bool:
         raise OriginDenied('fixed Hub lifetime selection required')
     if type(raw) is not bytes or not 0 < len(raw) <= 8192:
         raise OriginDenied('bounded trusted Hub startup required')
     value = json.loads(raw.decode(), object_pairs_hook=_unique)
+    if progress is not None: progress('config-decoded')
     fields = {'version','challenge','supervisor_identity','mapping_digest','room_id','room_instance','seats'}
     fields.add('profile' if persistent else 'run_id')
-    if (type(value) is not dict or set(value) - {'forge'} != fields
+    if (type(value) is not dict or set(value) - {'forge','library'} != fields
             or type(value['version']) is not int or value['version'] != 1
             or type(value['challenge']) is not str or len(value['challenge']) != 64
             or any(c not in '0123456789abcdef' for c in value['challenge'])
@@ -45,14 +92,28 @@ def configuration(raw, *, persistent=False):
             or type(value['seats']) is not list or len(value['seats']) != 2):
         raise OriginDenied('invalid trusted Hub startup')
     if 'forge' in value:
-        from .forge import ForgeBinding
+        if progress is not None: progress('forge-import')
         from .github_read import GitHubProject
+        if progress is not None: progress('forge-imported')
         forge = value['forge']
         if (type(forge) is not dict or set(forge) != {'project_id','repository','host'}
                 or forge['host'] != 'github.com'):
             raise OriginDenied('invalid trusted Forge binding')
         from .ledger import _token
         _token(forge['project_id']); GitHubProject(forge['repository'], forge['host'])
+    if 'library' in value:
+        if progress is not None: progress('library-import')
+        from .library_binding import project_binding
+        if progress is not None: progress('library-imported')
+        selected = value['library']
+        if (not persistent or type(selected) is not dict
+                or set(selected) != {'project','source_identity'}):
+            raise OriginDenied('invalid trusted Library binding')
+        project_binding(selected['project'],source_identity=selected['source_identity'])
+        if 'forge' in value and (selected['project']['id'] != value['forge']['project_id']
+                or selected['project']['repository'] != value['forge']['repository']):
+            raise OriginDenied('trusted Project bindings disagree')
+    if progress is not None: progress('binding-validated')
     receiver = ReceiverIdentity(65532,65532,'hub-'+value['room_instance'],value['mapping_digest'])
     seats=[]
     for seat in value['seats']:
@@ -72,6 +133,7 @@ def configuration(raw, *, persistent=False):
         from .workstation_admission import _token
         if not _token(value['run_id']):
             raise OriginDenied('invalid trusted initial Run')
+    if progress is not None: progress('seats-validated')
     return value,tuple(seats)
 
 
@@ -99,33 +161,41 @@ def initialize_hub(hub, seats, metadata, *, persistent):
             tuple(FixtureParticipant(s.participant_id,s.actor_id) for s in seats),metadata['run_id'])
 
 
-def serve_loop(loop, ledger, control_lease, *, persistent=False):
+def serve_loop(loop, ledger, control_lease, *, persistent=False, library_client=None):
     through=-1
     deadline=None if persistent else time.monotonic()+180
     while deadline is None or time.monotonic()<deadline:
         control_lease.require()
         loop.step(.1)  # Existing loop fences control EOF and owner pidfd exit.
+        if library_client is not None: library_client.poll()
         current=ledger.snapshot()['room_seq']
         if current!=through:
             report(ledger, summary=persistent);through=current
     raise OriginDenied('bounded qualification service lifetime expired')
 
 
-def run_service(*, persistent=False):
+def run_service(*, persistent=False, progress=None):
     if type(persistent) is not bool:
         raise OriginDenied('fixed Hub lifetime selection required')
     if len(sys.argv)!=1 or (os.getuid(),os.getgid())!=(65531,65531):
         raise OriginDenied('fixed unprivileged Hub entrypoint required')
+    if progress is not None: progress('entrypoint-validated')
     # Only this Room ledger directory is shared with the trusted host owner.
     # Setgid directory + group-readable/writable SQLite WAL files, never world
     # access or a Supervisor-private-store mount into Hub.
     os.umask(0o007)
     # Child of the fixed init, never unsupported PID1/parent0 or process scans.
+    if progress is not None: progress('probe-start')
     probe()
+    if progress is not None: progress('probe-done')
     kernel_status=process_status()
     if kernel_status!={'CapEff':'0000000000000000','CapBnd':'0000000000000000','NoNewPrivs':'1','Seccomp':'2'}:
         raise OriginDenied('actual Hub capabilities/NNP/seccomp profile differs')
-    metadata,seats=configuration(sys.stdin.buffer.readline(8193), persistent=persistent)
+    if progress is not None: progress('metadata-wait')
+    raw_metadata=sys.stdin.buffer.readline(8193)
+    if progress is not None: progress('metadata-read')
+    metadata,seats=configuration(raw_metadata, persistent=persistent, progress=progress)
+    if progress is not None: progress('metadata-parsed')
     mapping={'uid_map':Path('/proc/self/uid_map').read_text(),
              'gid_map':Path('/proc/self/gid_map').read_text(),
              'overflow_uid':int(Path('/proc/sys/kernel/overflowuid').read_text()),
@@ -133,11 +203,16 @@ def run_service(*, persistent=False):
     if (mapping['overflow_uid']!=65534 or mapping['overflow_gid']!=65534
             or hashlib.sha256(json.dumps(mapping,sort_keys=True).encode()).hexdigest()!=metadata['mapping_digest']):
         raise OriginDenied('actual Hub receiver namespace/overflow mapping differs')
+    if progress is not None: progress('mapping-validated')
     control_lease=EndpointLease(CONTROL,owner=65533,group=65531)
     peer_lease=EndpointLease(PEER,owner=65533,group=65532)
+    if progress is not None: progress('paths-validated')
     with ExitStack() as stack:
         control=stack.enter_context(closing(socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)))
-        enable(control);control.settimeout(8);control.connect(CONTROL)
+        enable(control);control.settimeout(8)
+        if progress is not None: progress('control-connect')
+        control.connect(CONTROL)
+        if progress is not None: progress('control-connected')
         control_lease.require()
         if control.send(b'HUB1'+bytes.fromhex(metadata['challenge']))!=36:
             raise OriginDenied('incomplete fixed Hub bootstrap')
@@ -147,7 +222,11 @@ def run_service(*, persistent=False):
             stack.callback(supervisor.close)
             if (list(supervisor.identity)!=metadata['supervisor_identity'] or record.data!=RELEASE):
                 raise OriginDenied('startup Supervisor kernel object not verified')
-        admissions=HubAdmission(STORE/'admissions.db',seats=seats,supervisor=supervisor,endpoint=peer_lease)
+        library_channel = None
+        if 'library' in metadata:
+            from .local_library_transport import offer_handoff
+            library_channel=offer_handoff(control);stack.callback(library_channel.close)
+        admissions=HubAdmission(admission_journal(),seats=seats,supervisor=supervisor,endpoint=peer_lease)
         stack.callback(admissions.close)
         ledger=RoomLedger(STORE/'room.db',metadata['room_id']);stack.callback(ledger.close)
         hub=FixturePeerHub(ledger)
@@ -156,6 +235,20 @@ def run_service(*, persistent=False):
         if 'forge' in metadata:
             from .forge import ForgeBinding
             dispatcher.attach_host_forge_binding(ForgeBinding(metadata['room_id'], **metadata['forge']))
+        library_client = None
+        if library_channel is not None:
+            from .local_library_transport import Client
+            from .library_hub import LibraryHub, DrainReports
+            from .library import project_binding
+            binding=metadata['library']
+            project=project_binding(binding['project'],source_identity=binding['source_identity'])
+            reports=DrainReports(ledger,room_id=metadata['room_id'],
+                project_identity=project['project_identity'],
+                authenticate=lambda: not supervisor.revoked and alive(supervisor.pidfd))
+            library_client=Client(library_channel,supervisor,project,reports=reports,
+                control_current=lambda: not select.select([control],[],[],0)[0])
+            dispatcher.attach_library(LibraryHub(ledger,room_id=metadata['room_id'],
+                project=binding['project'],source_identity=binding['source_identity'],contact=library_client))
         ready=_canonical({'version':1,'kind':'HUB_READY','controller':admissions.controller,
                           'room_id':metadata['room_id'],'room_instance':metadata['room_instance'],
                           'observation':{'uid':os.getuid(),'gid':os.getgid(),'parent':os.getppid(),'kernel_status':kernel_status,
@@ -171,7 +264,7 @@ def run_service(*, persistent=False):
                             context_generations={s.participant_id:1 for s in seats},
                             canonical_context_generations=True)
         stack.callback(loop.close)
-        serve_loop(loop,ledger,control_lease,persistent=persistent)
+        serve_loop(loop,ledger,control_lease,persistent=persistent,library_client=library_client)
 
 
 def main():

@@ -4,6 +4,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import unittest
 from unittest.mock import Mock,patch
 
@@ -18,6 +19,13 @@ class LocalProcessSmokeSourceTests(unittest.TestCase):
         with patch.dict(os.environ,{},clear=True),patch.object(smoke.subprocess,'Popen') as spawn,patch.object(smoke.tempfile,'TemporaryDirectory') as temporary:
             with self.assertRaisesRegex(AssertionError,'explicit hosted'):smoke.main(['--run'])
         spawn.assert_not_called();temporary.assert_not_called()
+
+    def test_direct_script_fixture_import_has_no_ambient_pythonpath(self):
+        code = ('import runpy; ns=runpy.run_path(' + repr(str(FILE)) + '); '
+                'support=ns["fixture_support"](); assert support.document()["version"] == 1')
+        result=subprocess.run([sys.executable,'-I','-c',code],cwd='/tmp',
+                              capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
 
     def test_all_explicit_hosted_gates_required(self):
         env={'GITHUB_ACTIONS':'true','RUNNER_OS':'Linux','UAS_LOCAL_PROCESS_SMOKE':'1'}

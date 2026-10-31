@@ -66,7 +66,8 @@ class ClaudeListingNativeTests(unittest.TestCase):
         self.gateway.requests = []
         self.gateway.release = threading.Event()
         self.gateway.entered = threading.Event()
-        self.thread = threading.Thread(target=self.gateway.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.gateway.serve_forever,
+                                       kwargs={'poll_interval': .05}, daemon=True)
         self.thread.start()
         self.addCleanup(self.close_gateway)
         self.binary = Path(INSTALL) / 'node_modules/@anthropic-ai/claude-code-linux-x64/claude'

@@ -224,4 +224,165 @@ class TransportTests(unittest.TestCase):
             self.assertNotIn(marker.encode(),retained)
         self.assert_private('Selected draft data.',rejection['reason'])
 
+    def all_project_grants(self):
+        self.fx.principal=library.LocalHuman('human','actor','grant',
+            lambda _, project, action:self.fx.allowed and project==self.source.scope.project_identity
+                and action in ('library-inspect','library-reject','library-adjudicate',
+                    'library-drain','library-retry','library-defer','library-requeue','library-resume'),
+            lambda:True)
+
+    def scheduling(self, kind, ident):
+        observed=self.invoke(dict(version=1,action='observe',project_id='alpha',for_action=kind),
+                             ident+'-observe')['result']
+        value=dict(version=1,action=kind,project_id='alpha',request_id=ident,
+                   settings_id=observed['settings_id'],observed_version=observed['observed_version'])
+        if kind in ('retry','resume','requeue'):value['drain_id']=observed['drain_id']
+        return value
+
+    def receipt_query(self, kind, ident):
+        return self.invoke(dict(version=1,action='receipt',project_id='alpha',for_action=kind),
+                           ident,mode='reconcile')
+
+    def test_scheduling_distinct_retry_disposition_and_separate_resume(self):
+        self.all_project_grants(); before=self.source.count()
+        drain=self.scheduling('drain','drain-new')
+        acknowledged=self.invoke(drain,'drain-new')
+        self.assertEqual(acknowledged['outcome'],'ACKNOWLEDGED',acknowledged)
+        self.assertEqual(acknowledged['kind'],'drain')
+        state=json.loads(canonical(self.fx.entry()['state']))
+        self.assertEqual(self.invoke(drain,'drain-new'),acknowledged)
+        self.assertEqual(self.receipt_query('drain','drain-new'),acknowledged)
+        self.assertEqual(self.fx.entry()['state'],state)
+        self.assertEqual(self.source.count(),before)
+        self.fx.blocked()
+        retry=self.scheduling('retry','retry-same')
+        self.assertEqual(self.invoke(retry,'retry-same')['kind'],'retry')
+        self.assertEqual(self.fx.entry()['state']['drain_id'],'original-drain')
+        self.fx.blocked()
+        rejection=self.fx.value(request='disposition')
+        receipt=self.invoke(rejection,'disposition')
+        self.assertEqual(receipt['outcome'],'COMMITTED')
+        self.assertEqual(self.fx.entry()['state']['state'],'DISPOSED')
+        bad=self.scheduling('drain','cannot-drain')
+        self.assertEqual(self.invoke(bad,'cannot-drain'),{'outcome':'REFUSED','reason':'DRAIN_DISPOSED'})
+        resume=self.scheduling('resume','new-remainder')
+        accepted=self.invoke(resume,'new-remainder')
+        self.assertEqual(accepted['kind'],'resume')
+        self.assertEqual(accepted['outcome'],'ACKNOWLEDGED')
+        self.assertIsNone(self.fx.entry()['state']['drain_id'])
+        self.assertEqual(self.fx.entry()['state']['selected'],[])
+        self.assertEqual(self.receipt_query('reject','disposition'),receipt)
+        self.assertEqual(self.fx.entry()['state']['state'],'READY')
+        self.assertFalse(self.fx.fx.fx.fixture.marker.exists())
+
+    def test_defer_and_requeue_keep_schedule_and_reconcile_without_new_writes(self):
+        from uas.library_observations import Owner as Observations
+        from uas.library_attention import Owner as Attention
+        import test_library_requeue as requeue_fixture
+        from datetime import timedelta
+        self.all_project_grants();self.fx.blocked()
+        now=self.fx.fx.fx.now
+        Observations(self.controls.service.publisher,current_scope=lambda:self.source.fresh,
+            settings=lambda:self.source.settings).capture(observed_at=now.isoformat(),
+                window_start=(now-timedelta(hours=1)).isoformat())
+        Attention(self.controls.service.publisher,current_scope=lambda:self.source.fresh,
+            settings=lambda:self.source.settings,now=lambda:now).sample()
+        state=json.loads(canonical(self.fx.entry()['state']));before=self.source.count()
+        defer=self.scheduling('defer','snooze')
+        result=self.invoke(defer,'snooze')
+        self.assertEqual(result['outcome'],'ACKNOWLEDGED',result)
+        self.assertEqual(result['reason'],'ATTENTION_SNOOZED')
+        self.assertEqual(self.receipt_query('defer','snooze'),result)
+        self.assertEqual(self.fx.entry()['state'],state);self.assertEqual(self.source.count(),before)
+        _,_,parked_drain=requeue_fixture.RequeueTests.parked(self.fx)
+        value=self.scheduling('requeue','release');value['drain_id']=parked_drain
+        before=self.source.count();result=self.invoke(value,'release')
+        self.assertEqual(result['outcome'],'COMMITTED',result)
+        self.assertEqual(self.fx.entry()['state'],state)
+        self.assertEqual(self.receipt_query('requeue','release'),result)
+        self.assertEqual(self.invoke(value,'release'),result)
+        self.assertEqual(self.source.count(),before+1)
+
+    def test_body_free_receipt_after_lost_private_response_and_current_fences(self):
+        self.all_project_grants();value=self.fx.value(reason='T32_EPHEMERAL_PRIVATE_REASON')
+        before=self.source.count()
+        def lost(*a,**kw):
+            self.contact(*a,**kw)
+            raise OSError('private response lost')
+        self.hub.contact=lost
+        self.assertEqual(self.invoke(value,'private-write')['outcome'],'UNCONFIRMED')
+        self.hub.contact=self.contact
+        receipt=self.receipt_query('reject','private-write')
+        self.assertEqual(receipt['outcome'],'COMMITTED',receipt)
+        self.assertEqual(self.source.count(),before+1)
+        self.assertEqual(self.receipt_query('reject','private-write'),receipt)
+        self.assertEqual(self.receipt_query('adjudicate','private-write')['reason'],'FORBIDDEN')
+        self.fx.allowed=False
+        self.assertEqual(self.receipt_query('reject','private-write')['reason'],'FORBIDDEN')
+        self.fx.allowed=True
+        self.session=replace(self.session,human=Origin('actor','human','inc','different-grant',()))
+        self.assertEqual(self.receipt_query('reject','private-write')['reason'],'ID_CONFLICT')
+        self.assert_private('T32_EPHEMERAL_PRIVATE_REASON')
+
+    def test_absent_pending_receipts_and_untrusted_receipt_fields_never_write(self):
+        self.all_project_grants();value=self.fx.value();before=self.source.count()
+        self.hub.contact=lambda *a,**kw:(_ for _ in ()).throw(OSError('before service'))
+        self.invoke(value,'unreached');self.hub.contact=self.contact
+        self.assertEqual(self.receipt_query('reject','unreached')['reason'],'CONTROL_OUTCOME_UNKNOWN')
+        self.assertEqual(self.receipt_query('reject','never-reserved')['reason'],'CONTROL_OUTCOME_UNKNOWN')
+        raw=dict(version=1,action='receipt',project_id='alpha',for_action='reject')
+        for extra in ({'service_operation_id':'forged'}, {'reason':'private'}, {'path':'/tmp'}):
+            self.assertEqual(self.invoke({**raw,**extra},'unreached','reconcile')['reason'],'INVALID_CONTROL_REQUEST')
+        self.assertEqual(self.invoke(raw,'unreached')['reason'],'INVALID_CONTROL_REQUEST')
+        self.assertEqual(self.source.count(),before)
+
+    def test_stale_definite_refusal_refresh_and_postpublication_failure_stays_unknown(self):
+        self.all_project_grants();value=self.fx.value(request='stale')
+        self.source.capture('newer');before=self.source.count()
+        self.assertEqual(self.invoke(value,'stale'),{'outcome':'REFUSED','reason':'STALE_INSPECTION'})
+        self.assertEqual(self.source.count(),before)
+        # Lost/duplicate refusal never becomes permission to apply a new write.
+        self.assertEqual(self.receipt_query('reject','stale')['reason'],'CONTROL_OUTCOME_UNKNOWN')
+        self.assertEqual(self.invoke(value,'stale')['reason'],'CONTROL_OUTCOME_UNKNOWN')
+        fresh=self.fx.value(request='fresh');publish=self.source.publisher.publish
+        def uncertain(*a,**kw):
+            publish(*a,**kw)
+            raise library.LibraryError('STALE_CONTROL_STATE')
+        with patch.object(self.source.publisher,'publish',side_effect=uncertain):
+            result=self.invoke(fresh,'fresh')
+        self.assertEqual(result['outcome'],'UNCONFIRMED',result)
+        self.assertEqual(self.source.count(),before+1)
+        self.assertEqual(self.receipt_query('reject','fresh')['reason'],'CONTROL_OUTCOME_UNKNOWN')
+        self.assertEqual(self.invoke(fresh,'fresh')['outcome'],'COMMITTED')
+        self.assertEqual(self.receipt_query('reject','fresh')['outcome'],'COMMITTED')
+        self.assertEqual(self.source.count(),before+1)
+
+    def test_inspection_service_selects_batch_identity_and_versions_batch_changes(self):
+        opening=self.opening();first=self.invoke(opening,'open-a')['result']
+        self.assertIsNone(first['drain_id'])
+        self.fx.blocked()
+        self.assertEqual(self.invoke(opening,'open-b')['reason'],'STALE_INSPECTION')
+        opening=self.opening();opening['request_id']='open-new-version'
+        second=self.invoke(opening,'open-c')['result']
+        self.assertEqual(second['drain_id'],'original-drain')
+        self.assertNotEqual(first['observed_version'],second['observed_version'])
+
+    def test_upgrade_preserves_original_t31_reservation_canonical_identity(self):
+        import hashlib
+        from uas.ledger import Command, Event, Transition
+        value=self.fx.value(request='old-format')
+        metadata={'request_sha256':hashlib.sha256(canonical(value)).hexdigest(),
+            'project_identity':self.source.scope.project_identity,'session':self.session.metadata(),
+            'service_operation_id':'human-control-'+library._digest(
+                [self.source.scope.project_identity,value['request_id']])}
+        self.ledger.apply(Command('old-operation','library.private','alpha',None,metadata),
+            self.session.human,authorize=lambda *_:True,
+            decide=lambda state,_:Transition(state,(Event('library.private.reserved',metadata),),metadata))
+        self.controls.handle(canonical(value),self.fx.principal)
+        before=self.source.count()
+        receipt=self.receipt_query('reject','old-operation')
+        self.assertEqual(receipt['outcome'],'COMMITTED',receipt)
+        self.assertEqual(self.invoke(value,'old-operation'),receipt)
+        self.assertEqual(self.source.count(),before)
+
 if __name__ == '__main__': unittest.main()

@@ -1,4 +1,4 @@
-# Private Manager Library transport — T31 / #189
+# Private Manager Library transport — T31 / #189 and T32 / #193
 
 `FieldNotesLibraryHost` is an attachment to the existing authenticated Manager
 host, not a new listener, login, UI, credential or deployment. The host supplies
@@ -61,3 +61,56 @@ Authentication is controlled trusted-host fixture context, not a mocked service;
 there is no live provider, network listener, browser suite or heavy VM. Native
 Git subprocesses, SQLite and a bounded two-thread race execute locally. Existing
 service/inspection/native suites continue covering the separate OS transport.
+
+## T32 intervention attachment and reconnect receipts
+
+The same authenticated envelope also admits Project `drain`, `retry`, `defer`,
+`requeue` and `resume` controls and their explicit `observe` requests. It does
+not admit settings, archive/restore/repair, arbitrary paths or Participant APIs.
+Every new action still runs the service's existing current grant, configuration
+and target/content fences. Drain is a scheduling acknowledgement, retry keeps
+its original blocked batch, defer only snoozes attention, requeue publishes only
+eligible parked-item release, and resume is a separate acknowledgement which
+never revives the disposed drain. Inspection includes the service-selected
+`drain_id` (or null), bound into its version, so the browser never invents the
+batch affected by a rejection or adjudication.
+
+An explicit body-free reconciliation uses the original envelope `operation_id`,
+`mode: "reconcile"`, and a request containing exactly `version: 1`,
+`action: "receipt"`, `project_id` and `for_action` (the original write kind).
+The Hub reads its existing metadata-only reservation using exact stored Origin,
+session and Project equality. Its trusted service-operation identity, not any
+browser-supplied record identity, selects a read-only Library receipt lookup.
+Current Project authority and original human/actor/kind scope are checked again
+at the service and before disclosure. An absent or pending operation remains
+unknown; this query never reserves, schedules, completes a pending publication
+or replays a body. Reconnect may retain the opaque operation/action/Project
+handle, but inspection text and unsubmitted form text must be discarded. A fresh
+explicit open is required. A lost pre-service or refusal response can remain
+unknown; there is no automatic new write to resolve that uncertainty.
+
+Original T31 canonical reservation metadata is unchanged, so upgrading does not
+invalidate an exact old request. Result projections now also include the finite
+kind, drain identity, acknowledgement and allowlisted reason. They never include
+private reason/conclusion/rationale fields, service-selected paths, or raw errors.
+Historical receipt reads do not claim a newly configured operation is valid.
+
+A direct `REFUSED` response is not a durable operation receipt. It is emitted
+only for a small finite set of control refusals while the scheduling lock is
+held, the owner has not entered uncertain/recovery state, the original service
+operation identity is authoritatively absent and the current grant still holds.
+The Git publisher reserves that identity before any push; scheduling and defer
+atomically commit their effect with their record. Publication-possible failures
+mark the scheduler failed. Any present record, uncertain owner, revoked grant
+or unrecognized exception remains `UNCONFIRMED`; a post-publication stale error
+cannot be mistaken for no effect. A lost refusal response remains unknown rather
+than authorizing an automatic retry. The UI may refresh after a received definite
+refusal, using a new request identity only for a new explicit human action.
+
+`test_manager_library_transport.py` now exercises every exposed control against
+real Git/SQLite/service owners, no-repeat scheduling and publication, blocked
+batch disposal/separate resume, attention-only defer, parked-item release,
+body-free private-response recovery, pre-service uncertainty, current revocation,
+wrong-kind/body/Origin refusal, post-publication uncertainty, and old-format
+reservation compatibility. Actual browser proof is owned by the T32 Field Notes
+check; no VM or real provider invocation is required by this attachment.

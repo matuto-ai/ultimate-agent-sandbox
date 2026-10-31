@@ -17,6 +17,7 @@ from library_support import (AT, HUMAN_ORIGIN, ORIGIN, OTHER, binding, capture, 
 from uas import library
 from uas.ledger import Origin
 from uas.library import LibraryError
+from uas.library_deadline import bounded
 from uas.library_records import LibraryRecords, MAX_PENDING
 
 WORKER = Path(__file__).parent / "fixtures" / "library_record_worker.py"
@@ -393,8 +394,9 @@ class UncertaintyTests(unittest.TestCase):
         other = sqlite3.connect(self.path, isolation_level=None)
         self.addCleanup(other.close)
         other.execute("BEGIN IMMEDIATE")
-        self.records._db.execute("PRAGMA busy_timeout=0")
-        with self.assertRaises(LibraryError) as busy:
+        # _writer sets its own SQLite timeout from the operation budget. Keep a
+        # real competing writer, but do not wait the production five seconds.
+        with bounded(.1), self.assertRaises(LibraryError) as busy:
             self.records.begin(attempt)
         self.assertEqual("RECORD_UNAVAILABLE", busy.exception.code)
         self.assertEqual([], self.records.pending())

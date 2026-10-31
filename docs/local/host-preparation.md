@@ -238,3 +238,18 @@ separate Engine image/data directory and retained image archives. The backing
 image bound is not a quota on all Docker metadata or downloaded images. Recheck
 free space at apply; keep the existing reports' archive sizes in the installation
 budget. Package/download costs are not silently included or executed here.
+
+### Private Hub admission journal
+
+The shared Hub store remains Supervisor-owned, mode `2770`, with the Hub group;
+its canonical `room.db` stays at the store root. The Hub keeps admission authority
+receipts separately at `private-admission/admissions.db`. It exclusively creates
+that fixed child as its own UID/GID, mode `0700`, clearing inherited setgid only
+on the newly created, empty directory through a held no-follow directory fd.
+Existing children must already have the exact owner/group and mode: startup does
+not chmod, chown, adopt symlinks, or recursively repair existing state.
+
+A legacy admission journal at the shared root (including its lock, WAL or SHM)
+blocks startup and requires explicit reconciliation. This change does not migrate,
+delete, or reset existing admission receipts automatically. Read-only qualification
+checks use the same private child; the canonical Room ledger is not relocated.
