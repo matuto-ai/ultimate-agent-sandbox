@@ -6,6 +6,8 @@ Run only with the operator's separate approval on a disposable prepared host.
 This is not the T42 model/target qualification or T41 VM isolation proof.
 """
 import argparse
+import calendar
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -147,6 +149,38 @@ def filtered_hub_errors(raw):
     return result
 
 
+def docker_time_ns(value):
+    require(type(value) is str, 'Docker timestamp type')
+    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{1,9})Z', value)
+    require(match is not None, 'Docker timestamp format')
+    instant = datetime.strptime(match[1], '%Y-%m-%dT%H:%M:%S')
+    return calendar.timegm(instant.timetuple()) * 1000000000 + int(match[2].ljust(9, '0'))
+
+
+def timestamped_hub_errors(raw, started_at):
+    start = docker_time_ns(started_at)
+    parsed = []
+    for line in raw.decode('utf-8', errors='replace').split('\n'):
+        match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z) (.*)', line)
+        if match is None: continue
+        try: timestamp = docker_time_ns(match[1])
+        except (ValueError, RuntimeError): continue
+        parsed.append((timestamp, match[2]))
+    result = filtered_hub_errors('\n'.join(line for _, line in parsed).encode())
+    phases = set(result['startup_phases'])
+    timings = []
+    for timestamp, line in parsed:
+        prefix = 'UAS_LOCAL_HUB_PHASE '
+        if not line.startswith(prefix) or line[len(prefix):] not in phases: continue
+        elapsed = timestamp - start
+        if 0 <= elapsed <= 120000000000:
+            timings.append({'phase': line[len(prefix):], 'elapsed_ms': elapsed // 1000000})
+    result['phase_timings'] = timings[:19]
+    result['phase_timing_overflow'] = len(timings) > 19
+    result['timing_basis'] = 'docker-log-time-relative-to-container-start-not-supervisor-deadline'
+    return result
+
+
 def owned_hub_diagnostic(receipt, room_id):
     try:
         require(receipt.get('room_id') == room_id, 'diagnostic Room differs')
@@ -157,13 +191,13 @@ def owned_hub_diagnostic(receipt, room_id):
                     for key in ('config_digest', 'profile_digest')), 'diagnostic digest')
         name = 'uas-native-' + instance + '-hub'
         # Select only identity/ownership/state, never environment or arbitrary config.
-        template = '{{json .Id}} {{json .Name}} {{json .Config.Labels}} {{json .State.Running}} {{json .State.ExitCode}} {{json .State.OOMKilled}}'
+        template = '{{json .Id}} {{json .Name}} {{json .Config.Labels}} {{json .State.Running}} {{json .State.ExitCode}} {{json .State.OOMKilled}} {{json .State.StartedAt}}'
         raw = diagnostic_command(['inspect', '--type', 'container', '--format', template, name])
         decoder = json.JSONDecoder(); values = []; rest = raw.decode().strip()
         while rest:
             value, end = decoder.raw_decode(rest); values.append(value); rest = rest[end:].lstrip()
-        require(len(values) == 6, 'diagnostic inspect schema')
-        identity, observed_name, labels, running, exit_code, oom = values
+        require(len(values) == 7, 'diagnostic inspect schema')
+        identity, observed_name, labels, running, exit_code, oom, started_at = values
         from uas.local_native import LocalNativeBackend
         prefix = LocalNativeBackend.LABEL
         expected = {prefix: 'true', prefix+'.room': room_id, prefix+'.instance': instance,
@@ -175,7 +209,9 @@ def owned_hub_diagnostic(receipt, room_id):
                 and type(exit_code) is int and 0 <= exit_code <= 255, 'diagnostic ownership differs')
         result = {'state': 'owned', 'running': running, 'exit_code': exit_code, 'oom_killed': oom}
         try:
-            result['errors'] = filtered_hub_errors(diagnostic_command(['logs', '--tail', '80', identity]))
+            docker_time_ns(started_at)  # Validate before accessing logs.
+            result['errors'] = timestamped_hub_errors(
+                diagnostic_command(['logs', '--timestamps', '--tail', '80', identity]), started_at)
         except Exception:
             result['errors'] = {'state': 'unavailable'}
         return result

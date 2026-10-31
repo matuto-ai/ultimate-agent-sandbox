@@ -92,8 +92,9 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         labels = backend._labels(receipt, 'hub')
         def wire(selected):
             return ' '.join(json.dumps(x) for x in ('d'*64, '/uas-native-'+'a'*32+'-hub', selected,
-                                                   False, 1, False)).encode()
+                                                   False, 1, False, '2026-10-31T17:00:00.000000000Z')).encode()
         logs = b'File "/opt/uas/uas/local_hub.py", line 1\nModuleNotFoundError: No module named \'_sqlite3\'\nsecret-credential\n'
+        logs = b'\n'.join(b'2026-10-31T17:00:01.000000000Z ' + line for line in logs.split(b'\n'))
         with patch.object(probe, 'diagnostic_command', side_effect=[wire(labels), logs]) as command:
             result = probe.owned_hub_diagnostic(receipt, 'alpha')
         self.assertEqual(result['state'], 'owned')
@@ -101,9 +102,14 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         self.assertEqual(result['errors']['missing_modules'], ['_sqlite3'])
         self.assertIn('local_hub', result['errors']['uas_frames'])
         self.assertNotIn('secret-credential', json.dumps(result))
-        self.assertEqual(command.call_args_list[1].args[0], ['logs', '--tail', '80', 'd'*64])
+        self.assertEqual(command.call_args_list[1].args[0], ['logs', '--timestamps', '--tail', '80', 'd'*64])
         with patch.object(probe, 'diagnostic_command', return_value=wire({**labels, prefix+'.room': 'beta'})) as command:
             self.assertEqual(probe.owned_hub_diagnostic(receipt, 'alpha'), {'state': 'unavailable'})
+        self.assertEqual(command.call_count, 1)
+        bad_start = wire(labels).replace(b'2026-10-31T17:00:00.000000000Z', b'malformed-time')
+        with patch.object(probe, 'diagnostic_command', return_value=bad_start) as command:
+            result = probe.owned_hub_diagnostic(receipt, 'alpha')
+        self.assertEqual(result['errors'], {'state': 'unavailable'})
         self.assertEqual(command.call_count, 1)
 
     def test_hub_log_filter_excludes_unknown_paths_modules_and_message_contents(self):
@@ -135,3 +141,29 @@ class LibraryInstallationProbeTests(unittest.TestCase):
         overflow = probe.filtered_hub_errors(raw * 10)
         self.assertEqual(len(overflow['startup_phases']), len(phases))
         self.assertTrue(overflow['startup_phase_overflow'])
+
+
+    def test_phase_timestamps_are_bounded_relative_and_never_raw_log_content(self):
+        start = '2026-10-31T17:00:00.123456789Z'
+        raw = ('2026-10-31T17:00:00.123456789Z UAS_LOCAL_HUB_PHASE import-start\n'
+               '2026-10-31T17:00:08.123456789Z UAS_LOCAL_HUB_PHASE control-connected\n'
+               "2026-10-31T17:00:09.123456789Z ModuleNotFoundError: No module named '_sqlite3'\n"
+               '2026-10-31T17:00:09.123456789Z secret-token\n').encode()
+        result = probe.timestamped_hub_errors(raw, start)
+        self.assertEqual(result['phase_timings'], [{'phase': 'import-start', 'elapsed_ms': 0},
+                                                  {'phase': 'control-connected', 'elapsed_ms': 8000}])
+        self.assertEqual(result['missing_modules'], ['_sqlite3'])
+        self.assertNotIn('secret-token', json.dumps(result))
+        self.assertIn('not-supervisor-deadline', result['timing_basis'])
+        for stamp in ('2026-10-31T16:59:59.123456789Z', '2026-10-31T17:02:00.123456790Z',
+                      '2026-10-31T17:00:08Z', '2026-13-31T17:00:08.123456789Z',
+                      '2026-10-31T17:00:08.123456789+00:00'):
+            with self.subTest(stamp=stamp):
+                value = probe.timestamped_hub_errors((stamp+' UAS_LOCAL_HUB_PHASE import-start').encode(), start)
+                self.assertEqual(value['phase_timings'], [])
+        for suffix in ('unknown', 'import-start secret', 'import-start\r', 'import-start\x00'):
+            value = probe.timestamped_hub_errors((start+' UAS_LOCAL_HUB_PHASE '+suffix).encode(), start)
+            self.assertEqual(value['phase_timings'], [])
+        overflow = probe.timestamped_hub_errors(raw * 20, start)
+        self.assertEqual(len(overflow['phase_timings']), 19)
+        self.assertTrue(overflow['phase_timing_overflow'])
