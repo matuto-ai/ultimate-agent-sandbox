@@ -287,6 +287,11 @@ async function libraryBrowserProof(send,evaluate,output,screenshots) {
       const name=theme+'-library-inspection'+(mobile?'-mobile':'')+'.png',shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
       fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
     }
+    for(const [selector,name] of [['[data-library-dispose]','D-library-disposition-mobile.png'],['#library-operation','D-library-actions-mobile.png']]){
+      await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'});new Promise(resolve=>requestAnimationFrame(resolve))`);
+      const shot=await send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});
+      fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
+    }
     await input('library-conclusion','T32_PRIVATE_CONCLUSION unsubmitted');
     await input('library-rationale','T32_PRIVATE_RATIONALE unsubmitted');
     await privacy();
@@ -748,8 +753,8 @@ async function browserCheck(){
     await evaluate(`document.querySelector('a[data-nav][href*="page=project&"]').click()`);
     for(const name of ['library-current','library-stale','disconnected','library-stale-reconnected','reconnected','reconnected']){
       await evaluate(`installDocument(${JSON.stringify(dataFor(documents[name]))})`);
-      const library=await evaluate(`({text:document.querySelector('.library-operations').textContent,controls:document.querySelectorAll('.library-operations button,.library-operations input').length})`);
-      assert(library.text.includes('BLOCKED')&&library.text.includes('library-service')&&library.controls===0);
+      const library=await evaluate(`({text:document.querySelector('.library-operations').textContent,controls:[...document.querySelectorAll('.library-operations button,.library-operations input')].map(node=>({launcher:node.hasAttribute('data-library-open'),disabled:node.disabled}))})`);
+      assert(library.text.includes('BLOCKED')&&library.text.includes('library-service')&&library.controls.length===1&&library.controls.every(node=>node.launcher&&node.disabled));
       const expected=name==='library-current'?'current':['library-stale','disconnected','library-stale-reconnected'].includes(name)?'stale':'unknown';
       assert(library.text.includes('data '+expected),name+': Library freshness after refresh');
     }
