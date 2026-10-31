@@ -82,6 +82,18 @@ class LibraryVMAdapterTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 guest.startup_refusal(subprocess.CompletedProcess([], status, b'', result.stdout), code)
 
+    def test_image_diagnostic_only_inspects_exact_owned_id_and_numeric_user(self):
+        from contextlib import redirect_stdout
+        with patch.object(guest, 'run', return_value='"65532:65532"\n') as run, redirect_stdout(io.StringIO()):
+            value = guest.image_diagnostic('sha256:' + 'a'*64)
+        self.assertEqual(value['image_user'], '65532:65532')
+        self.assertEqual(run.call_args.args[-1], 'sha256:' + 'a'*64)
+        with patch.object(guest, 'run') as run:
+            with self.assertRaises(AssertionError): guest.image_diagnostic('foreign-tag')
+        run.assert_not_called()
+        with patch.object(guest, 'run', return_value='"secret-value"'):
+            with self.assertRaises(AssertionError): guest.image_diagnostic('sha256:' + 'a'*64)
+
     def test_archive_producer_pins_clean_candidate_and_exact_wheels(self):
         root = self.base / 'repo'; root.mkdir()
         for name in ('uas/__init__.py', *runner.EXTRA_SOURCES):

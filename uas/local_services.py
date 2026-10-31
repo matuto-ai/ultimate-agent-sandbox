@@ -50,12 +50,19 @@ def send_startup(process,raw):
         require(written>0,'LOCAL_HUB_START_WRITE_UNKNOWN');offset+=written
 
 
+# Closed private child diagnostics, kept dependency-free for staged owners.
+FAILURE_PHASES = frozenset({'bootstrap','library-root','hub-startup','relay-start','runtime-setup','serving',
+    'hub-attach','hub-start','hub-write','hub-connect','hub-origin','hub-release','hub-library-handoff','hub-ready'})
+FAILURE_KINDS = frozenset({'origin-denied','origin-unavailable','qualification','permission','timeout','os-error','other'})
+
+
 def read_control_receipt(process,room,instance,*,status,seconds=10):
     deadline=time.monotonic()+seconds;raw=bytearray()
     while len(raw)<=4096:
-        require(process.poll() is None,'LOCAL_HUB_START_EXITED')
+        exited=process.poll() is not None
         left=deadline-time.monotonic();require(left>0,'LOCAL_HUB_START_UNCONFIRMED')
-        readable,_,_=select.select([process.stdout],[],[],left)
+        readable,_,_=select.select([process.stdout],[],[],0 if exited else left)
+        require(not exited or bool(readable),'LOCAL_HUB_START_EXITED')
         require(bool(readable),'LOCAL_HUB_START_UNCONFIRMED')
         byte=os.read(process.stdout.fileno(),1)
         require(bool(byte),'LOCAL_HUB_START_EOF')
@@ -63,6 +70,12 @@ def read_control_receipt(process,room,instance,*,status,seconds=10):
         raw.extend(byte)
     require(len(raw)<=4096,'LOCAL_HUB_READY_SIZE')
     value=json.loads(raw,object_pairs_hook=_unique)
+    if (type(value) is dict and set(value)=={'version','status','phase','error'}
+            and type(value['version']) is int and value['version']==1 and value['status']=='unknown'
+            and type(value['phase']) is str and value['phase'] in FAILURE_PHASES
+            and type(value['error']) is str and value['error'] in FAILURE_KINDS):
+        raise LifecycleError('LOCAL_HUB_CHILD_'+value['phase'].upper().replace('-','_')+'_'+value['error'].upper().replace('-','_'))
+    require(process.poll() is None,'LOCAL_HUB_START_EXITED')
     fields={'version','status','room_id','room_instance'} | ({'controller'} if status=='ready' else set())
     require(type(value) is dict and set(value)==fields
             and type(value['version']) is int and value['version']==1 and value['status']==status

@@ -11,6 +11,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import re
+import stat
 import subprocess
 import sys
 import time
@@ -59,6 +61,67 @@ def candidate_identity(expected_commit, source_manifest=None):
     return expected_commit
 
 
+def safe_code(value):
+    if value in ('BackendUnknown', 'OwnershipConflict', 'LifecycleError', 'QualificationError'):
+        return value
+    return value if type(value) is str and re.fullmatch(r'[A-Z][A-Z0-9_]{0,95}', value) else 'REDACTED'
+
+
+def safe_state(value):
+    if type(value) is not dict:
+        return {'state': 'unavailable'}
+    result = {}
+    if value.get('phase') in ('absent', 'creating', 'starting', 'running', 'start_failed',
+                              'stopping', 'stopped', 'stop_failed', 'destroying',
+                              'destroy_failed', 'destroyed', 'unknown'):
+        result['phase'] = value['phase']
+    instance = value.get('instance_id')
+    if type(instance) is str and re.fullmatch(r'[0-9a-f]{32}', instance):
+        result['instance_id'] = instance
+    leftovers = value.get('leftovers')
+    if type(leftovers) is list:
+        result['leftovers'] = [
+            {'kind': item.get('kind') if item.get('kind') in
+             ('network', 'container', 'volume', 'control-state', 'authority', 'reconciliation', 'tombstone')
+             else 'redacted', 'reason': safe_code(item.get('reason'))}
+            for item in leftovers[:16] if type(item) is dict]
+        result['leftover_count'] = len(leftovers)
+    return result
+
+
+def startup_diagnostic(room, result):
+    """Read only this configured Room's fixed receipt; emit no arbitrary details."""
+    report = {'action': 'start', 'room': room['id'], 'stage': 'operator-response'}
+    if type(result) is dict:
+        report['outcome'] = result.get('outcome') if result.get('outcome') in ('observed', 'unknown') else 'redacted'
+        if 'error' in result: report['error'] = safe_code(result['error'])
+        response = result.get('result')
+        if type(response) is dict:
+            report['response_state'] = safe_state(response.get('infrastructure'))
+    root = Path(room['state_root'])
+    path = root / 'lifecycle.json'
+    try:
+        require(root.resolve() == root and root.is_dir(), 'receipt root invalid')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+                    and info.st_nlink == 1 and info.st_size <= 1048576, 'receipt invalid')
+            raw = os.read(fd, 1048577)
+            require(len(raw) <= 1048576, 'receipt oversized')
+            receipt = json.loads(raw)
+            require(type(receipt) is dict and receipt.get('room_id') == room['id'], 'receipt scope invalid')
+            report['owned_receipt'] = safe_state(receipt)
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        report['owned_receipt'] = {'state': 'absent'}
+    except Exception:
+        report['owned_receipt'] = {'state': 'unavailable'}
+    print('Library native startup: ' + json.dumps(report, sort_keys=True), flush=True)
+    return report
+
+
 def isolated_marker(bundle, own, siblings):
     files = list(bundle.rglob('*'))
     require(not any(path.is_symlink() for path in files), 'projection symlink exposed')
@@ -103,6 +166,7 @@ def run(installation_root, expected_commit, *, source_manifest=None, expected_ma
         generations = {}
         for room in rooms:
             result = request(installation, 'start', room['id'])
+            startup_diagnostic(room, result)
             require(result.get('outcome') == 'observed', 'Room Start outcome unknown')
             state = result['result']
             require(state.get('infrastructure', {}).get('phase') == 'running'

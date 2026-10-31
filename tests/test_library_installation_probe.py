@@ -1,5 +1,8 @@
 """Safety/source contracts only: does not run a prepared native installation."""
 import importlib.util
+import io
+import json
+from contextlib import redirect_stdout
 import os
 from pathlib import Path
 import tempfile
@@ -47,3 +50,35 @@ class LibraryInstallationProbeTests(unittest.TestCase):
             leak.unlink(); (root / 'beta-private.md').write_text('innocent')
             with self.assertRaisesRegex(RuntimeError, 'sibling Project content exposed'):
                 probe.isolated_marker(root, 'alpha-private', ['beta-private'])
+
+
+    def test_startup_diagnostic_preserves_code_and_owned_phase_without_secrets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            room = {'id': 'alpha', 'state_root': temp}
+            receipt = {'room_id': 'alpha', 'instance_id': 'a'*32, 'phase': 'start_failed',
+                       'spec': {'credential': 'never-print-this'},
+                       'leftovers': [{'kind': 'reconciliation', 'name': '/private/path',
+                                      'reason': 'ADMISSION_FAILED'}]}
+            path = Path(temp) / 'lifecycle.json'; path.write_text(json.dumps(receipt))
+            response = {'outcome': 'unknown', 'error': 'LOCAL_HUB_START_FAILED',
+                        'details': 'never-print-this'}
+            output = io.StringIO()
+            with redirect_stdout(output): result = probe.startup_diagnostic(room, response)
+            self.assertEqual(result['error'], 'LOCAL_HUB_START_FAILED')
+            self.assertEqual(result['owned_receipt']['phase'], 'start_failed')
+            self.assertNotIn('never-print-this', output.getvalue())
+            self.assertNotIn('/private/path', output.getvalue())
+            path.unlink(); path.symlink_to(Path(temp) / 'elsewhere')
+            with redirect_stdout(io.StringIO()): result = probe.startup_diagnostic(room, response)
+            self.assertEqual(result['owned_receipt'], {'state': 'unavailable'})
+
+    def test_startup_diagnostic_rejects_oversize_wrong_scope_and_arbitrary_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            room = {'id': 'alpha', 'state_root': temp}
+            path = Path(temp) / 'lifecycle.json'
+            for raw in ('x'*1048577, json.dumps({'room_id': 'beta', 'phase': 'running'})):
+                path.write_text(raw)
+                with redirect_stdout(io.StringIO()):
+                    result = probe.startup_diagnostic(room, {'outcome': 'unknown', 'error': '/secret/token'})
+                self.assertEqual(result['error'], 'REDACTED')
+                self.assertEqual(result['owned_receipt'], {'state': 'unavailable'})

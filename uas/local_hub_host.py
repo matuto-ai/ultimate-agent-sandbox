@@ -105,7 +105,22 @@ def retain(control,origin,parent_fd):
             raise QualificationError('LOCAL_HUB_UNEXPECTED_PARENT_DATA')
 
 
-def run(raw,parent_fd):
+FAILURE_PHASES = frozenset({'bootstrap','library-root','hub-startup','relay-start','runtime-setup','serving',
+    'hub-attach','hub-start','hub-write','hub-connect','hub-origin','hub-release','hub-library-handoff','hub-ready'})
+FAILURE_KINDS = frozenset({'origin-denied','origin-unavailable','qualification','permission','timeout','os-error','other'})
+
+
+def failure_receipt(phase, error):
+    from .kernel_origin import OriginDenied, OriginUnavailable
+    kind = next((name for cls,name in ((OriginDenied,'origin-denied'),
+        (OriginUnavailable,'origin-unavailable'),(QualificationError,'qualification'),
+        (PermissionError,'permission'),(TimeoutError,'timeout'),(OSError,'os-error'))
+        if isinstance(error,cls)), 'other')
+    return {'version':1,'status':'unknown','phase':phase if phase in FAILURE_PHASES else 'bootstrap','error':kind}
+
+
+def run(raw,parent_fd,*,phase=lambda _:None):
+    phase('bootstrap')
     if os.getuid()==0 or os.getgid()==0:
         raise QualificationError('LOCAL_HUB_FIXED_OWNER_REQUIRED')
     document=startup_document(raw)
@@ -120,6 +135,7 @@ def run(raw,parent_fd):
         startup=metadata(document['room'],resources,_identity(self_fd),secrets.token_hex(32))
         library_pair = None
         if 'library' in document:
+            phase('library-root')
             from .kernel_origin import enable, receive, HeldOrigin
             from .local_library_transport import Relay, handoff, require
             root_channel = socket.socket(fileno=document['library']['fd']); stack.callback(root_channel.close)
@@ -136,20 +152,24 @@ def run(raw,parent_fd):
             configuration(_canonical(startup),persistent=True)
         listener=socket.socket(fileno=resources['control_fd']);stack.callback(listener.close)
         peer=socket.socket(fileno=resources['peer_fd']);stack.callback(peer.close)
+        phase('hub-startup')
         control,origin,ready,_=start_hub_channel(DockerExecAPI(startup_engine(document)),resources,
-                                               startup,listener,stack,SessionBudget(30),host_profile=host_profile,
+                                               startup,listener,stack,SessionBudget(30),host_profile=host_profile,progress=phase,
                                                library_handoff=None if library_pair is None else lambda control:handoff(control,library_pair[1]))
         if library_pair is not None:
+            phase('relay-start')
             library_pair[1].close()
             relay=Relay(library_pair[0],origin,root_channel,root_origin)
             relay.start();stack.callback(relay.close)
         receipt={'version':1,'status':'ready','room_id':startup['room_id'],
                  'room_instance':startup['room_instance'],'controller':ready['controller']}
         def announce(_=None):
+            phase('serving')
             sys.stdout.buffer.write(_canonical(receipt)+b'\n');sys.stdout.buffer.flush()
         if 'runtime' not in document:
             announce();retain(control,origin,parent_fd)
         else:
+            phase('runtime-setup')
             from io import StringIO
             from .config import load
             from .local_native import LocalNativeProfile
@@ -192,9 +212,10 @@ def main():
         if byte==b'\n':break
         if not byte:raise QualificationError('LOCAL_HUB_STARTUP_EOF')
         raw.extend(byte)
-    try:run(bytes(raw),0)
-    except Exception:
-        sys.stdout.buffer.write(b'{"version":1,"status":"unknown","code":"LOCAL_HUB_START_OR_OWNER_UNCONFIRMED"}\n')
+    phase=['bootstrap']
+    try:run(bytes(raw),0,phase=lambda value:phase.__setitem__(0,value))
+    except Exception as error:
+        sys.stdout.buffer.write(_canonical(failure_receipt(phase[0],error))+b'\n')
         sys.stdout.buffer.flush();raise
 
 

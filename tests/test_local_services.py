@@ -142,3 +142,29 @@ class LocalServicesTests(unittest.TestCase):
         with patch.object(services.select,'select',return_value=([process.stdout],[],[])),patch.object(services,'read_control_receipt') as receipt,patch.object(services,'send_startup') as send:
             self.assertIs(owner.revoke('instance','participants'),True)
         send.assert_not_called();receipt.assert_called_once_with(process,'alpha','instance',status='participants-revoked',seconds=1)
+    def diagnostic_receipt(self,value,*,exited=False):
+        process=Mock();process.poll.return_value=1 if exited else None
+        raw=json.dumps(value).encode()+b'\n'
+        with patch.object(services.select,'select',return_value=([process.stdout],[],[])),patch.object(services.os,'read',side_effect=[bytes([c]) for c in raw]):
+            return services.read_ready(process,'alpha','instance')
+    def test_typed_failure_survives_child_exit_without_admitting_ready(self):
+        value={'version':1,'status':'unknown','phase':'library-root','error':'origin-denied'}
+        for exited in (False,True):
+            with self.subTest(exited=exited),self.assertRaisesRegex(LifecycleError,'LOCAL_HUB_CHILD_LIBRARY_ROOT_ORIGIN_DENIED'):
+                self.diagnostic_receipt(value,exited=exited)
+        ready={'version':1,'status':'ready','room_id':'alpha','room_instance':'instance','controller':'x'}
+        with self.assertRaisesRegex(LifecycleError,'LOCAL_HUB_START_EXITED'):
+            self.diagnostic_receipt(ready,exited=True)
+    def test_failure_schema_never_exposes_untrusted_diagnostics_or_scope(self):
+        value={'version':1,'status':'unknown','phase':'bootstrap','error':'other'}
+        for changed in ({'phase':'secret/path'},{'error':'secret/token'},{'version':True},
+                        {'room_id':'other'},{'detail':'secret'},{'phase':['bootstrap']}):
+            with self.subTest(changed=changed),self.assertRaises(LifecycleError) as caught:
+                self.diagnostic_receipt({**value,**changed})
+            self.assertEqual(caught.exception.code,'LOCAL_HUB_READY_SCOPE')
+        ready={'version':1,'status':'ready','room_id':'other','room_instance':'instance','controller':'x'}
+        with self.assertRaisesRegex(LifecycleError,'LOCAL_HUB_READY_SCOPE'):self.diagnostic_receipt(ready)
+    def test_diagnostic_enums_match_child_without_importing_it_in_owner(self):
+        from uas import local_hub_host
+        self.assertEqual(services.FAILURE_PHASES,local_hub_host.FAILURE_PHASES)
+        self.assertEqual(services.FAILURE_KINDS,local_hub_host.FAILURE_KINDS)

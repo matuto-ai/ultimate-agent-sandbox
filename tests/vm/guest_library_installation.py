@@ -232,6 +232,19 @@ def negative_startup(selection, *, name, expected, unsafe=False):
             and not (root / 'library' / 'clone.git').exists(), 'startup did not fail closed')
 
 
+def image_diagnostic(image):
+    require(type(image) is str and re.fullmatch(r'sha256:[0-9a-f]{64}', image),
+            'exact owned image diagnostic required')
+    raw = run('docker', 'image', 'inspect', '--format', '{{json .Config.User}}', image)
+    require(len(raw) <= 128, 'image user receipt bound')
+    user = json.loads(raw)
+    require(type(user) is str and re.fullmatch(r'[0-9]{1,6}:[0-9]{1,6}', user),
+            'numeric image user required')
+    result = {'stage': 'owned-image-imported', 'image_id': image, 'image_user': user}
+    print('Library guest phase: ' + json.dumps(result, sort_keys=True), flush=True)
+    return result
+
+
 def scenario(nonce, manifest, candidate):
     from native_rootfs import build_room_rootfs
     from guest_room_base import import_image
@@ -250,6 +263,7 @@ def scenario(nonce, manifest, candidate):
     require(run('docker', 'version', '--format', '{{.Server.Version}}').strip() == '29.8.2',
             'exact Engine required')
     image = import_image(archive)
+    image_diagnostic(image)
     device = Path('/dev/disk/by-id/virtio-uas-quota')
     require(device.exists() and run('blockdev', '--getsize64', str(device)).strip() == str(2*1024**3),
             'exact disposable disk required')
@@ -258,12 +272,14 @@ def scenario(nonce, manifest, candidate):
     config = json.loads((CANDIDATE / 'tests/fixtures/two-rooms.json').read_text())
     native = prepare_storage(config, image, nonce)
     library = prepare_library(config)
+    print('Library guest phase: configuration-prepared', flush=True)
     selection = {'version': 1, 'project': write(CONFIG / 'project.json', config),
                  'native': write(CONFIG / 'native.json', native), 'manager': None,
                  'library': write(CONFIG / 'library.json', library)}
     negative_startup({k: v for k, v in selection.items() if k != 'library'},
                      name='absent', expected='LIBRARY_NOT_CONFIGURED')
     negative_startup(selection, name='unsafe', expected='INVALID_DEPLOYMENT_STATE', unsafe=True)
+    print('Library guest phase: negative-startup-confirmed', flush=True)
     installation = Installation(INSTALL); installation.setup(json.dumps(selection).encode())
     path = CANDIDATE / 'tests/native/library_installation_probe.py'
     spec = importlib.util.spec_from_file_location('installation_probe', path)
