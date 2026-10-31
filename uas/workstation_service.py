@@ -9,10 +9,11 @@ import hashlib
 import os
 from pathlib import Path
 import socket
+import select
 import sys
 import time
 
-from .kernel_origin import HeldOrigin, OriginDenied, ReceiverIdentity, enable, probe, receive
+from .kernel_origin import HeldOrigin, OriginDenied, ReceiverIdentity, alive, enable, probe, receive
 from .ledger import RoomLedger
 from .peer import FixtureParticipant, FixturePeerHub
 from .workstation_admission import AdmissionSeat, HubAdmission, _canonical, _unique
@@ -35,7 +36,7 @@ def configuration(raw, *, persistent=False):
     value = json.loads(raw.decode(), object_pairs_hook=_unique)
     fields = {'version','challenge','supervisor_identity','mapping_digest','room_id','room_instance','seats'}
     fields.add('profile' if persistent else 'run_id')
-    if (type(value) is not dict or set(value) - {'forge'} != fields
+    if (type(value) is not dict or set(value) - {'forge','library'} != fields
             or type(value['version']) is not int or value['version'] != 1
             or type(value['challenge']) is not str or len(value['challenge']) != 64
             or any(c not in '0123456789abcdef' for c in value['challenge'])
@@ -53,6 +54,16 @@ def configuration(raw, *, persistent=False):
             raise OriginDenied('invalid trusted Forge binding')
         from .ledger import _token
         _token(forge['project_id']); GitHubProject(forge['repository'], forge['host'])
+    if 'library' in value:
+        from .library import project_binding
+        selected = value['library']
+        if (not persistent or type(selected) is not dict
+                or set(selected) != {'project','source_identity'}):
+            raise OriginDenied('invalid trusted Library binding')
+        project_binding(selected['project'],source_identity=selected['source_identity'])
+        if 'forge' in value and (selected['project']['id'] != value['forge']['project_id']
+                or selected['project']['repository'] != value['forge']['repository']):
+            raise OriginDenied('trusted Project bindings disagree')
     receiver = ReceiverIdentity(65532,65532,'hub-'+value['room_instance'],value['mapping_digest'])
     seats=[]
     for seat in value['seats']:
@@ -99,12 +110,13 @@ def initialize_hub(hub, seats, metadata, *, persistent):
             tuple(FixtureParticipant(s.participant_id,s.actor_id) for s in seats),metadata['run_id'])
 
 
-def serve_loop(loop, ledger, control_lease, *, persistent=False):
+def serve_loop(loop, ledger, control_lease, *, persistent=False, library_client=None):
     through=-1
     deadline=None if persistent else time.monotonic()+180
     while deadline is None or time.monotonic()<deadline:
         control_lease.require()
         loop.step(.1)  # Existing loop fences control EOF and owner pidfd exit.
+        if library_client is not None: library_client.poll()
         current=ledger.snapshot()['room_seq']
         if current!=through:
             report(ledger, summary=persistent);through=current
@@ -147,6 +159,10 @@ def run_service(*, persistent=False):
             stack.callback(supervisor.close)
             if (list(supervisor.identity)!=metadata['supervisor_identity'] or record.data!=RELEASE):
                 raise OriginDenied('startup Supervisor kernel object not verified')
+        library_channel = None
+        if 'library' in metadata:
+            from .local_library_transport import accept_handoff
+            library_channel=accept_handoff(control,supervisor);stack.callback(library_channel.close)
         admissions=HubAdmission(STORE/'admissions.db',seats=seats,supervisor=supervisor,endpoint=peer_lease)
         stack.callback(admissions.close)
         ledger=RoomLedger(STORE/'room.db',metadata['room_id']);stack.callback(ledger.close)
@@ -156,6 +172,20 @@ def run_service(*, persistent=False):
         if 'forge' in metadata:
             from .forge import ForgeBinding
             dispatcher.attach_host_forge_binding(ForgeBinding(metadata['room_id'], **metadata['forge']))
+        library_client = None
+        if library_channel is not None:
+            from .local_library_transport import Client
+            from .library_hub import LibraryHub, DrainReports
+            from .library import project_binding
+            binding=metadata['library']
+            project=project_binding(binding['project'],source_identity=binding['source_identity'])
+            reports=DrainReports(ledger,room_id=metadata['room_id'],
+                project_identity=project['project_identity'],
+                authenticate=lambda: not supervisor.revoked and alive(supervisor.pidfd))
+            library_client=Client(library_channel,supervisor,project,reports=reports,
+                control_current=lambda: not select.select([control],[],[],0)[0])
+            dispatcher.attach_library(LibraryHub(ledger,room_id=metadata['room_id'],
+                project=binding['project'],source_identity=binding['source_identity'],contact=library_client))
         ready=_canonical({'version':1,'kind':'HUB_READY','controller':admissions.controller,
                           'room_id':metadata['room_id'],'room_instance':metadata['room_instance'],
                           'observation':{'uid':os.getuid(),'gid':os.getgid(),'parent':os.getppid(),'kernel_status':kernel_status,
@@ -171,7 +201,7 @@ def run_service(*, persistent=False):
                             context_generations={s.participant_id:1 for s in seats},
                             canonical_context_generations=True)
         stack.callback(loop.close)
-        serve_loop(loop,ledger,control_lease,persistent=persistent)
+        serve_loop(loop,ledger,control_lease,persistent=persistent,library_client=library_client)
 
 
 def main():

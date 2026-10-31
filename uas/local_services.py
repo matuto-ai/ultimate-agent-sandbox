@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import select
 import stat
+import socket
 import subprocess
 import sys
 import time
@@ -49,12 +50,19 @@ def send_startup(process,raw):
         require(written>0,'LOCAL_HUB_START_WRITE_UNKNOWN');offset+=written
 
 
+# Closed private child diagnostics, kept dependency-free for staged owners.
+FAILURE_PHASES = frozenset({'bootstrap','library-root','hub-startup','relay-start','runtime-setup','serving',
+    'hub-attach','hub-start','hub-write','hub-connect','hub-origin','hub-release','hub-library-handoff','hub-ready'})
+FAILURE_KINDS = frozenset({'origin-denied','origin-unavailable','qualification','permission','timeout','os-error','other'})
+
+
 def read_control_receipt(process,room,instance,*,status,seconds=10):
     deadline=time.monotonic()+seconds;raw=bytearray()
     while len(raw)<=4096:
-        require(process.poll() is None,'LOCAL_HUB_START_EXITED')
+        exited=process.poll() is not None
         left=deadline-time.monotonic();require(left>0,'LOCAL_HUB_START_UNCONFIRMED')
-        readable,_,_=select.select([process.stdout],[],[],left)
+        readable,_,_=select.select([process.stdout],[],[],0 if exited else left)
+        require(not exited or bool(readable),'LOCAL_HUB_START_EXITED')
         require(bool(readable),'LOCAL_HUB_START_UNCONFIRMED')
         byte=os.read(process.stdout.fileno(),1)
         require(bool(byte),'LOCAL_HUB_START_EOF')
@@ -62,6 +70,12 @@ def read_control_receipt(process,room,instance,*,status,seconds=10):
         raw.extend(byte)
     require(len(raw)<=4096,'LOCAL_HUB_READY_SIZE')
     value=json.loads(raw,object_pairs_hook=_unique)
+    if (type(value) is dict and set(value)=={'version','status','phase','error'}
+            and type(value['version']) is int and value['version']==1 and value['status']=='unknown'
+            and type(value['phase']) is str and value['phase'] in FAILURE_PHASES
+            and type(value['error']) is str and value['error'] in FAILURE_KINDS):
+        raise LifecycleError('LOCAL_HUB_CHILD_'+value['phase'].upper().replace('-','_')+'_'+value['error'].upper().replace('-','_'))
+    require(process.poll() is None,'LOCAL_HUB_START_EXITED')
     fields={'version','status','room_id','room_instance'} | ({'controller'} if status=='ready' else set())
     require(type(value) is dict and set(value)==fields
             and type(value['version']) is int and value['version']==1 and value['status']==status
@@ -85,6 +99,7 @@ class LocalServices:
         require(manager_reference_for is None or callable(manager_reference_for),'LOCAL_MANAGER_SELECTOR_REQUIRED')
         self.runtime_plan_for=runtime_plan_for;self.manager_reference_for=manager_reference_for
         self._lock_fd=host_lock_fd;self._rooms={};self.operation_lock=threading.RLock()
+        self.library = None
 
     def ensure(self,room,owner,backend,state):
         require(os.geteuid()==0,'LOCAL_SERVICE_ROOT_REQUIRED')
@@ -140,6 +155,20 @@ class LocalServices:
                 'broker_fd':data['broker_fd'],'checkout_fd':data['checkout_fd'],'git_fd':data.get('git_fd'),
                 'resources':{k:v for k,v in data.items() if k not in {'broker_fd','checkout_fd','git_fd'}}}
             if 'gate_manifest' in runtime_plan.installation:extra_groups=[host_profile.owners['gate']]
+        library_channels = None
+        if self.library is not None:
+            from .kernel_origin import enable, _identity
+            host_channel, child_channel = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+            enable(host_channel); enable(child_channel)
+            host_channel.settimeout(5); child_channel.settimeout(5)
+            library_channels = (host_channel, child_channel)
+            row['library_channels'] = library_channels
+            with_fd = os.pidfd_open(os.getpid())
+            try: root_identity = list(_identity(with_fd))
+            finally: os.close(with_fd)
+            document['library'] = {'fd':child_channel.fileno(), 'root_identity':root_identity,
+                                   **self.library.binding(room)}
+            extra_fds.append(child_channel.fileno())
         raw=_canonical(document)+b'\n';require(len(raw)<=2*1048576,'LOCAL_HUB_STARTUP_SIZE')
         docker_group=os.stat(host_profile.socket).st_gid
         process=subprocess.Popen([sys.executable,'-m','uas.local_hub_host'],
@@ -149,6 +178,25 @@ class LocalServices:
             env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(Path(__file__).resolve().parents[1]),
                  'PYTHONDONTWRITEBYTECODE':'1'})
         row['process']=process
+        if library_channels is not None:
+            from .kernel_origin import HeldOrigin, Record
+            from .local_library_transport import RootServer, send
+            from . import library
+            host_channel, child_channel = library_channels
+            child_channel.close()
+            peer = HeldOrigin(Record(b'', (process.pid, host_profile.owners['supervisor'],
+                host_profile.owners['supervisor']), os.pidfd_open(process.pid)))
+            profiles = {p['id']:p for p in backend.profile.room['profiles']}
+            seats = {s['participant']:{'actor_id':s['actor'],'profile_id':s['profile'],
+                     'capabilities':sorted(set(profiles[s['profile']]['capabilities']) | {'peer-traffic'})}
+                     for s in backend.profile.room['seats']}
+            selected = self.library.binding(room)
+            server = RootServer(host_channel, peer, lambda:self.library.endpoint(room),
+                library.project_binding(selected['project'], source_identity=selected['source_identity']),
+                seats, current=lambda:process.poll() is None)
+            row['library_server'] = server
+            host_channel.send(_canonical({'kind':'root-ready'}))
+            server.start()
         if 'runtime_owner' in row:row['runtime_owner'].adopt(process)
         # Parent retains writer only. Child inherits read end and host lock.
         send_startup(process,raw)
@@ -179,6 +227,8 @@ class LocalServices:
         if row is None:return {'hub':'not-owned','runtime':'not-started'}
         process=row['process']
         if row['state']=='ready' and (process is None or process.poll() is not None):row['state']='unknown'
+        if row.get('library_server') is not None and row['library_server'].failure:
+            row['state']='unknown'
         runtime=row.get('runtime_waiting','not-started')
         if 'runtime_owner' in row:
             runtime=row.get('runtime_phase','unknown')
@@ -210,10 +260,14 @@ class LocalServices:
         for row in rows:
             process=row['process']
             if process is None:
+                for channel in row.get('library_channels', ()):
+                    channel.close()
                 if 'runtime_owner' in row:row['runtime_owner'].close()
                 return False
             row['state']='unknown'
             try:
+                if 'library_server' in row:
+                    if row['library_server'].close() is not True:return False
                 process.stdin.close()  # EOF fences the actual held control.
                 process.wait(timeout=10)
                 if 'runtime_owner' in row and row['runtime_owner'].close() is not True:return False
@@ -234,6 +288,13 @@ class LocalServices:
             process.stdout.close()
             row['state']='stopped'
         return True
+
+    def report_library(self, report):
+        if type(report) is not dict: return False
+        row = self._rooms.get(report.get('room_id'))
+        if row is None or row.get('state') != 'ready': return False
+        server = row.get('library_server')
+        return server is not None and server.report(report) is True
 
     def close(self):
         results=[self.revoke(row['instance'],'all') for row in list(self._rooms.values())]

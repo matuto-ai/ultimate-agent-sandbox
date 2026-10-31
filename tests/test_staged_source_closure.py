@@ -20,6 +20,10 @@ OPTIONAL_LOCAL_EDGES = {
     # Hub image packages every uas module; its explicitly selected Library route
     # is tested separately through real admitted dispatch.
     ('uas/workstation_peer.py', 'uas/library_hub.py'),
+    # Library-selected persistent Hub only; full Hub image packages these.
+    ('uas/workstation_service.py', 'uas/library.py'),
+    ('uas/workstation_service.py', 'uas/library_hub.py'),
+    ('uas/workstation_service.py', 'uas/local_library_transport.py'),
     ('uas/lifecycle.py', 'uas/local_native.py'),
     ('uas/__main__.py', 'uas/local_cli.py'),
     ('uas/native_qualification.py', 'uas/local_runtime_plan.py'),

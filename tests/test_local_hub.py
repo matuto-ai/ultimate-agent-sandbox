@@ -82,14 +82,18 @@ class LocalHubTests(unittest.TestCase):
         record2=SimpleNamespace(data=json.dumps(ready).encode())
         def record(value):
             result=Mock();result.__enter__=Mock(return_value=value);result.__exit__=Mock(return_value=False);return result
-        engine=Mock();budget=Mock();budget.remaining.return_value=5
+        engine=Mock();budget=Mock();budget.remaining.return_value=5;phases=[];handoff=Mock()
         with patch.object(session,'EndpointLease'),patch.object(session,'enable'),patch.object(session,'HeldOrigin'),patch.object(session,'receive',side_effect=[record(record1),record(record2)]),ExitStack() as stack:
-            result=session.start_hub_channel(engine,resources,startup,listener,stack,budget)
+            result=session.start_hub_channel(engine,resources,startup,listener,stack,budget,progress=phases.append,library_handoff=handoff)
             self.assertEqual(result[2],ready);engine.start_hub.assert_called_once_with('owned-id')
-        engine=Mock();engine.start_hub.side_effect=TimeoutError('uncertain start')
+            self.assertEqual(phases,['hub-attach','hub-start','hub-write','hub-connect','hub-origin','hub-release','hub-library-handoff','hub-ready'])
+            handoff.assert_called_once_with(control)
+        engine=Mock();engine.start_hub.side_effect=TimeoutError('uncertain start');phases=[]
         with patch.object(session,'EndpointLease'),ExitStack() as stack:
-            with self.assertRaises(TimeoutError):session.start_hub_channel(engine,resources,startup,listener,stack,budget)
+            with self.assertRaises(TimeoutError):session.start_hub_channel(engine,resources,startup,listener,stack,budget,progress=phases.append)
         engine.start_hub.assert_called_once_with('owned-id');engine.attach_hub.return_value.close.assert_called_once()
+        self.assertEqual(phases,['hub-attach','hub-start'])
+        self.assertEqual(host.failure_receipt(phases[-1],TimeoutError('private'))['phase'],'hub-start')
 
     def test_startup_rejects_alias_descriptors(self):
         value={'version':1,'room':{},'resources':{'hub_id':'owned','instance':'instance','control_path':'/owned/hub.sock',
@@ -105,3 +109,20 @@ class LocalHubTests(unittest.TestCase):
         self.assertNotIn('run_id',result)
         self.assertEqual(result['seats'][0]['capabilities'],['forge-read','peer-traffic'])
         self.assertEqual(result['forge']['repository'],room['project']['repository'])
+    def test_failure_receipt_is_closed_and_never_contains_exception_text(self):
+        for error,kind in ((OriginDenied('secret/path'),'origin-denied'),
+                           (QualificationError('secret/token'),'qualification'),
+                           (PermissionError('secret'),'permission'),
+                           (TimeoutError('secret'),'timeout'),(ValueError('secret'),'other')):
+            self.assertEqual(host.failure_receipt('library-root',error),
+                {'version':1,'status':'unknown','phase':'library-root','error':kind})
+        self.assertEqual(host.failure_receipt('private/path',ValueError()).get('phase'),'bootstrap')
+    def test_main_emits_safe_failure_then_terminates(self):
+        from io import BytesIO
+        output=BytesIO()
+        def fail(raw,fd,*,phase):
+            phase('hub-startup');raise OriginDenied('private model/config text')
+        with patch.object(host.sys,'argv',['fixed']),patch.object(host.os,'read',side_effect=[b'{',b'}',b'\n']),patch.object(host,'run',side_effect=fail),patch.object(host.sys,'stdout',SimpleNamespace(buffer=output)):
+            with self.assertRaises(OriginDenied):host.main()
+        value=json.loads(output.getvalue())
+        self.assertEqual(value,{'version':1,'status':'unknown','phase':'hub-startup','error':'origin-denied'})

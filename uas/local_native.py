@@ -189,6 +189,15 @@ class LocalNativeProfile(native.NativeBoundaryProfile):
         self.git_manifest=self.git_plan=self.gate_manifest=self.gate_plan=None
         self.runtime_plan=None
 
+    def require_path_owner(self, key, info):
+        # Library projection is host-managed and mounted read-only in Rooms.
+        # Writable runtime roots retain the canonical shifted runtime owner.
+        if key == 'reference':
+            require((info.st_uid, info.st_gid) == (0, 0)
+                    and stat.S_IMODE(info.st_mode) == 0o755, 'REFERENCE_OWNER_MODE')
+        else:
+            super().require_path_owner(key, info)
+
     def require_host_unchanged(self):
         require(canonical({'document':self.native_document,'host':self.host_profile.document()})==self._host_binding,
                 'LOCAL_NATIVE_HOST_SELECTION_CHANGED')

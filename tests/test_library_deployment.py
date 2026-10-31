@@ -107,6 +107,46 @@ class DeploymentLibraryTests(unittest.TestCase):
         self.addCleanup(lambda: value.stop() if value.running else None)
         return value
 
+    def test_split_process_endpoint_binds_room_and_revokes_after_stop(self):
+        deployment = self.make_deployment().start()
+        from unittest.mock import Mock
+        ledger_for = Mock(side_effect=AssertionError('endpoint must not open Hub ledger'))
+        with unittest.mock.patch.object(deployment, 'ledger_for', ledger_for):
+            endpoint = deployment.endpoint('alpha')
+        ledger_for.assert_not_called()
+        public = deployment.binding('alpha')
+        self.assertEqual(public, self.projects['alpha'])
+        public['project']['id'] = 'forged'
+        self.assertEqual(deployment.binding('alpha')['project']['id'], 'alpha')
+        endpoint.guard()
+        deployment.stop_room('alpha')
+        with self.assertRaisesRegex(library.LibraryError, 'ROOM_NOT_BOUND'):
+            endpoint.guard()
+        with self.assertRaisesRegex(library.LibraryError, 'ROOM_NOT_BOUND'):
+            deployment.endpoint('alpha')
+        self.assertTrue(deployment.bound('beta'))
+
+    def test_installed_report_transport_refuses_foreign_and_uncertain_results(self):
+        from unittest.mock import Mock
+        deployment = self.make_deployment()
+        transport = Mock(return_value=False)
+        deployment.set_report_transport(transport)
+        deployment.start()
+        transport.reset_mock()
+        report = {'room_id': 'alpha', 'project_identity': 'foreign'}
+        self.assertFalse(deployment._transport(report))
+        transport.assert_not_called()
+        report['project_identity'] = deployment._rooms['alpha'].scope.project_identity
+        self.assertFalse(deployment._transport(report))
+        transport.return_value = True
+        self.assertTrue(deployment._transport(report))
+        transport.return_value = {'recorded': True}
+        self.assertFalse(deployment._transport(report))
+        transport.side_effect = OSError('lost reply')
+        self.assertFalse(deployment._transport(report))
+        with self.assertRaisesRegex(library.LibraryError, 'DEPLOYMENT_DEPENDENCY_REQUIRED'):
+            deployment.set_report_transport(lambda _: True)
+
     def register(self, deployment, room):
         entry = self.projects[room]
         binding = library.project_binding(entry['project'], source_identity=entry['source_identity'])
@@ -257,6 +297,12 @@ class DeploymentLibraryTests(unittest.TestCase):
         self.assertTrue(deployment.service.scheduler is not None)
         deployment.start_room('alpha')
         self.assertEqual(deployment.read('alpha').manifest['commit_sha'], head)
+        # A restarted Room receives a fresh endpoint. Its retired Hub cannot
+        # regain capture authority merely because the same Project rebound.
+        stale = self.enqueue(deployment, 'alpha', 'STALE_MARKER', suffix='stale')
+        self.assertNotEqual(stale['outcome'], 'DURABLY_QUEUED')
+        self.assertEqual(self.head(), head)
+        self.hubs.pop((id(deployment), 'alpha'))
         result = self.enqueue(deployment, 'alpha', 'SECOND_MARKER', suffix='two')
         self.assertEqual(result['outcome'], 'DURABLY_QUEUED', result)
         self.assertNotEqual(self.head(), head)
