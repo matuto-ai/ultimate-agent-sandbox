@@ -62,6 +62,20 @@ vm.runInContext('Date.now = () => '+(Date.parse(data.generated_at)+2000),aging.c
 assert.equal(aging.context.libraryQuality(agingProject,agingSource),'stale','source TTL expires before fresh Hub TTL');
 aging.listeners.get('interval')();
 assert(aging.get('app').innerHTML.match(/<section class="library-operations"[\s\S]*?data-status="stale"/),'retained visible Library provenance must age without a new document');
+// A generated connected fixture expires after its real 30-second source TTL.
+// A late browser scenario must not mistake this intentionally disabled launcher
+// for asynchronous rendering or retry its click until authority appears fresh.
+const expiredLibrary=boot('C','project');
+expiredLibrary.context.installLibraryActionHost(project,{project_id:'alpha',handle(){throw Error('expired panel must not dispatch');}});
+assert(!expiredLibrary.context.libraryLauncher(expiredLibrary.context.stateFor().project).includes(" disabled"));
+vm.runInContext('Date.now = () => '+(Date.parse(data.generated_at)+31000),expiredLibrary.context);
+assert(expiredLibrary.context.libraryLauncher(expiredLibrary.context.stateFor().project).includes('disabled'));
+expiredLibrary.context.openLibraryPanel(project);
+assert(!expiredLibrary.get('library-dialog').open,'expired authority cannot open Library controls');
+expiredLibrary.get('library-dialog').open=true;
+expiredLibrary.get('library-body').innerHTML='private fixture text';
+expiredLibrary.listeners.get('interval')();
+assert(!expiredLibrary.get('library-dialog').open&&expiredLibrary.get('library-body').innerHTML==='','retained expired Library panel must close and erase private content');
 const metadataOnly=structuredClone(data);
 metadataOnly.rooms[0].view.projection.sections.library.value['github.com/1001'].title='CONTENT_SENTINEL_180';
 assert(!boot('C','project','connected',metadataOnly).get('app').innerHTML.includes('CONTENT_SENTINEL_180'),'render must whitelist metadata');
@@ -228,7 +242,39 @@ function libraryServiceFixture() {
   };
 }
 
-async function libraryBrowserProof(send,evaluate,output,screenshots) {
+// The earlier browser routes consume a finite 30-second snapshot. Generate a
+// new real Ledger -> Stream -> ReadModel cut for this later interaction phase;
+// never extend its valid_until, freeze the browser clock, or retry an action.
+async function freshLibraryDocuments(budget=null) {
+  budget?.check();
+  const {execFile}=require('node:child_process'),os=require('node:os');
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'manager-library-fresh-'));
+  const destination=path.join(directory,'documents');
+  try {
+    await new Promise((resolve,reject)=>execFile('python3',[
+      path.resolve('tests/test_manager_ui.py'),'--write-browser-fixtures',destination],{
+      timeout:Math.max(1,Math.min(2000,budget?.remaining()??2000)),killSignal:'SIGKILL',maxBuffer:65536,env:{...process.env,PYTHONPATH:'.:tests',PYTHONDONTWRITEBYTECODE:'1'}
+    },error=>error?reject(error):resolve()));
+    budget?.check();
+    return Object.fromEntries(['connected','reconnected'].map(name=>[
+      name,fs.readFileSync(path.join(destination,name+'.html'),'utf8')]));
+  } finally {fs.rmSync(directory,{recursive:true,force:true});}
+}
+
+async function freshLibraryDocumentContract() {
+  const refreshed=await freshLibraryDocuments();
+  for(const html of Object.values(refreshed)) {
+    const document=dataFor(html),room=document.rooms.find(room=>room.metadata.project_id==='alpha');
+    assert(room&&room.view.status==='connected');
+    const captured=Date.parse(room.view.projection.captured_at),until=Date.parse(room.valid_until);
+    assert.equal(until-captured,30000,'refresh must retain the production source TTL');
+    assert(Date.now()>=captured&&Date.now()<until,'real fixture producer must supply a current cut');
+    assert.equal(room.view.identity.room_id,'alpha');
+  }
+}
+
+async function libraryBrowserProof(send,evaluate,output,screenshots,budget) {
+  const documents=await freshLibraryDocuments(budget);
   const fixture=libraryServiceFixture(),evidence=[];
   let lastWrite=null;
   const markers=['T32_PRIVATE_ITEM','T32_PRIVATE_CONTEXT','T32_PRIVATE_SIBLING','T32_PRIVATE_CONCLUSION','T32_PRIVATE_RATIONALE','T32_PRIVATE_REASON'];
@@ -847,7 +893,7 @@ async function browserCheck(){
       fs.writeFileSync(path.join(output,name),Buffer.from(shot.data,'base64'));screenshots.push(name);
     } finally {fs.rmSync(settingsDirectory,{recursive:true,force:true});}
 
-    const libraryEvidence=await libraryBrowserProof(send,evaluate,output,screenshots);
+    const libraryEvidence=await libraryBrowserProof(send,evaluate,output,screenshots,budget);
     proof={library_evidence:libraryEvidence,settings_evidence:settingsEvidence,settings_path:'real Python FieldNotesLibrarySettingsHost -> ManagerLibrarySettingsHub -> SettingsOwner over test-only pipes',status:'passed',browser:version,executable:chrome,sandbox:'enabled; no bypass flags',network:'HTTP/HTTPS/WS/WSS blocked; no server',routes:receipts,interactions:['drawer-click-Escape','dialog-focus-Escape','navigation-Back','live-disconnect-reconnect','mobile-layout','opt-in-human-controls-click','typed-action-double-click','unknown-no-repeat','disconnect-closes-controls','library-current-stale-disconnect-repeated-reconnect','library-mobile-layout'],action_evidence:'Chrome with injected controlled host adapter; actual Python host-owner integration is separately tested',screenshots,pixel_review:'pending independent inspection'};
   }catch(error){
     failure=error;failureElapsed=Math.max(0,Date.now()-started);
@@ -875,4 +921,4 @@ async function browserCheck(){
 executableContract();
 timerContract();
 diagnosticsContract();
-ownershipContract().then(startupRecoveryContract).then(()=>require('./test-startup-recovery.cjs')()).then(actionContract).then(settingsContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
+ownershipContract().then(startupRecoveryContract).then(()=>require('./test-startup-recovery.cjs')()).then(actionContract).then(settingsContract).then(()=>require('./test-library-refresh.cjs')()).then(freshLibraryDocumentContract).then(()=>args.includes('--browser')?browserCheck():undefined).catch(error=>{console.error(error);process.exitCode=1;});
