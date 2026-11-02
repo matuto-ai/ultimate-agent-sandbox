@@ -35,8 +35,43 @@ def require(condition, message):
         raise BudgetError(message)
 
 
-def critical_path(workflow, jobs, *, historical=False):
-    """Include job setup/cleanup, not queue time or this accounting job."""
+def job_timing(job):
+    """Keep every runner step; report pre-step provisioning and post-step finalization."""
+    def timestamp(value):
+        require(isinstance(value, str), 'Missing job/step timestamp')
+        try:
+            result = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise BudgetError('Invalid job/step timestamp') from error
+        require(result.utcoffset() is not None, 'Timezone missing from job/step timestamp')
+        return result
+
+    start, end = timestamp(job.get('started_at')), timestamp(job.get('completed_at'))
+    require(end > start, 'Invalid job wall duration')
+    steps = job.get('steps')
+    require(isinstance(steps, list) and len(steps) >= 2, 'Missing complete runner step inventory')
+    require(all(isinstance(step, dict) for step in steps), 'Invalid runner step metadata')
+    require(steps[0].get('name') == 'Set up job' and steps[-1].get('name') == 'Complete job'
+            and steps[0].get('conclusion') == steps[-1].get('conclusion') == 'success',
+            'Missing successful runner setup/completion boundary')
+    previous, number = start, 0
+    for step in steps:
+        require(isinstance(step.get('number'), int) and not isinstance(step['number'], bool)
+                and step['number'] > number, 'Invalid runner step order')
+        require(step.get('status') == 'completed' and step.get('conclusion') in ('success', 'skipped'),
+                'Incomplete or failed runner step')
+        step_start, step_end = timestamp(step.get('started_at')), timestamp(step.get('completed_at'))
+        require(previous <= step_start <= step_end <= end, 'Invalid runner step timing interval')
+        previous, number = step_end, step['number']
+    first_step = timestamp(steps[0]['started_at'])
+    execution = (previous - first_step).total_seconds()
+    require(execution > 0, 'Invalid execution duration')
+    return dict(provisioning=(first_step - start).total_seconds(), execution=execution, wall=(end - start).total_seconds(),
+                finalization=(end - previous).total_seconds())
+
+
+def critical_path(workflow, jobs, *, historical=False, diagnostics=None):
+    """Include setup/tests/cleanup steps; exclude only pre/post-step GitHub intervals."""
     accounting = workflow.removesuffix('.yml') + ' runtime budget'
     measured = [job for job in jobs if job['name'] != accounting]
     require(len(jobs) - len(measured) <= 1, 'Duplicate runtime accounting job')
@@ -73,12 +108,14 @@ def critical_path(workflow, jobs, *, historical=False):
     for name, job in by_name.items():
         require(job['status'] == 'completed' and job['conclusion'] == 'success',
                 f'{name} did not complete successfully; no runtime acceptance')
-        start = datetime.fromisoformat(job['started_at'].replace('Z', '+00:00'))
-        end = datetime.fromisoformat(job['completed_at'].replace('Z', '+00:00'))
-        seconds = (end - start).total_seconds()
-        require(seconds > 0, f'{name} has invalid timing evidence')
-        durations[name] = seconds
-    return sum(max(durations[name] for name in stage & expected) for stage in stages)
+        durations[name] = job_timing(job)
+    execution = sum(max(durations[name]['execution'] for name in stage & expected) for stage in stages)
+    if diagnostics is not None:
+        diagnostics.update(jobs=durations,
+            wall_path=sum(max(durations[name]['wall'] for name in stage & expected) for stage in stages),
+            span=(max(datetime.fromisoformat(job['completed_at'].replace('Z', '+00:00')) for job in measured)
+                  - min(datetime.fromisoformat(job['started_at'].replace('Z', '+00:00')) for job in measured)).total_seconds())
+    return execution
 
 
 def scoped_jobs(workflow, jobs, path):
@@ -95,6 +132,10 @@ def scoped_jobs(workflow, jobs, path):
     # Explicitly exclude sibling reusable jobs and the final gate. Unexpected
     # unscoped jobs still fail critical_path's exact inventory check.
     return [job for job in jobs if job['name'] != 'verify'
+            # A skipped reusable workflow is exposed as its caller job, without
+            # a child prefix. Only this exact skip is exempt; verify checks its
+            # path-applicability output before accepting it.
+            and not (job['name'] == 'pi-durable-fit' and job.get('conclusion') == 'skipped')
             and not job['name'].startswith(('pi-native / ', 'claude-native / ', 'pi-durable-fit / '))]
 
 
@@ -167,18 +208,26 @@ def check(repo, workflow, branch, base, run_id):
     current = api(repo, f'actions/runs/{run_id}')
     require(current['path'] in (f'.github/workflows/{workflow}', '.github/workflows/verify.yaml')
             and current['event'] in ('push', 'pull_request'), 'Current workflow identity mismatch')
-    elapsed = critical_path(workflow, scoped_jobs(workflow, run_jobs(repo, run_id), current['path']))
+    diagnostics = {}
+    elapsed = critical_path(workflow, scoped_jobs(workflow, run_jobs(repo, run_id), current['path']),
+                            diagnostics=diagnostics)
     if elapsed is None:
         return 'Documentation-only run: runtime unchanged; no new full-suite baseline.'
+    details = (f'Full job-wall critical path: {diagnostics["wall_path"]:.1f}s; '
+               f'observed lane span (including queue gaps): {diagnostics["span"]:.1f}s. '
+               'Per-job pre-step / execution / after-step finalization / full wall (seconds): '
+               + '; '.join(f'{name}: {timing["provisioning"]:.1f} / {timing["execution"]:.1f} / {timing["finalization"]:.1f} / {timing["wall"]:.1f}'
+                           for name, timing in sorted(diagnostics['jobs'].items())) + '.')
     require(elapsed <= ABSOLUTE_SECONDS,
-            f'CI critical path {elapsed:.1f}s exceeds the absolute 150-second ceiling')
+            f'CI critical path {elapsed:.1f}s exceeds the absolute 150-second ceiling. ' + details)
     previous, samples = baseline(repo, workflow, branch, base, run_id)
     limit = allowed_seconds(previous)
     sources = '; '.join(f'run {number}, commit {commit}: {seconds:.1f}s'
                         for number, commit, seconds in samples)
     summary = (f'CI critical path (first attempt): {elapsed:.1f}s; baseline median: {previous:.1f}s; '
                f'limit: {limit:.1f}s (+{GROWTH_PERCENT}%, absolute {ABSOLUTE_SECONDS}s). '
-               f'Sources: {sources}.')
+               f'Sources: {sources}. All current and historical samples use first Set up job start through final Complete job step; '
+               'all setup, installation, tests, inter-step gaps and cleanup remain included. ' + details)
     require(elapsed <= limit, summary + ' Runtime growth exceeds the allowance.')
     return summary
 

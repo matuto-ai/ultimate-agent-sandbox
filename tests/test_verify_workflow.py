@@ -117,6 +117,18 @@ class VerifyWorkflowTests(unittest.TestCase):
         with self.assertRaises(budget.BudgetError):
             budget.critical_path('validate.yml', budget.scoped_jobs('validate.yml', jobs + [{'name': 'unmeasured'}], '.github/workflows/verify.yaml'))
 
+    def test_skipped_durable_reusable_caller_has_exact_conditional_exemption(self):
+        helper = test_vm_ci_policy.RuntimeBudgetTests()
+        jobs = helper.jobs('validate.yml')
+        skipped = dict(name='pi-durable-fit', conclusion='skipped')
+        selected = budget.scoped_jobs('validate.yml', jobs + [skipped], '.github/workflows/verify.yaml')
+        self.assertEqual(80, budget.critical_path('validate.yml', selected))
+        for conclusion in ('success', 'failure', 'cancelled', None):
+            selected = budget.scoped_jobs('validate.yml', jobs + [dict(skipped, conclusion=conclusion)],
+                                          '.github/workflows/verify.yaml')
+            with self.assertRaises(budget.BudgetError):
+                budget.critical_path('validate.yml', selected)
+
     def test_native_repartition_keeps_only_complete_historical_graphs(self):
         helper = test_vm_ci_policy.RuntimeBudgetTests()
         for lane, names in (

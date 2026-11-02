@@ -180,7 +180,12 @@ class VMCITriggerTests(unittest.TestCase):
 class RuntimeBudgetTests(unittest.TestCase):
     def jobs(self, workflow='validate.yml', seconds=40, run_id=30):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        return [dict(name=name, run_id=run_id, run_attempt=1, status='completed', conclusion='success', steps=[],
+        return [dict(name=name, run_id=run_id, run_attempt=1, status='completed', conclusion='success', steps=[
+                         dict(name='Set up job', number=1, status='completed', conclusion='success',
+                              started_at=start.isoformat(), completed_at=start.isoformat()),
+                         dict(name='Complete job', number=2, status='completed', conclusion='success',
+                              started_at=(start + timedelta(seconds=seconds)).isoformat(),
+                              completed_at=(start + timedelta(seconds=seconds)).isoformat())],
                      started_at=start.isoformat(), completed_at=(start + timedelta(seconds=seconds)).isoformat())
                 for stage in budget.STAGES[workflow] for name in sorted(stage)]
 
@@ -208,11 +213,15 @@ class RuntimeBudgetTests(unittest.TestCase):
     def test_parallel_path_counts_setup_cleanup_but_not_queue_delay(self):
         jobs = self.jobs()
         next(job for job in jobs if job['name'] == 'unit-synthesis')['completed_at'] = '2026-01-01T00:01:00+00:00'
+        synthesis = next(job for job in jobs if job['name'] == 'unit-synthesis')
+        synthesis['steps'][-1]['started_at'] = synthesis['steps'][-1]['completed_at'] = synthesis['completed_at']
         # Moving an entire downstream stage later must not add queue time.
         for job in jobs:
             if job['name'] in budget.SEAM_JOBS:
                 job['started_at'] = '2026-01-01T01:00:00+00:00'
                 job['completed_at'] = '2026-01-01T01:00:45+00:00'
+                job['steps'][0]['started_at'] = job['steps'][0]['completed_at'] = job['started_at']
+                job['steps'][-1]['started_at'] = job['steps'][-1]['completed_at'] = job['completed_at']
         jobs.append(dict(name='validate runtime budget', status='in_progress'))
         self.assertEqual(105, budget.critical_path('validate.yml', jobs))
 
