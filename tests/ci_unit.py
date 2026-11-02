@@ -22,6 +22,7 @@ SLOW_MODULES = frozenset({'test_artifact_manual_source',
  'test_claude_permission_policy',
  'test_forge_mutations',
  'test_gate_evaluation',
+ 'test_library_repair_native',
  'test_library_dispatch',
  'test_library_import',
  'test_participant_pi_launch',
@@ -74,7 +75,10 @@ ADDITIONAL_MODULES = frozenset({'test_artifact_connected',
  'test_room_cli_diagnostics',
  'test_workstation_delivery'})
 
+# PR #270: measured remainder Claude source/cache checks move to existing synthesis headroom.
 SYNTHESIS_MODULES = frozenset({'test_context',
+ 'test_claude_participant_source',
+ 'test_claude_ci_cache',
  'test_library_attempts',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
@@ -84,11 +88,10 @@ SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'
 # Run41228190888: maintenance51.501s; deployment12.717s moves beside controls.
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload', 'test_library_deployment'})
 
-# #182 measured repair+native+retention ~23s; keep setup/variance margin.
-# #191 requeue joins the existing retention/repair/deployment lane.
-# Keep main's recovery/archive and attention/lifecycle assignments intact.
-MAINTENANCE_MODULES = frozenset({'test_library_retention', 'test_library_repair',
- 'test_library_repair_native', 'test_library_requeue'})
+# PR #270: measured 63s maintenance moves repair-native to slow and retention to disposition.
+# Keep complete modules and identical required environments in every lane.
+MAINTENANCE_MODULES = frozenset({'test_library_repair',
+ 'test_library_requeue'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
@@ -99,14 +102,17 @@ LIFECYCLE_MODULES = frozenset({'test_library_attention', 'test_library_records',
  'test_library_service', 'test_manager_library_transport',
  'test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'})
 
-DISPOSITION_MODULES = frozenset({'test_library_adjudication',
+DISPOSITION_MODULES = frozenset({'test_library_retention',
+ 'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
  'test_library_disposition_native'})
 
-# Run 41129393214: disposition recovery took 16.7s; archive's 30s job has room.
-ARCHIVE_MODULES = frozenset({'test_library_archive', 'test_library_archive_integration',
+# Run 41129393214: disposition recovery uses archive headroom.
+# PR #270: five measured remainder modules also use existing archive headroom.
+ARCHIVE_MODULES = frozenset({'test_host_capacity', 'test_library_promotion', 'test_local_native_terminal',
+ 'test_library_capture_frames', 'test_native_completed_retirement', 'test_library_archive', 'test_library_archive_integration',
  'test_library_archive_native', 'test_library_disposition_recovery'})
 
 PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
