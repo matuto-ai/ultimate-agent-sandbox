@@ -173,3 +173,19 @@ All discovered IDs, required environments, twelve lanes, dependency gates,
 timeouts, and the runtime-budget rule remain unchanged. Explicit module
 membership and exact inventory tests cover the move; the next exact-head run
 must establish acceptance without ignoring the failed graph.
+
+## Claude source/cache checks in existing synthesis headroom (PR #270)
+
+[Run 41488731238](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41488731238)
+passed functional jobs but measured a 117-second graph against the unchanged
+112.2-second allowance: remainder 66 seconds plus room-control-plane 51 seconds.
+The existing synthesis lane took 29 seconds. Remainder test-line timestamp deltas
+estimate 8.115 seconds in `test_claude_participant_source` and 5.312 seconds in
+`test_claude_ci_cache`; these estimates are not guaranteed future durations.
+
+Move those two complete modules (27 current cases) to synthesis. The full
+discovered inventory remains disjoint and complete; one new partition regression
+is added, no case is removed. This uses existing parallel capacity without new
+jobs, environment changes, timeout changes, acceptance-budget changes, baseline
+changes, or altered measurement. The next exact-head hosted run must establish
+acceptance; local lane timings are not hosted acceptance evidence.

@@ -78,6 +78,8 @@ class CIPartitionTests(unittest.TestCase):
  'test_workstation_delivery'})
         self.assertEqual(ci.INSPECTION_MODULES, {'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
         self.assertEqual(ci.SYNTHESIS_MODULES, {'test_context',
+ 'test_claude_participant_source',
+ 'test_claude_ci_cache',
  'test_library_attempts',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
@@ -141,7 +143,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['slow']), 16)
         self.assertEqual(len(groups['integration']), 19)
         self.assertEqual(len(groups['additional']), 20)
-        self.assertEqual(len(groups['synthesis']), 4)
+        self.assertEqual(len(groups['synthesis']), 6)
         self.assertEqual(len(groups['scheduler']), 2)
         self.assertEqual(len(groups['operator']), 3)
         self.assertEqual(len(groups['inspection']), 3)
@@ -153,6 +155,21 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
         for item in selected:
+            item.run.assert_not_called()
+
+    def test_claude_source_and_cache_modules_move_whole_without_other_reassignment(self):
+        moved = ['test_claude_participant_source.Native.test_current',
+                 'test_claude_participant_source.Future.test_new',
+                 'test_claude_ci_cache.Cache.test_current',
+                 'test_claude_ci_cache.Future.test_new']
+        untouched = ['test_claude_new.Future.test_new', 'test_future.Case.test_one']
+        ids = moved + untouched
+        cases, groups = ci.partition_suite(unittest.TestSuite(case(name) for name in ids))
+        self.assertEqual(moved, [item.id() for item in groups['synthesis']])
+        self.assertEqual(untouched, [item.id() for item in groups['remainder']])
+        self.assertEqual(ids, [item.id() for item in cases])
+        self.assertEqual(sorted(ids), sorted(item.id() for group in groups.values() for item in group))
+        for item in cases:
             item.run.assert_not_called()
 
     def test_duplicate_ids_are_rejected_even_for_different_case_objects(self):

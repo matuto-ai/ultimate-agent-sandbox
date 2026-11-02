@@ -74,7 +74,10 @@ ADDITIONAL_MODULES = frozenset({'test_artifact_connected',
  'test_room_cli_diagnostics',
  'test_workstation_delivery'})
 
+# PR #270: measured remainder Claude source/cache checks move to existing synthesis headroom.
 SYNTHESIS_MODULES = frozenset({'test_context',
+ 'test_claude_participant_source',
+ 'test_claude_ci_cache',
  'test_library_attempts',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
