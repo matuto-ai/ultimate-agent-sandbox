@@ -233,7 +233,7 @@ def parse_recovery_approval(raw):
             and type(record['run_id']) is int and record['run_id'] > 0,
             'Invalid recovery identity')
     ids = record['cancelled_job_ids']
-    require(type(ids) is list and len(ids) == 2
+    require(type(ids) is list and 1 <= len(ids) <= len(recovery_functional_names())
             and all(type(value) is int and value > 0 for value in ids)
             and len(set(ids)) == len(ids), 'Invalid cancelled job inventory')
     require(type(record['approval_reference']) is str

@@ -5,7 +5,7 @@ read attempt 1, including after a recovery. Timing boundaries, the five-sample
 median, growth allowance, absolute ceiling, functional inventory and branch
 protection are unchanged.
 
-An operator may authorize exactly one complete second attempt when exactly two
+An operator may authorize exactly one complete second attempt when explicitly enumerated
 functional jobs were marked cancelled **after every recorded step succeeded**,
 including `Complete job`. This is not permission to rerun test failures,
 slowdowns, incomplete jobs, partial failed-job subsets or arbitrary later attempts.
@@ -27,7 +27,8 @@ Its JSON object has exactly these fields:
 - `run_id`: positive integer for the existing run
 - `head_sha`: exact 40-character lowercase hexadecimal SHA
 - `attempt`: integer 2
-- `cancelled_job_ids`: exactly the two distinct positive job IDs
+- `cancelled_job_ids`: the exact nonempty list of distinct positive cancelled job IDs,
+  bounded by the 28 functional jobs in the current graph
 - `approval_reference`: 1–160 letters, digits, underscores, colons or hyphens
 
 The record is limited to 4096 UTF-8 bytes. Duplicate/extra keys, malformed values,

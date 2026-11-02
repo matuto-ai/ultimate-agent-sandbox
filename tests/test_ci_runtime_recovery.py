@@ -88,7 +88,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
         for key, value in invalid.items():
             with self.subTest(key=key), self.assertRaises(budget.BudgetError):
                 budget.parse_recovery_approval(json.dumps(dict(self.approval, **{key: value})))
-        for value in ([], [1], [1, 2, 3], [True, 2], [0, 2]):
+        for value in ([], list(range(1, len(budget.recovery_functional_names()) + 2)), [True, 2], [0, 2]):
             with self.subTest(ids=value), self.assertRaises(budget.BudgetError):
                 budget.parse_recovery_approval(json.dumps(dict(self.approval, cancelled_job_ids=value)))
 
@@ -99,6 +99,17 @@ class RuntimeRecoveryTests(unittest.TestCase):
                 self.assertIn('explicitly approved attempt 2', self.check(workflow))
         self.assertEqual(self.original, original)
         self.assertIn('Original GitHub conclusions remain unchanged', self.check())
+
+    def test_single_postcompletion_cancellation_is_explicit_and_exact(self):
+        restored_id = self.approval['cancelled_job_ids'].pop()
+        next(value for value in self.original if value['id'] == restored_id)['conclusion'] = 'success'
+        self.assertEqual(budget.parse_recovery_approval(json.dumps(self.approval)), self.approval)
+        for workflow in budget.STAGES:
+            with self.subTest(workflow=workflow):
+                self.assertIn('explicitly approved attempt 2', self.check(workflow))
+        self.approval['cancelled_job_ids'].append(restored_id)
+        with self.assertRaises(budget.BudgetError):
+            self.check()
 
     def test_absent_approval_does_not_use_green_second_attempt(self):
         with self.assertRaises(budget.BudgetError):
