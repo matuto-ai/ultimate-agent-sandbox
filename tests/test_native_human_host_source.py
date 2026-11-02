@@ -319,7 +319,7 @@ class NativeHumanHostedSelectionSourceTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         workflow=(root/'.github/workflows/verify.yaml').read_text()
         job=workflow.split('\n  manager-mtls:\n',1)[1].split('\n  manager-field-notes:',1)[0]
-        self.assertIn('timeout-minutes: 1',job)
+        self.assertIn('timeout-minutes: 5',job)
         self.assertIn('UAS_MANAGER_TLS_TEST: "1"',job)
         self.assertEqual(job.count('timeout --signal=TERM --kill-after=2s 40s'),1)
         self.assertIn('PYTHONPATH=tests timeout --signal=TERM --kill-after=2s 40s python3 -m unittest test_manager_tls test_native_human_tls -v',job)

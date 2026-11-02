@@ -11,8 +11,9 @@ import ci_runtime_budget as budget
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_job_watchdogs_and_measured_budget_are_required(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [3, 3, 3, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1, 1, 1], 'claude-native.yml': [3, 1],
-                   'pi-native.yml': [3, 1], 'pi-durable-fit.yml': [2]}
+        # Outer watchdog includes runner result upload/finalization, not just our steps.
+        budgets = {'validate.yml': [5] * 15, 'claude-native.yml': [5, 5],
+                   'pi-native.yml': [5, 5], 'pi-durable-fit.yml': [5]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
                 text = (workflows / ('verify.yaml' if name == 'validate.yml' else name)).read_text()
@@ -158,7 +159,7 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertNotIn('sudo', browser)
                     self.assertNotIn('npm ', browser)
                     self.assertNotIn('--no-sandbox', browser)
-                self.assertLessEqual(max(actual), 3)
+                self.assertLessEqual(max(actual), 5)
                 if name == 'pi-native.yml':
                     self.assertIn('partition: [0, 1, 2, 3]', text)
                     self.assertIn('name: official-pi-native-${{ matrix.partition }}', text)
