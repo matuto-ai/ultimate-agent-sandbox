@@ -1,4 +1,4 @@
-"""Exclude only post-runner finalization, not setup, cleanup or execution gaps."""
+"""Exclude only pre/post-step intervals, not setup, cleanup or execution gaps."""
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import unittest
@@ -26,20 +26,30 @@ def fixture(name='official-claude-fixture-0', *, finalization=29, offset=0):
 
 
 class CIFinalizationTests(unittest.TestCase):
-    def test_only_twenty_nine_post_step_seconds_are_excluded(self):
+    def test_pre_and_post_step_intervals_are_separate_from_all_our_work(self):
         timing = budget.job_timing(fixture())
-        self.assertEqual(31, timing['execution'])
+        self.assertEqual(26, timing['execution'])
         self.assertEqual(60, timing['wall'])
         self.assertEqual(29, timing['finalization'])
-        # Execution includes five seconds before setup and four of checkout cleanup.
-        self.assertEqual(timing['wall'], timing['execution'] + timing['finalization'])
+        # Five seconds before setup are separate; four seconds of our cleanup count.
+        self.assertEqual(5, timing['provisioning'])
+        self.assertEqual(timing['wall'], timing['provisioning'] + timing['execution'] + timing['finalization'])
+
+    def test_longer_pre_step_delay_never_changes_work_or_historical_comparison(self):
+        job = fixture()
+        job['started_at'] = stamp(-15)
+        timing = budget.job_timing(job)
+        self.assertEqual(20, timing['provisioning'])
+        self.assertEqual(26, timing['execution'])
+        self.assertEqual(29, timing['finalization'])
+        self.assertEqual(75, timing['wall'])
 
     def test_no_finalization_and_zero_duration_steps_are_valid(self):
         job = fixture(finalization=0)
         job['steps'][0]['completed_at'] = job['steps'][0]['started_at']
         job['steps'][-1]['started_at'] = job['steps'][-1]['completed_at']
         timing = budget.job_timing(job)
-        self.assertEqual(31, timing['execution'])
+        self.assertEqual(26, timing['execution'])
         self.assertEqual(31, timing['wall'])
         self.assertEqual(0, timing['finalization'])
 
@@ -47,18 +57,18 @@ class CIFinalizationTests(unittest.TestCase):
         job = fixture()
         job['steps'][1]['completed_at'] = stamp(21)
         job['steps'][2]['started_at'] = stamp(26)  # Five-second inter-step gap stays counted.
-        self.assertEqual(31, budget.job_timing(job)['execution'])
+        self.assertEqual(26, budget.job_timing(job)['execution'])
         job['steps'][2]['completed_at'] = stamp(40)
         job['steps'][3]['started_at'] = stamp(40)
         job['steps'][3]['completed_at'] = stamp(41)
-        self.assertEqual(41, budget.job_timing(job)['execution'])
+        self.assertEqual(36, budget.job_timing(job)['execution'])
 
     def test_current_and_historical_graphs_use_the_same_execution_metric(self):
         lane = 'claude-native.yml'
         current = [fixture(name) for name in sorted(budget.STAGES[lane][0])]
         historic = [fixture('official-claude-fixture')]
-        self.assertEqual(31, budget.critical_path(lane, current))
-        self.assertEqual(31, budget.critical_path(lane, historic, historical=True))
+        self.assertEqual(26, budget.critical_path(lane, current))
+        self.assertEqual(26, budget.critical_path(lane, historic, historical=True))
         # Longer real execution still exceeds the identical historical growth limit.
         slow = deepcopy(current)
         for step in slow[0]['steps'][1:]:
@@ -69,8 +79,8 @@ class CIFinalizationTests(unittest.TestCase):
         # GitHub finalization alone does not make either baseline or candidate slower.
         for job in current + historic:
             job['completed_at'] = stamp(300)
-        self.assertEqual(31, budget.critical_path(lane, current))
-        self.assertEqual(31, budget.critical_path(lane, historic, historical=True))
+        self.assertEqual(26, budget.critical_path(lane, current))
+        self.assertEqual(26, budget.critical_path(lane, historic, historical=True))
 
     def test_failed_or_cancelled_work_cannot_receive_runtime_acceptance(self):
         lane = 'claude-native.yml'
@@ -136,25 +146,25 @@ class CIFinalizationTests(unittest.TestCase):
     def test_skipped_non_boundary_step_is_valid_with_explicit_timestamps(self):
         job = fixture()
         job['steps'][1].update(conclusion='skipped', completed_at=stamp(6))
-        self.assertEqual(31, budget.job_timing(job)['execution'])
+        self.assertEqual(26, budget.job_timing(job)['execution'])
 
     def test_diagnostics_retain_wall_path_span_and_each_finalization_gap(self):
         lane = 'claude-native.yml'
         jobs = [fixture(name, offset=index * 10)
                 for index, name in enumerate(sorted(budget.STAGES[lane][0]))]
         diagnostics = {}
-        self.assertEqual(31, budget.critical_path(lane, jobs, diagnostics=diagnostics))
+        self.assertEqual(26, budget.critical_path(lane, jobs, diagnostics=diagnostics))
         self.assertEqual(60, diagnostics['wall_path'])
         self.assertEqual(70, diagnostics['span'])
         self.assertEqual({job['name'] for job in jobs}, set(diagnostics['jobs']))
         for values in diagnostics['jobs'].values():
-            self.assertEqual({'execution': 31, 'wall': 60, 'finalization': 29}, values)
+            self.assertEqual({'provisioning': 5, 'execution': 26, 'wall': 60, 'finalization': 29}, values)
 
     def test_two_stage_path_keeps_cleanup_for_each_stage_without_finalization(self):
         lane = 'validate.yml'
         jobs = [fixture(name, offset=index * 40)
                 for index, stage in enumerate(budget.STAGES[lane]) for name in stage]
         diagnostics = {}
-        self.assertEqual(62, budget.critical_path(lane, jobs, diagnostics=diagnostics))
+        self.assertEqual(52, budget.critical_path(lane, jobs, diagnostics=diagnostics))
         self.assertEqual(120, diagnostics['wall_path'])
         self.assertEqual(100, diagnostics['span'])

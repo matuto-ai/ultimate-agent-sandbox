@@ -36,7 +36,7 @@ def require(condition, message):
 
 
 def job_timing(job):
-    """Keep provisioning and every runner step; separate only after-step finalization."""
+    """Keep every runner step; report pre-step provisioning and post-step finalization."""
     def timestamp(value):
         require(isinstance(value, str), 'Missing job/step timestamp')
         try:
@@ -63,14 +63,15 @@ def job_timing(job):
         step_start, step_end = timestamp(step.get('started_at')), timestamp(step.get('completed_at'))
         require(previous <= step_start <= step_end <= end, 'Invalid runner step timing interval')
         previous, number = step_end, step['number']
-    execution = (previous - start).total_seconds()
+    first_step = timestamp(steps[0]['started_at'])
+    execution = (previous - first_step).total_seconds()
     require(execution > 0, 'Invalid execution duration')
-    return dict(execution=execution, wall=(end - start).total_seconds(),
+    return dict(provisioning=(first_step - start).total_seconds(), execution=execution, wall=(end - start).total_seconds(),
                 finalization=(end - previous).total_seconds())
 
 
 def critical_path(workflow, jobs, *, historical=False, diagnostics=None):
-    """Include provisioning/setup/cleanup steps, not after-step finalization or queue time."""
+    """Include setup/tests/cleanup steps; exclude only pre/post-step GitHub intervals."""
     accounting = workflow.removesuffix('.yml') + ' runtime budget'
     measured = [job for job in jobs if job['name'] != accounting]
     require(len(jobs) - len(measured) <= 1, 'Duplicate runtime accounting job')
@@ -214,8 +215,8 @@ def check(repo, workflow, branch, base, run_id):
         return 'Documentation-only run: runtime unchanged; no new full-suite baseline.'
     details = (f'Full job-wall critical path: {diagnostics["wall_path"]:.1f}s; '
                f'observed lane span (including queue gaps): {diagnostics["span"]:.1f}s. '
-               'Per-job execution / after-step GitHub finalization / full wall (seconds): '
-               + '; '.join(f'{name}: {timing["execution"]:.1f} / {timing["finalization"]:.1f} / {timing["wall"]:.1f}'
+               'Per-job pre-step / execution / after-step finalization / full wall (seconds): '
+               + '; '.join(f'{name}: {timing["provisioning"]:.1f} / {timing["execution"]:.1f} / {timing["finalization"]:.1f} / {timing["wall"]:.1f}'
                            for name, timing in sorted(diagnostics['jobs'].items())) + '.')
     require(elapsed <= ABSOLUTE_SECONDS,
             f'CI critical path {elapsed:.1f}s exceeds the absolute 150-second ceiling. ' + details)
@@ -225,8 +226,8 @@ def check(repo, workflow, branch, base, run_id):
                         for number, commit, seconds in samples)
     summary = (f'CI critical path (first attempt): {elapsed:.1f}s; baseline median: {previous:.1f}s; '
                f'limit: {limit:.1f}s (+{GROWTH_PERCENT}%, absolute {ABSOLUTE_SECONDS}s). '
-               f'Sources: {sources}. All current and historical samples use job start through final Complete job step; '
-               'provisioning, setup, tests and cleanup remain included. ' + details)
+               f'Sources: {sources}. All current and historical samples use first Set up job start through final Complete job step; '
+               'all setup, installation, tests, inter-step gaps and cleanup remain included. ' + details)
     require(elapsed <= limit, summary + ' Runtime growth exceeds the allowance.')
     return summary
 
