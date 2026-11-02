@@ -131,6 +131,10 @@ def scoped_jobs(workflow, jobs, path):
     # Explicitly exclude sibling reusable jobs and the final gate. Unexpected
     # unscoped jobs still fail critical_path's exact inventory check.
     return [job for job in jobs if job['name'] != 'verify'
+            # A skipped reusable workflow is exposed as its caller job, without
+            # a child prefix. Only this exact skip is exempt; verify checks its
+            # path-applicability output before accepting it.
+            and not (job['name'] == 'pi-durable-fit' and job.get('conclusion') == 'skipped')
             and not job['name'].startswith(('pi-native / ', 'claude-native / ', 'pi-durable-fit / '))]
 
 
