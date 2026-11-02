@@ -62,7 +62,7 @@ class LocalProcessSmokeSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError,'deadline'):owner.left()
 
     def test_workflow_keeps_bounded_process_smoke_in_root_lane(self):
-        text=(ROOT/'.github/workflows/validate.yml').read_text()
+        text=(ROOT/'.github/workflows/verify.yaml').read_text()
         lane=text.split('  validate:\n',1)[1].split('\n  unit-slow:',1)[0]
         self.assertIn('15s python3 tests/linux/local_process_smoke.py --run',lane)
         self.assertIn('UAS_LOCAL_PROCESS_SMOKE: "1"',lane)

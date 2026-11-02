@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'tests/linux/diff_smoke.py'
-WORKFLOW = ROOT / '.github/workflows/validate.yml'
+WORKFLOW = ROOT / '.github/workflows/verify.yaml'
 
 
 class DiffBuildBarrierTests(unittest.TestCase):

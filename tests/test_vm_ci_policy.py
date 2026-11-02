@@ -11,18 +11,18 @@ import ci_runtime_budget as budget
 class VMCITriggerTests(unittest.TestCase):
     def test_automatic_job_watchdogs_and_measured_budget_are_required(self):
         workflows = Path(__file__).parents[1] / '.github/workflows'
-        budgets = {'validate.yml': [3, 3, 3, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1, 1], 'claude-native.yml': [3, 1],
+        budgets = {'validate.yml': [3, 3, 3, 1, 1, 2, 1, 1, 2, 1, 2, 1, 1, 1, 1], 'claude-native.yml': [3, 1],
                    'pi-native.yml': [3, 1], 'pi-durable-fit.yml': [2]}
         for name, expected in budgets.items():
             with self.subTest(workflow=name):
-                text = (workflows / name).read_text()
+                text = (workflows / ('verify.yaml' if name == 'validate.yml' else name)).read_text()
                 actual = list(map(int, re.findall(r'^    timeout-minutes: (\d+)$', text, re.MULTILINE)))
                 self.assertEqual(expected, actual)
                 if name in budget.STAGES:
                     self.assertIn('  actions: read\n', text)
                     gate = text.split('\n  runtime-budget:\n', 1)[1]
                     self.assertIn('always()', gate)
-                    self.assertIn('name: ${{ github.workflow }} runtime budget', gate)
+                    self.assertIn(f'name: {name.removesuffix(".yml")} runtime budget', gate)
                     self.assertNotIn('continue-on-error:', gate)
                     self.assertIn('fetch-depth: 0', gate)
                     self.assertIn('persist-credentials: false', gate)
@@ -36,7 +36,7 @@ class VMCITriggerTests(unittest.TestCase):
                         text.split('\njobs:\n', 1)[1], re.MULTILINE | re.DOTALL))
                     integrations = {'forge-broker-smoke', 'artifact-linux-smoke', 'docker-lifecycle', 'git-native-seams', 'gate-linux-smoke', 'gate-command-native', 'gate-artifact-native', 'room-control-plane', 'manager-mtls', 'manager-field-notes'}
                     roots = {'validate', 'unit-slow', 'unit-integration'}
-                    self.assertEqual(set(jobs), roots | integrations | {'runtime-budget'})
+                    self.assertEqual(set(jobs), roots | integrations | {'runtime-budget', 'pi-native', 'claude-native', 'pi-durable-fit', 'verify'})
                     dependencies = re.search(r'^    needs: \[(.+)\]$', jobs['runtime-budget'], re.MULTILINE)
                     self.assertEqual(set(dependencies[1].split(', ')), roots | integrations)
                     self.assertEqual(budget.STAGES['validate.yml'][1], integrations)
@@ -62,6 +62,10 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertEqual(jobs['validate'].count(smoke), 1)
                     self.assertEqual(text.count('python3 tests/linux/local_process_smoke.py --run'), 1)
                     remainder = jobs['validate'].replace(smoke, '', 1)
+                    remainder = remainder.replace('      durable_fit: ${{ steps.changes.outputs.durable_fit }}\n', '')
+                    begin = remainder.index('          # Preserve the durable-fit path scope;')
+                    end = remainder.index('          echo "durable_fit=$durable_fit" >> "$GITHUB_OUTPUT"', begin)
+                    remainder = remainder[:begin] + remainder[end + len('          echo "durable_fit=$durable_fit" >> "$GITHUB_OUTPUT"\n'):]
                     # Same source diff, docs exemption and mandatory test env;
                     # only the root's label and selected complementary shard differ.
                     self.assertEqual(remainder.replace('Validate successor interfaces', 'UNIT')
@@ -155,11 +159,11 @@ class VMCITriggerTests(unittest.TestCase):
                     self.assertNotIn('--no-sandbox', browser)
                 self.assertLessEqual(max(actual), 3)
                 if name == 'pi-native.yml':
-                    self.assertIn('partition: [0, 1, 2]', text)
+                    self.assertIn('partition: [0, 1, 2, 3]', text)
                     self.assertIn('name: official-pi-native-${{ matrix.partition }}', text)
                     self.assertIn('needs: [official-pi-native]', gate)
                     self.assertIn('--partition "${{ matrix.partition }}"', text)
-                    self.assertEqual(budget.STAGES[name], (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2')),))
+                    self.assertEqual(budget.STAGES[name], (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2', 'official-pi-native-3')),))
 
     def test_feasibility_has_only_manual_or_exact_review_label_triggers(self):
         workflow = (Path(__file__).parents[1] / '.github/workflows/vm-feasibility.yml').read_text()
@@ -187,7 +191,7 @@ class RuntimeBudgetTests(unittest.TestCase):
         routes = {
             'actions/runs/30': dict(path=f'.github/workflows/{workflow}', event='pull_request'),
             'actions/runs/30/attempts/1/jobs?per_page=100': dict(total_count=len(current_jobs), jobs=current_jobs),
-            f'actions/workflows/{workflow}/runs?event=push&branch=main&per_page=100': dict(workflow_runs=rows),
+            'actions/runs?event=push&branch=main&per_page=100': dict(workflow_runs=rows),
         }
         for number, seconds in zip(range(20, 15, -1), samples or [previous] * 5):
             rows.append(dict(id=number, run_attempt=1, path=f'.github/workflows/{workflow}', event='push',
@@ -266,7 +270,7 @@ class RuntimeBudgetTests(unittest.TestCase):
         routes = self.evidence(workflow='validate.yml', previous=50)
         routes['actions/runs/30/attempts/1/jobs?per_page=100']['jobs'] = jobs
         self.assertIn('Documentation-only', self.check(routes, 'validate.yml'))
-        key = 'actions/workflows/validate.yml/runs?event=push&branch=main&per_page=100'
+        key = 'actions/runs?event=push&branch=main&per_page=100'
         rows = routes[key]['workflow_runs']
         rows.append(dict(rows[0], id=25, head_sha='c' * 40))
         routes['actions/runs/25/attempts/1/jobs?per_page=100'] = dict(total_count=len(jobs),
@@ -278,7 +282,7 @@ class RuntimeBudgetTests(unittest.TestCase):
 
     def test_baseline_uses_five_distinct_main_commits_not_repushes_current_or_pr(self):
         routes = self.evidence()
-        key = 'actions/workflows/pi-native.yml/runs?event=push&branch=main&per_page=100'
+        key = 'actions/runs?event=push&branch=main&per_page=100'
         rows = routes[key]['workflow_runs']
         row = rows[0]
         rows.extend([dict(row, id=25), dict(row, id=30)])
@@ -297,7 +301,7 @@ class RuntimeBudgetTests(unittest.TestCase):
 
     def test_reruns_cannot_replace_first_attempt_or_turn_failure_into_baseline(self):
         routes = self.evidence()
-        key = 'actions/workflows/pi-native.yml/runs?event=push&branch=main&per_page=100'
+        key = 'actions/runs?event=push&branch=main&per_page=100'
         row = routes[key]['workflow_runs'][0]
         routes['actions/runs/20/attempts/1'] = dict(row)
         row['run_attempt'] = 3
@@ -313,7 +317,7 @@ class RuntimeBudgetTests(unittest.TestCase):
 
     def test_missing_baseline_partial_inventory_and_invalid_baseline_fail_closed(self):
         routes = self.evidence()
-        key = 'actions/workflows/pi-native.yml/runs?event=push&branch=main&per_page=100'
+        key = 'actions/runs?event=push&branch=main&per_page=100'
         routes[key]['workflow_runs'].pop()
         with self.assertRaisesRegex(budget.BudgetError, 'Need five distinct'):
             self.check(routes)

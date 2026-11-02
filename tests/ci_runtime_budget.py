@@ -21,8 +21,8 @@ SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lif
                        'manager-field-notes'))
 STAGES = {
     'validate.yml': (UNIT_JOBS, SEAM_JOBS),
-    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2')),),
-    'claude-native.yml': (frozenset(('official-claude-fixture',)),),
+    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2', 'official-pi-native-3')),),
+    'claude-native.yml': (frozenset(('official-claude-fixture-0', 'official-claude-fixture-1')),),
 }
 
 
@@ -43,6 +43,11 @@ def critical_path(workflow, jobs, *, historical=False):
     names = [job['name'] for job in measured]
     stages = STAGES[workflow]
     if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
+        stages = (frozenset(names),)
+    if historical and workflow == 'pi-native.yml' and set(names) == {
+            'official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2'}:
+        stages = (frozenset(names),)
+    if historical and workflow == 'claude-native.yml' and names == ['official-claude-fixture']:
         stages = (frozenset(names),)
     expected = set().union(*stages)
     # Recognize only complete historical graphs; current runs require all twelve roots.
@@ -74,6 +79,23 @@ def critical_path(workflow, jobs, *, historical=False):
         require(seconds > 0, f'{name} has invalid timing evidence')
         durations[name] = seconds
     return sum(max(durations[name] for name in stage & expected) for stage in stages)
+
+
+def scoped_jobs(workflow, jobs, path):
+    """Select a fixed lane inside the unified workflow, never an arbitrary subset."""
+    if path != '.github/workflows/verify.yaml':
+        require(path == f'.github/workflows/{workflow}', 'Workflow lane identity mismatch')
+        return jobs
+    prefixes = {'pi-native.yml': 'pi-native / ', 'claude-native.yml': 'claude-native / '}
+    if workflow in prefixes:
+        prefix = prefixes[workflow]
+        return [dict(job, name=job['name'][len(prefix):]) for job in jobs
+                if job['name'].startswith(prefix)]
+    require(workflow == 'validate.yml', 'Unknown unified workflow lane')
+    # Explicitly exclude sibling reusable jobs and the final gate. Unexpected
+    # unscoped jobs still fail critical_path's exact inventory check.
+    return [job for job in jobs if job['name'] != 'verify'
+            and not job['name'].startswith(('pi-native / ', 'claude-native / ', 'pi-durable-fit / '))]
 
 
 def allowed_seconds(baseline):
@@ -109,12 +131,13 @@ def ancestor(commit, base):
 
 def baseline(repo, workflow, branch, base, current_id):
     from urllib.parse import quote
-    response = api(repo, f'actions/workflows/{workflow}/runs?event=push'
+    response = api(repo, 'actions/runs?event=push'
                    f'&branch={quote(branch, safe="")}&per_page=100')
     # Re-pushing a commit cannot buy another baseline sample or replace its first run.
     first_runs = {}
     for run in sorted(response['workflow_runs'], key=lambda row: row['id']):
-        if run['id'] < current_id:
+        if (run['id'] < current_id and run['path'] in
+                (f'.github/workflows/{workflow}', '.github/workflows/verify.yaml')):
             first_runs.setdefault(run['head_sha'], run)
     samples = []
     for run in sorted(first_runs.values(), key=lambda row: row['id'], reverse=True):
@@ -123,13 +146,13 @@ def baseline(repo, workflow, branch, base, current_id):
             require(original['id'] == run['id'] and original['head_sha'] == run['head_sha']
                     and original['run_attempt'] == 1, 'Baseline attempt identity mismatch')
             run = original
-        require(run['path'] == f'.github/workflows/{workflow}' and run['event'] == 'push'
+        require(run['path'] in (f'.github/workflows/{workflow}', '.github/workflows/verify.yaml') and run['event'] == 'push'
                 and run['head_branch'] == branch, 'Baseline run identity mismatch')
         if run['status'] != 'completed' or run['conclusion'] != 'success':
             continue
         if not ancestor(run['head_sha'], base):
             continue
-        seconds = critical_path(workflow, run_jobs(repo, run['id']), historical=True)
+        seconds = critical_path(workflow, scoped_jobs(workflow, run_jobs(repo, run['id']), run['path']), historical=True)
         if seconds is not None:
             allowed_seconds(seconds)
             samples.append((run['id'], run['head_sha'], seconds))
@@ -142,9 +165,9 @@ def check(repo, workflow, branch, base, run_id):
     require(re.fullmatch(r'[\w.-]+/[\w.-]+', repo) and re.fullmatch(r'[0-9a-f]{40}', base)
             and run_id > 0, 'Invalid repository, base or run identity')
     current = api(repo, f'actions/runs/{run_id}')
-    require(current['path'] == f'.github/workflows/{workflow}'
+    require(current['path'] in (f'.github/workflows/{workflow}', '.github/workflows/verify.yaml')
             and current['event'] in ('push', 'pull_request'), 'Current workflow identity mismatch')
-    elapsed = critical_path(workflow, run_jobs(repo, run_id))
+    elapsed = critical_path(workflow, scoped_jobs(workflow, run_jobs(repo, run_id), current['path']))
     if elapsed is None:
         return 'Documentation-only run: runtime unchanged; no new full-suite baseline.'
     require(elapsed <= ABSOLUTE_SECONDS,

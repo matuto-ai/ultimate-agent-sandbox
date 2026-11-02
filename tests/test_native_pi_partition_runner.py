@@ -16,7 +16,8 @@ spec = importlib.util.spec_from_file_location('pi_partition_runner', ROOT / 'tes
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 NAMES = ['test_pi_runtime.C.test_a', 'test_pi_forge.C.test_b', 'test_pi_assignment.C.test_c',
-         'test_pi_reset.C.test_d', 'test_pi_library_capture.C.test_e', 'test_pi_future.C.test_new']
+         'test_pi_reset.C.test_d', 'test_pi_library_capture.C.test_e', 'test_pi_future.C.test_new',
+         'test_pi_library.C.test_projection', 'test_pi_participant.C.test_delivery']
 
 
 class PiPartitionRunnerTests(unittest.TestCase):
@@ -70,7 +71,7 @@ class PiPartitionRunnerTests(unittest.TestCase):
                 self.assertEqual(0, runner.worker(path))
 
     def test_partition_exact_unique_union_and_future_default(self):
-        self.assertEqual([NAMES[:2], NAMES[5:], NAMES[2:5]], runner.partition(NAMES))
+        self.assertEqual([NAMES[:2], NAMES[5:6], NAMES[2:5], NAMES[6:]], runner.partition(NAMES))
         for bad in ([], NAMES + NAMES[:1], NAMES[1:], NAMES + ['other.C.test']):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 runner.partition(bad)
@@ -197,14 +198,16 @@ class PiPartitionRunnerTests(unittest.TestCase):
         first = self.exercise(selected=0)
         second = self.exercise(selected=1)
         third = self.exercise(selected=2)
+        fourth = self.exercise(selected=3)
         self.assertEqual([[NAMES[0]], [NAMES[1]]], first)
-        self.assertEqual([NAMES[5:]], second)
+        self.assertEqual([NAMES[5:6]], second)
+        self.assertEqual([[NAMES[6]], [NAMES[7]]], fourth)
         self.assertEqual([[NAMES[2], NAMES[4]], [NAMES[3]]], third)
         local = self.exercise()
         self.assertEqual(2, len(local))
-        self.assertEqual(sorted(NAMES), sorted(sum(first + second + third, [])))
+        self.assertEqual(sorted(NAMES), sorted(sum(first + second + third + fourth, [])))
         self.assertEqual(sorted(NAMES), sorted(sum(local, [])))
-        for invalid in (-1, 3, True, '0'):
+        for invalid in (-1, 4, True, '0'):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 runner.run(invalid)
         self.exercise(selected=1, wait_failure=True)

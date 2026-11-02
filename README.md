@@ -140,11 +140,23 @@ python -m pip install --require-hashes --only-binary=:all: -r requirements.txt
 
 The Library gate uses `markdown-it-py` in CommonMark mode (no rendering, plugins, or automatic bare-URL linking). HTML, images and destinations are checked as parsed tokens; fenced and indented code remain literal. Parser nesting at 32 levels is refused rather than silently leaving content unchecked. The parser and its sole runtime dependency, `mdurl`, are pinned with wheel hashes in `requirements.txt`; CI installs the same file in an isolated environment before each aggregate partition.
 
+### Automatic verification
+
+`.github/workflows/verify.yaml` is the automatic entrypoint. Use the exact check
+name **`verify`** in branch protection. It waits for the unit/Linux/container/UI
+lanes and their timing gate, the reusable official Pi and Claude fixtures and their
+timing gates, and the applicable Pi durable-fit check. A failed, cancelled, missing
+or unexpectedly skipped lane cannot pass. Durable-fit retains its source-path
+scope (workflow edits also run it); docs-only exemptions are explicit and do not
+claim runtime evidence. The native helper workflows are reusable-only, so a commit
+does not start duplicate runs. Manual VM/native qualification stays separate and
+is never started by this entrypoint. This change does not edit repository rules.
+
 ### CI runtime budget
 
-The `validate`, `pi-native`, and `claude-native` workflows enforce `min(150 seconds, median of the last five eligible main measurements × 1.10)`. Each workflow uses five distinct main commits preceding the current run, restricted to the tested base's history. Only the first attempt of the first push run for a commit can supply a sample, and that attempt must have completed successfully. Re-running or re-pushing a commit cannot replace its measurement or count it twice. Documentation-only validation runs do not supply full-suite samples. Existing Actions history supplies the initial baseline; no guessed seed or writable baseline artifact is needed.
+The `validate`, `pi-native`, and `claude-native` measurement lanes enforce `min(150 seconds, median of the last five eligible main measurements × 1.10)`. Each lane uses five distinct main commits preceding the current run, restricted to the tested base's history. Only the first attempt of the first push run for a commit can supply a sample, and that attempt must have completed successfully. Re-running or re-pushing a commit cannot replace its measurement or count it twice. Documentation-only validation runs do not supply full-suite samples. The reader recognizes both retained pre-rename runs and the same lanes in the unified workflow, without resetting their baseline. Existing Actions history supplies the initial baseline; no guessed seed or writable baseline artifact is needed.
 
-The measurement includes setup, tests, and cleanup of each validation job. For `validate`, it is the longest unit job plus the longest dependent seam job; parallel jobs are not summed. Pi's three disjoint native partitions run on separate runners and contribute the longest complete job; all three must pass. Runner queue time and the final accounting job are excluded. GitHub's job timestamps supply the evidence. The final `runtime-budget` check reports the measured duration, source run/commit, and allowed duration in its job summary. Missing, failed, skipped, duplicate, or unrecognized validation jobs cannot produce acceptance, except for the existing explicit documentation-only exemption.
+The measurement includes setup, tests, and cleanup of each validation job. For `validate`, it is the longest unit job plus the longest dependent seam job; parallel jobs are not summed. Pi's four disjoint native partitions run on separate runners and contribute the longest complete job; all four must pass. Claude similarly runs its receiver-heavy module separately from the remaining dynamically discovered modules; both partitions must pass. Runner queue time and the final accounting job are excluded. GitHub's job timestamps supply the evidence. The final `runtime-budget` check reports the measured duration, source run/commit, and allowed duration in its job summary. Missing, failed, skipped, duplicate, or unrecognized validation jobs cannot produce acceptance, except for the existing explicit documentation-only exemption.
 
 The current PR is also judged on its first-attempt job measurements: retrying the same run cannot turn an over-budget result green. A failed first-attempt functional job likewise cannot become runtime evidence through a retry. This protects against retrying until a favorable runner appears; it does not prevent someone with branch-write authority from creating new commits, which remains a review responsibility.
 

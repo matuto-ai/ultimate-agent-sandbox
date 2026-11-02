@@ -330,7 +330,7 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
         self.assertIn('if primary is None: raise AssertionError', self.source)
 
     def test_workflow_adds_one_parallel_child_without_new_job_or_budget(self):
-        workflow = (ROOT / '.github/workflows/validate.yml').read_text()
+        workflow = (ROOT / '.github/workflows/verify.yaml').read_text()
         job = workflow.split('  git-native-seams:\n', 1)[1].split('  gate-linux-smoke:\n', 1)[0]
         self.assertIn('timeout-minutes: 1', job)
         self.assertIn('needs: [validate, unit-slow, unit-integration]', job)
