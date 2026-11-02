@@ -27,6 +27,7 @@ class CIPartitionTests(unittest.TestCase):
  'test_claude_permission_policy',
  'test_forge_mutations',
  'test_gate_evaluation',
+ 'test_library_repair_native',
  'test_library_dispatch',
  'test_library_import',
  'test_participant_pi_launch',
@@ -87,17 +88,19 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(ci.LIFECYCLE_MODULES, {'test_library_attention', 'test_library_records',
  'test_library_service', 'test_manager_library_transport',
  'test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'})
-        self.assertEqual(ci.DISPOSITION_MODULES, {'test_library_adjudication',
+        self.assertEqual(ci.DISPOSITION_MODULES, {'test_library_retention',
+ 'test_library_adjudication',
  'test_library_adjudication_native',
  'test_library_adjudication_recovery',
  'test_library_disposition',
  'test_library_disposition_native'})
-        self.assertEqual(ci.ARCHIVE_MODULES, {'test_library_archive', 'test_library_archive_integration',
+        self.assertEqual(ci.ARCHIVE_MODULES, {'test_host_capacity', 'test_library_promotion', 'test_local_native_terminal',
+ 'test_library_capture_frames', 'test_native_completed_retirement', 'test_library_archive', 'test_library_archive_integration',
  'test_library_archive_native', 'test_library_disposition_recovery'})
         self.assertEqual('archive', ci.partition_for('test_library_disposition_recovery.Case.test_one'))
         self.assertEqual('archive', ci.partition_for('test_library_archive.Case.test_one'))
-        self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_retention', 'test_library_repair',
- 'test_library_repair_native', 'test_library_requeue'})
+        self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_repair',
+ 'test_library_requeue'})
         for module in ('test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'):
             self.assertEqual('lifecycle', ci.partition_for(module + '.Case.test_one'))
         self.assertEqual('operator', ci.partition_for('test_library_deployment.Case.test_one'))
@@ -140,7 +143,7 @@ class CIPartitionTests(unittest.TestCase):
         selected = [case(identifier) for identifier in identifiers]
         cases, groups = ci.partition_suite(unittest.TestSuite(selected))
         self.assertEqual([item.id() for item in cases], identifiers)
-        self.assertEqual(len(groups['slow']), 16)
+        self.assertEqual(len(groups['slow']), 17)
         self.assertEqual(len(groups['integration']), 19)
         self.assertEqual(len(groups['additional']), 20)
         self.assertEqual(len(groups['synthesis']), 6)
@@ -148,9 +151,9 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['operator']), 3)
         self.assertEqual(len(groups['inspection']), 3)
         self.assertEqual(len(groups['lifecycle']), 7)
-        self.assertEqual(len(groups['disposition']), 5)
-        self.assertEqual(len(groups['maintenance']), 4)
-        self.assertEqual(len(groups['archive']), 4)
+        self.assertEqual(len(groups['disposition']), 6)
+        self.assertEqual(len(groups['maintenance']), 2)
+        self.assertEqual(len(groups['archive']), 9)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
@@ -168,6 +171,40 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(moved, [item.id() for item in groups['synthesis']])
         self.assertEqual(untouched, [item.id() for item in groups['remainder']])
         self.assertEqual(ids, [item.id() for item in cases])
+        self.assertEqual(sorted(ids), sorted(item.id() for group in groups.values() for item in group))
+        for item in cases:
+            item.run.assert_not_called()
+
+    def test_retention_moves_whole_to_disposition_without_other_reassignment(self):
+        moved = ['test_library_retention.Retention.test_current',
+                 'test_library_retention.Future.test_new']
+        maintenance = ['test_library_repair.Case.test_current',
+                       'test_library_requeue.Case.test_current']
+        untouched = ['test_library_retention_future.Future.test_new']
+        ids = moved + maintenance + untouched
+        cases, groups = ci.partition_suite(unittest.TestSuite(case(name) for name in ids))
+        self.assertEqual(moved, [item.id() for item in groups['disposition']])
+        self.assertEqual(maintenance, [item.id() for item in groups['maintenance']])
+        self.assertEqual(untouched, [item.id() for item in groups['remainder']])
+        self.assertEqual(ids, [item.id() for item in cases])
+        self.assertEqual(sorted(ids), sorted(item.id() for group in groups.values() for item in group))
+        for item in cases:
+            item.run.assert_not_called()
+
+    def test_measured_headroom_moves_whole_modules_without_other_reassignment(self):
+        archive_modules = ('test_host_capacity', 'test_library_promotion',
+                           'test_local_native_terminal', 'test_library_capture_frames',
+                           'test_native_completed_retirement')
+        archive = [module + suffix for module in archive_modules
+                   for suffix in ('.Case.test_current', '.Future.test_new')]
+        slow = ['test_library_repair_native.Native.test_current',
+                'test_library_repair_native.Future.test_new']
+        remainder = ['test_host_capacity_future.Future.test_new']
+        ids = archive + slow + remainder
+        cases, groups = ci.partition_suite(unittest.TestSuite(case(name) for name in ids))
+        self.assertEqual(archive, [item.id() for item in groups['archive']])
+        self.assertEqual(slow, [item.id() for item in groups['slow']])
+        self.assertEqual(remainder, [item.id() for item in groups['remainder']])
         self.assertEqual(sorted(ids), sorted(item.id() for group in groups.values() for item in group))
         for item in cases:
             item.run.assert_not_called()

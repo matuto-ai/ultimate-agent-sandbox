@@ -189,3 +189,31 @@ is added, no case is removed. This uses existing parallel capacity without new
 jobs, environment changes, timeout changes, acceptance-budget changes, baseline
 changes, or altered measurement. The next exact-head hosted run must establish
 acceptance; local lane timings are not hosted acceptance evidence.
+
+## Retention checks in existing disposition headroom (PR #270)
+
+[Run 41489941571](https://github.com/matuto-ai/ultimate-agent-sandbox/actions/runs/41489941571)
+passed all functional jobs. The prior redistribution reduced remainder from 66
+seconds to 54, with synthesis at 43 seconds. Maintenance became the longest
+parallel unit lane at 63 seconds (55 cases in 53.715 suite seconds); the graph
+measured 114 seconds against the unchanged 112.2-second allowance. The existing
+disposition lane took 33 seconds. Test-line timestamp deltas estimate retention
+at 12.184 seconds; this is planning evidence, not a future-duration guarantee.
+
+Move the complete `test_library_retention` module from maintenance to disposition,
+retaining repair and requeue in maintenance. Exact module guards
+and a new current/future-case regression preserve complete, disjoint discovery.
+No test is removed, and no job, environment, timeout, budget, baseline, or timing
+measurement changes. The next exact-head hosted graph must establish acceptance.
+
+Reviewing all twelve lanes in the same run avoids moving the bottleneck one lane
+at a time. Slow took 34 seconds and archive 36, while remainder took 54. Move
+`test_library_repair_native` (estimated 4.205 suite seconds) from maintenance to
+slow. Move complete remainder modules `test_host_capacity` (1.716),
+`test_library_promotion` (1.354), `test_local_native_terminal` (1.171),
+`test_library_capture_frames` (0.991), and `test_native_completed_retirement`
+(0.952) to archive. These measured estimates project maintenance near 47 seconds,
+remainder near 48, disposition near 45, slow near 38, and archive near 42; the
+other measured lanes remain between 39 and 45 seconds. This is bounded balancing
+of existing jobs, not a guaranteed graph duration. Whole-module current/future
+ID guards cover every reassignment; the mandatory environments remain identical.
