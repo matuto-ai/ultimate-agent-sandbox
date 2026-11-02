@@ -38,16 +38,22 @@ def evidence():
         if value['name'] in ('forge-broker-smoke', 'manager-field-notes'):
             value['conclusion'] = 'cancelled'
             cancelled.append(value['id'])
+        if value['name'] in budget.RECOVERY_ACCOUNTING:
+            value['steps'][1]['name'] = 'Enforce measured runtime growth and absolute ceiling'
         if value['name'] in ('validate runtime budget', 'verify'):
             value['conclusion'] = 'failure'
+            value['steps'][1]['conclusion'] = 'failure'
     approval = dict(version=1, repository=REPO, run_id=RUN, head_sha=SHA, attempt=2,
-                    cancelled_job_ids=cancelled, approval_reference='Sentinel_explicit_permission')
+                    cancelled_job_ids=cancelled, approval_reference='Sentinel_explicit_permission',
+                    original_job_conclusions_sha256=budget.conclusion_digest(original))
     replacement = deepcopy(original)
     for value in replacement:
         value['run_attempt'] = 2
         value['id'] += 1000
         if value['name'] != 'pi-durable-fit':
             value['conclusion'] = 'success'
+            for step in value['steps']:
+                step['conclusion'] = 'success'
     current = dict(id=RUN, head_sha=SHA, run_attempt=2, path='.github/workflows/verify.yaml',
                    event='pull_request', head_branch='feature', status='in_progress', conclusion=None)
     old_run = dict(current, run_attempt=1, status='completed', conclusion='failure')
@@ -70,8 +76,24 @@ class RuntimeRecoveryTests(unittest.TestCase):
         self.assertIn(path, responses)
         return deepcopy(responses[path])
 
+    def accounting_log(self, repo, job_id):
+        self.assertEqual(repo, REPO)
+        value = next(value for value in self.original if value['id'] == job_id)
+        lanes = {'validate runtime budget': 'validate.yml',
+                 'pi-native / pi-native runtime budget': 'pi-native.yml',
+                 'claude-native / claude-native runtime budget': 'claude-native.yml'}
+        workflow = lanes[value['name']]
+        lane_ids = sorted(row['id'] for row in budget.scoped_jobs(
+            workflow, self.original, '.github/workflows/verify.yaml')
+            if row['id'] in self.approval['cancelled_job_ids'])
+        receipt = dict(version=1, repository=REPO, run_id=RUN, head_sha=SHA,
+                       attempt=1, workflow=workflow, reason='functional_cancellation',
+                       cancelled_job_ids=lane_ids)
+        return budget.RECEIPT_PREFIX + json.dumps(receipt)
+
     def check(self, workflow='validate.yml', approval=True):
         with patch.object(budget, 'api', side_effect=self.api), patch.object(
+                budget, 'accounting_log', side_effect=self.accounting_log), patch.object(
                 budget, 'baseline', return_value=(100, [(1, 'b' * 40, 100)])):
             return budget.check(REPO, workflow, 'main', 'b' * 40, RUN,
                                 recovery_approval=self.approval if approval else None)
@@ -103,6 +125,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
     def test_single_postcompletion_cancellation_is_explicit_and_exact(self):
         restored_id = self.approval['cancelled_job_ids'].pop()
         next(value for value in self.original if value['id'] == restored_id)['conclusion'] = 'success'
+        self.approval['original_job_conclusions_sha256'] = budget.conclusion_digest(self.original)
         self.assertEqual(budget.parse_recovery_approval(json.dumps(self.approval)), self.approval)
         for workflow in budget.STAGES:
             with self.subTest(workflow=workflow):
@@ -144,18 +167,23 @@ class RuntimeRecoveryTests(unittest.TestCase):
         for mutate in mutations:
             saved = deepcopy(self.original)
             mutate(self.original[index])
+            if self.original[index]['status'] == 'completed':
+                self.approval['original_job_conclusions_sha256'] = budget.conclusion_digest(self.original)
             with self.subTest(mutation=mutate), self.assertRaises(budget.BudgetError):
                 self.check()
             self.original = saved
+            self.approval['original_job_conclusions_sha256'] = budget.conclusion_digest(self.original)
 
     def test_other_original_failure_or_cancellation_cannot_be_hidden(self):
         index = next(i for i, value in enumerate(self.original) if value['name'] == 'unit-slow')
         for conclusion in ('failure', 'cancelled', 'skipped'):
             saved = deepcopy(self.original)
             self.original[index]['conclusion'] = conclusion
+            self.approval['original_job_conclusions_sha256'] = budget.conclusion_digest(self.original)
             with self.subTest(conclusion=conclusion), self.assertRaises(budget.BudgetError):
                 self.check()
             self.original = saved
+            self.approval['original_job_conclusions_sha256'] = budget.conclusion_digest(self.original)
         self.approval['cancelled_job_ids'][0] = 999999
         with self.assertRaises(budget.BudgetError):
             self.check()
@@ -247,6 +275,7 @@ class RuntimeRecoveryTests(unittest.TestCase):
             source = (root / '.github/workflows' / workflow).read_text()
             self.assertIn('CI_RUNTIME_RECOVERY_APPROVAL:', source)
             self.assertIn('vars.CI_RUNTIME_RECOVERY_APPROVAL', source)
+            self.assertIn('CI_RUNTIME_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}', source)
         source = (root / '.github/workflows/verify.yaml').read_text()
         accounting = source.split('  runtime-budget:', 1)[1].split('  pi-native:', 1)[0]
         needs = next(line for line in accounting.splitlines() if line.strip().startswith('needs:'))

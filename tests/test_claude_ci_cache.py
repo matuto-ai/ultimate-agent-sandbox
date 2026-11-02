@@ -29,7 +29,14 @@ class ClaudeCICacheTests(unittest.TestCase):
         save=workflow.index('uses: actions/cache/save@')
         tests=workflow.index('sh "$2/tests/claude/run-tests.sh"')
         self.assertTrue(cli<sdk<parser<save<tests)
-        self.assertEqual(workflow.count('        if:'),1)
+        conditional_steps = [(block.splitlines()[0], line.strip())
+            for block in workflow.split('      - name: ')[1:]
+            for line in block.splitlines()[1:] if line.startswith('        if:')]
+        self.assertEqual(conditional_steps, [
+            ('Confirm exact public npm acquisition cache hit',
+             "if: ${{ steps.claude-npm-cache.outputs.cache-hit == 'true' }}"),
+            ('Save verified public acquisition bytes before fixture execution',
+             "if: ${{ steps.claude-npm-cache.outputs.cache-hit != 'true' }}")])
         self.assertIn("if: ${{ steps.claude-npm-cache.outputs.cache-hit != 'true' }}",workflow)
         self.assertNotIn('continue-on-error',workflow)
     def test_both_installs_keep_scrubbed_configuration_lock_checks_and_integrity_path(self):
