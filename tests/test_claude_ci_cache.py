@@ -1,6 +1,8 @@
 """Public acquisition-cache policy and fixture worker checks; no npm or native runtime."""
 from pathlib import Path
 import os
+import json
+import shutil
 import re
 import subprocess
 import sys
@@ -40,6 +42,61 @@ class ClaudeCICacheTests(unittest.TestCase):
             self.assertIn('NPM_CONFIG_USERCONFIG="$PWD/.home/empty-user.npmrc"',script)
             self.assertIn('NPM_CONFIG_GLOBALCONFIG="$PWD/.home/empty-global.npmrc"',script)
             self.assertLess(script.index('check-lock.mjs'),script.index('"$npm_path" ci '))
+
+
+    def test_glibc_binary_is_direct_and_optional_platform_downloads_are_omitted(self):
+        root = ROOT/'tests/claude'
+        manifest = json.loads((root/'package.json').read_text())
+        lock = json.loads((root/'package-lock.json').read_text())
+        expected = {'@anthropic-ai/claude-code': '2.1.310',
+                    '@anthropic-ai/claude-code-linux-x64': '2.1.310'}
+        self.assertEqual(expected, manifest['dependencies'])
+        self.assertEqual(expected, lock['packages']['']['dependencies'])
+        binary = lock['packages']['node_modules/@anthropic-ai/claude-code-linux-x64']
+        self.assertNotIn('optional', binary)
+        self.assertEqual('2.1.310', binary['version'])
+        self.assertEqual('sha512-CuzpJrMBbqaR3+1SiLrBtPV3w/cFvcqBfhe9kNskzZ2Fm6KXa7v0l7tM+Ln6l5QLb79WoU0CcacXnYtsygbe6A==', binary['integrity'])
+        for name, item in lock['packages'].items():
+            if name.startswith('node_modules/@anthropic-ai/claude-code-') and not name.endswith('code-linux-x64'):
+                self.assertTrue(item['optional'])
+        script = (root/'install-dependencies.sh').read_text()
+        self.assertIn('"$npm_path" ci --omit=optional ', script)
+        self.assertLess(script.index('check-lock.mjs'), script.index('"$npm_path" ci '))
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for actual lock checker')
+    def test_lock_checker_rejects_direct_dependency_and_integrity_mutation(self):
+        root = ROOT/'tests/claude'
+        cases = ('unchanged', 'manifest missing binary', 'lock missing binary',
+                 'binary optional', 'binary integrity', 'umbrella integrity')
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                copy = Path(directory)
+                for name in ('package.json', 'package-lock.json', 'check-lock.mjs'):
+                    shutil.copyfile(root/name, copy/name)
+                manifest = json.loads((copy/'package.json').read_text())
+                lock = json.loads((copy/'package-lock.json').read_text())
+                binary = lock['packages']['node_modules/@anthropic-ai/claude-code-linux-x64']
+                if case == 'manifest missing binary': del manifest['dependencies']['@anthropic-ai/claude-code-linux-x64']
+                elif case == 'lock missing binary': del lock['packages']['']['dependencies']['@anthropic-ai/claude-code-linux-x64']
+                elif case == 'binary optional': binary['optional'] = True
+                elif case == 'binary integrity': binary['integrity'] = 'sha512-AAAA'
+                elif case == 'umbrella integrity': lock['packages']['node_modules/@anthropic-ai/claude-code']['integrity'] = 'sha512-AAAA'
+                (copy/'package.json').write_text(json.dumps(manifest))
+                (copy/'package-lock.json').write_text(json.dumps(lock))
+                result = subprocess.run(['node', str(copy/'check-lock.mjs')], capture_output=True, timeout=10)
+                self.assertEqual(case == 'unchanged', result.returncode == 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for actual platform guard')
+    def test_lock_checker_explicitly_rejects_unsupported_native_platforms(self):
+        checker = (ROOT/'tests/claude/check-lock.mjs').as_uri()
+        for setup in ("Object.defineProperty(process, 'platform', {value:'darwin'});",
+                      "Object.defineProperty(process, 'arch', {value:'arm64'});",
+                      "process.report.getReport = () => ({header:{}});"):
+            result = subprocess.run(['node', '--input-type=module', '-e',
+                                     setup + 'await import(' + json.dumps(checker) + ');'],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn('Claude fixture requires Linux x64 glibc', result.stderr)
 
 
 class ClaudeCIRunnerTests(unittest.TestCase):

@@ -1,1 +1,1 @@
-{"name": "ultimate-claude-native-fixture", "private": true, "version": "0.0.0", "dependencies": {"@anthropic-ai/claude-code": "2.1.310"}}
+{"name": "ultimate-claude-native-fixture", "private": true, "version": "0.0.0", "dependencies": {"@anthropic-ai/claude-code": "2.1.310", "@anthropic-ai/claude-code-linux-x64": "2.1.310"}}

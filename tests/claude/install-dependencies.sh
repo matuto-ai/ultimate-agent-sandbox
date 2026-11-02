@@ -19,5 +19,5 @@ exec env -i PATH="$(dirname "$node_path"):$(dirname "$npm_path"):/usr/bin:/bin" 
   NPM_CONFIG_USERCONFIG="$PWD/.home/empty-user.npmrc" \
   NPM_CONFIG_GLOBALCONFIG="$PWD/.home/empty-global.npmrc" \
   NPM_CONFIG_CACHE="$PWD/.npm-cache" NPM_CONFIG_IGNORE_SCRIPTS=true \
-  "$npm_path" ci --registry=https://registry.npmjs.org --ignore-scripts --no-audit --no-fund \
+  "$npm_path" ci --omit=optional --registry=https://registry.npmjs.org --ignore-scripts --no-audit --no-fund \
   --prefer-offline --fetch-retries=0 --fetch-timeout=20000 --update-notifier=false
