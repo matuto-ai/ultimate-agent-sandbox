@@ -95,12 +95,12 @@ class CIPartitionTests(unittest.TestCase):
  'test_library_disposition',
  'test_library_disposition_native'})
         self.assertEqual(ci.ARCHIVE_MODULES, {'test_host_capacity', 'test_library_promotion', 'test_local_native_terminal',
- 'test_library_capture_frames', 'test_native_completed_retirement', 'test_library_archive', 'test_library_archive_integration',
- 'test_library_archive_native', 'test_library_disposition_recovery'})
-        self.assertEqual('archive', ci.partition_for('test_library_disposition_recovery.Case.test_one'))
-        self.assertEqual('archive', ci.partition_for('test_library_archive.Case.test_one'))
+ 'test_library_capture_frames', 'test_native_completed_retirement', 'test_library_archive_integration',
+ 'test_library_archive_native'})
+        self.assertEqual('scheduler', ci.partition_for('test_library_disposition_recovery.Case.test_one'))
+        self.assertEqual('maintenance', ci.partition_for('test_library_archive.Case.test_one'))
         self.assertEqual(ci.MAINTENANCE_MODULES, {'test_library_repair',
- 'test_library_requeue'})
+ 'test_library_requeue', 'test_library_archive'})
         for module in ('test_local_library_wiring', 'test_local_library_model', 'test_local_library_transport'):
             self.assertEqual('lifecycle', ci.partition_for(module + '.Case.test_one'))
         self.assertEqual('operator', ci.partition_for('test_library_deployment.Case.test_one'))
@@ -113,7 +113,8 @@ class CIPartitionTests(unittest.TestCase):
         matrix=workflow.split('  unit-integration:',1)[1].split('  forge-broker-smoke:',1)[0]
         self.assertEqual(matrix.count('- {partition:'), 10)
         self.assertNotIn('needs:', matrix)
-        self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly'})
+        self.assertEqual(ci.SCHEDULER_MODULES, {'test_library_scheduler', 'test_library_assembly',
+ 'test_library_disposition_recovery'})
         self.assertEqual('scheduler', ci.partition_for('test_library_scheduler.Case.test_one'))
         self.assertEqual('synthesis', ci.partition_for('test_library_attempts.Case.test_one'))
         self.assertFalse(ci.SLOW_MODULES & ci.INTEGRATION_MODULES)
@@ -147,13 +148,13 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual(len(groups['integration']), 19)
         self.assertEqual(len(groups['additional']), 20)
         self.assertEqual(len(groups['synthesis']), 6)
-        self.assertEqual(len(groups['scheduler']), 2)
+        self.assertEqual(len(groups['scheduler']), 3)
         self.assertEqual(len(groups['operator']), 3)
         self.assertEqual(len(groups['inspection']), 3)
         self.assertEqual(len(groups['lifecycle']), 7)
         self.assertEqual(len(groups['disposition']), 6)
-        self.assertEqual(len(groups['maintenance']), 2)
-        self.assertEqual(len(groups['archive']), 9)
+        self.assertEqual(len(groups['maintenance']), 3)
+        self.assertEqual(len(groups['archive']), 7)
         self.assertEqual(len(groups['remainder']), 2)
         self.assertEqual(sorted(item.id() for group in groups.values() for item in group),
                          sorted(identifiers))
@@ -209,6 +210,23 @@ class CIPartitionTests(unittest.TestCase):
         for item in cases:
             item.run.assert_not_called()
 
+    def test_archive_hot_modules_move_whole_to_existing_parallel_lanes(self):
+        assignments = {'test_library_archive': 'maintenance',
+                       'test_library_disposition_recovery': 'scheduler',
+                       'test_library_archive_native': 'archive',
+                       'test_library_archive_integration': 'archive',
+                       'test_library_archive_future': 'remainder'}
+        ids = [module + suffix for module in assignments
+               for suffix in ('.Current.test_case', '.Future.test_added')]
+        cases, groups = ci.partition_suite(unittest.TestSuite(case(name) for name in ids))
+        for identifier in ids:
+            expected = assignments[identifier.split('.', 1)[0]]
+            self.assertEqual(expected, ci.partition_for(identifier))
+            self.assertEqual(1, sum(item.id() == identifier for group in groups.values() for item in group))
+        self.assertEqual(ids, [item.id() for item in cases])
+        for item in cases:
+            item.run.assert_not_called()
+
     def test_duplicate_ids_are_rejected_even_for_different_case_objects(self):
         with self.assertRaises(ValueError):
             ci.partition_suite(unittest.TestSuite([case('test_peer.Case.test_one'),
@@ -252,7 +270,7 @@ class CIPartitionTests(unittest.TestCase):
             lifecycle = case('test_library_service.Case.test_one')
             disposition = case('test_library_adjudication.Case.test_one')
             maintenance = case('test_library_repair.Case.test_one')
-            archive = case('test_library_archive.Case.test_one')
+            archive = case('test_library_archive_native.Case.test_one')
             loader = Mock(errors=[], discover=Mock(return_value=unittest.TestSuite(
                 [archive, maintenance, lifecycle, disposition, slow, integration, additional, synthesis, scheduler, operator, inspection, rest])))
             runner = Mock()
@@ -279,7 +297,7 @@ class CIPartitionTests(unittest.TestCase):
         loader.errors = []
         loader.discover.return_value = unittest.TestSuite([case('test_peer.Case.test_one'),
                                                           case('test_future.Case.test_one'), case('test_participant.Case.test_one'),
-                                                          case('test_local_three_runs.Case.test_one'), case('test_library_attempts.Case.test_one'), case('test_library_scheduler.Case.test_one'), case('test_library_controls.Case.test_one'), case('test_library_inspection.Case.test_one'), case('test_library_service.Case.test_one'), case('test_library_adjudication.Case.test_one'), case('test_library_repair.Case.test_one'), case('test_library_archive.Case.test_one')])
+                                                          case('test_local_three_runs.Case.test_one'), case('test_library_attempts.Case.test_one'), case('test_library_scheduler.Case.test_one'), case('test_library_controls.Case.test_one'), case('test_library_inspection.Case.test_one'), case('test_library_service.Case.test_one'), case('test_library_adjudication.Case.test_one'), case('test_library_repair.Case.test_one'), case('test_library_archive_native.Case.test_one')])
         runner = Mock(); runner.run.return_value.wasSuccessful.return_value = False
         with patch.object(ci.unittest, 'TestLoader', return_value=loader), \
                 patch.object(ci.unittest, 'TextTestRunner', return_value=runner), \

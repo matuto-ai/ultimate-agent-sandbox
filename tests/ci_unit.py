@@ -83,15 +83,18 @@ SYNTHESIS_MODULES = frozenset({'test_context',
  'test_native_pi_reset_adversarial',
  'test_staged_source_closure'})
 
-SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly'})
+# Run 41521952691: archive 87s; move 20.47s recovery work into scheduler's 33s lane.
+SCHEDULER_MODULES = frozenset({'test_library_scheduler', 'test_library_assembly',
+ 'test_library_disposition_recovery'})
 
 # Run41228190888: maintenance51.501s; deployment12.717s moves beside controls.
 OPERATOR_MODULES = frozenset({'test_library_controls', 'test_git_payload', 'test_library_deployment'})
 
 # PR #270: measured 63s maintenance moves repair-native to slow and retention to disposition.
 # Keep complete modules and identical required environments in every lane.
+# Run 41521952691 measured archive's core module at 25.87s; maintenance had 27s total.
 MAINTENANCE_MODULES = frozenset({'test_library_repair',
- 'test_library_requeue'})
+ 'test_library_requeue', 'test_library_archive'})
 
 INSPECTION_MODULES = frozenset({'test_library_hub', 'test_library_inspection', 'test_library_relocation'})
 
@@ -109,11 +112,10 @@ DISPOSITION_MODULES = frozenset({'test_library_retention',
  'test_library_disposition',
  'test_library_disposition_native'})
 
-# Run 41129393214: disposition recovery uses archive headroom.
 # PR #270: five measured remainder modules also use existing archive headroom.
 ARCHIVE_MODULES = frozenset({'test_host_capacity', 'test_library_promotion', 'test_local_native_terminal',
- 'test_library_capture_frames', 'test_native_completed_retirement', 'test_library_archive', 'test_library_archive_integration',
- 'test_library_archive_native', 'test_library_disposition_recovery'})
+ 'test_library_capture_frames', 'test_native_completed_retirement', 'test_library_archive_integration',
+ 'test_library_archive_native'})
 
 PARTITIONS = ('archive', 'maintenance', 'lifecycle', 'disposition', 'inspection', 'operator', 'slow',
               'integration', 'additional', 'synthesis', 'scheduler', 'remainder')
