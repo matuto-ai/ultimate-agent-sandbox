@@ -317,7 +317,7 @@ class NativeHumanHostedSelectionSourceTests(unittest.TestCase):
     def test_exact_two_hosted_modules_share_existing_timeout_and_environment_gate(self):
         import ast
         root=Path(__file__).resolve().parents[1]
-        workflow=(root/'.github/workflows/validate.yml').read_text()
+        workflow=(root/'.github/workflows/verify.yaml').read_text()
         job=workflow.split('\n  manager-mtls:\n',1)[1].split('\n  manager-field-notes:',1)[0]
         self.assertIn('timeout-minutes: 1',job)
         self.assertIn('UAS_MANAGER_TLS_TEST: "1"',job)

@@ -103,7 +103,7 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
         self.assertIn("error.code == 'GATE_ENDPOINT_REPLACED'", source)
 
     def test_workflow_is_bounded_parallel_readonly_and_never_runs_full_vm(self):
-        workflow = (ROOT / '.github/workflows/validate.yml').read_text()
+        workflow = (ROOT / '.github/workflows/verify.yaml').read_text()
         job = workflow.split('  artifact-linux-smoke:\n', 1)[1].split('  docker-lifecycle:\n', 1)[0]
         self.assertIn('needs: [validate, unit-slow, unit-integration]', job)
         self.assertIn('timeout-minutes: 1', job)

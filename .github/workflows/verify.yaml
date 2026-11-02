@@ -1,4 +1,4 @@
-name: validate
+name: Verify
 
 on:
   push:
@@ -17,6 +17,7 @@ jobs:
   validate:
     outputs:
       skip_tests: ${{ steps.changes.outputs.skip_tests }}
+      durable_fit: ${{ steps.changes.outputs.durable_fit }}
     if: ${{ github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 3
@@ -63,6 +64,21 @@ jobs:
             skip_tests=true
           fi
           echo "skip_tests=$skip_tests" >> "$GITHUB_OUTPUT"
+          # Preserve the durable-fit path scope; unknown diffs run it conservatively.
+          durable_fit=true
+          if [[ "$base" =~ ^[0-9a-f]{40}$ ]] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+            changed="$(mktemp)"
+            if git diff --name-only -z --no-renames "$base" HEAD -- > "$changed" && [[ -s "$changed" ]]; then
+              durable_fit=false
+              while IFS= read -r -d '' path; do
+                case "$path" in
+                  spike/pi-durable-fit/*|uas/ledger.py|.github/workflows/*) durable_fit=true ;;
+                esac
+              done < "$changed"
+            fi
+            rm -f "$changed"
+          fi
+          echo "durable_fit=$durable_fit" >> "$GITHUB_OUTPUT"
 
       # Give every test-only setup/check step this condition, not the whole job.
       - name: Install pinned Python dependencies
@@ -469,7 +485,7 @@ jobs:
           retention-days: 7
 
   runtime-budget:
-    name: ${{ github.workflow }} runtime budget
+    name: validate runtime budget
     needs: [validate, unit-slow, unit-integration, forge-broker-smoke, artifact-linux-smoke, docker-lifecycle, git-native-seams, gate-linux-smoke, gate-command-native, gate-artifact-native, room-control-plane, manager-mtls, manager-field-notes]
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
@@ -485,3 +501,40 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: python3 -B tests/ci_runtime_budget.py validate.yml --base "$BASE_SHA"
+
+
+  pi-native:
+    uses: ./.github/workflows/pi-native.yml
+
+  claude-native:
+    uses: ./.github/workflows/claude-native.yml
+
+  pi-durable-fit:
+    needs: [validate]
+    if: ${{ needs.validate.outputs.durable_fit == 'true' }}
+    uses: ./.github/workflows/pi-durable-fit.yml
+
+  verify:
+    # One branch-protection check. Only the explicit durable-fit path exemption
+    # may skip a dependency; each timing gate validates its complete test graph.
+    needs: [validate, runtime-budget, pi-native, claude-native, pi-durable-fit]
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Require every applicable verification lane
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          jobs = json.loads(os.environ['RESULTS'])
+          required = {'validate', 'runtime-budget', 'pi-native', 'claude-native', 'pi-durable-fit'}
+          assert set(jobs) == required, 'Missing or unexpected verification lane'
+          assert all(jobs[name]['result'] == 'success' for name in required - {'pi-durable-fit'}), 'Required verification failed, skipped or cancelled'
+          applicable = jobs['validate']['outputs'].get('durable_fit')
+          assert applicable in ('true', 'false'), 'Unknown durable-fit applicability'
+          expected = 'success' if applicable == 'true' else 'skipped'
+          assert jobs['pi-durable-fit']['result'] == expected, 'Durable-fit result does not match applicability'
+          print('All applicable verification lanes passed.')
+          PYTHON

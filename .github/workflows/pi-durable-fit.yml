@@ -1,23 +1,10 @@
 name: pi-durable-fit
 
 on:
-  push:
-    paths:
-      - 'spike/pi-durable-fit/**'
-      - 'uas/ledger.py'
-      - '.github/workflows/pi-durable-fit.yml'
-  pull_request:
-    paths:
-      - 'spike/pi-durable-fit/**'
-      - 'uas/ledger.py'
-      - '.github/workflows/pi-durable-fit.yml'
+  workflow_call:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
 
 jobs:
   model-free-fit:

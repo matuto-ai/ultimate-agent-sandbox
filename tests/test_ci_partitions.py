@@ -103,7 +103,7 @@ class CIPartitionTests(unittest.TestCase):
         self.assertEqual('maintenance', ci.partition_for('test_library_requeue.Case.test_one'))
         self.assertEqual('operator', ci.partition_for('test_library_controls.Case.test_one'))
         self.assertEqual('inspection', ci.partition_for('test_library_inspection.Case.test_one'))
-        workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/validate.yml').read_text()
+        workflow=(Path(__file__).resolve().parents[1]/'.github/workflows/verify.yaml').read_text()
         self.assertIn('- {partition: inspection, name: unit-inspection}', workflow)
         matrix=workflow.split('  unit-integration:',1)[1].split('  forge-broker-smoke:',1)[0]
         self.assertEqual(matrix.count('- {partition:'), 10)

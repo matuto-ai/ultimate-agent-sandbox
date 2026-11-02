@@ -1,16 +1,11 @@
 name: claude-native
 
 on:
-  push:
-  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
   actions: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
 
 jobs:
   official-claude-fixture:
@@ -66,7 +61,7 @@ jobs:
           sudo unshare --net -- sh -c 'ip link set lo up; exec sudo -u "$1" -- env -i PATH="$4/bin:/usr/bin:/bin" UAS_CLAUDE_INSTALL="$2/tests/claude" UAS_CLAUDE_SDK_INSTALL="$2/tests/claude/sdk" UAS_CLAUDE_NODE="$3" sh "$2/tests/claude/run-tests.sh"' sh "$runner_user" "$PWD" "$node_path" "$RUNNER_TEMP/uas-python"
 
   runtime-budget:
-    name: ${{ github.workflow }} runtime budget
+    name: claude-native runtime budget
     needs: [official-claude-fixture]
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04

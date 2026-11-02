@@ -1,16 +1,11 @@
 name: pi-native
 
 on:
-  push:
-  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
   actions: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
 
 jobs:
   official-pi-native:
@@ -48,7 +43,7 @@ jobs:
             env PATH="$node_dir:$RUNNER_TEMP/uas-python/bin:/usr/bin:/bin" sh tests/pi/run-tests.sh --partition "${{ matrix.partition }}"
 
   runtime-budget:
-    name: ${{ github.workflow }} runtime budget
+    name: pi-native runtime budget
     needs: [official-pi-native]
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04

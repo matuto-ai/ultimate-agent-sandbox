@@ -83,7 +83,7 @@ class ReviewHostedTests(unittest.TestCase):
         self.assertNotIn("copytree",source)
         self.assertIn("for name in SOURCES:",source)
         self.assertIn('secret not in out and secret not in err',source)
-        workflow=(ROOT/'.github/workflows/validate.yml').read_text()
+        workflow=(ROOT/'.github/workflows/verify.yaml').read_text()
         self.assertIn('30s sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS /usr/bin/python3 tests/linux/review_forge_smoke.py & review=$!',workflow)
         gates=workflow.split('  gate-linux-smoke:\n',1)[1].split('  gate-command-native:',1)[0]
         self.assertIn('children=("$diff")',gates)
