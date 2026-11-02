@@ -38,7 +38,8 @@ class VMCITriggerTests(unittest.TestCase):
                     roots = {'validate', 'unit-slow', 'unit-integration'}
                     self.assertEqual(set(jobs), roots | integrations | {'runtime-budget', 'pi-native', 'claude-native', 'pi-durable-fit', 'verify'})
                     dependencies = re.search(r'^    needs: \[(.+)\]$', jobs['runtime-budget'], re.MULTILINE)
-                    self.assertEqual(set(dependencies[1].split(', ')), roots | integrations)
+                    self.assertEqual(set(dependencies[1].split(', ')), roots | integrations |
+                                     {'pi-native', 'claude-native', 'pi-durable-fit'})
                     self.assertEqual(budget.STAGES['validate.yml'][1], integrations)
                     matrix_names = set(re.findall(r'partition: \w+, name: ([\w-]+)', text))
                     self.assertEqual(budget.STAGES['validate.yml'][0], {'validate', 'unit-slow'} | matrix_names)

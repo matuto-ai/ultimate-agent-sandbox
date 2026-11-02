@@ -152,11 +152,13 @@ def api(repo, path):
     return json.loads(result.stdout)
 
 
-def run_jobs(repo, run_id):
-    response = api(repo, f'actions/runs/{run_id}/attempts/1/jobs?per_page=100')
+def run_jobs(repo, run_id, attempt=1):
+    require(type(attempt) is int and attempt in (1, 2), 'Unsupported run attempt')
+    response = api(repo, f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
     require(response['total_count'] == len(response['jobs']) <= 100,
             'Incomplete job inventory')
-    require(all(job['run_id'] == run_id and job['run_attempt'] == 1 for job in response['jobs']),
+    require(all(type(job['run_id']) is int and job['run_id'] == run_id and type(job['run_attempt']) is int
+                and job['run_attempt'] == attempt for job in response['jobs']),
             'Job/run/attempt identity mismatch')
     return response['jobs']
 
@@ -202,14 +204,182 @@ def baseline(repo, workflow, branch, base, current_id):
     raise BudgetError('Need five distinct successful first-attempt full main runs among the last 100 runs')
 
 
-def check(repo, workflow, branch, base, run_id):
+def parse_recovery_approval(raw):
+    """Parse operator-supplied evidence; never infer or create authorization."""
+    if raw == '':
+        return None
+    require(type(raw) is str and len(raw.encode('utf-8')) <= 4096,
+            'Invalid recovery approval size')
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'Duplicate recovery approval field')
+            result[key] = value
+        return result
+    try:
+        record = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, TypeError, RecursionError) as error:
+        raise BudgetError('Invalid recovery approval JSON') from error
+    require(type(record) is dict and set(record) == {
+        'version', 'repository', 'run_id', 'head_sha', 'attempt',
+        'cancelled_job_ids', 'approval_reference'}, 'Invalid recovery approval schema')
+    require(type(record['version']) is int and record['version'] == 1
+            and type(record['attempt']) is int and record['attempt'] == 2,
+            'Recovery permits only explicit attempt two')
+    require(type(record['repository']) is str
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}', record['repository'])
+            and type(record['head_sha']) is str
+            and re.fullmatch(r'[0-9a-f]{40}', record['head_sha'])
+            and type(record['run_id']) is int and record['run_id'] > 0,
+            'Invalid recovery identity')
+    ids = record['cancelled_job_ids']
+    require(type(ids) is list and len(ids) == 2
+            and all(type(value) is int and value > 0 for value in ids)
+            and len(set(ids)) == len(ids), 'Invalid cancelled job inventory')
+    require(type(record['approval_reference']) is str
+            and re.fullmatch(r'[A-Za-z0-9_:-]{1,160}', record['approval_reference']),
+            'Missing bounded operator approval reference')
+    return record
+
+
+def normalize_original_cancellations(jobs, approval):
+    """Copy for accounting only; original GitHub conclusions are immutable."""
+    ids = [job.get('id') for job in jobs]
+    require(all(type(value) is int and value > 0 for value in ids)
+            and len(set(ids)) == len(ids), 'Invalid original job identities')
+    expected = set(approval['cancelled_job_ids'])
+    cancelled = {job['id'] for job in jobs if job.get('conclusion') == 'cancelled'}
+    require(cancelled == expected, 'Original cancellation inventory differs from approval')
+    result = []
+    for job in jobs:
+        require(type(job.get('run_id')) is int and job.get('run_id') == approval['run_id']
+                and job.get('run_attempt') == 1
+                and job.get('head_sha') == approval['head_sha'],
+                'Original job/run/attempt/head mismatch')
+        if job['id'] in expected:
+            require(job.get('status') == 'completed', 'Original cancellation is not terminal')
+            timing = job_timing(job)
+            require(all(step.get('conclusion') == 'success' for step in job['steps'])
+                    and timing['finalization'] > 0,
+                    'Cancellation was not after successful complete runner steps')
+            result.append(dict(job, conclusion='success'))
+        else:
+            result.append(dict(job))
+    return result
+
+def recovery_functional_names():
+    names = set().union(*STAGES['validate.yml'])
+    for workflow, prefix in (('pi-native.yml', 'pi-native / '),
+                             ('claude-native.yml', 'claude-native / ')):
+        names.update(prefix + name for stage in STAGES[workflow] for name in stage)
+    return names
+
+
+RECOVERY_ACCOUNTING = frozenset(('validate runtime budget',
+    'pi-native / pi-native runtime budget', 'claude-native / claude-native runtime budget'))
+RECOVERY_DURABLE = 'pi-durable-fit / model-free-fit'
+
+
+def recovery_inventory(jobs, approval, attempt, *, original=False):
+    """Validate fixed unified functional graph, not a caller-selected subset."""
+    names = [job.get('name') for job in jobs]
+    ids = [job.get('id') for job in jobs]
+    functional = recovery_functional_names()
+    require(len(names) == len(set(names)) and len(ids) == len(set(ids))
+            and all(type(value) is int and value > 0 for value in ids),
+            'Duplicate or invalid recovery jobs')
+    require(all(type(job.get('run_id')) is int and job.get('run_id') == approval['run_id']
+                and type(job.get('run_attempt')) is int
+                and job['run_attempt'] == attempt
+                and job.get('head_sha') == approval['head_sha'] for job in jobs),
+            'Recovery job/run/attempt/head identity mismatch')
+    by_name = {job['name']: job for job in jobs}
+    durable = set(names) & {'pi-durable-fit', RECOVERY_DURABLE}
+    require(len(durable) == 1 and functional <= set(names)
+            and set(names) <= functional | RECOVERY_ACCOUNTING | {'verify'} | durable,
+            'Incomplete or unexpected recovery graph')
+    for name in functional:
+        job = by_name[name]
+        require(job.get('status') == 'completed' and job.get('conclusion') == 'success',
+                'Recovery functional job did not succeed')
+        job_timing(job)
+    durable_name = next(iter(durable))
+    job = by_name[durable_name]
+    require(job.get('status') == 'completed', 'Durable-fit recovery evidence incomplete')
+    if durable_name == 'pi-durable-fit':
+        require(job.get('conclusion') == 'skipped' and job.get('steps') == [],
+                'Invalid durable-fit exemption shape')
+    else:
+        require(job.get('conclusion') == 'success', 'Durable-fit recovery failed')
+        job_timing(job)
+    required_accounting = RECOVERY_ACCOUNTING if original else (
+        RECOVERY_ACCOUNTING - {'validate runtime budget'})
+    require(required_accounting <= set(names), 'Missing recovery accounting jobs')
+    for name in required_accounting:
+        require(by_name[name].get('status') == 'completed', 'Recovery accounting incomplete')
+        if not original:
+            require(by_name[name].get('conclusion') == 'success',
+                    'Replacement native accounting failed')
+    if original:
+        require('verify' in by_name and by_name['verify'].get('status') == 'completed',
+                'Original verification is not terminal')
+    return durable_name
+
+def recovery_original(repo, current, approval):
+    require(repo == approval['repository'] and type(current.get('id')) is int
+            and current.get('id') == approval['run_id']
+            and type(current.get('head_branch')) is str and bool(current['head_branch'])
+            and current.get('head_sha') == approval['head_sha']
+            and type(current.get('run_attempt')) is int and current['run_attempt'] == 2
+            and current.get('path') == '.github/workflows/verify.yaml',
+            'Recovery approval does not match current run')
+    original = api(repo, f'actions/runs/{approval["run_id"]}/attempts/1')
+    require(original.get('status') == 'completed'
+            and original.get('conclusion') in ('failure', 'cancelled')
+            and type(original.get('run_attempt')) is int and original['run_attempt'] == 1
+            and all(original.get(key) == current.get(key) for key in
+                    ('id', 'head_sha', 'path', 'event', 'head_branch')),
+            'Original recovery run identity mismatch')
+    jobs = run_jobs(repo, approval['run_id'])
+    cancelled = set(approval['cancelled_job_ids'])
+    require(all(job.get('name') in recovery_functional_names()
+                for job in jobs if job.get('id') in cancelled),
+            'Only functional job cancellations may be recovered')
+    copied = normalize_original_cancellations(jobs, approval)
+    recovery_inventory(copied, approval, 1, original=True)
+    for workflow in STAGES:
+        require(critical_path(workflow, scoped_jobs(workflow, copied, original['path'])) is not None,
+                'Documentation-only recovery is not permitted')
+    return copied, original
+
+
+def validate_replacement_inventory(jobs, original_jobs, approval):
+    durable = recovery_inventory(jobs, approval, 2)
+    original_durable = ({job['name'] for job in original_jobs}
+                        & {'pi-durable-fit', RECOVERY_DURABLE})
+    require(original_durable == {durable}, 'Replacement changed durable-fit applicability')
+
+def check(repo, workflow, branch, base, run_id, recovery_approval=None):
     require(re.fullmatch(r'[\w.-]+/[\w.-]+', repo) and re.fullmatch(r'[0-9a-f]{40}', base)
             and run_id > 0, 'Invalid repository, base or run identity')
     current = api(repo, f'actions/runs/{run_id}')
     require(current['path'] in (f'.github/workflows/{workflow}', '.github/workflows/verify.yaml')
             and current['event'] in ('push', 'pull_request'), 'Current workflow identity mismatch')
+    original_elapsed = None
+    attempt = 1
+    if recovery_approval is not None:
+        original_jobs, original = recovery_original(repo, current, recovery_approval)
+        attempt = 2
+        jobs = run_jobs(repo, run_id, attempt)
+        require(all(job.get('head_sha') == recovery_approval['head_sha'] for job in jobs),
+                'Replacement head mismatch')
+        if workflow == 'validate.yml':
+            validate_replacement_inventory(jobs, original_jobs, recovery_approval)
+        original_elapsed = critical_path(workflow, scoped_jobs(workflow, original_jobs, original['path']))
+    else:
+        jobs = run_jobs(repo, run_id)
     diagnostics = {}
-    elapsed = critical_path(workflow, scoped_jobs(workflow, run_jobs(repo, run_id), current['path']),
+    elapsed = critical_path(workflow, scoped_jobs(workflow, jobs, current['path']),
                             diagnostics=diagnostics)
     if elapsed is None:
         return 'Documentation-only run: runtime unchanged; no new full-suite baseline.'
@@ -222,13 +392,20 @@ def check(repo, workflow, branch, base, run_id):
             f'CI critical path {elapsed:.1f}s exceeds the absolute 150-second ceiling. ' + details)
     previous, samples = baseline(repo, workflow, branch, base, run_id)
     limit = allowed_seconds(previous)
+    if original_elapsed is not None:
+        require(original_elapsed <= limit,
+                f'Original first-attempt critical path {original_elapsed:.1f}s exceeds {limit:.1f}s; recovery refused')
     sources = '; '.join(f'run {number}, commit {commit}: {seconds:.1f}s'
                         for number, commit, seconds in samples)
-    summary = (f'CI critical path (first attempt): {elapsed:.1f}s; baseline median: {previous:.1f}s; '
+    attempt_label = 'first attempt' if attempt == 1 else 'explicitly approved attempt 2'
+    summary = (f'CI critical path ({attempt_label}): {elapsed:.1f}s; baseline median: {previous:.1f}s; '
                f'limit: {limit:.1f}s (+{GROWTH_PERCENT}%, absolute {ABSOLUTE_SECONDS}s). '
                f'Sources: {sources}. All current and historical samples use first Set up job start through final Complete job step; '
                'all setup, installation, tests, inter-step gaps and cleanup remain included. ' + details)
     require(elapsed <= limit, summary + ' Runtime growth exceeds the allowance.')
+    if attempt == 2:
+        summary += (f' Original first attempt: {original_elapsed:.1f}s, independently within the same limit. '
+                    'Original GitHub conclusions remain unchanged; recovery is not a baseline sample.')
     return summary
 
 
@@ -239,7 +416,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         message = check(os.environ['GITHUB_REPOSITORY'], args.workflow,
-                        os.environ['DEFAULT_BRANCH'], args.base, int(os.environ['GITHUB_RUN_ID']))
+                        os.environ['DEFAULT_BRANCH'], args.base, int(os.environ['GITHUB_RUN_ID']),
+                        recovery_approval=parse_recovery_approval(os.environ.get('CI_RUNTIME_RECOVERY_APPROVAL', '')))
         print(message)
         if os.environ.get('GITHUB_STEP_SUMMARY'):
             with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:

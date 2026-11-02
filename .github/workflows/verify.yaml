@@ -486,7 +486,7 @@ jobs:
 
   runtime-budget:
     name: validate runtime budget
-    needs: [validate, unit-slow, unit-integration, forge-broker-smoke, artifact-linux-smoke, docker-lifecycle, git-native-seams, gate-linux-smoke, gate-command-native, gate-artifact-native, room-control-plane, manager-mtls, manager-field-notes]
+    needs: [validate, unit-slow, unit-integration, forge-broker-smoke, artifact-linux-smoke, docker-lifecycle, git-native-seams, gate-linux-smoke, gate-command-native, gate-artifact-native, room-control-plane, manager-mtls, manager-field-notes, pi-native, claude-native, pi-durable-fit]
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
@@ -497,6 +497,7 @@ jobs:
           persist-credentials: false
       - name: Enforce measured runtime growth and absolute ceiling
         env:
+          CI_RUNTIME_RECOVERY_APPROVAL: ${{ vars.CI_RUNTIME_RECOVERY_APPROVAL }}
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
