@@ -33,8 +33,6 @@ class ClaudeCICacheTests(unittest.TestCase):
             for block in workflow.split('      - name: ')[1:]
             for line in block.splitlines()[1:] if line.startswith('        if:')]
         self.assertEqual(conditional_steps, [
-            ('Confirm exact public npm acquisition cache hit',
-             "if: ${{ steps.claude-npm-cache.outputs.cache-hit == 'true' }}"),
             ('Save verified public acquisition bytes before fixture execution',
              "if: ${{ steps.claude-npm-cache.outputs.cache-hit != 'true' }}")])
         self.assertIn("if: ${{ steps.claude-npm-cache.outputs.cache-hit != 'true' }}",workflow)

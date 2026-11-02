@@ -332,7 +332,7 @@ class RoomServiceSmokeSourceTests(unittest.TestCase):
     def test_workflow_adds_one_parallel_child_without_new_job_or_budget(self):
         workflow = (ROOT / '.github/workflows/verify.yaml').read_text()
         job = workflow.split('  git-native-seams:\n', 1)[1].split('  gate-linux-smoke:\n', 1)[0]
-        self.assertIn('timeout-minutes: 1', job)
+        self.assertIn('timeout-minutes: 5', job)
         self.assertIn('needs: [validate, unit-slow, unit-integration]', job)
         self.assertIn('persist-credentials: false', job)
         self.assertIn('timeout --signal=TERM --kill-after=2s 29s sudo -n', job)

@@ -106,7 +106,7 @@ class ArtifactLinuxSmokeSourceTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/verify.yaml').read_text()
         job = workflow.split('  artifact-linux-smoke:\n', 1)[1].split('  docker-lifecycle:\n', 1)[0]
         self.assertIn('needs: [validate, unit-slow, unit-integration]', job)
-        self.assertIn('timeout-minutes: 1', job)
+        self.assertIn('timeout-minutes: 5', job)
         self.assertIn("needs.validate.outputs.skip_tests != 'true'", job)
         self.assertIn("needs.unit-slow.outputs.skip_tests != 'true'", job)
         self.assertIn("needs.unit-integration.outputs.skip_tests != 'true'", job)

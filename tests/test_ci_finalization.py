@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import patch
 
 import ci_runtime_budget as budget
 
@@ -168,3 +169,36 @@ class CIFinalizationTests(unittest.TestCase):
         self.assertEqual(52, budget.critical_path(lane, jobs, diagnostics=diagnostics))
         self.assertEqual(120, diagnostics['wall_path'])
         self.assertEqual(100, diagnostics['span'])
+
+
+class CIFirstAttemptTests(unittest.TestCase):
+    def test_only_first_attempt_jobs_are_requested(self):
+        row = dict(run_id=123, run_attempt=1)
+        with patch.object(budget, 'api', return_value=dict(total_count=1, jobs=[row])) as api:
+            self.assertEqual([row], budget.run_jobs('owner/repo', 123))
+        api.assert_called_once_with('owner/repo', 'actions/runs/123/attempts/1/jobs?per_page=100')
+
+    def test_second_attempt_and_coercible_identities_are_rejected(self):
+        for run_id, attempt in [(123, 2), (123, True), ('123', 1), (True, 1)]:
+            with self.subTest(run_id=run_id, attempt=attempt):
+                with patch.object(budget, 'api', return_value=dict(
+                        total_count=1, jobs=[dict(run_id=run_id, run_attempt=attempt)])):
+                    with self.assertRaises(budget.BudgetError):
+                        budget.run_jobs('owner/repo', 123)
+
+    def test_rerun_and_legacy_variable_cannot_override_cancelled_first_attempt(self):
+        lane = 'claude-native.yml'
+        jobs = [fixture(name) for name in sorted(budget.STAGES[lane][0])]
+        for job in jobs:
+            job.update(run_id=123, run_attempt=1)
+        jobs[0]['conclusion'] = 'cancelled'
+        def api(repo, path):
+            if path == 'actions/runs/123':
+                return dict(path='.github/workflows/claude-native.yml', event='push', run_attempt=2)
+            self.assertEqual('actions/runs/123/attempts/1/jobs?per_page=100', path)
+            return dict(total_count=len(jobs), jobs=jobs)
+        with patch.dict('os.environ', {'CI_RUNTIME_RECOVERY_APPROVAL': '{"attempt":2}'}):
+            with patch.object(budget, 'api', side_effect=api), patch.object(budget, 'baseline') as baseline:
+                with self.assertRaisesRegex(budget.BudgetError, 'did not complete successfully'):
+                    budget.check('owner/repo', lane, 'main', 'a' * 40, 123)
+                baseline.assert_not_called()
