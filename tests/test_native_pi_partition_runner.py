@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest.mock import Mock, patch
 
@@ -86,6 +87,65 @@ class PiPartitionRunnerTests(unittest.TestCase):
         for bad in ([], NAMES + NAMES[:1]):
             with self.assertRaises(ValueError):
                 runner.worker_groups(bad)
+
+    def test_only_audited_isolated_classes_offload_stably_with_exact_coverage(self):
+        inventory = NAMES + [f'{identity}.test_case_{i}'
+                            for identity in runner.SPLIT_CLASSES for i in range(20)]
+        groups = runner.partition(inventory)
+        self.assertEqual(sorted(inventory), sorted(sum(groups, [])))
+        for identity, worker in runner.SPLIT_CLASSES.items():
+            moved = [name for name in groups[3] if name.startswith(identity + '.')]
+            self.assertTrue(moved)
+            self.assertLess(len(moved), 20)
+            for name in moved:
+                self.assertEqual(worker, runner.offload_worker(name))
+                self.assertIn(name, runner.worker_groups(groups[3])[worker])
+            for name in inventory:
+                self.assertEqual([i for i, group in enumerate(groups) if name in group],
+                                 [i for i, group in enumerate(runner.partition(inventory + [identity + '.test_later'])) if name in group])
+        self.assertEqual(list(reversed(groups[3])), runner.partition(list(reversed(inventory)))[3])
+        for name in ('test_pi_runtime.PiNativeTests.test_future',
+                     'test_pi_forge.FutureClass.test_new', 'test_pi_reset.FutureClass.test_new'):
+            self.assertIsNone(runner.offload_worker(name))
+        local = runner.worker_groups(inventory)
+        self.assertEqual(2, len(local))
+        self.assertEqual(sorted(inventory), sorted(sum(local, [])))
+
+    def test_real_discovery_remains_exact_once_and_keeps_runtime_class_intact(self):
+        inventory = runner.discover()
+        self.assertEqual(139, len(inventory))
+        groups = runner.partition(inventory)
+        payloads = [runner.worker_groups(group) for group in groups]
+        flattened = [name for partition in payloads for worker in partition for name in worker]
+        self.assertEqual(sorted(inventory), sorted(flattened))
+        self.assertEqual(len(flattened), len(set(flattened)))
+        self.assertTrue(all(len(workers) <= 2 for workers in payloads))
+        runtime = [name for name in inventory if name.startswith('test_pi_runtime.')]
+        self.assertEqual(17, len(runtime))
+        self.assertTrue(all(name in payloads[0][0] for name in runtime))
+        for workers in payloads:
+            for worker in workers:
+                self.assertEqual([name for name in inventory if name in worker], worker)
+
+    def test_split_classes_refuse_new_shared_class_or_module_fixtures(self):
+        identity = 'test_pi_forge.PiForgeTests'
+        inventory = [identity + '.test_future']
+        for hook in ('setUpClass', 'tearDownClass', 'setUpModule', 'tearDownModule'):
+            for inherited in (False, True):
+                cls = type('PiForgeTests', (unittest.TestCase,), {})
+                module = types.SimpleNamespace(PiForgeTests=cls)
+                if hook.endswith('Module'):
+                    setattr(module, hook, lambda: None)
+                else:
+                    setattr(cls, hook, classmethod(lambda cls: None))
+                    if inherited:
+                        module.PiForgeTests = type('Child', (cls,), {})
+                with self.subTest(hook=hook, inherited=inherited), \
+                     patch.dict(sys.modules, {'test_pi_forge': module}), self.assertRaises(ValueError):
+                    runner.validate_split_fixtures(inventory)
+        cls = type('PiForgeTests', (unittest.TestCase,), {})
+        with patch.dict(sys.modules, {'test_pi_forge': types.SimpleNamespace(PiForgeTests=cls)}):
+            runner.validate_split_fixtures(inventory)
 
     def test_wait_reports_failure_or_absolute_timeout_without_reaping(self):
         process = Mock(returncode=None)

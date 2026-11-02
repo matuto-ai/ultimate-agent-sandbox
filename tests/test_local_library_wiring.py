@@ -300,14 +300,32 @@ class LocalLibraryWiringTests(unittest.TestCase):
         observed = {}
 
         def driver(controller):
-            self.register('alpha')
-            controller.handle(self.packet('start', 'alpha'))
+            self.assertTrue(self.deployment.wait_idle('alpha', timeout=5))
+            projection = self.deployment._bound['alpha'].projection
+            entered, release = threading.Event(), threading.Event()
+            refresh = projection.refresh
+            def paused_refresh():
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError('fixture projection barrier timed out')
+                return refresh()
+            with patch.object(projection, 'refresh', side_effect=paused_refresh):
+                try:
+                    self.register('alpha')
+                    self.assertTrue(entered.wait(5))
+                    controller.handle(self.packet('start', 'alpha'))
+                    self.assertFalse(self.deployment.wait_idle('alpha', timeout=0),
+                                     'already-running Start is not a projection barrier')
+                finally:
+                    release.set()  # Never strand a worker during assertion cleanup.
+                self.assertTrue(self.deployment.wait_idle('alpha', timeout=5))
             _, _bundle, snapshot = self.projection('alpha')
             observed['first'] = json.loads(snapshot.read_text())['commit_sha']
             observed['bound'] = self.deployment.bound('alpha')
             controller.handle(self.packet('stop', 'alpha'))
             observed['unbound'] = self.deployment.bound('alpha')
             controller.handle(self.packet('start', 'alpha'))
+            self.assertTrue(self.deployment.wait_idle('alpha', timeout=5))
             observed['second'] = json.loads(self.projection('alpha')[2].read_text())['commit_sha']
             observed['rebound'] = self.deployment.bound('alpha')
             observed['head'] = self.deployment.publisher.head()
@@ -316,6 +334,7 @@ class LocalLibraryWiringTests(unittest.TestCase):
         self.assertTrue(observed['bound'])
         self.assertFalse(observed['unbound'])
         self.assertTrue(observed['rebound'])
+        self.assertIsNotNone(observed['first'])
         self.assertEqual(observed['second'], observed['first'])
         self.assertEqual(observed['head'], observed['first'])
 

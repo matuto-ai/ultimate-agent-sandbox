@@ -24,10 +24,36 @@ PRIMARY = frozenset(('test_pi_runtime', 'test_pi_forge'))
 PROJECTION = frozenset(('test_pi_library', 'test_pi_participant'))
 RECOVERY = frozenset(('test_pi_assignment', 'test_pi_reset', 'test_pi_library_capture'))
 # Two bounded workers per invocation, including local all-partition runs. Keep
-# complete modules/classes together so class-level official probes are not repeated.
+# classes with shared fixtures together so official class probes are not repeated.
 # Native module pairs balance real process startup; unknown modules remain included.
 SECOND_WORKER_MODULES = frozenset(('test_pi_forge', 'test_pi_run_admission',
                                     'test_pi_initialization', 'test_pi_reset', 'test_pi_participant'))
+# Only these audited per-test-isolated classes may fan out across runners.
+# Stable IDs avoid changing placement when discovery order or future cases change.
+SPLIT_CLASSES = {'test_pi_forge.PiForgeTests': 1, 'test_pi_reset.PiResetTests': 0}
+
+
+def offload_worker(name):
+    target = SPLIT_CLASSES.get(name.rsplit('.', 1)[0])
+    return target if target is not None and hashlib.sha256(name.encode()).digest()[-1] % 2 else None
+
+
+def validate_split_fixtures(inventory):
+    for identity in SPLIT_CLASSES:
+        if not any(name.startswith(identity + '.') for name in inventory):
+            continue
+        module_name, class_name = identity.rsplit('.', 1)
+        module = sys.modules[module_name]
+        cls = getattr(module, class_name)
+        if any(getattr(module, hook, None) is not None for hook in ('setUpModule', 'tearDownModule')):
+            raise ValueError('split Pi class gained a shared module fixture: ' + identity)
+        for hook in ('setUpClass', 'tearDownClass'):
+            actual = getattr(getattr(cls, hook), '__func__', None)
+            expected = getattr(unittest.TestCase, hook).__func__
+            if actual is not expected:
+                raise ValueError('split Pi class gained a shared class fixture: ' + identity)
+
+
 WORK_SECONDS = 125
 CANCELLED = None
 
@@ -51,7 +77,7 @@ def partition(inventory):
     groups = [[], [], [], []]
     for name in inventory:
         module = name.split('.')[0]
-        index = (0 if module in PRIMARY else 2 if module in RECOVERY
+        index = (3 if offload_worker(name) is not None else 0 if module in PRIMARY else 2 if module in RECOVERY
                  else 3 if module in PROJECTION else 1)
         groups[index].append(name)
     if not all(groups) or sorted(sum(groups, [])) != sorted(inventory):
@@ -62,7 +88,9 @@ def partition(inventory):
 def worker_groups(inventory):
     groups = [[], []]
     for name in inventory:
-        groups[int(name.split('.')[0] in SECOND_WORKER_MODULES)].append(name)
+        offloaded = offload_worker(name)
+        index = offloaded if offloaded is not None else int(name.split('.')[0] in SECOND_WORKER_MODULES)
+        groups[index].append(name)
     result = [group for group in groups if group]
     if not result or sorted(sum(result, [])) != sorted(inventory) or len(set(inventory)) != len(inventory):
         raise ValueError('invalid bounded worker inventory')
@@ -82,7 +110,9 @@ def discover():
     suite = loader.discover(str(ROOT / 'tests'), pattern='test_pi_*.py')
     if loader.errors:
         raise ValueError('Pi discovery failed: ' + '\n'.join(loader.errors))
-    return list(ids(suite))
+    inventory = list(ids(suite))
+    validate_split_fixtures(inventory)
+    return inventory
 
 
 def worker(manifest):
@@ -94,6 +124,7 @@ def worker(manifest):
     suite = loader.loadTestsFromNames(names)
     if loader.errors or list(ids(suite)) != names:
         raise ValueError('worker inventory differs from discovery')
+    validate_split_fixtures(names)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() and not result.skipped and result.testsRun == len(names) else 1
 
