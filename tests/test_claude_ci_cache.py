@@ -43,7 +43,7 @@ class ClaudeCICacheTests(unittest.TestCase):
 
 
 class ClaudeCIRunnerTests(unittest.TestCase):
-    def run_fixture(self, *, fail=None):
+    def run_fixture(self, *, fail=None, partition=None, args=None, missing=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root/'tests/claude').mkdir(parents=True)
@@ -57,6 +57,7 @@ class ClaudeCIRunnerTests(unittest.TestCase):
             names = ('first', 'sdk_receiver', 'participant', 'sdk', 'readiness',
                      'runtime', 'library_read', 'library', 'future')
             for name in names:
+                if name == missing: continue
                 (root/f'tests/test_claude_{name}.py').write_text(
                     'import time, unittest\n'
                     'class Fixture(unittest.TestCase):\n'
@@ -65,11 +66,18 @@ class ClaudeCIRunnerTests(unittest.TestCase):
                     '  time.sleep(.15)\n'
                     f"  with open('events', 'a') as output: output.write('end:{name}\\n')\n"
                     f'  self.assertFalse({name == fail!r})\n')
-            result = subprocess.run(['sh', str(script)], cwd=root,
+            arguments = args if args is not None else ([] if partition is None else ['--partition', str(partition)])
+            result = subprocess.run(['sh', str(script), *arguments], cwd=root,
                 env={**os.environ, 'UAS_CLAUDE_INSTALL':'fixture',
                      'UAS_CLAUDE_SDK_INSTALL':'fixture', 'UAS_CLAUDE_NODE':sys.executable},
                 capture_output=True, text=True, timeout=10)
-            events = (root/'events').read_text().splitlines()
+            events = (root/'events').read_text().splitlines() if (root/'events').exists() else []
+        if args is not None or missing is not None:
+            self.assertNotEqual(0, result.returncode)
+            self.assertEqual([], events)
+            return result
+        if partition is not None:
+            names = tuple(name for name in names if (name == 'sdk_receiver') == (partition == 0))
         self.assertEqual(['scan', 'probe'], events[:2])
         self.assertCountEqual([f'{phase}:{name}' for phase in ('start', 'end')
                               for name in names], events[2:])
@@ -79,9 +87,10 @@ class ClaudeCIRunnerTests(unittest.TestCase):
             self.assertTrue(0 <= active <= 2)
             peak = max(peak, active)
         self.assertEqual(0, active)
-        self.assertEqual(2, peak)
+        self.assertEqual(min(2, len(names)), peak)
         starts = [event for event in events[2:] if event.startswith('start:')]
-        self.assertCountEqual(['start:sdk_receiver', 'start:participant'], starts[:2])
+        first = ['sdk_receiver', 'participant'] if partition is None else ['sdk_receiver'] if partition == 0 else ['participant', 'sdk']
+        self.assertCountEqual(['start:' + name for name in first], starts[:len(first)])
         # Every discovered module ran exactly once, including future/unranked ones.
         self.assertEqual(len(names), len(starts))
         return result
@@ -99,3 +108,33 @@ class ClaudeCIRunnerTests(unittest.TestCase):
         result = self.run_fixture(fail='sdk_receiver')
         self.assertNotEqual(0, result.returncode)
         self.assertIn('FAILED', result.stderr)
+
+    def test_runner_partitions_cover_disjoint_full_inventory_including_future_modules(self):
+        for partition in (0, 1):
+            result = self.run_fixture(partition=partition)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_each_partition_propagates_its_worker_failure(self):
+        for partition, failed in ((0, 'sdk_receiver'), (1, 'future')):
+            result = self.run_fixture(partition=partition, fail=failed)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn('FAILED', result.stderr)
+
+    def test_invalid_partition_arguments_fail_before_probes(self):
+        for args in (['--partition'], ['--partition', '2'], ['--partition', '-1'],
+                     ['--partition', 'all'], ['--other', '0'], ['--partition', '0', 'extra']):
+            self.run_fixture(args=args)
+
+    def test_missing_required_inventory_fails_before_probes(self):
+        for missing in ('sdk_receiver', 'participant'):
+            for partition in (None, 0, 1):
+                self.run_fixture(partition=partition, missing=missing)
+
+    def test_ci_runs_both_partitions_and_binds_both_to_runtime_guard(self):
+        workflow = (ROOT/'.github/workflows/claude-native.yml').read_text()
+        self.assertIn('name: official-claude-fixture-${{ matrix.partition }}', workflow)
+        self.assertIn('fail-fast: false', workflow)
+        self.assertIn('partition: [0, 1]', workflow)
+        self.assertIn('needs: [official-claude-fixture]', workflow)
+        self.assertIn('run-tests.sh" --partition "$5"', workflow)
+        self.assertIn('"$RUNNER_TEMP/uas-python" "${{ matrix.partition }}"', workflow)

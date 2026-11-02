@@ -21,8 +21,8 @@ SEAM_JOBS = frozenset(('forge-broker-smoke', 'artifact-linux-smoke', 'docker-lif
                        'manager-field-notes'))
 STAGES = {
     'validate.yml': (UNIT_JOBS, SEAM_JOBS),
-    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2')),),
-    'claude-native.yml': (frozenset(('official-claude-fixture',)),),
+    'pi-native.yml': (frozenset(('official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2', 'official-pi-native-3')),),
+    'claude-native.yml': (frozenset(('official-claude-fixture-0', 'official-claude-fixture-1')),),
 }
 
 
@@ -43,6 +43,11 @@ def critical_path(workflow, jobs, *, historical=False):
     names = [job['name'] for job in measured]
     stages = STAGES[workflow]
     if historical and workflow == 'pi-native.yml' and names == ['official-pi-native']:
+        stages = (frozenset(names),)
+    if historical and workflow == 'pi-native.yml' and set(names) == {
+            'official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2'}:
+        stages = (frozenset(names),)
+    if historical and workflow == 'claude-native.yml' and names == ['official-claude-fixture']:
         stages = (frozenset(names),)
     expected = set().union(*stages)
     # Recognize only complete historical graphs; current runs require all twelve roots.

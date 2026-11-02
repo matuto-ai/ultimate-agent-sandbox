@@ -117,6 +117,20 @@ class VerifyWorkflowTests(unittest.TestCase):
         with self.assertRaises(budget.BudgetError):
             budget.critical_path('validate.yml', budget.scoped_jobs('validate.yml', jobs + [{'name': 'unmeasured'}], '.github/workflows/verify.yaml'))
 
+    def test_native_repartition_keeps_only_complete_historical_graphs(self):
+        helper = test_vm_ci_policy.RuntimeBudgetTests()
+        for lane, names in (
+                ('pi-native.yml', ['official-pi-native-0', 'official-pi-native-1', 'official-pi-native-2']),
+                ('claude-native.yml', ['official-claude-fixture'])):
+            template = helper.jobs(lane)[0]
+            old = [dict(template, name=name) for name in names]
+            self.assertEqual(40, budget.critical_path(lane, old, historical=True))
+            with self.assertRaises(budget.BudgetError):
+                budget.critical_path(lane, old)
+            for invalid in (old + old[:1], old + [dict(template, name='unexpected')], old[:-1]):
+                with self.assertRaises(budget.BudgetError):
+                    budget.critical_path(lane, invalid, historical=True)
+
     def test_rename_keeps_old_baseline_and_new_current_workflow_identity(self):
         helper = test_vm_ci_policy.RuntimeBudgetTests()
         for lane in budget.STAGES:
